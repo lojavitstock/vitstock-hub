@@ -2,16 +2,40 @@ import React, { useState } from 'react';
 import { Search, UserPlus, Tag as TagIcon, Phone, Mail, MessageSquare, MoreHorizontal, Filter } from 'lucide-react';
 import { mockConversations } from '../services/mockData';
 import { Contact } from '../types';
+import { EvolutionApiService } from '../services/evolutionApi';
 import { useNavigate } from 'react-router-dom';
 
 export const ContatosPage: React.FC = () => {
   const navigate = useNavigate();
-  const [contacts, setContacts] = useState<Contact[]>(mockConversations.map(c => c.contact));
+  const [contacts, setContacts] = useState<Contact[]>([]);
   const [search, setSearch] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   // Form State
   const [newContact, setNewContact] = useState({ name: '', phone: '', email: '', tag: 'Novo Lead' });
+
+  React.useEffect(() => {
+    const loadRealContacts = async () => {
+      setLoading(true);
+      const instanceName = import.meta.env.VITE_EVOLUTION_INSTANCE_NAME || 'vitstock_atendimento';
+      const isMock = import.meta.env.VITE_USE_MOCK_DATA === 'true';
+
+      if (isMock) {
+        setContacts(mockConversations.map(c => c.contact));
+      } else {
+        const chats = await EvolutionApiService.fetchRealChats(instanceName);
+        if (chats.length > 0) {
+          setContacts(chats.map(c => c.contact));
+        } else {
+          setContacts(mockConversations.map(c => c.contact));
+        }
+      }
+      setLoading(false);
+    };
+
+    loadRealContacts();
+  }, []);
 
   const handleAddContact = (e: React.FormEvent) => {
     e.preventDefault();
