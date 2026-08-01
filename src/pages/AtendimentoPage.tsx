@@ -58,20 +58,37 @@ export const AtendimentoPage: React.FC = () => {
     return () => clearInterval(interval);
   }, [isMock]);
 
-  // Carregar mensagens quando trocar de conversa e manter sincronizado a cada 3 segundos
+  const messagesEndRef = React.useRef<HTMLDivElement>(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  // Carregar mensagens quando trocar de conversa e manter sincronizado a cada 2 segundos
   useEffect(() => {
     if (!activeConvId || isMock) return;
 
     const fetchConvMessages = async () => {
       const realMsgs = await EvolutionApiService.fetchMessages(instanceName, activeConvId);
-      setMessages(realMsgs);
+      setMessages(prev => {
+        // Se a quantidade ou última mensagem for diferente, atualiza
+        if (prev.length !== realMsgs.length || (realMsgs.length > 0 && prev[prev.length - 1]?.id !== realMsgs[realMsgs.length - 1]?.id)) {
+          return realMsgs;
+        }
+        return prev;
+      });
     };
 
     fetchConvMessages();
 
-    const interval = setInterval(fetchConvMessages, 3000);
+    const interval = setInterval(fetchConvMessages, 2000);
     return () => clearInterval(interval);
   }, [activeConvId, isMock, instanceName]);
+
+  // Rolar para a última mensagem automaticamente quando chegar mensagem nova
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages.length]);
 
   const loadChats = async (showLoading = true) => {
     if (showLoading) setLoadingChats(true);
@@ -490,6 +507,7 @@ export const AtendimentoPage: React.FC = () => {
                   </div>
                 );
               })}
+              <div ref={messagesEndRef} />
             </div>
 
             {/* Caixas de Resposta Rápida (Pop-over) */}
