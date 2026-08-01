@@ -135,79 +135,81 @@ export class EvolutionApiService {
   }
 
   /**
-   * Buscar conversas reais (Tentando Supabase primeiro, depois Evolution API)
+   * Buscar conversas reais diretamente da Evolution API no Railway
+   */
+  /**
+   * Buscar conversas reais diretamente da Evolution API no Railway (com deduplicação e busca de nomes)
    */
   static async fetchRealChats(instanceName: string): Promise<Conversation[]> {
     if (USE_MOCK) return mockConversations;
 
     try {
-      // 1. Tenta buscar conversas gravadas no Supabase
-      const { data: supaConversations, error } = await supabase
-        .from('conversations')
-        .select('*')
-        .order('created_at', { ascending: false });
+      console.log(`[EvolutionAPI] Buscando conversas e contatos do Railway para: ${instanceName}`);
+      let rawChats: any[] = [];
+      let contactsMap = new Map<string, { name: string; avatar: string }>();
 
-      if (!error && supaConversations && supaConversations.length > 0) {
-        return supaConversations.map(c => ({
-          id: c.id,
-          contact: {
-            id: c.id,
-            name: c.contact_name || c.contact_phone || 'Contato',
-            phone: c.contact_phone || '',
-            avatar: c.contact_avatar || '',
-            tags: [{ id: 't-supa', name: 'WhatsApp', color: '#10B981' }],
-            createdAt: c.created_at ? c.created_at.split('T')[0] : new Date().toISOString().split('T')[0]
-          },
-          lastMessage: c.last_message || 'Conversa iniciada',
-          lastMessageTimestamp: c.last_message_timestamp || 'Hoje',
-          unreadCount: c.unread_count || 0,
-          status: c.status || 'open',
-          department: c.department || 'Atendimento Geral'
-        }));
-      }
-
-      // 2. Fallback para Evolution API se não houver dados no Supabase ainda
-      console.log(`[EvolutionAPI] Buscando conversas para a instância: ${instanceName}`);
-      let rawData: any[] = [];
-
-      const resChats = await fetch(`${API_URL}/chat/findChats/${instanceName}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': API_KEY
-        },
-        body: JSON.stringify({})
-      });
-
-      if (resChats.ok) {
-        const chats = await resChats.json();
-        if (Array.isArray(chats) && chats.length > 0) rawData = chats;
-      }
-
-      if (rawData.length === 0) {
-        const resContacts = await fetch(`${API_URL}/chat/findContacts/${instanceName}`, {
+      // 1. Busca conversas e contatos em paralelo
+      const [resChats, resContacts] = await Promise.all([
+        fetch(`${API_URL}/chat/findChats/${instanceName}`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'apikey': API_KEY
-          },
+          headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
           body: JSON.stringify({})
-        });
+        }),
+        fetch(`${API_URL}/chat/findContacts/${instanceName}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
+          body: JSON.stringify({})
+        })
+      ]);
 
-        if (resContacts.ok) {
-          const contacts = await resContacts.json();
-          if (Array.isArray(contacts) && contacts.length > 0) {
-            rawData = contacts.filter((c: any) => c.id && (c.id.includes('@s.whatsapp.net') || c.id.includes('@c.us')));
-          }
+      // Popula o mapa de contatos para resolver nomes salvos
+      if (resContacts.ok) {
+        const contactsData = await resContacts.json();
+        if (Array.isArray(contactsData)) {
+          contactsData.forEach((c: any) => {
+            const rawJid = c.remoteJid || c.id || '';
+            const phoneKey = rawJid.split('@')[0].replace(/\D/g, '');
+            if (phoneKey && c.pushName && c.pushName !== 'WhatsApp Business' && c.pushName !== 'Você') {
+              contactsMap.set(phoneKey, {
+                name: c.pushName,
+                avatar: c.profilePicUrl || ''
+              });
+            }
+          });
         }
       }
 
-      if (rawData.length === 0) return [];
+      if (resChats.ok) {
+        const chatsData = await resChats.json();
+        if (Array.isArray(chatsData)) rawChats = chatsData;
+      }
 
-      return rawData.map((item: any, index: number) => {
+      if (rawChats.length === 0 && contactsMap.size === 0) return [];
+
+      // 2. Mapeamento e Deduplicação por número de telefone (cleanNumber)
+      const conversationsMap = new Map<string, Conversation>();
+
+      rawChats.forEach((item: any, index: number) => {
+        // Ignora chats de grupos por enquanto se necessário, ou inclui se tiver remoteJid
+        const isGroup = item.remoteJid?.includes('@g.us') || item.id?.includes('@g.us');
+        if (isGroup) return; // Filtra grupos da aba principal de atendimento individual
+
         const keyRemoteJid = item.lastMessage?.key?.remoteJidAlt || item.remoteJid || item.id || `chat-${index}`;
-        const cleanNumber = keyRemoteJid.split('@')[0];
-        const displayName = item.lastMessage?.pushName || item.pushName || item.name || item.verifiedName || cleanNumber;
+        const cleanNumber = keyRemoteJid.split('@')[0].replace(/\D/g, '');
+
+        if (!cleanNumber) return;
+
+        // Resolve o Nome Salvo (Prioridade: Mapa de Contatos > pushName da Mensagem > Nome do Chat > Número)
+        const savedContact = contactsMap.get(cleanNumber);
+        let displayName = savedContact?.name ||
+                          item.lastMessage?.pushName || 
+                          item.pushName || 
+                          item.name || 
+                          item.verifiedName;
+
+        if (!displayName || displayName === 'Você' || displayName === 'WhatsApp Business') {
+          displayName = `+${cleanNumber}`;
+        }
 
         const messageContent = 
           item.lastMessage?.message?.conversation ||
@@ -215,25 +217,42 @@ export class EvolutionApiService {
           item.lastMessage?.message?.imageMessage?.caption ||
           (item.lastMessage?.message?.audioMessage ? '[Áudio]' : null) ||
           (item.lastMessage?.message?.imageMessage ? '[Imagem]' : null) ||
+          (item.lastMessage?.message?.documentMessage ? '[Documento]' : null) ||
           'Conversa iniciada';
 
-        return {
+        const timestampStr = item.updatedAt || item.lastMessage?.messageTimestamp
+          ? new Date(item.updatedAt || Number(item.lastMessage?.messageTimestamp) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          : 'Hoje';
+
+        const conversationObj: Conversation = {
           id: keyRemoteJid,
           contact: {
             id: keyRemoteJid,
             name: displayName,
-            phone: cleanNumber ? `+${cleanNumber}` : '',
-            avatar: item.profilePicUrl || item.profilePictureUrl || '',
+            phone: `+${cleanNumber}`,
+            avatar: savedContact?.avatar || item.profilePicUrl || item.profilePictureUrl || '',
             tags: [{ id: 't-real', name: 'WhatsApp', color: '#10B981' }],
             createdAt: new Date().toISOString().split('T')[0]
           },
           lastMessage: messageContent,
-          lastMessageTimestamp: item.updatedAt ? new Date(item.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Hoje',
+          lastMessageTimestamp: timestampStr,
           unreadCount: item.unreadCount || 0,
           status: 'open',
           department: 'Atendimento Geral'
         };
+
+        // Se o mapa já tiver este número, atualiza apenas se a mensagem for mais recente ou se o nome for melhor que a entrada existente
+        if (conversationsMap.has(cleanNumber)) {
+          const existing = conversationsMap.get(cleanNumber)!;
+          if (existing.contact.name.startsWith('+') && !displayName.startsWith('+')) {
+            existing.contact.name = displayName;
+          }
+        } else {
+          conversationsMap.set(cleanNumber, conversationObj);
+        }
       });
+
+      return Array.from(conversationsMap.values());
     } catch (err) {
       console.error('[EvolutionAPI] Erro ao carregar chats/contatos:', err);
       return [];
@@ -241,7 +260,7 @@ export class EvolutionApiService {
   }
 
   /**
-   * Enviar mensagem de texto via WhatsApp + Salvar no Supabase
+   * Enviar mensagem de texto diretamente via Evolution API no Railway
    */
   static async sendTextMessage(instanceName: string, number: string, text: string) {
     if (USE_MOCK) {
@@ -250,33 +269,7 @@ export class EvolutionApiService {
     }
 
     const cleanNumber = number.replace(/\D/g, '');
-    const jid = `${cleanNumber}@s.whatsapp.net`;
-    const timestampStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-    // 1. Salva ou atualiza a conversa e a mensagem no Supabase
-    try {
-      await supabase.from('conversations').upsert({
-        id: jid,
-        contact_phone: `+${cleanNumber}`,
-        last_message: text,
-        last_message_timestamp: timestampStr,
-        status: 'open'
-      });
-
-      await supabase.from('messages').insert({
-        id: `msg-${Date.now()}`,
-        conversation_id: jid,
-        sender: 'attendant',
-        sender_name: 'Leo Vitorino',
-        content: text,
-        timestamp: timestampStr,
-        status: 'sent'
-      });
-    } catch (err) {
-      console.warn('Erro ao persisitir mensagem no Supabase:', err);
-    }
-
-    // 2. Dispara a mensagem no WhatsApp real via Evolution API
     try {
       const res = await fetch(`${API_URL}/message/sendText/${instanceName}`, {
         method: 'POST',
@@ -303,7 +296,7 @@ export class EvolutionApiService {
 
 
   /**
-   * Buscar histórico de mensagens de uma conversa/contato
+   * Buscar histórico de mensagens de uma conversa diretamente da Evolution API no Railway
    */
   static async fetchMessages(instanceName: string, remoteJid: string): Promise<Message[]> {
     if (USE_MOCK) return [];
@@ -311,27 +304,6 @@ export class EvolutionApiService {
     try {
       const cleanJid = remoteJid.includes('@') ? remoteJid : `${remoteJid.replace(/\D/g, '')}@s.whatsapp.net`;
 
-      // 1. Tenta carregar mensagens do Supabase primeiro
-      const { data: supaMsgs, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('conversation_id', cleanJid)
-        .order('created_at', { ascending: true });
-
-      if (!error && supaMsgs && supaMsgs.length > 0) {
-        return supaMsgs.map(m => ({
-          id: m.id,
-          conversationId: m.conversation_id,
-          sender: m.sender as 'attendant' | 'contact',
-          senderName: m.sender_name || 'Atendente',
-          content: m.content || '',
-          timestamp: m.timestamp || 'Agora',
-          status: m.status || 'sent',
-          isInternalNote: m.is_internal_note || false
-        }));
-      }
-
-      // 2. Fallback para Evolution API se não houver histórico gravado no Supabase
       const res = await fetch(`${API_URL}/chat/findMessages/${instanceName}`, {
         method: 'POST',
         headers: {
@@ -356,33 +328,62 @@ export class EvolutionApiService {
         rawMsgs = data.messages.records;
       }
 
+      if (!Array.isArray(rawMsgs)) return [];
+
       return rawMsgs.map((m: any, idx: number) => {
         const fromMe = m.key?.fromMe ?? false;
+        
+        let mediaUrl: string | undefined = undefined;
+        let mediaType: 'image' | 'audio' | 'document' | undefined = undefined;
+
+        const imgMsg = m.message?.imageMessage;
+        const audioMsg = m.message?.audioMessage;
+        const docMsg = m.message?.documentMessage;
+
+        if (imgMsg) {
+          mediaType = 'image';
+          mediaUrl = imgMsg.url || imgMsg.directPath || m.mediaUrl;
+        } else if (audioMsg) {
+          mediaType = 'audio';
+          mediaUrl = audioMsg.url || audioMsg.directPath || m.mediaUrl;
+        } else if (docMsg) {
+          mediaType = 'document';
+          mediaUrl = docMsg.url || docMsg.directPath || m.mediaUrl;
+        }
+
         const msgContent = 
           m.message?.conversation || 
           m.message?.extendedTextMessage?.text || 
-          m.message?.imageMessage?.caption || 
-          '[Mídia/Anexo]';
+          imgMsg?.caption || 
+          m.message?.videoMessage?.caption ||
+          (audioMsg ? '[Mensagem de Áudio]' : null) ||
+          (imgMsg ? '[Imagem]' : null) ||
+          (docMsg ? '[Documento]' : null) ||
+          '[Mensagem]';
 
         const timestampStr = m.messageTimestamp 
           ? new Date(Number(m.messageTimestamp) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
           : 'Agora';
 
         const senderType: 'attendant' | 'contact' = fromMe ? 'attendant' : 'contact';
+        const msgStatus: 'sent' | 'delivered' | 'read' = 'read';
+
         return {
-          id: m.key?.id || `real-msg-${idx}`,
+          id: m.key?.id || m.id || `real-msg-${idx}`,
           conversationId: remoteJid,
           sender: senderType,
           senderName: fromMe ? 'Atendente' : (m.pushName || 'Contato'),
           content: msgContent,
+          mediaUrl: mediaUrl,
+          mediaType: mediaType,
           timestamp: timestampStr,
-          status: 'read' as const
+          status: msgStatus,
+          isInternalNote: false
         };
       }).reverse();
     } catch (err) {
-      console.warn('Erro ao buscar mensagens:', err);
+      console.error('[EvolutionAPI] Erro ao buscar mensagens:', err);
       return [];
     }
   }
 }
-

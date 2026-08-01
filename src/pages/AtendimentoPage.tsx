@@ -45,36 +45,20 @@ export const AtendimentoPage: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>([]);
 
 
-  // Carregar conversas ao iniciar e escutar mudanças via Supabase Realtime
+  // Carregar conversas ao iniciar e manter atualizado a cada 4 segundos
   useEffect(() => {
     loadChats();
 
     if (isMock) return;
 
-    // Escuta Realtime na tabela 'conversations'
-    const channelConversations = supabase
-      .channel('public:conversations')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'conversations' },
-        () => {
-          loadChats();
-        }
-      )
-      .subscribe();
-
-    // Polling secundário como fallback a cada 5 segundos
     const interval = setInterval(() => {
-      loadChats();
-    }, 5000);
+      loadChats(false); // Atualização silenciosa em segundo plano
+    }, 4000);
 
-    return () => {
-      supabase.removeChannel(channelConversations);
-      clearInterval(interval);
-    };
+    return () => clearInterval(interval);
   }, [isMock]);
 
-  // Carregar mensagens quando trocar de conversa e escutar novas mensagens em tempo real
+  // Carregar mensagens quando trocar de conversa e manter sincronizado a cada 3 segundos
   useEffect(() => {
     if (!activeConvId || isMock) return;
 
@@ -85,76 +69,27 @@ export const AtendimentoPage: React.FC = () => {
 
     fetchConvMessages();
 
-    // Escuta Realtime na tabela 'messages' para a conversa ativa
-    const channelMessages = supabase
-      .channel(`public:messages:${activeConvId}`)
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${activeConvId}` },
-        (payload) => {
-          const newMsg = payload.new;
-          if (newMsg) {
-            setMessages(prev => {
-              if (prev.some(m => m.id === newMsg.id)) return prev;
-              return [
-                ...prev,
-                {
-                  id: newMsg.id,
-                  conversationId: newMsg.conversation_id,
-                  sender: newMsg.sender === 'attendant' ? 'attendant' : 'contact',
-                  senderName: newMsg.sender_name || 'Contato',
-                  content: newMsg.content,
-                  timestamp: newMsg.created_at ? new Date(newMsg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                  status: newMsg.status || 'read',
-                  isInternalNote: newMsg.is_internal_note || false
-                }
-              ];
-            });
-          }
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channelMessages);
-    };
+    const interval = setInterval(fetchConvMessages, 3000);
+    return () => clearInterval(interval);
   }, [activeConvId, isMock, instanceName]);
 
-  const loadChats = async () => {
-    setLoadingChats(true);
+  const loadChats = async (showLoading = true) => {
+    if (showLoading) setLoadingChats(true);
     if (isMock) {
       setConversations(mockConversations);
-      setActiveConvId(mockConversations[0].id);
-      setMessages([
-        {
-          id: 'm1',
-          conversationId: 'conv-1',
-          sender: 'contact',
-          content: 'Olá! Vi o anúncio dos pneus Michelin na Vitstock. Vocês entregam em Curitiba?',
-          timestamp: '13:58',
-          status: 'read'
-        },
-        {
-          id: 'm2',
-          conversationId: 'conv-1',
-          sender: 'attendant',
-          senderName: 'Leo Vitorino',
-          content: 'Com certeza! Entregamos em todo o Brasil. Para Curitiba temos frete especial.',
-          timestamp: '14:02',
-          status: 'read'
-        }
-      ]);
+      setActiveConvId(mockConversations[0]?.id || '');
     } else {
       const realChats = await EvolutionApiService.fetchRealChats(instanceName);
       if (realChats.length > 0) {
         setConversations(realChats);
-        setActiveConvId(realChats[0].id);
+        // Define a primeira conversa ativa se ainda não houver nenhuma selecionada
+        setActiveConvId(prev => prev || realChats[0].id);
       } else {
         setConversations([]);
         setMessages([]);
       }
     }
-    setLoadingChats(false);
+    if (showLoading) setLoadingChats(false);
   };
 
 
@@ -305,7 +240,7 @@ export const AtendimentoPage: React.FC = () => {
                 <Plus className="w-3.5 h-3.5" />
               </button>
               <button 
-                onClick={loadChats} 
+                onClick={() => loadChats(true)} 
                 className="p-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-amber-400 transition-colors"
                 title="Sincronizar Mensagens"
               >
@@ -496,13 +431,56 @@ export const AtendimentoPage: React.FC = () => {
                       />
                     )}
                     <div>
-                      <div className={`p-3.5 rounded-2xl text-xs leading-relaxed ${
+                      <div className={`p-3.5 rounded-2xl text-xs leading-relaxed space-y-2 ${
                         isMe 
                           ? 'bg-amber-400 text-zinc-950 font-medium rounded-tr-none shadow-[0_2px_10px_rgba(238,187,44,0.15)]' 
                           : 'bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-tl-none'
                       }`}>
                         {isMe && <p className="text-[10px] font-bold text-zinc-900/70 mb-1">{msg.senderName}</p>}
-                        <p className="whitespace-pre-wrap">{msg.content}</p>
+
+                        {/* Renderização de Imagem */}
+                        {msg.mediaType === 'image' && msg.mediaUrl && (
+                          <div className="rounded-xl overflow-hidden max-w-xs mb-2 border border-black/10">
+                            <img 
+                              src={msg.mediaUrl} 
+                              alt="Imagem recebida" 
+                              className="w-full h-auto object-cover max-h-64 rounded-lg cursor-pointer hover:scale-105 transition-transform"
+                              onClick={() => window.open(msg.mediaUrl, '_blank')}
+                            />
+                          </div>
+                        )}
+
+                        {/* Renderização de Áudio */}
+                        {msg.mediaType === 'audio' && msg.mediaUrl && (
+                          <div className="flex items-center gap-2 p-1.5 rounded-xl bg-black/10 my-1">
+                            <audio 
+                              controls 
+                              src={msg.mediaUrl} 
+                              className="w-full max-w-xs h-8 accent-amber-400"
+                            />
+                          </div>
+                        )}
+
+                        {/* Renderização de Documento */}
+                        {msg.mediaType === 'document' && msg.mediaUrl && (
+                          <div className="flex items-center gap-2.5 p-2 rounded-xl bg-black/10 my-1 border border-white/10">
+                            <Paperclip className="w-4 h-4 flex-shrink-0" />
+                            <span className="truncate flex-1 font-bold">{msg.content}</span>
+                            <a 
+                              href={msg.mediaUrl} 
+                              target="_blank" 
+                              rel="noreferrer"
+                              className="px-2 py-1 rounded bg-amber-400/20 text-amber-300 font-bold hover:bg-amber-400 hover:text-zinc-950 transition-colors"
+                            >
+                              Baixar
+                            </a>
+                          </div>
+                        )}
+
+                        {/* Texto da Mensagem */}
+                        {msg.content && msg.content !== '[Imagem]' && msg.content !== '[Mensagem de Áudio]' && (
+                          <p className="whitespace-pre-wrap">{msg.content}</p>
+                        )}
                       </div>
                       <div className={`flex items-center gap-1 mt-1 text-[10px] text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
                         <span>{msg.timestamp}</span>
