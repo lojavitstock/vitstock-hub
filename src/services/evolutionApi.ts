@@ -322,13 +322,9 @@ export class EvolutionApiService {
 
       if (!res.ok) return [];
       const data = await res.json();
-      let rawMsgs = data?.records || data?.messages || (Array.isArray(data) ? data : []);
+      const rawMsgs = data?.messages?.records || data?.records || (Array.isArray(data) ? data : []);
 
-      if ((!Array.isArray(rawMsgs) || rawMsgs.length === 0) && data?.messages?.records) {
-        rawMsgs = data.messages.records;
-      }
-
-      if (!Array.isArray(rawMsgs)) return [];
+      if (!Array.isArray(rawMsgs) || rawMsgs.length === 0) return [];
 
       return rawMsgs.map((m: any, idx: number) => {
         const fromMe = m.key?.fromMe ?? false;
