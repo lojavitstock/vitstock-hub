@@ -205,23 +205,29 @@ export class EvolutionApiService {
       if (rawData.length === 0) return [];
 
       return rawData.map((item: any, index: number) => {
-        const jid = item.id || item.remoteJid || `chat-${index}`;
-        const cleanNumber = jid.split('@')[0];
-        const displayName = item.name || item.pushName || item.verifiedName || item.shortName || cleanNumber;
+        const keyRemoteJid = item.lastMessage?.key?.remoteJidAlt || item.remoteJid || item.id || `chat-${index}`;
+        const cleanNumber = keyRemoteJid.split('@')[0];
+        const displayName = item.lastMessage?.pushName || item.pushName || item.name || item.verifiedName || cleanNumber;
+
+        const messageContent = 
+          item.lastMessage?.message?.conversation ||
+          item.lastMessage?.message?.extendedTextMessage?.text ||
+          item.lastMessage?.message?.imageMessage?.caption ||
+          (item.lastMessage?.message?.audioMessage ? '[Áudio]' : null) ||
+          (item.lastMessage?.message?.imageMessage ? '[Imagem]' : null) ||
+          'Conversa iniciada';
 
         return {
-          id: jid,
+          id: keyRemoteJid,
           contact: {
-            id: jid,
+            id: keyRemoteJid,
             name: displayName,
             phone: cleanNumber ? `+${cleanNumber}` : '',
             avatar: item.profilePicUrl || item.profilePictureUrl || '',
             tags: [{ id: 't-real', name: 'WhatsApp', color: '#10B981' }],
             createdAt: new Date().toISOString().split('T')[0]
           },
-          lastMessage: item.lastMessage?.message?.conversation || 
-                       item.lastMessage?.message?.extendedTextMessage?.text || 
-                       'Conversa iniciada',
+          lastMessage: messageContent,
           lastMessageTimestamp: item.updatedAt ? new Date(item.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Hoje',
           unreadCount: item.unreadCount || 0,
           status: 'open',
@@ -338,15 +344,17 @@ export class EvolutionApiService {
               remoteJid: cleanJid
             }
           },
-          limit: 50
+          limit: 100
         })
       });
 
       if (!res.ok) return [];
       const data = await res.json();
-      const rawMsgs = data?.records || data?.messages || (Array.isArray(data) ? data : []);
+      let rawMsgs = data?.records || data?.messages || (Array.isArray(data) ? data : []);
 
-      if (!Array.isArray(rawMsgs)) return [];
+      if ((!Array.isArray(rawMsgs) || rawMsgs.length === 0) && data?.messages?.records) {
+        rawMsgs = data.messages.records;
+      }
 
       return rawMsgs.map((m: any, idx: number) => {
         const fromMe = m.key?.fromMe ?? false;
