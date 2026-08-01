@@ -58,10 +58,14 @@ export const AtendimentoPage: React.FC = () => {
     return () => clearInterval(interval);
   }, [isMock]);
 
+  const messagesContainerRef = React.useRef<HTMLDivElement>(null);
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
+    if (messagesContainerRef.current) {
+      messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+    }
+    messagesEndRef.current?.scrollIntoView({ behavior });
   };
 
   // Carregar mensagens quando trocar de conversa e manter sincronizado a cada 2 segundos
@@ -71,7 +75,6 @@ export const AtendimentoPage: React.FC = () => {
     const fetchConvMessages = async () => {
       const realMsgs = await EvolutionApiService.fetchMessages(instanceName, activeConvId);
       setMessages(prev => {
-        // Se a quantidade ou última mensagem for diferente, atualiza
         if (prev.length !== realMsgs.length || (realMsgs.length > 0 && prev[prev.length - 1]?.id !== realMsgs[realMsgs.length - 1]?.id)) {
           return realMsgs;
         }
@@ -79,16 +82,20 @@ export const AtendimentoPage: React.FC = () => {
       });
     };
 
-    fetchConvMessages();
+    fetchConvMessages().then(() => {
+      setTimeout(() => scrollToBottom('auto'), 50);
+    });
 
     const interval = setInterval(fetchConvMessages, 2000);
     return () => clearInterval(interval);
   }, [activeConvId, isMock, instanceName]);
 
-  // Rolar para a última mensagem automaticamente quando chegar mensagem nova
+  // Rolar para a última mensagem automaticamente quando a conversa mudar ou chegar mensagem nova
   useEffect(() => {
-    scrollToBottom();
-  }, [messages.length]);
+    if (messages.length > 0) {
+      scrollToBottom('smooth');
+    }
+  }, [messages.length, activeConvId]);
 
   const loadChats = async (showLoading = true) => {
     if (showLoading) setLoadingChats(true);
@@ -403,7 +410,7 @@ export const AtendimentoPage: React.FC = () => {
             </div>
 
             {/* Mensagens com Scroll */}
-            <div className="flex-1 p-5 overflow-y-auto space-y-4 bg-zinc-950/60">
+            <div ref={messagesContainerRef} className="flex-1 p-5 overflow-y-auto space-y-4 bg-zinc-950/60">
               <div className="flex justify-center my-2">
                 <span className="text-[10px] font-bold px-3 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-500">
                   Atendimento em tempo real via Evolution API
