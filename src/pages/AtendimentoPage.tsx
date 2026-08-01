@@ -72,22 +72,26 @@ export const AtendimentoPage: React.FC = () => {
   useEffect(() => {
     if (!activeConvId || isMock) return;
 
+    let isSubscribed = true;
+
     const fetchConvMessages = async () => {
       const realMsgs = await EvolutionApiService.fetchMessages(instanceName, activeConvId);
-      setMessages(prev => {
-        if (prev.length !== realMsgs.length || (realMsgs.length > 0 && prev[prev.length - 1]?.id !== realMsgs[realMsgs.length - 1]?.id)) {
-          return realMsgs;
-        }
-        return prev;
-      });
+      if (isSubscribed) {
+        setMessages(realMsgs);
+      }
     };
 
     fetchConvMessages().then(() => {
-      setTimeout(() => scrollToBottom('auto'), 50);
+      if (isSubscribed) {
+        setTimeout(() => scrollToBottom('auto'), 50);
+      }
     });
 
     const interval = setInterval(fetchConvMessages, 2000);
-    return () => clearInterval(interval);
+    return () => {
+      isSubscribed = false;
+      clearInterval(interval);
+    };
   }, [activeConvId, isMock, instanceName]);
 
   // Rolar para a última mensagem automaticamente quando a conversa mudar ou chegar mensagem nova
@@ -106,7 +110,6 @@ export const AtendimentoPage: React.FC = () => {
       const realChats = await EvolutionApiService.fetchRealChats(instanceName);
       if (realChats.length > 0) {
         setConversations(realChats);
-        // Define a primeira conversa ativa se ainda não houver nenhuma selecionada
         setActiveConvId(prev => prev || realChats[0].id);
       } else {
         setConversations([]);
@@ -142,9 +145,16 @@ export const AtendimentoPage: React.FC = () => {
     // Se NÃO for nota interna e NÃO for mock, envia mensagem real no WhatsApp via Evolution API!
     if (!isInternalNote && !isMock) {
       await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, newMsgText);
+      
+      // Busca atualizada do backend imediatamente apos enviar
+      setTimeout(async () => {
+        const updatedMsgs = await EvolutionApiService.fetchMessages(instanceName, activeConv.id);
+        if (updatedMsgs.length > 0) setMessages(updatedMsgs);
+        loadChats(false);
+      }, 800);
     }
 
-    // Atualiza última mensagem na lista
+    // Atualiza última mensagem na lista lateral
     setConversations(prev => prev.map(c => c.id === activeConv.id ? {
       ...c,
       lastMessage: isInternalNote ? `[Nota Interna]: ${newMsgText}` : newMsgText,

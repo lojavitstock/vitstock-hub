@@ -336,19 +336,25 @@ export class EvolutionApiService {
         let mediaUrl: string | undefined = undefined;
         let mediaType: 'image' | 'audio' | 'document' | undefined = undefined;
 
-        const imgMsg = m.message?.imageMessage;
-        const audioMsg = m.message?.audioMessage;
+        const imgMsg = m.message?.imageMessage || m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
+        const audioMsg = m.message?.audioMessage || m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
         const docMsg = m.message?.documentMessage;
 
         if (imgMsg) {
           mediaType = 'image';
-          mediaUrl = imgMsg.url || imgMsg.directPath || m.mediaUrl;
+          if (imgMsg.url && imgMsg.url.startsWith('http')) {
+            mediaUrl = imgMsg.url;
+          } else if (imgMsg.jpegThumbnail) {
+            mediaUrl = imgMsg.jpegThumbnail.startsWith('data:') ? imgMsg.jpegThumbnail : `data:image/jpeg;base64,${imgMsg.jpegThumbnail}`;
+          }
         } else if (audioMsg) {
           mediaType = 'audio';
-          mediaUrl = audioMsg.url || audioMsg.directPath || m.mediaUrl;
+          if (audioMsg.url && audioMsg.url.startsWith('http')) {
+            mediaUrl = audioMsg.url;
+          }
         } else if (docMsg) {
           mediaType = 'document';
-          mediaUrl = docMsg.url || docMsg.directPath || m.mediaUrl;
+          mediaUrl = docMsg.url;
         }
 
         const msgContent = 
@@ -357,7 +363,7 @@ export class EvolutionApiService {
           imgMsg?.caption || 
           m.message?.videoMessage?.caption ||
           (audioMsg ? '[Mensagem de Áudio]' : null) ||
-          (imgMsg ? '[Imagem]' : null) ||
+          (imgMsg ? (imgMsg.caption || '[Imagem]') : null) ||
           (docMsg ? '[Documento]' : null) ||
           '[Mensagem]';
 
