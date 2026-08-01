@@ -161,7 +161,9 @@ export const ConexoesPage: React.FC = () => {
           <div className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800/80 grid grid-cols-3 gap-4 text-xs">
             <div>
               <span className="text-zinc-500 block mb-0.5 font-bold">Servidor API Nuvem</span>
-              <span className="text-zinc-200 font-mono font-semibold">http://147.15.34.119:8080</span>
+              <span className="text-zinc-200 font-mono font-semibold truncate block" title={import.meta.env.VITE_EVOLUTION_API_URL || 'Railway Cloud'}>
+                {import.meta.env.VITE_EVOLUTION_API_URL || 'Railway Cloud'}
+              </span>
             </div>
             <div>
               <span className="text-zinc-500 block mb-0.5 font-bold">Webhooks & Sessão</span>
@@ -171,7 +173,7 @@ export const ConexoesPage: React.FC = () => {
             </div>
             <div>
               <span className="text-zinc-500 block mb-0.5 font-bold">Banco de Dados</span>
-              <span className="text-zinc-200 font-mono">PostgreSQL</span>
+              <span className="text-zinc-200 font-mono">PostgreSQL (Railway)</span>
             </div>
           </div>
 
