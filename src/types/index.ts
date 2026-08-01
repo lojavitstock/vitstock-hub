@@ -33,6 +33,7 @@ export interface Message {
   content: string;
   mediaUrl?: string;
   mediaType?: 'image' | 'audio' | 'document';
+  rawKey?: any;
   timestamp: string;
   status: 'sent' | 'delivered' | 'read';
   isInternalNote?: boolean;

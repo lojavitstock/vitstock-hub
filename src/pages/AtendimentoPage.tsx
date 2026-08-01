@@ -24,6 +24,128 @@ import { Conversation, Message } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { supabase } from '../services/supabase';
 
+const MediaMessageContent: React.FC<{ msg: Message; instanceName: string }> = ({ msg, instanceName }) => {
+  const isMedia = msg.mediaType === 'image' || msg.mediaType === 'audio' || msg.mediaType === 'document';
+  if (!isMedia) return null;
+
+  const isDataUri = (url?: string | null) => !!url && url.startsWith('data:');
+
+  const [src, setSrc] = useState<string | null>(isDataUri(msg.mediaUrl) ? msg.mediaUrl! : null);
+  const [loadingMedia, setLoadingMedia] = useState<boolean>(!isDataUri(msg.mediaUrl) && !!msg.rawKey);
+  const [showModal, setShowModal] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!isDataUri(src) && msg.rawKey) {
+      let isMounted = true;
+      setLoadingMedia(true);
+      EvolutionApiService.getDecodedMedia(instanceName, msg.rawKey).then(base64 => {
+        if (isMounted) {
+          if (base64) {
+            setSrc(base64);
+          }
+          setLoadingMedia(false);
+        }
+      });
+      return () => { isMounted = false; };
+    }
+  }, [msg, instanceName, src]);
+
+  if (loadingMedia) {
+    return (
+      <div className="p-2.5 rounded-lg bg-black/30 border border-amber-400/20 text-[11px] text-amber-300 flex items-center gap-2 font-bold animate-pulse my-1 max-w-xs">
+        <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+        Descriptografando imagem/áudio...
+      </div>
+    );
+  }
+
+  if (msg.mediaType === 'image') {
+    const finalImageSrc = src || (isDataUri(msg.mediaUrl) ? msg.mediaUrl : null);
+
+    if (!finalImageSrc) {
+      return (
+        <div className="p-3 rounded-xl bg-zinc-900 border border-zinc-800 text-[11px] text-zinc-400 flex items-center gap-2 my-1">
+          <ImageIcon className="w-4 h-4 text-zinc-500" />
+          <span>Imagem indisponível no WhatsApp</span>
+        </div>
+      );
+    }
+
+    return (
+      <>
+        <div className="rounded-xl overflow-hidden max-w-xs mb-2 border border-black/20 shadow-xl group relative">
+          <img 
+            src={finalImageSrc} 
+            alt="Imagem WhatsApp" 
+            className="w-full h-auto object-cover max-h-72 rounded-lg cursor-pointer hover:opacity-90 transition-all"
+            onClick={() => setShowModal(true)}
+          />
+          <div className="absolute bottom-2 right-2 bg-black/60 backdrop-blur-md px-2 py-1 rounded text-[10px] text-white opacity-0 group-hover:opacity-100 transition-opacity font-bold">
+            Clique para ampliar 🔍
+          </div>
+        </div>
+
+        {/* Modal Lightbox de Zoom da Imagem */}
+        {showModal && (
+          <div 
+            className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in"
+            onClick={() => setShowModal(false)}
+          >
+            <div className="relative max-w-4xl w-full max-h-[90vh] flex flex-col items-center justify-center" onClick={e => e.stopPropagation()}>
+              <div className="absolute -top-12 right-0 flex items-center gap-3">
+                <a
+                  href={finalImageSrc}
+                  download="imagem-whatsapp.jpg"
+                  className="px-3 py-1.5 rounded-lg bg-amber-400 text-zinc-950 font-bold text-xs hover:bg-amber-300 transition-colors flex items-center gap-1"
+                >
+                  Download HD
+                </a>
+                <button
+                  onClick={() => setShowModal(false)}
+                  className="w-8 h-8 rounded-full bg-zinc-800 text-zinc-200 hover:text-white font-bold flex items-center justify-center border border-zinc-700"
+                >
+                  ✕
+                </button>
+              </div>
+              <img 
+                src={finalImageSrc} 
+                alt="Imagem Ampliada" 
+                className="max-w-full max-h-[85vh] object-contain rounded-xl shadow-2xl border border-zinc-800"
+              />
+            </div>
+          </div>
+        )}
+      </>
+    );
+  }
+
+  if (msg.mediaType === 'audio' && src) {
+    return (
+      <div className="flex items-center gap-2 p-2 rounded-xl bg-black/30 my-1 border border-white/10 max-w-xs shadow-inner">
+        <audio controls src={src} className="w-full h-8 accent-amber-400" />
+      </div>
+    );
+  }
+
+  if (msg.mediaType === 'document' && src) {
+    return (
+      <div className="flex items-center gap-2.5 p-2.5 rounded-xl bg-black/30 my-1 border border-white/10 max-w-xs shadow-inner">
+        <Paperclip className="w-4 h-4 flex-shrink-0 text-amber-400" />
+        <span className="truncate flex-1 font-bold text-xs">{msg.content || 'Documento'}</span>
+        <a 
+          href={src} 
+          download="documento.pdf"
+          className="px-2.5 py-1 rounded bg-amber-400 text-zinc-950 font-bold hover:bg-amber-300 transition-colors text-[11px]"
+        >
+          Baixar
+        </a>
+      </div>
+    );
+  }
+
+  return null;
+};
+
 export const AtendimentoPage: React.FC = () => {
   const instanceName = import.meta.env.VITE_EVOLUTION_INSTANCE_NAME || 'vitstock_atendimento';
   const isMock = import.meta.env.VITE_USE_MOCK_DATA === 'true';
@@ -472,47 +594,11 @@ export const AtendimentoPage: React.FC = () => {
                       }`}>
                         {isMe && <p className="text-[10px] font-bold text-zinc-900/70 mb-1">{msg.senderName}</p>}
 
-                        {/* Renderização de Imagem */}
-                        {msg.mediaType === 'image' && msg.mediaUrl && (
-                          <div className="rounded-xl overflow-hidden max-w-xs mb-2 border border-black/10">
-                            <img 
-                              src={msg.mediaUrl} 
-                              alt="Imagem recebida" 
-                              className="w-full h-auto object-cover max-h-64 rounded-lg cursor-pointer hover:scale-105 transition-transform"
-                              onClick={() => window.open(msg.mediaUrl, '_blank')}
-                            />
-                          </div>
-                        )}
-
-                        {/* Renderização de Áudio */}
-                        {msg.mediaType === 'audio' && msg.mediaUrl && (
-                          <div className="flex items-center gap-2 p-1.5 rounded-xl bg-black/10 my-1">
-                            <audio 
-                              controls 
-                              src={msg.mediaUrl} 
-                              className="w-full max-w-xs h-8 accent-amber-400"
-                            />
-                          </div>
-                        )}
-
-                        {/* Renderização de Documento */}
-                        {msg.mediaType === 'document' && msg.mediaUrl && (
-                          <div className="flex items-center gap-2.5 p-2 rounded-xl bg-black/10 my-1 border border-white/10">
-                            <Paperclip className="w-4 h-4 flex-shrink-0" />
-                            <span className="truncate flex-1 font-bold">{msg.content}</span>
-                            <a 
-                              href={msg.mediaUrl} 
-                              target="_blank" 
-                              rel="noreferrer"
-                              className="px-2 py-1 rounded bg-amber-400/20 text-amber-300 font-bold hover:bg-amber-400 hover:text-zinc-950 transition-colors"
-                            >
-                              Baixar
-                            </a>
-                          </div>
-                        )}
+                        {/* Renderização Inteligente de Mídias (Imagem, Áudio, Documentos em Base64) */}
+                        <MediaMessageContent msg={msg} instanceName={instanceName} />
 
                         {/* Texto da Mensagem */}
-                        {msg.content && msg.content !== '[Imagem]' && msg.content !== '[Mensagem de Áudio]' && (
+                        {msg.content && msg.content !== '[Imagem]' && msg.content !== '[Mensagem de Áudio]' && !msg.content.startsWith('🖼️') && !msg.content.startsWith('🎵') && (
                           <p className="whitespace-pre-wrap">{msg.content}</p>
                         )}
                       </div>

@@ -193,9 +193,11 @@ export class EvolutionApiService {
         // Ignora chats de grupos por enquanto se necessário, ou inclui se tiver remoteJid
         const isGroup = item.remoteJid?.includes('@g.us') || item.id?.includes('@g.us');
         if (isGroup) return; // Filtra grupos da aba principal de atendimento individual
-
-        const keyRemoteJid = item.lastMessage?.key?.remoteJidAlt || item.remoteJid || item.id || `chat-${index}`;
-        const cleanNumber = keyRemoteJid.split('@')[0].replace(/\D/g, '');
+        
+        // Usa o remoteJid exato com que a Evolution API gravou o chat no banco do Railway
+        const rawRemoteJid = item.remoteJid || item.id || `chat-${index}`;
+        const altJid = item.lastMessage?.key?.remoteJidAlt;
+        const cleanNumber = (altJid || rawRemoteJid).split('@')[0].replace(/\D/g, '');
 
         if (!cleanNumber) return;
 
@@ -225,9 +227,9 @@ export class EvolutionApiService {
           : 'Hoje';
 
         const conversationObj: Conversation = {
-          id: keyRemoteJid,
+          id: rawRemoteJid, // ID real para findMessages no Railway (ex: 267877160644613@lid)
           contact: {
-            id: keyRemoteJid,
+            id: rawRemoteJid,
             name: displayName,
             phone: `+${cleanNumber}`,
             avatar: savedContact?.avatar || item.profilePicUrl || item.profilePictureUrl || '',
@@ -326,15 +328,21 @@ export class EvolutionApiService {
 
       if (!Array.isArray(rawMsgs) || rawMsgs.length === 0) return [];
 
-      return rawMsgs.map((m: any, idx: number) => {
+      // A Evolution API retorna do mais recente para o mais antigo. Invertemos para exibir cronologicamente.
+      const chronologicalMsgs = [...rawMsgs].reverse();
+
+      return chronologicalMsgs.map((m: any, idx: number) => {
         const fromMe = m.key?.fromMe ?? false;
         
         let mediaUrl: string | undefined = undefined;
         let mediaType: 'image' | 'audio' | 'document' | undefined = undefined;
 
-        const imgMsg = m.message?.imageMessage || m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
-        const audioMsg = m.message?.audioMessage || m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
-        const docMsg = m.message?.documentMessage;
+        const msgObj = m.message || {};
+        const imgMsg = msgObj.imageMessage || msgObj.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
+        const audioMsg = msgObj.audioMessage || msgObj.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
+        const docMsg = msgObj.documentMessage;
+        const stickerMsg = msgObj.stickerMessage;
+        const reactionMsg = msgObj.reactionMessage;
 
         if (imgMsg) {
           mediaType = 'image';
@@ -353,14 +361,16 @@ export class EvolutionApiService {
           mediaUrl = docMsg.url;
         }
 
-        const msgContent = 
-          m.message?.conversation || 
-          m.message?.extendedTextMessage?.text || 
+        let msgContent = 
+          msgObj.conversation || 
+          msgObj.extendedTextMessage?.text || 
           imgMsg?.caption || 
-          m.message?.videoMessage?.caption ||
-          (audioMsg ? '[Mensagem de Áudio]' : null) ||
-          (imgMsg ? (imgMsg.caption || '[Imagem]') : null) ||
-          (docMsg ? '[Documento]' : null) ||
+          msgObj.videoMessage?.caption ||
+          (reactionMsg ? `Reagiu com: ${reactionMsg.text}` : null) ||
+          (stickerMsg ? '🧩 [Figurinha]' : null) ||
+          (audioMsg ? '🎵 [Mensagem de Áudio]' : null) ||
+          (imgMsg ? (imgMsg.caption || '🖼️ [Imagem]') : null) ||
+          (docMsg ? '📄 [Documento]' : null) ||
           '[Mensagem]';
 
         const timestampStr = m.messageTimestamp 
@@ -378,14 +388,46 @@ export class EvolutionApiService {
           content: msgContent,
           mediaUrl: mediaUrl,
           mediaType: mediaType,
+          rawKey: m.key,
           timestamp: timestampStr,
           status: msgStatus,
           isInternalNote: false
         };
-      }).reverse();
+      });
     } catch (err) {
       console.error('[EvolutionAPI] Erro ao buscar mensagens:', err);
       return [];
+    }
+  }
+
+  /**
+   * Descriptografar e obter base64 de imagem/áudio via Evolution API no Railway
+   */
+  static async getDecodedMedia(instanceName: string, messageKey: any): Promise<string | null> {
+    if (!messageKey || USE_MOCK) return null;
+
+    try {
+      const res = await fetch(`${API_URL}/chat/getBase64FromMediaMessage/${instanceName}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': API_KEY
+        },
+        body: JSON.stringify({
+          message: { key: messageKey },
+          convertToMp4: false
+        })
+      });
+
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data.base64) {
+        return data.base64.startsWith('data:') ? data.base64 : `data:${data.mimetype || 'image/jpeg'};base64,${data.base64}`;
+      }
+      return null;
+    } catch (err) {
+      console.error('[EvolutionAPI] Erro ao buscar mídia decodificada:', err);
+      return null;
     }
   }
 }
