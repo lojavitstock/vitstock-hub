@@ -47,13 +47,13 @@ export const AppLayout: React.FC = () => {
   ];
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100 font-overpass">
+    <div className="flex h-screen w-screen overflow-hidden bg-[#11181d] text-slate-100 font-overpass">
       {/* Sidebar Lateral Desktop (Layout Vitstock Hub) */}
-      <aside className="w-64 flex-shrink-0 bg-[#0C0C0E] border-r border-zinc-800/80 flex flex-col justify-between select-none">
+      <aside className="w-56 flex-shrink-0 bg-[#182126] border-r border-[#344047] flex flex-col justify-between select-none">
         
         {/* Top Header: Logo Oficial VITSTOCK® */}
         <div>
-          <div className="p-5 border-b border-zinc-800/60 flex items-center gap-3">
+          <div className="p-4 border-b border-[#344047] bg-[#20292f] flex items-center gap-3">
             <div className="w-10 h-10 min-w-[40px] max-w-[40px] max-h-[40px] overflow-hidden rounded-xl bg-amber-400/10 border border-amber-400/30 flex items-center justify-center p-1.5 shadow-[0_0_15px_rgba(238,187,44,0.15)] flex-shrink-0">
               <img 
                 src="/VITSTOCK®/SIMBOLO/1.png" 
@@ -78,7 +78,7 @@ export const AppLayout: React.FC = () => {
 
           {/* Menu de Navegação em Português */}
           <nav className="p-3 space-y-1">
-            <p className="px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-zinc-500">
+            <p className="px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-slate-500">
               Menu Principal
             </p>
             {navItems.map((item) => {
@@ -92,8 +92,8 @@ export const AppLayout: React.FC = () => {
                     const active = navActive || (item.path === '/atendimento' && location.pathname === '/');
                     return `flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-semibold transition-all duration-150 ${
                       active
-                        ? 'bg-amber-400 text-zinc-950 shadow-[0_0_12px_rgba(238,187,44,0.3)] font-bold'
-                        : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900/80'
+                        ? 'bg-amber-400/15 text-amber-300 border border-amber-400/35 shadow-sm font-bold'
+                        : 'text-slate-400 border border-transparent hover:text-slate-100 hover:bg-[#263138]'
                     }`;
                   }}
                 >
@@ -117,10 +117,10 @@ export const AppLayout: React.FC = () => {
         </div>
 
         {/* Bottom Section: Status da Conexão & Perfil do Atendente */}
-        <div className="p-3 border-t border-zinc-800/60 bg-zinc-900/30">
+        <div className="p-3 border-t border-[#344047] bg-[#151e23]">
           
           {/* Status WhatsApp (Evolution API em Tempo Real) */}
-          <div className="mb-3 p-2.5 rounded-lg bg-zinc-900/80 border border-zinc-800 flex items-center justify-between">
+          <div className="mb-3 p-2.5 rounded-lg bg-[#20292f] border border-[#344047] flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="relative flex h-2.5 w-2.5">
                 <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${isConnected ? 'bg-emerald-400' : 'bg-amber-400'} opacity-75`}></span>
@@ -138,7 +138,7 @@ export const AppLayout: React.FC = () => {
           </div>
 
           {/* Card Atendente */}
-          <div className="flex items-center justify-between p-2 rounded-lg hover:bg-zinc-900/60 transition-colors">
+          <div className="flex items-center justify-between p-2 rounded-lg hover:bg-[#263138] transition-colors">
             <div className="flex items-center gap-2.5">
               <div className="relative">
                 <img 
@@ -172,7 +172,7 @@ export const AppLayout: React.FC = () => {
       </aside>
 
       {/* Main Content Area */}
-      <main className="flex-1 h-full overflow-hidden bg-zinc-950 flex flex-col">
+      <main className="flex-1 h-full overflow-hidden bg-[#11181d] flex flex-col">
         <Outlet />
       </main>
     </div>
