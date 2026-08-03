@@ -1,38 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { Settings, Users, Shield, Zap, Layers, Plus, Check, Loader2 } from 'lucide-react';
+import React, { useState } from 'react';
+import { Settings, Users, Shield, Zap, Layers, Plus, Check } from 'lucide-react';
 import { Attendant } from '../types';
-import { supabase } from '../services/supabase';
 
 export const ConfiguracoesPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'attendants' | 'departments' | 'quickReplies'>('attendants');
   const [attendants, setAttendants] = useState<Attendant[]>([]);
-  const [loadingAttendants, setLoadingAttendants] = useState(false);
-
-  useEffect(() => {
-    if (activeTab === 'attendants') {
-      fetchAttendants();
-    }
-  }, [activeTab]);
-
-  const fetchAttendants = async () => {
-    setLoadingAttendants(true);
-    try {
-      const { data, error } = await supabase.from('profiles').select('*');
-      if (!error && data) {
-        setAttendants(data.map(p => ({
-          id: p.id,
-          name: p.name,
-          avatar: p.avatar || '',
-          role: p.role,
-          online: p.online || false
-        })));
-      }
-    } catch (err) {
-      console.error('Erro ao carregar atendentes:', err);
-    } finally {
-      setLoadingAttendants(false);
-    }
-  };
 
   return (
     <div className="flex-1 h-full p-6 overflow-y-auto bg-zinc-950 font-overpass">
@@ -84,13 +56,9 @@ export const ConfiguracoesPage: React.FC = () => {
           </div>
 
           <div className="bg-[#0C0C0E] border border-zinc-800 rounded-xl divide-y divide-zinc-900">
-            {loadingAttendants ? (
-              <div className="p-8 text-center text-zinc-500 text-xs flex items-center justify-center gap-2">
-                <Loader2 className="w-4 h-4 animate-spin text-amber-400" /> Carregando atendentes do Supabase...
-              </div>
-            ) : attendants.length === 0 ? (
+            {attendants.length === 0 ? (
               <div className="p-8 text-center text-zinc-500 text-xs">
-                Nenhum atendente cadastrado no banco de dados ainda.
+                A equipe será carregada pela nova API do Railway.
               </div>
             ) : (
               attendants.map(attendant => (

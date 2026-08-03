@@ -7,22 +7,38 @@ import { FunilPage } from './pages/FunilPage';
 import { CampanhasPage } from './pages/CampanhasPage';
 import { ConexoesPage } from './pages/ConexoesPage';
 import { ConfiguracoesPage } from './pages/ConfiguracoesPage';
+import { LoginPage } from './pages/LoginPage';
+import { useAuth } from './auth/AuthContext';
+
+const AuthenticatedApp: React.FC = () => {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return <div className="min-h-screen bg-zinc-950 flex items-center justify-center text-sm text-zinc-500">Carregando...</div>;
+  }
+
+  if (!user) return <LoginPage />;
+
+  return (
+    <Routes>
+      <Route path="/" element={<AppLayout />}>
+        <Route index element={<Navigate to="/atendimento" replace />} />
+        <Route path="atendimento" element={<AtendimentoPage />} />
+        <Route path="contatos" element={<ContatosPage />} />
+        <Route path="funil" element={<FunilPage />} />
+        <Route path="campanhas" element={<CampanhasPage />} />
+        <Route path="conexoes" element={<ConexoesPage />} />
+        <Route path="configuracoes" element={<ConfiguracoesPage />} />
+        <Route path="*" element={<Navigate to="/atendimento" replace />} />
+      </Route>
+    </Routes>
+  );
+};
 
 export const App: React.FC = () => {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<AppLayout />}>
-          <Route index element={<Navigate to="/atendimento" replace />} />
-          <Route path="atendimento" element={<AtendimentoPage />} />
-          <Route path="contatos" element={<ContatosPage />} />
-          <Route path="funil" element={<FunilPage />} />
-          <Route path="campanhas" element={<CampanhasPage />} />
-          <Route path="conexoes" element={<ConexoesPage />} />
-          <Route path="configuracoes" element={<ConfiguracoesPage />} />
-          <Route path="*" element={<Navigate to="/atendimento" replace />} />
-        </Route>
-      </Routes>
+      <AuthenticatedApp />
     </BrowserRouter>
   );
 };

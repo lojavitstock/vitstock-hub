@@ -1,10 +1,17 @@
 import { WhatsappInstance, Conversation, Message } from '../types';
 import { mockInstances, mockConversations } from './mockData';
-import { supabase } from './supabase';
 
-const API_URL = import.meta.env.VITE_EVOLUTION_API_URL ? import.meta.env.VITE_EVOLUTION_API_URL : '/evolution-api';
-const API_KEY = import.meta.env.VITE_EVOLUTION_API_KEY || 'vitstock_global_key_2026';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 const USE_MOCK = import.meta.env.VITE_USE_MOCK_DATA === 'true';
+
+const apiFetch = (path: string, init?: RequestInit) => fetch(`${API_URL}${path}`, {
+  ...init,
+  credentials: 'include',
+  headers: {
+    'Content-Type': 'application/json',
+    ...init?.headers,
+  },
+});
 
 export class EvolutionApiService {
   /**
@@ -16,49 +23,8 @@ export class EvolutionApiService {
     }
 
     try {
-      // 1. Consultar fetchInstances para verificar disconnectionAt e disconnectionReasonCode
-      const fetchRes = await fetch(`${API_URL}/instance/fetchInstances`, {
-        headers: { 'apikey': API_KEY }
-      });
-      
-      let fetchedInst: any = null;
-      if (fetchRes.ok) {
-        const instances = await fetchRes.json();
-        if (Array.isArray(instances)) {
-          fetchedInst = instances.find((i: any) => i.name === instanceName || i.instanceName === instanceName);
-        }
-      }
-
-      // Se connectionStatus for open no fetchInstances, o WhatsApp está pareado!
-      if (fetchedInst && fetchedInst.connectionStatus === 'open') {
-        const rawOwner = fetchedInst.ownerJid || '';
-        const cleanPhone = rawOwner.split('@')[0];
-        return {
-          id: instanceName,
-          name: instanceName,
-          status: 'connected',
-          profileName: fetchedInst.profileName || 'Vitstock WhatsApp',
-          phone: cleanPhone ? `+${cleanPhone}` : ''
-        };
-      }
-
-      // Se houver registro de desconexão recente ou status close/connecting
-      if (fetchedInst && (fetchedInst.connectionStatus === 'close' || fetchedInst.connectionStatus === 'connecting')) {
-        return {
-          id: instanceName,
-          name: instanceName,
-          status: 'disconnected',
-          phone: fetchedInst.ownerJid ? fetchedInst.ownerJid.split('@')[0] : ''
-        };
-      }
-
-      // Fallback: Checar a rota de connectionState
-      const res = await fetch(`${API_URL}/instance/connectionState/${instanceName}`, {
-        headers: { 'apikey': API_KEY }
-      });
-      if (!res.ok) {
-        return await this.createInstance(instanceName);
-      }
+      const res = await apiFetch('/api/evolution/status');
+      if (!res.ok) throw new Error('Backend indisponível ou sessão expirada');
       const data = await res.json();
       const state = data?.instance?.state || data?.state;
 
@@ -66,7 +32,7 @@ export class EvolutionApiService {
         id: instanceName,
         name: instanceName,
         status: state === 'open' ? 'connected' : 'disconnected',
-        phone: data?.instance?.owner || (fetchedInst?.ownerJid ? fetchedInst.ownerJid.split('@')[0] : '')
+        phone: data?.instance?.owner || ''
       };
     } catch (err) {
       console.warn('Evolution API indisponível ou em criação:', err);
@@ -83,37 +49,7 @@ export class EvolutionApiService {
    */
   static async createInstance(instanceName: string): Promise<WhatsappInstance> {
     if (USE_MOCK) return mockInstances[0];
-
-    try {
-      const res = await fetch(`${API_URL}/instance/create`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': API_KEY
-        },
-        body: JSON.stringify({
-          instanceName,
-          token: API_KEY,
-          qrcode: true,
-          integration: 'WHATSAPP-BAILEYS'
-        })
-      });
-      const data = await res.json();
-      const qr = data?.qrcode?.base64 || data?.base64 || data?.code;
-      return {
-        id: instanceName,
-        name: instanceName,
-        status: 'disconnected',
-        qrCodeUrl: qr
-      };
-    } catch (err) {
-      console.error('Erro ao criar instância:', err);
-      return {
-        id: instanceName,
-        name: instanceName,
-        status: 'disconnected'
-      };
-    }
+    return { id: instanceName, name: instanceName, status: 'disconnected' };
   }
 
   /**
@@ -123,9 +59,7 @@ export class EvolutionApiService {
     if (USE_MOCK) return null;
 
     try {
-      const res = await fetch(`${API_URL}/instance/connect/${instanceName}`, {
-        headers: { 'apikey': API_KEY }
-      });
+      const res = await apiFetch('/api/evolution/connect');
       const data = await res.json();
       return data?.base64 || data?.qrcode?.base64 || data?.code || null;
     } catch (err) {
@@ -148,41 +82,27 @@ export class EvolutionApiService {
       let rawChats: any[] = [];
       let contactsMap = new Map<string, { name: string; avatar: string }>();
 
-      // 1. Busca conversas e contatos em paralelo
-      const [resChats, resContacts] = await Promise.all([
-        fetch(`${API_URL}/chat/findChats/${instanceName}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
-          body: JSON.stringify({})
-        }),
-        fetch(`${API_URL}/chat/findContacts/${instanceName}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
-          body: JSON.stringify({})
-        })
-      ]);
+      const response = await apiFetch('/api/evolution/chats');
+      if (!response.ok) return [];
+      const payload = await response.json();
+      const contactsData = payload.contacts;
+      const chatsData = payload.chats;
 
       // Popula o mapa de contatos para resolver nomes salvos
-      if (resContacts.ok) {
-        const contactsData = await resContacts.json();
-        if (Array.isArray(contactsData)) {
-          contactsData.forEach((c: any) => {
-            const rawJid = c.remoteJid || c.id || '';
-            const phoneKey = rawJid.split('@')[0].replace(/\D/g, '');
-            if (phoneKey && c.pushName && c.pushName !== 'WhatsApp Business' && c.pushName !== 'Você') {
-              contactsMap.set(phoneKey, {
-                name: c.pushName,
-                avatar: c.profilePicUrl || ''
-              });
-            }
-          });
-        }
+      if (Array.isArray(contactsData)) {
+        contactsData.forEach((c: any) => {
+          const rawJid = c.remoteJid || c.id || '';
+          const phoneKey = rawJid.split('@')[0].replace(/\D/g, '');
+          if (phoneKey && c.pushName && c.pushName !== 'WhatsApp Business' && c.pushName !== 'Você') {
+            contactsMap.set(phoneKey, {
+              name: c.pushName,
+              avatar: c.profilePicUrl || ''
+            });
+          }
+        });
       }
 
-      if (resChats.ok) {
-        const chatsData = await resChats.json();
-        if (Array.isArray(chatsData)) rawChats = chatsData;
-      }
+      if (Array.isArray(chatsData)) rawChats = chatsData;
 
       if (rawChats.length === 0 && contactsMap.size === 0) return [];
 
@@ -273,17 +193,11 @@ export class EvolutionApiService {
     const cleanNumber = number.replace(/\D/g, '');
 
     try {
-      const res = await fetch(`${API_URL}/message/sendText/${instanceName}`, {
+      const res = await apiFetch('/api/evolution/messages/send', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': API_KEY
-        },
         body: JSON.stringify({
           number: cleanNumber,
-          text: text,
-          delay: 1200,
-          linkPreview: true
+          text: text
         })
       });
 
@@ -306,20 +220,9 @@ export class EvolutionApiService {
     try {
       const cleanJid = remoteJid.includes('@') ? remoteJid : `${remoteJid.replace(/\D/g, '')}@s.whatsapp.net`;
 
-      const res = await fetch(`${API_URL}/chat/findMessages/${instanceName}`, {
+      const res = await apiFetch('/api/evolution/messages', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': API_KEY
-        },
-        body: JSON.stringify({
-          where: {
-            key: {
-              remoteJid: cleanJid
-            }
-          },
-          limit: 100
-        })
+        body: JSON.stringify({ remoteJid: cleanJid })
       });
 
       if (!res.ok) return [];
@@ -407,16 +310,9 @@ export class EvolutionApiService {
     if (!messageKey || USE_MOCK) return null;
 
     try {
-      const res = await fetch(`${API_URL}/chat/getBase64FromMediaMessage/${instanceName}`, {
+      const res = await apiFetch('/api/evolution/media', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': API_KEY
-        },
-        body: JSON.stringify({
-          message: { key: messageKey },
-          convertToMp4: false
-        })
+        body: JSON.stringify({ messageKey })
       });
 
       if (!res.ok) return null;
