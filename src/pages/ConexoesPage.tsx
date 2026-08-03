@@ -15,28 +15,20 @@ export const ConexoesPage: React.FC = () => {
   const [qrCodeBase64, setQrCodeBase64] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Auto-polling a cada 3 segundos para detectar a conexão automaticamente sem F5
+  // Consulta somente o estado. O QR Code nunca é regenerado automaticamente.
   useEffect(() => {
     fetchStatus();
 
-    const interval = setInterval(() => {
-      if (instance.status !== 'connected') {
-        fetchStatus(false);
-      }
-    }, 3000);
+    const interval = setInterval(() => fetchStatus(false), 30000);
 
     return () => clearInterval(interval);
-  }, [instance.status]);
+  }, []);
 
   const fetchStatus = async (showLoading = true) => {
     if (showLoading) setLoading(true);
     const statusData = await EvolutionApiService.getInstanceStatus(instanceName);
     setInstance(statusData);
 
-    if (statusData.status !== 'connected' && !isMock) {
-      const qr = await EvolutionApiService.getConnectQrCode(instanceName);
-      if (qr) setQrCodeBase64(qr);
-    }
     if (showLoading) setLoading(false);
   };
 
@@ -53,7 +45,7 @@ export const ConexoesPage: React.FC = () => {
     const statusData = await EvolutionApiService.getInstanceStatus(instanceName);
     setInstance(statusData);
 
-    if (statusData.status !== 'connected') {
+    if (statusData.status === 'disconnected') {
       const qr = await EvolutionApiService.getConnectQrCode(instanceName);
       if (qr) {
         setQrCodeBase64(qr);
@@ -73,6 +65,10 @@ export const ConexoesPage: React.FC = () => {
             {instance.status === 'connected' ? (
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-bold">
                 WhatsApp Conectado em Tempo Real
+              </span>
+            ) : instance.status === 'connecting' ? (
+              <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-400/10 text-amber-300 border border-amber-400/30 font-bold animate-pulse">
+                Reconectando
               </span>
             ) : (
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-400/10 text-amber-400 border border-amber-400/30 font-bold animate-pulse">
@@ -114,12 +110,14 @@ export const ConexoesPage: React.FC = () => {
 
             <div className="flex items-center gap-2">
               <span className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-2 ${
-                instance.status === 'connected' 
+                instance.status === 'connected'
                   ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 shadow-[0_0_12px_rgba(16,185,129,0.2)]' 
-                  : 'bg-amber-400/10 text-amber-400 border border-amber-400/30'
+                  : instance.status === 'connecting'
+                    ? 'bg-amber-400/10 text-amber-300 border border-amber-400/30'
+                    : 'bg-red-500/10 text-red-300 border border-red-500/30'
               }`}>
-                <span className={`w-2.5 h-2.5 rounded-full ${instance.status === 'connected' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400 animate-ping'}`} />
-                {instance.status === 'connected' ? 'ONLINE (Conectado)' : 'Aguardando Leitura do QR Code'}
+                <span className={`w-2.5 h-2.5 rounded-full ${instance.status === 'connected' ? 'bg-emerald-500 animate-pulse' : instance.status === 'connecting' ? 'bg-amber-400 animate-pulse' : 'bg-red-500'}`} />
+                {instance.status === 'connected' ? 'ONLINE (Conectado)' : instance.status === 'connecting' ? 'Reconectando sessão' : 'Desconectado'}
               </span>
             </div>
           </div>
@@ -134,6 +132,12 @@ export const ConexoesPage: React.FC = () => {
               <p className="text-xs text-zinc-400 max-w-md mx-auto">
                 Suas mensagens de entrada e saída estão sendo sincronizadas via WebSocket com a sua Evolution API na Oracle Cloud.
               </p>
+            </div>
+          ) : instance.status === 'connecting' ? (
+            <div className="p-8 rounded-xl bg-amber-400/5 border border-amber-400/20 text-center space-y-3 animate-fade-in">
+              <RefreshCw className="w-8 h-8 text-amber-300 animate-spin mx-auto" />
+              <h4 className="text-sm font-bold text-amber-200">Restabelecendo a sessão do WhatsApp</h4>
+              <p className="text-xs text-zinc-400">Uma oscilação temporária não exige nova leitura do QR Code.</p>
             </div>
           ) : (
             /* Se estiver DESCONECTADO (exibir QR Code) */

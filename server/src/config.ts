@@ -15,6 +15,8 @@ const configSchema = z.object({
   EVOLUTION_API_URL: z.string().url(),
   EVOLUTION_API_KEY: z.string().min(16),
   EVOLUTION_INSTANCE_NAME: z.string().min(1),
+  GOOGLE_CLIENT_ID: z.string().min(20).optional(),
+  GOOGLE_CLIENT_SECRET: z.string().min(20).optional(),
 });
 
 const parsed = configSchema.safeParse(process.env);

@@ -23,13 +23,15 @@ export async function loadUser(request: FastifyRequest) {
   const result = await db.query<{
     id: string;
     company_id: string;
+    company_name: string;
     name: string;
     email: string;
     role: 'admin' | 'attendant';
   }>(
-    `SELECT u.id, u.company_id, u.name, u.email, u.role
+    `SELECT u.id, u.company_id, c.name AS company_name, u.name, u.email, u.role
      FROM sessions s
      JOIN users u ON u.id = s.user_id
+     JOIN companies c ON c.id = u.company_id
      WHERE s.token_hash = $1 AND s.expires_at > now() AND u.active = true`,
     [hashSessionToken(token)],
   );
@@ -39,6 +41,7 @@ export async function loadUser(request: FastifyRequest) {
     request.user = {
       id: user.id,
       companyId: user.company_id,
+      companyName: user.company_name,
       name: user.name,
       email: user.email,
       role: user.role,
@@ -58,14 +61,17 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     const result = await db.query<{
       id: string;
       company_id: string;
+      company_name: string;
       name: string;
       email: string;
       role: 'admin' | 'attendant';
       password_hash: string;
       must_change_password: boolean;
     }>(
-      `SELECT id, company_id, name, email, role, password_hash, must_change_password
-       FROM users WHERE lower(email) = lower($1) AND active = true LIMIT 1`,
+      `SELECT u.id, u.company_id, c.name AS company_name, u.name, u.email, u.role, u.password_hash, u.must_change_password
+       FROM users u
+       JOIN companies c ON c.id = u.company_id
+       WHERE lower(u.email) = lower($1) AND u.active = true LIMIT 1`,
       [parsed.data.email],
     );
 
@@ -93,6 +99,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       user: {
         id: user.id,
         companyId: user.company_id,
+        companyName: user.company_name,
         name: user.name,
         email: user.email,
         role: user.role,

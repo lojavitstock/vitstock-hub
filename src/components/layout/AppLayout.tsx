@@ -19,17 +19,24 @@ export const AppLayout: React.FC = () => {
   const location = useLocation();
   const { user: currentUser, logout } = useAuth();
   const instanceName = 'vitstock_atendimento';
-  const [isConnected, setIsConnected] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'connecting' | 'disconnected'>('connecting');
 
   useEffect(() => {
+    const syncSharedStatus = (event: Event) => {
+      setConnectionStatus((event as CustomEvent<'connected' | 'connecting' | 'disconnected'>).detail);
+    };
     const checkConnection = async () => {
       const statusData = await EvolutionApiService.getInstanceStatus(instanceName);
-      setIsConnected(statusData.status === 'connected');
+      setConnectionStatus(statusData.status);
     };
 
+    window.addEventListener('vitstock:whatsapp-status', syncSharedStatus);
     checkConnection();
-    const interval = setInterval(checkConnection, 5000);
-    return () => clearInterval(interval);
+    const interval = setInterval(checkConnection, 30000);
+    return () => {
+      window.removeEventListener('vitstock:whatsapp-status', syncSharedStatus);
+      clearInterval(interval);
+    };
   }, [instanceName]);
 
   const navItems: Array<{
@@ -123,17 +130,17 @@ export const AppLayout: React.FC = () => {
           <div className="mb-3 p-2.5 rounded-lg bg-[#20292f] border border-[#344047] flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="relative flex h-2.5 w-2.5">
-                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${isConnected ? 'bg-emerald-400' : 'bg-amber-400'} opacity-75`}></span>
-                <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${isConnected ? 'bg-emerald-500' : 'bg-amber-400'}`}></span>
+                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${connectionStatus === 'connected' ? 'bg-emerald-400' : connectionStatus === 'connecting' ? 'bg-amber-400' : 'bg-red-400'} opacity-75`}></span>
+                <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${connectionStatus === 'connected' ? 'bg-emerald-500' : connectionStatus === 'connecting' ? 'bg-amber-400' : 'bg-red-500'}`}></span>
               </span>
-              <span className={`text-xs font-semibold ${isConnected ? 'text-zinc-300' : 'text-amber-400'}`}>
-                {isConnected ? 'WhatsApp Conectado' : 'Aguardando QR Code'}
+              <span className={`text-xs font-semibold ${connectionStatus === 'connected' ? 'text-zinc-300' : connectionStatus === 'connecting' ? 'text-amber-300' : 'text-red-300'}`}>
+                {connectionStatus === 'connected' ? 'WhatsApp Conectado' : connectionStatus === 'connecting' ? 'Reconectando WhatsApp' : 'WhatsApp Desconectado'}
               </span>
             </div>
-            {isConnected ? (
+            {connectionStatus === 'connected' ? (
               <Wifi className="w-3.5 h-3.5 text-emerald-400" />
             ) : (
-              <WifiOff className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+              <WifiOff className={`w-3.5 h-3.5 ${connectionStatus === 'connecting' ? 'text-amber-400 animate-pulse' : 'text-red-400'}`} />
             )}
           </div>
 

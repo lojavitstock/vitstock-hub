@@ -1,9 +1,41 @@
-import React, { useState } from 'react';
-import { Search, UserPlus, Tag as TagIcon, Phone, Mail, MessageSquare, MoreHorizontal, Filter } from 'lucide-react';
+import React, { useCallback, useState } from 'react';
+import { Search, UserPlus, MessageSquare, Filter, RefreshCw, Cloud, CloudOff } from 'lucide-react';
 import { mockConversations } from '../services/mockData';
 import { Contact } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { useNavigate } from 'react-router-dom';
+import { apiRequest } from '../services/api';
+
+type ApiContact = {
+  id: string;
+  name: string;
+  phone: string;
+  email?: string | null;
+  cpf?: string | null;
+  address?: string | null;
+  secondary_phone?: string | null;
+  avatar_url?: string | null;
+  notes?: string | null;
+  source?: string;
+  created_at: string;
+};
+
+const ContactAvatar: React.FC<{ contact: Contact }> = ({ contact }) => {
+  const initials = contact.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
+  return (
+    <div className="relative w-9 h-9 rounded-full overflow-hidden border border-[#46535a] bg-[#2a343a] flex-shrink-0">
+      <span className="absolute inset-0 flex items-center justify-center text-[10px] font-extrabold text-amber-300">{initials}</span>
+      {contact.avatar && (
+        <img
+          src={contact.avatar}
+          alt=""
+          className="absolute inset-0 w-full h-full object-cover"
+          onError={(event) => { event.currentTarget.style.display = 'none'; }}
+        />
+      )}
+    </div>
+  );
+};
 
 export const ContatosPage: React.FC = () => {
   const navigate = useNavigate();
@@ -11,48 +43,96 @@ export const ContatosPage: React.FC = () => {
   const [search, setSearch] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [googleConnected, setGoogleConnected] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [feedback, setFeedback] = useState('');
 
   // Form State
   const [newContact, setNewContact] = useState({ name: '', phone: '', email: '', tag: 'Novo Lead' });
 
-  React.useEffect(() => {
-    const loadRealContacts = async () => {
-      setLoading(true);
-      const instanceName = 'vitstock_atendimento';
-      const isMock = import.meta.env.VITE_USE_MOCK_DATA === 'true';
+  const mapApiContacts = (items: ApiContact[]): Contact[] => items.map((contact) => ({
+    id: contact.id,
+    name: contact.name,
+    phone: `+${contact.phone}`,
+    email: contact.email || undefined,
+    cpf: contact.cpf || undefined,
+    address: contact.address || undefined,
+    otherPhone: contact.secondary_phone ? `+${contact.secondary_phone}` : undefined,
+    avatar: contact.avatar_url || undefined,
+    notes: contact.notes || undefined,
+    tags: [{ id: `source-${contact.id}`, name: contact.source === 'google' ? 'Google' : 'Hub', color: contact.source === 'google' ? '#34A853' : '#EEBB2C' }],
+    createdAt: new Date(contact.created_at).toLocaleDateString('pt-BR'),
+  }));
 
-      if (isMock) {
-        setContacts(mockConversations.map(c => c.contact));
-      } else {
-        const chats = await EvolutionApiService.fetchRealChats(instanceName);
-        if (chats.length > 0) {
-          setContacts(chats.map(c => c.contact));
+  const loadRealContacts = useCallback(async () => {
+      setLoading(true);
+      try {
+        const [status, stored] = await Promise.all([
+          apiRequest<{ connected: boolean }>('/api/google/status'),
+          apiRequest<{ contacts: ApiContact[] }>('/api/contacts'),
+        ]);
+        setGoogleConnected(status.connected);
+        if (stored.contacts.length > 0) {
+          setContacts(mapApiContacts(stored.contacts));
         } else {
-          setContacts(mockConversations.map(c => c.contact));
+          const chats = await EvolutionApiService.fetchRealChats('vitstock_atendimento');
+          setContacts(chats.map(c => c.contact));
         }
+      } catch {
+        const chats = await EvolutionApiService.fetchRealChats('vitstock_atendimento');
+        setContacts(chats.length > 0 ? chats.map(c => c.contact) : mockConversations.map(c => c.contact));
       }
       setLoading(false);
-    };
-
-    loadRealContacts();
   }, []);
 
-  const handleAddContact = (e: React.FormEvent) => {
+  React.useEffect(() => {
+    loadRealContacts();
+  }, [loadRealContacts]);
+
+  React.useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('google') === 'connected') {
+      setFeedback('Google Contacts conectado. Clique em Sincronizar contatos.');
+      window.history.replaceState({}, '', '/contatos');
+    }
+  }, []);
+
+  const handleGoogleConnect = async () => {
+    try {
+      const { url } = await apiRequest<{ url: string }>('/api/google/connect');
+      window.location.assign(url);
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : 'Não foi possível conectar ao Google');
+    }
+  };
+
+  const handleGoogleSync = async () => {
+    setSyncing(true);
+    setFeedback('');
+    try {
+      const result = await apiRequest<{ imported: number; total: number }>('/api/google/sync', { method: 'POST' });
+      setFeedback(`${result.imported} contatos com telefone sincronizados.`);
+      await loadRealContacts();
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : 'Falha ao sincronizar contatos');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleAddContact = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newContact.name || !newContact.phone) return;
-
-    const contact: Contact = {
-      id: `c-${Date.now()}`,
-      name: newContact.name,
-      phone: newContact.phone,
-      email: newContact.email,
-      tags: [{ id: 't-new', name: newContact.tag, color: '#EEBB2C' }],
-      createdAt: new Date().toISOString().split('T')[0]
-    };
-
-    setContacts(prev => [contact, ...prev]);
-    setIsModalOpen(false);
-    setNewContact({ name: '', phone: '', email: '', tag: 'Novo Lead' });
+    try {
+      const result = await apiRequest<{ googleSynced: boolean }>('/api/contacts', {
+        method: 'POST', body: JSON.stringify({ name: newContact.name, phone: newContact.phone, email: newContact.email }),
+      });
+      setFeedback(result.googleSynced ? 'Contato salvo no Hub e no Google Contacts.' : 'Contato salvo no Hub. Conecte o Google para sincronizá-lo.');
+      setIsModalOpen(false);
+      setNewContact({ name: '', phone: '', email: '', tag: 'Novo Lead' });
+      await loadRealContacts();
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : 'Não foi possível salvar o contato');
+    }
   };
 
   const filteredContacts = contacts.filter(c => 
@@ -75,13 +155,28 @@ export const ContatosPage: React.FC = () => {
           <p className="text-xs text-zinc-400 mt-1">Gerencie os clientes e etiquetas vinculados ao WhatsApp</p>
         </div>
 
-        <button 
-          onClick={() => setIsModalOpen(true)}
-          className="btn-primary text-xs"
-        >
-          <UserPlus className="w-4 h-4" /> Adicionar Contato
-        </button>
+        <div className="flex items-center gap-2">
+          {googleConnected ? (
+            <button onClick={handleGoogleSync} disabled={syncing} className="btn-secondary text-xs">
+              <RefreshCw className={`w-4 h-4 text-emerald-400 ${syncing ? 'animate-spin' : ''}`} />
+              {syncing ? 'Sincronizando...' : 'Sincronizar Google'}
+            </button>
+          ) : (
+            <button onClick={handleGoogleConnect} className="btn-secondary text-xs">
+              <CloudOff className="w-4 h-4 text-amber-400" /> Conectar Google
+            </button>
+          )}
+          <button onClick={() => setIsModalOpen(true)} className="btn-primary text-xs">
+            <UserPlus className="w-4 h-4" /> Adicionar Contato
+          </button>
+        </div>
       </div>
+
+      {feedback && (
+        <div className="mb-4 px-4 py-3 rounded-lg bg-[#20292f] border border-[#344047] text-xs text-slate-200 flex items-center gap-2">
+          <Cloud className="w-4 h-4 text-emerald-400" /> {feedback}
+        </div>
+      )}
 
       {/* Filtros e Busca */}
       <div className="flex items-center gap-3 mb-6">
@@ -115,18 +210,11 @@ export const ContatosPage: React.FC = () => {
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-900">
-            {filteredContacts.map(contact => (
+            {!loading && filteredContacts.map(contact => (
               <tr key={contact.id} className="hover:bg-zinc-900/40 transition-colors">
                 <td className="py-3.5 px-4">
                   <div className="flex items-center gap-3">
-                    <img 
-                      src={contact.avatar} 
-                      alt={contact.name}
-                      className="w-9 h-9 rounded-full object-cover border border-zinc-800" 
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).src = `https://ui-avatars.com/api/?name=${encodeURIComponent(contact.name)}&background=EEBB2C&color=000`;
-                      }}
-                    />
+                    <ContactAvatar contact={contact} />
                     <span className="font-bold text-zinc-100">{contact.name}</span>
                   </div>
                 </td>
@@ -199,6 +287,7 @@ export const ContatosPage: React.FC = () => {
                 />
               </div>
 
+              <p className="text-[11px] text-zinc-500">O contato será salvo no Hub e, quando conectado, também no Google Contacts.</p>
               <div className="flex items-center justify-end gap-2 pt-3 border-t border-zinc-800">
                 <button 
                   type="button"

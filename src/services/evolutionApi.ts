@@ -1,5 +1,134 @@
-import { WhatsappInstance, Conversation, Message } from '../types';
+import { ChatStatus, WhatsappInstance, Conversation, Message } from '../types';
 import { mockInstances, mockConversations } from './mockData';
+
+const unwrapEvolutionMessage = (message: any) => {
+  let current = message || {};
+  for (let index = 0; index < 6; index += 1) {
+    const nested = current?.ephemeralMessage?.message
+      || current?.viewOnceMessage?.message
+      || current?.viewOnceMessageV2?.message
+      || current?.documentWithCaptionMessage?.message
+      || current?.editedMessage?.message;
+    if (!nested) break;
+    current = nested;
+  }
+  return current;
+};
+
+const firstMessageText = (...values: unknown[]) => values.find(
+  (value): value is string => typeof value === 'string' && value.trim().length > 0,
+)?.trim();
+
+const getInteractiveMessage = (message: any) => {
+  const msg = unwrapEvolutionMessage(message);
+  return msg.interactiveMessage
+    || msg.templateMessage?.interactiveMessageTemplate
+    || msg.templateMessage?.interactiveMessage
+    || msg.viewOnceMessage?.message?.interactiveMessage
+    || msg.viewOnceMessageV2?.message?.interactiveMessage;
+};
+
+const getInteractiveResponseText = (message: any) => {
+  const response = unwrapEvolutionMessage(message).interactiveResponseMessage?.nativeFlowResponseMessage;
+  if (!response?.paramsJson) return undefined;
+  try {
+    const params = JSON.parse(response.paramsJson);
+    return firstMessageText(params.display_text, params.title, params.id);
+  } catch {
+    return undefined;
+  }
+};
+
+const extractEvolutionMessageText = (message: any): string | undefined => {
+  const msg = unwrapEvolutionMessage(message);
+  const interactive = getInteractiveMessage(msg);
+  const template = msg.templateMessage?.hydratedTemplate;
+  const fourRowTemplate = msg.templateMessage?.hydratedFourRowTemplate;
+
+  const text = firstMessageText(
+    msg.conversation,
+    msg.extendedTextMessage?.text,
+    msg.imageMessage?.caption,
+    msg.videoMessage?.caption,
+    msg.audioMessage?.caption,
+    msg.documentMessage?.caption,
+    interactive?.body?.text,
+    interactive?.header?.text,
+    interactive?.header?.title,
+    msg.buttonsMessage?.contentText,
+    msg.buttonsMessage?.footerText,
+    msg.listMessage?.description,
+    msg.listMessage?.title,
+    msg.listMessage?.footerText,
+    template?.hydratedContentText,
+    template?.hydratedTitleText,
+    template?.hydratedFooterText,
+    fourRowTemplate?.content,
+    fourRowTemplate?.title,
+    fourRowTemplate?.footer,
+    msg.templateButtonReplyMessage?.selectedDisplayText,
+    msg.buttonsResponseMessage?.selectedDisplayText,
+    msg.listResponseMessage?.title,
+    msg.listResponseMessage?.singleSelectReply?.selectedRowId,
+    getInteractiveResponseText(msg),
+  );
+
+  if (text) return text;
+  if (interactive || msg.buttonsMessage || msg.listMessage) return '🔘 [Mensagem interativa]';
+  if (msg.stickerMessage) return '🧩 [Figurinha]';
+  if (msg.audioMessage) return '🎵 [Mensagem de Áudio]';
+  if (msg.imageMessage) return '🖼️ [Imagem]';
+  if (msg.videoMessage) return '🎬 [Vídeo]';
+  if (msg.documentMessage) return '📄 [Documento]';
+  return undefined;
+};
+
+const extractEvolutionButtons = (message: any): NonNullable<Message['interactiveButtons']> => {
+  const msg = unwrapEvolutionMessage(message);
+  const interactive = getInteractiveMessage(msg);
+  const buttons: NonNullable<Message['interactiveButtons']> = [];
+
+  const addNativeFlowButton = (button: any) => {
+    try {
+      const params = JSON.parse(button?.buttonParamsJson || '{}');
+      if (button?.name === 'cta_url' && /^https?:\/\//i.test(params.url || '')) {
+        buttons.push({ type: 'url', label: params.display_text || 'Abrir link', url: params.url });
+      } else if (button?.name === 'cta_copy') {
+        buttons.push({ type: 'copy', label: params.display_text || 'Copiar', value: params.copy_code || params.code || '' });
+      } else if (button?.name === 'quick_reply') {
+        buttons.push({ type: 'quickReply', label: params.display_text || 'Responder', value: params.id || params.display_text || '' });
+      } else if (button?.name === 'cta_call') {
+        buttons.push({ type: 'call', label: params.display_text || 'Ligar', value: params.phone_number || params.number || '' });
+      }
+    } catch {
+      // Mensagens comerciais podem conter botões sem JSON válido; o texto principal continua sendo exibido.
+    }
+  };
+
+  const nativeButtons = interactive?.nativeFlowMessage?.buttons;
+  if (Array.isArray(nativeButtons)) nativeButtons.forEach(addNativeFlowButton);
+
+  const hydratedButtons = msg.templateMessage?.hydratedTemplate?.hydratedButtons;
+  if (Array.isArray(hydratedButtons)) {
+    hydratedButtons.forEach((button: any) => {
+      const urlButton = button?.urlButton;
+      const callButton = button?.callButton;
+      const quickReplyButton = button?.quickReplyButton;
+      if (urlButton?.url) buttons.push({ type: 'url', label: urlButton.displayText || 'Abrir link', url: urlButton.url });
+      if (callButton?.phoneNumber) buttons.push({ type: 'call', label: callButton.displayText || 'Ligar', value: callButton.phoneNumber });
+      if (quickReplyButton) buttons.push({ type: 'quickReply', label: quickReplyButton.displayText || 'Responder', value: quickReplyButton.id || quickReplyButton.displayText || '' });
+    });
+  }
+
+  if (Array.isArray(msg.buttonsMessage?.buttons)) {
+    msg.buttonsMessage.buttons.forEach((button: any) => {
+      const label = button?.buttonText?.displayText || button?.displayText;
+      if (label) buttons.push({ type: 'quickReply', label, value: button.buttonId || label });
+    });
+  }
+
+  return buttons;
+};
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 const USE_MOCK = import.meta.env.VITE_USE_MOCK_DATA === 'true';
@@ -14,6 +143,15 @@ const apiFetch = (path: string, init?: RequestInit) => fetch(`${API_URL}${path}`
 });
 
 export class EvolutionApiService {
+  private static lastKnownStatus: WhatsappInstance['status'] = 'connecting';
+
+  private static publishStatus(status: WhatsappInstance['status']) {
+    this.lastKnownStatus = status;
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('vitstock:whatsapp-status', { detail: status }));
+    }
+  }
+
   /**
    * Buscar status da conexão da instância
    */
@@ -27,11 +165,17 @@ export class EvolutionApiService {
       if (!res.ok) throw new Error('Backend indisponível ou sessão expirada');
       const data = await res.json();
       const state = data?.instance?.state || data?.state;
+      const status: WhatsappInstance['status'] = state === 'open'
+        ? 'connected'
+        : state === 'connecting'
+          ? 'connecting'
+          : 'disconnected';
+      this.publishStatus(status);
 
       return {
         id: instanceName,
         name: instanceName,
-        status: state === 'open' ? 'connected' : 'disconnected',
+        status,
         phone: data?.instance?.owner || ''
       };
     } catch (err) {
@@ -39,7 +183,7 @@ export class EvolutionApiService {
       return {
         id: instanceName,
         name: instanceName,
-        status: 'disconnected'
+        status: this.lastKnownStatus
       };
     }
   }
@@ -87,6 +231,73 @@ export class EvolutionApiService {
       const payload = await response.json();
       const contactsData = payload.contacts;
       const chatsData = payload.chats;
+      const storedContactsData = payload.storedContacts;
+      const storedContactsMap = new Map<string, { name: string; source: string }>();
+      const assignmentsMap = new Map<string, { id: string; name: string }>();
+      const assignmentsByNumber = new Map<string, { id: string; name: string }>();
+      const statusesMap = new Map<string, { status: ChatStatus; updatedAt: number }>();
+      const statusesByNumber = new Map<string, { status: ChatStatus; updatedAt: number }>();
+      const readStatesMap = new Map<string, number>();
+
+      if (Array.isArray(payload.assignments)) {
+        payload.assignments.forEach((assignment: any) => {
+          if (assignment?.evolution_remote_jid && assignment?.user_id && assignment?.user_name) {
+            const value = { id: assignment.user_id, name: assignment.user_name };
+            assignmentsMap.set(assignment.evolution_remote_jid, value);
+            const number = assignment.evolution_remote_jid.split('@')[0].replace(/\D/g, '');
+            if (number) assignmentsByNumber.set(number, value);
+          }
+        });
+      }
+
+      if (Array.isArray(payload.statuses)) {
+        payload.statuses.forEach((conversation: any) => {
+          if (conversation?.evolution_remote_jid && ['open', 'pending', 'resolved'].includes(conversation.status)) {
+            const value = {
+              status: conversation.status as ChatStatus,
+              updatedAt: conversation.updated_at ? Date.parse(conversation.updated_at) : 0,
+            };
+            statusesMap.set(conversation.evolution_remote_jid, value);
+            const number = conversation.evolution_remote_jid.split('@')[0].replace(/\D/g, '');
+            if (number) statusesByNumber.set(number, value);
+          }
+        });
+      }
+
+      if (Array.isArray(payload.readStates)) {
+        payload.readStates.forEach((readState: any) => {
+          const timestamp = Number(readState?.last_read_message_timestamp);
+          if (readState?.evolution_remote_jid && Number.isFinite(timestamp)) {
+            readStatesMap.set(readState.evolution_remote_jid, timestamp);
+          }
+        });
+      }
+
+      const phoneVariants = (value: string) => {
+        const digits = value.replace(/\D/g, '');
+        const variants = new Set([digits]);
+        if (digits.startsWith('55') && digits.length === 13) {
+          variants.add(`${digits.slice(0, 4)}${digits.slice(5)}`);
+        } else if (digits.startsWith('55') && digits.length === 12) {
+          variants.add(`${digits.slice(0, 4)}9${digits.slice(4)}`);
+        }
+        return Array.from(variants);
+      };
+
+      if (Array.isArray(storedContactsData)) {
+        const ordered = [...storedContactsData].sort((a: any, b: any) => {
+          const priority = (source: string) => source === 'google' ? 0 : source === 'hub' ? 1 : 2;
+          return priority(a.source) - priority(b.source);
+        });
+        ordered.forEach((contact: any) => {
+          if (!contact?.name || !contact?.phone) return;
+          phoneVariants(contact.phone).forEach((phone) => {
+            if (!storedContactsMap.has(phone)) {
+              storedContactsMap.set(phone, { name: contact.name, source: contact.source });
+            }
+          });
+        });
+      }
 
       // Popula o mapa de contatos para resolver nomes salvos
       if (Array.isArray(contactsData)) {
@@ -118,12 +329,42 @@ export class EvolutionApiService {
         const rawRemoteJid = item.remoteJid || item.id || `chat-${index}`;
         const altJid = item.lastMessage?.key?.remoteJidAlt;
         const cleanNumber = (altJid || rawRemoteJid).split('@')[0].replace(/\D/g, '');
+        const assignment = assignmentsMap.get(rawRemoteJid)
+          || (altJid ? assignmentsMap.get(altJid) : undefined)
+          || phoneVariants(cleanNumber).map((phone) => assignmentsByNumber.get(phone)).find(Boolean);
+        const lastMessageFromMe = Boolean(item.lastMessage?.key?.fromMe);
+        const lastMessageAt = item.lastMessage?.messageTimestamp
+          ? Number(item.lastMessage.messageTimestamp) * 1000
+          : item.updatedAt
+            ? Date.parse(item.updatedAt)
+            : 0;
+        const rawUnreadCount = Number(item.unreadCount) || 0;
+        const hasReadState = readStatesMap.has(rawRemoteJid);
+        const lastReadAt = readStatesMap.get(rawRemoteJid) || 0;
+        const unreadCount = hasReadState && lastMessageAt > 0 && lastMessageAt <= lastReadAt
+          ? 0
+          : hasReadState && !lastMessageFromMe && lastMessageAt > lastReadAt
+            ? Math.max(1, rawUnreadCount)
+            : rawUnreadCount;
+        const storedStatus = statusesMap.get(rawRemoteJid)
+          || (altJid ? statusesMap.get(altJid) : undefined)
+          || phoneVariants(cleanNumber).map((phone) => statusesByNumber.get(phone)).find(Boolean);
+        const status = storedStatus?.status || 'open';
+        const hasNewIncomingMessage = !lastMessageFromMe
+          && lastMessageAt > 0
+          && (!storedStatus?.updatedAt || lastMessageAt > storedStatus.updatedAt);
+        const effectiveStatus = status === 'resolved' && hasNewIncomingMessage ? 'open' : status;
+        const needsResponse = effectiveStatus !== 'resolved' && hasNewIncomingMessage;
 
         if (!cleanNumber) return;
 
         // Resolve o Nome Salvo (Prioridade: Mapa de Contatos > pushName da Mensagem > Nome do Chat > Número)
         const savedContact = contactsMap.get(cleanNumber);
-        let displayName = savedContact?.name ||
+        const storedContact = phoneVariants(cleanNumber)
+          .map((phone) => storedContactsMap.get(phone))
+          .find(Boolean);
+        let displayName = storedContact?.name ||
+                          savedContact?.name ||
                           item.lastMessage?.pushName || 
                           item.pushName || 
                           item.name || 
@@ -133,14 +374,7 @@ export class EvolutionApiService {
           displayName = `+${cleanNumber}`;
         }
 
-        const messageContent = 
-          item.lastMessage?.message?.conversation ||
-          item.lastMessage?.message?.extendedTextMessage?.text ||
-          item.lastMessage?.message?.imageMessage?.caption ||
-          (item.lastMessage?.message?.audioMessage ? '[Áudio]' : null) ||
-          (item.lastMessage?.message?.imageMessage ? '[Imagem]' : null) ||
-          (item.lastMessage?.message?.documentMessage ? '[Documento]' : null) ||
-          'Conversa iniciada';
+        const messageContent = extractEvolutionMessageText(item.lastMessage?.message) || 'Conversa iniciada';
 
         const timestampStr = item.updatedAt || item.lastMessage?.messageTimestamp
           ? new Date(item.updatedAt || Number(item.lastMessage?.messageTimestamp) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -153,14 +387,21 @@ export class EvolutionApiService {
             name: displayName,
             phone: `+${cleanNumber}`,
             avatar: savedContact?.avatar || item.profilePicUrl || item.profilePictureUrl || '',
-            tags: [{ id: 't-real', name: 'WhatsApp', color: '#10B981' }],
+            tags: [assignment
+              ? { id: `assigned-${assignment.id}`, name: assignment.name, color: '#A78BFA' }
+              : { id: 't-real', name: 'WhatsApp', color: '#10B981' }],
             createdAt: new Date().toISOString().split('T')[0]
           },
           lastMessage: messageContent,
           lastMessageTimestamp: timestampStr,
-          unreadCount: item.unreadCount || 0,
-          status: 'open',
-          department: 'Atendimento Geral'
+          lastMessageAt,
+          lastMessageFromMe,
+          lastMessageKey: item.lastMessage?.key,
+          unreadCount,
+          status: effectiveStatus,
+          needsResponse,
+          department: 'Atendimento Geral',
+          assignedAttendant: assignment ? { id: assignment.id, name: assignment.name } : undefined,
         };
 
         // Se o mapa já tiver este número, atualiza apenas se a mensagem for mais recente ou se o nome for melhor que a entrada existente
@@ -179,6 +420,48 @@ export class EvolutionApiService {
       console.error('[EvolutionAPI] Erro ao carregar chats/contatos:', err);
       return [];
     }
+  }
+
+  static async captureChat(remoteJid: string, phone?: string) {
+    const response = await apiFetch('/api/evolution/chats/capture', {
+      method: 'POST',
+      body: JSON.stringify({ remoteJid, phone }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body?.error || 'Não foi possível capturar o atendimento');
+    return body as { remoteJid: string; user: { id: string; name: string } };
+  }
+
+  static async releaseChat(remoteJid: string, phone?: string) {
+    const response = await apiFetch('/api/evolution/chats/release', {
+      method: 'POST',
+      body: JSON.stringify({ remoteJid, phone }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body?.error || 'Não foi possível liberar o atendimento');
+    return body as { released: boolean; remoteJid: string };
+  }
+
+  static async updateChatStatus(remoteJid: string, status: ChatStatus, phone?: string) {
+    const response = await apiFetch('/api/evolution/chats/status', {
+      method: 'PATCH',
+      body: JSON.stringify({ remoteJid, status, phone }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body?.error || 'NÃ£o foi possÃ­vel atualizar o status');
+    return body as { remoteJid: string; status: ChatStatus };
+  }
+
+  static async markChatAsRead(remoteJid: string, messageTimestamp: number, messageKey?: Conversation['lastMessageKey']) {
+    if (USE_MOCK || !Number.isFinite(messageTimestamp) || messageTimestamp <= 0) return;
+
+    const response = await apiFetch('/api/evolution/chats/read', {
+      method: 'POST',
+      body: JSON.stringify({ remoteJid, messageTimestamp, messageKey }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body?.error || 'NÃ£o foi possÃ­vel marcar a conversa como lida');
+    return body as { remoteJid: string; messageTimestamp: number; providerMarked?: boolean };
   }
 
   /**
@@ -214,7 +497,7 @@ export class EvolutionApiService {
   /**
    * Buscar histórico de mensagens de uma conversa diretamente da Evolution API no Railway
    */
-  static async fetchMessages(instanceName: string, remoteJid: string): Promise<Message[]> {
+  static async fetchMessages(instanceName: string, remoteJid: string, attendantLabel = 'Atendente'): Promise<Message[]> {
     if (USE_MOCK) return [];
 
     try {
@@ -238,14 +521,17 @@ export class EvolutionApiService {
         const fromMe = m.key?.fromMe ?? false;
         
         let mediaUrl: string | undefined = undefined;
-        let mediaType: 'image' | 'audio' | 'document' | undefined = undefined;
+        let mediaType: 'image' | 'audio' | 'document' | 'sticker' | undefined = undefined;
 
-        const msgObj = m.message || {};
-        const imgMsg = msgObj.imageMessage || msgObj.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
-        const audioMsg = msgObj.audioMessage || msgObj.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
+        const rawMessage = m.message || {};
+        const msgObj = unwrapEvolutionMessage(rawMessage);
+        const imgMsg = msgObj.imageMessage || rawMessage.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
+        const audioMsg = msgObj.audioMessage || rawMessage.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
         const docMsg = msgObj.documentMessage;
         const stickerMsg = msgObj.stickerMessage;
         const reactionMsg = msgObj.reactionMessage;
+        const interactiveMsg = getInteractiveMessage(msgObj);
+        const interactiveButtons = extractEvolutionButtons(msgObj);
 
         if (imgMsg) {
           mediaType = 'image';
@@ -262,19 +548,16 @@ export class EvolutionApiService {
         } else if (docMsg) {
           mediaType = 'document';
           mediaUrl = docMsg.url;
+        } else if (stickerMsg) {
+          mediaType = 'sticker';
+          if (stickerMsg.url && stickerMsg.url.startsWith('data:')) {
+            mediaUrl = stickerMsg.url;
+          }
         }
 
-        let msgContent = 
-          msgObj.conversation || 
-          msgObj.extendedTextMessage?.text || 
-          imgMsg?.caption || 
-          msgObj.videoMessage?.caption ||
-          (reactionMsg ? `Reagiu com: ${reactionMsg.text}` : null) ||
-          (stickerMsg ? '🧩 [Figurinha]' : null) ||
-          (audioMsg ? '🎵 [Mensagem de Áudio]' : null) ||
-          (imgMsg ? (imgMsg.caption || '🖼️ [Imagem]') : null) ||
-          (docMsg ? '📄 [Documento]' : null) ||
-          '[Mensagem]';
+        const msgContent = reactionMsg
+          ? `Reagiu com: ${reactionMsg.text || '👍'}`
+          : extractEvolutionMessageText(rawMessage) || '[Mensagem não suportada]';
 
         const timestampStr = m.messageTimestamp 
           ? new Date(Number(m.messageTimestamp) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -287,10 +570,21 @@ export class EvolutionApiService {
           id: m.key?.id || m.id || `real-msg-${idx}`,
           conversationId: remoteJid,
           sender: senderType,
-          senderName: fromMe ? 'Atendente' : (m.pushName || 'Contato'),
+          senderName: fromMe ? attendantLabel : (m.pushName || 'Contato'),
           content: msgContent,
           mediaUrl: mediaUrl,
           mediaType: mediaType,
+          mediaDuration: audioMsg?.seconds ? Number(audioMsg.seconds) : undefined,
+          interactiveTitle: interactiveMsg?.header?.title
+            || interactiveMsg?.header?.text
+            || msgObj.templateMessage?.hydratedTemplate?.hydratedTitleText
+            || msgObj.templateMessage?.hydratedFourRowTemplate?.title
+            || undefined,
+          interactiveFooter: interactiveMsg?.footer?.text
+            || msgObj.templateMessage?.hydratedTemplate?.hydratedFooterText
+            || msgObj.templateMessage?.hydratedFourRowTemplate?.footer
+            || undefined,
+          interactiveButtons,
           rawKey: m.key,
           timestamp: timestampStr,
           status: msgStatus,
@@ -323,6 +617,19 @@ export class EvolutionApiService {
       return null;
     } catch (err) {
       console.error('[EvolutionAPI] Erro ao buscar mídia decodificada:', err);
+      return null;
+    }
+  }
+
+  static async fetchBusinessProfile(number: string): Promise<any | null> {
+    try {
+      const res = await apiFetch('/api/evolution/business-profile', {
+        method: 'POST',
+        body: JSON.stringify({ number: number.replace(/\D/g, '') }),
+      });
+      if (!res.ok) return null;
+      return res.json();
+    } catch {
       return null;
     }
   }

@@ -20,6 +20,9 @@ export interface Contact {
   phone: string;
   avatar?: string;
   email?: string;
+  cpf?: string;
+  address?: string;
+  otherPhone?: string;
   tags: Tag[];
   notes?: string;
   createdAt: string;
@@ -32,7 +35,16 @@ export interface Message {
   senderName?: string;
   content: string;
   mediaUrl?: string;
-  mediaType?: 'image' | 'audio' | 'document';
+  mediaType?: 'image' | 'audio' | 'document' | 'sticker';
+  mediaDuration?: number;
+  interactiveTitle?: string;
+  interactiveFooter?: string;
+  interactiveButtons?: Array<{
+    type: 'url' | 'quickReply' | 'call' | 'copy';
+    label: string;
+    url?: string;
+    value?: string;
+  }>;
   rawKey?: any;
   timestamp: string;
   status: 'sent' | 'delivered' | 'read';
@@ -44,9 +56,18 @@ export interface Conversation {
   contact: Contact;
   lastMessage: string;
   lastMessageTimestamp: string;
+  lastMessageAt?: number;
+  lastMessageFromMe?: boolean;
+  lastMessageKey?: {
+    id: string;
+    remoteJid: string;
+    fromMe?: boolean;
+    [key: string]: unknown;
+  };
   unreadCount: number;
+  needsResponse?: boolean;
   status: ChatStatus;
-  assignedAttendant?: Attendant;
+  assignedAttendant?: Pick<Attendant, 'id' | 'name'>;
   department: string;
 }
 

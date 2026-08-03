@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:local": "node scripts/dev-local.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "server:dev": "npm --prefix server run dev",
