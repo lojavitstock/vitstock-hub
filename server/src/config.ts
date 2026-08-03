@@ -11,7 +11,7 @@ const configSchema = z.object({
   DATABASE_URL: z.string().min(1),
   SESSION_SECRET: z.string().min(43),
   WEBHOOK_SECRET: z.string().min(43),
-  FRONTEND_URL: z.string().url(),
+  FRONTEND_URL: z.string().url().transform((value) => value.replace(/\/$/, '')),
   EVOLUTION_API_URL: z.string().url(),
   EVOLUTION_API_KEY: z.string().min(16),
   EVOLUTION_INSTANCE_NAME: z.string().min(1),
