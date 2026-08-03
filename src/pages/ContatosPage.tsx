@@ -18,7 +18,7 @@ export const ContatosPage: React.FC = () => {
   React.useEffect(() => {
     const loadRealContacts = async () => {
       setLoading(true);
-      const instanceName = import.meta.env.VITE_EVOLUTION_INSTANCE_NAME || 'vitstock_atendimento';
+      const instanceName = 'vitstock_atendimento';
       const isMock = import.meta.env.VITE_USE_MOCK_DATA === 'true';
 
       if (isMock) {

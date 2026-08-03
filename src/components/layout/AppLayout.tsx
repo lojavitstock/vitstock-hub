@@ -12,13 +12,13 @@ import {
   LogOut,
   ShieldCheck
 } from 'lucide-react';
-import { mockAttendants } from '../../services/mockData';
 import { EvolutionApiService } from '../../services/evolutionApi';
+import { useAuth } from '../../auth/AuthContext';
 
 export const AppLayout: React.FC = () => {
   const location = useLocation();
-  const currentUser = mockAttendants[0];
-  const instanceName = import.meta.env.VITE_EVOLUTION_INSTANCE_NAME || 'vitstock_atendimento';
+  const { user: currentUser, logout } = useAuth();
+  const instanceName = 'vitstock_atendimento';
   const [isConnected, setIsConnected] = useState(false);
 
   useEffect(() => {
@@ -142,8 +142,8 @@ export const AppLayout: React.FC = () => {
             <div className="flex items-center gap-2.5">
               <div className="relative">
                 <img 
-                  src={currentUser.avatar} 
-                  alt={currentUser.name}
+                  src={`https://ui-avatars.com/api/?name=${encodeURIComponent(currentUser?.name || 'Usuário')}&background=EEBB2C&color=000`}
+                  alt={currentUser?.name || 'Usuário'}
                   className="w-9 h-9 rounded-full object-cover border border-amber-400/40" 
                   onError={(e) => {
                     (e.target as HTMLImageElement).src = 'https://ui-avatars.com/api/?name=Leo+Vitorino&background=EEBB2C&color=000';
@@ -153,13 +153,14 @@ export const AppLayout: React.FC = () => {
               </div>
               <div className="overflow-hidden">
                 <p className="text-xs font-bold text-zinc-100 truncate flex items-center gap-1">
-                  {currentUser.name}
+                  {currentUser?.name}
                   <ShieldCheck className="w-3 h-3 text-amber-400 inline" />
                 </p>
-                <p className="text-[11px] text-zinc-400 truncate capitalize">{currentUser.role}</p>
+                <p className="text-[11px] text-zinc-400 truncate capitalize">{currentUser?.role}</p>
               </div>
             </div>
             <button 
+              onClick={() => void logout()}
               className="text-zinc-500 hover:text-red-400 p-1.5 rounded-md hover:bg-zinc-800/50 transition-colors"
               title="Sair da Plataforma"
             >

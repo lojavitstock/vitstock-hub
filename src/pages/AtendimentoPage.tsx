@@ -22,7 +22,6 @@ import {
 import { mockConversations } from '../services/mockData';
 import { Conversation, Message } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
-import { supabase } from '../services/supabase';
 
 const MediaMessageContent: React.FC<{ msg: Message; instanceName: string }> = ({ msg, instanceName }) => {
   const isMedia = msg.mediaType === 'image' || msg.mediaType === 'audio' || msg.mediaType === 'document';
@@ -147,7 +146,7 @@ const MediaMessageContent: React.FC<{ msg: Message; instanceName: string }> = ({
 };
 
 export const AtendimentoPage: React.FC = () => {
-  const instanceName = import.meta.env.VITE_EVOLUTION_INSTANCE_NAME || 'vitstock_atendimento';
+  const instanceName = 'vitstock_atendimento';
   const isMock = import.meta.env.VITE_USE_MOCK_DATA === 'true';
 
   const [conversations, setConversations] = useState<Conversation[]>([]);

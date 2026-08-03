@@ -4,7 +4,7 @@ import { WhatsappInstance } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 
 export const ConexoesPage: React.FC = () => {
-  const instanceName = import.meta.env.VITE_EVOLUTION_INSTANCE_NAME || 'vitstock_atendimento';
+  const instanceName = 'vitstock_atendimento';
   const isMock = import.meta.env.VITE_USE_MOCK_DATA === 'true';
 
   const [instance, setInstance] = useState<WhatsappInstance>({
@@ -161,8 +161,8 @@ export const ConexoesPage: React.FC = () => {
           <div className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800/80 grid grid-cols-3 gap-4 text-xs">
             <div>
               <span className="text-zinc-500 block mb-0.5 font-bold">Servidor API Nuvem</span>
-              <span className="text-zinc-200 font-mono font-semibold truncate block" title={import.meta.env.VITE_EVOLUTION_API_URL || 'Railway Cloud'}>
-                {import.meta.env.VITE_EVOLUTION_API_URL || 'Railway Cloud'}
+              <span className="text-zinc-200 font-mono font-semibold truncate block" title={import.meta.env.VITE_API_URL || 'Backend Railway'}>
+                {import.meta.env.VITE_API_URL || 'Backend Railway'}
               </span>
             </div>
             <div>
