@@ -32,6 +32,8 @@ import {
   X,
   Building2,
   Globe,
+  MapPin,
+  Megaphone,
   Archive
 } from 'lucide-react';
 import { mockConversations } from '../services/mockData';
@@ -84,6 +86,53 @@ const InteractiveMessageContent: React.FC<{ msg: Message }> = ({ msg }) => {
       ) : (
         <button key={`${button.label}-${index}`} type="button" className="w-full px-3 py-2 mt-2 rounded-lg border border-slate-500/30 bg-white/5 text-slate-300 font-bold">{button.label}</button>
       ))}
+    </div>
+  );
+};
+
+const SpecialMessageContent: React.FC<{ msg: Message }> = ({ msg }) => {
+  const metadata = msg.metadata;
+  if (!metadata) return null;
+  const trafficLabel = metadata.trafficSource === 'FB_Ads'
+    ? 'Anúncio do Facebook ou Instagram'
+    : metadata.trafficSource
+      ? `Origem: ${metadata.trafficSource}`
+      : '';
+  return (
+    <div className="space-y-2">
+      {trafficLabel && (
+        <div className="rounded-xl border border-emerald-400/25 bg-emerald-500/10 p-2.5 text-emerald-100">
+          <div className="flex items-center gap-2 text-[11px] font-extrabold uppercase tracking-wide text-emerald-300">
+            <Megaphone className="h-4 w-4" /> {trafficLabel}
+          </div>
+          {metadata.trafficTitle && <p className="mt-1 text-xs font-semibold text-slate-100">{metadata.trafficTitle}</p>}
+          {metadata.trafficUrl && (
+            <a href={metadata.trafficUrl} target="_blank" rel="noopener noreferrer" className="mt-1 inline-flex items-center gap-1 text-[11px] font-bold text-emerald-300 hover:text-emerald-200">
+              <ExternalLink className="h-3 w-3" /> Mostrar detalhes
+            </a>
+          )}
+        </div>
+      )}
+      {metadata.contactCard && (
+        <div className="flex items-center gap-2.5 rounded-xl border border-sky-300/20 bg-sky-400/10 p-2.5">
+          <UserRound className="h-5 w-5 text-sky-300" />
+          <div className="min-w-0">
+            <p className="text-xs font-extrabold text-slate-100">{metadata.contactCard.displayName}</p>
+            {metadata.contactCard.phone && <p className="text-[11px] text-slate-300">{metadata.contactCard.phone}</p>}
+          </div>
+        </div>
+      )}
+      {metadata.location && (
+        <a href={metadata.location.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2.5 rounded-xl border border-amber-300/20 bg-amber-400/10 p-2.5 text-amber-100 hover:bg-amber-400/15">
+          <MapPin className="h-5 w-5 text-amber-300" />
+          <span className="text-xs font-bold">{metadata.location.name || 'Localização compartilhada'}{metadata.location.address ? `\n${metadata.location.address}` : ''}</span>
+        </a>
+      )}
+      {metadata.systemLabel && (
+        <div className="flex items-center gap-2 rounded-xl border border-slate-300/15 bg-black/20 p-2.5 text-xs font-bold text-slate-300">
+          <PhoneCall className="h-4 w-4 text-amber-300" /> {metadata.systemLabel}
+        </div>
+      )}
     </div>
   );
 };
@@ -1399,6 +1448,7 @@ export const AtendimentoPage: React.FC = () => {
 
                         {/* Renderização Inteligente de Mídias (Imagem, Áudio, Documentos em Base64) */}
                         <MediaMessageContent msg={msg} instanceName={instanceName} />
+                        <SpecialMessageContent msg={msg} />
                         <InteractiveMessageContent msg={msg} />
 
                         {/* Texto da Mensagem */}

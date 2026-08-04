@@ -121,6 +121,7 @@ function unwrapProviderMessage(message: any) {
       || current?.viewOnceMessage?.message
       || current?.viewOnceMessageV2?.message
       || current?.documentWithCaptionMessage?.message
+      || current?.associatedChildMessage?.message
       || current?.editedMessage?.message;
     if (!nested) break;
     current = nested;
@@ -132,8 +133,144 @@ function firstProviderText(...values: unknown[]) {
   return values.find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim();
 }
 
+function providerMessageType(record: any, message: any) {
+  const explicit = String(record?.messageType || '').trim();
+  if (explicit) return explicit;
+  const knownTypes = [
+    'conversation', 'extendedTextMessage', 'imageMessage', 'audioMessage', 'videoMessage',
+    'documentMessage', 'stickerMessage', 'contactMessage', 'locationMessage', 'reactionMessage',
+    'protocolMessage', 'associatedChildMessage', 'interactiveMessage', 'templateMessage',
+    'buttonsMessage', 'listMessage', 'pollCreationMessage', 'pollUpdateMessage', 'callLogMessage',
+    'call', 'placeholderMessage', 'secretEncryptedMessage', 'statusMentionMessage',
+  ];
+  return knownTypes.find((type) => message?.[type]) || '';
+}
+
+function providerContactPhoneFromVcard(vcard: unknown) {
+  if (typeof vcard !== 'string') return '';
+  const waid = vcard.match(/waid=(\d+)/i)?.[1];
+  if (waid) return `+${waid}`;
+  const phone = vcard.match(/(?:TEL[^:]*:)([^\n\r]+)/i)?.[1]?.trim();
+  return phone || '';
+}
+
+function providerInteractiveButtons(message: any) {
+  const interactive = message?.interactiveMessage
+    || message?.templateMessage?.interactiveMessageTemplate
+    || message?.templateMessage?.interactiveMessage;
+  const buttons: Array<{ type: 'url' | 'quickReply' | 'call' | 'copy'; label: string; url?: string; value?: string }> = [];
+  const addNativeButton = (button: any) => {
+    try {
+      const params = JSON.parse(button?.buttonParamsJson || '{}');
+      if (button?.name === 'cta_url' && /^https?:\/\//i.test(params.url || '')) {
+        buttons.push({ type: 'url', label: params.display_text || 'Abrir link', url: params.url });
+      } else if (button?.name === 'cta_call') {
+        buttons.push({ type: 'call', label: params.display_text || 'Ligar', value: params.phone_number || params.number || '' });
+      } else if (button?.name === 'cta_copy') {
+        buttons.push({ type: 'copy', label: params.display_text || 'Copiar', value: params.copy_code || params.code || '' });
+      } else if (button?.name === 'quick_reply') {
+        buttons.push({ type: 'quickReply', label: params.display_text || 'Responder', value: params.id || params.display_text || '' });
+      }
+    } catch {
+      // Alguns modelos comerciais entregam o JSON do botão incompleto.
+    }
+  };
+  if (Array.isArray(interactive?.nativeFlowMessage?.buttons)) interactive.nativeFlowMessage.buttons.forEach(addNativeButton);
+  const hydrated = message?.templateMessage?.hydratedTemplate?.hydratedButtons;
+  if (Array.isArray(hydrated)) {
+    hydrated.forEach((button: any) => {
+      if (button?.urlButton?.url) buttons.push({ type: 'url', label: button.urlButton.displayText || 'Abrir link', url: button.urlButton.url });
+      if (button?.callButton?.phoneNumber) buttons.push({ type: 'call', label: button.callButton.displayText || 'Ligar', value: button.callButton.phoneNumber });
+      if (button?.quickReplyButton) buttons.push({ type: 'quickReply', label: button.quickReplyButton.displayText || 'Responder', value: button.quickReplyButton.id || button.quickReplyButton.displayText || '' });
+    });
+  }
+  return buttons;
+}
+
+function providerMessageMetadata(record: any, message: any, fromMe: boolean) {
+  const type = providerMessageType(record, message);
+  const context = record?.contextInfo
+    || message?.contextInfo
+    || message?.extendedTextMessage?.contextInfo
+    || message?.imageMessage?.contextInfo
+    || message?.videoMessage?.contextInfo
+    || message?.documentMessage?.contextInfo
+    || {};
+  const externalAd = record?.contextInfo?.externalAdReply
+    || message?.extendedTextMessage?.contextInfo?.externalAdReply
+    || message?.contextInfo?.externalAdReply;
+  const contact = message?.contactMessage;
+  const location = message?.locationMessage;
+  const reaction = message?.reactionMessage;
+  const protocol = message?.protocolMessage;
+  const call = message?.callLogMessage || message?.call || message?.offerMessage;
+  const metadata: Record<string, any> = { providerType: type };
+
+  const trafficSource = context?.conversionSource
+    || context?.conversion_source
+    || (context?.ctwaSignals || context?.conversionData || context?.conversion_data ? 'FB_Ads' : undefined);
+  if (typeof trafficSource === 'string' && trafficSource.trim()) metadata.trafficSource = trafficSource.trim();
+  const trafficTitle = externalAd?.title || externalAd?.sourceApp || externalAd?.mediaType;
+  const trafficUrl = externalAd?.sourceUrl || externalAd?.sourceURL;
+  if (typeof trafficTitle === 'string' && trafficTitle.trim()) metadata.trafficTitle = trafficTitle.trim();
+  if (typeof trafficUrl === 'string' && trafficUrl.trim()) metadata.trafficUrl = trafficUrl.trim();
+
+  if (contact) {
+    metadata.contactCard = {
+      displayName: contact.displayName || 'Contato compartilhado',
+      phone: providerContactPhoneFromVcard(contact.vcard) || undefined,
+    };
+  }
+  if (location && Number.isFinite(Number(location.degreesLatitude)) && Number.isFinite(Number(location.degreesLongitude))) {
+    const latitude = Number(location.degreesLatitude);
+    const longitude = Number(location.degreesLongitude);
+    metadata.location = {
+      latitude,
+      longitude,
+      name: location.name || undefined,
+      address: location.address || undefined,
+      url: location.url || `https://www.google.com/maps?q=${latitude},${longitude}`,
+    };
+  }
+  if (typeof reaction?.text === 'string' && reaction.text.trim()) metadata.reaction = reaction.text.trim();
+  if (context?.isForwarded || message?.contextInfo?.isForwarded) metadata.forwarded = true;
+
+  if (call || /call/i.test(type)) {
+    const isVideo = Boolean(call?.isVideo || call?.video || call?.callType === 'video');
+    metadata.systemLabel = isVideo ? 'Ligação de vídeo' : 'Ligação de voz';
+  } else if (type === 'protocolMessage') {
+    const protocolType = Number(protocol?.type);
+    metadata.systemLabel = protocolType === 0
+      ? 'Mensagem apagada'
+      : protocolType === 3
+        ? 'Mensagens temporárias atualizadas'
+        : 'Evento do WhatsApp';
+  } else if (type === 'placeholderMessage') {
+    metadata.systemLabel = 'Mensagem indisponível';
+  } else if (type === 'secretEncryptedMessage') {
+    metadata.systemLabel = 'Mensagem protegida';
+  } else if (type === 'statusMentionMessage') {
+    metadata.systemLabel = 'Menção de status';
+  }
+
+  const interactive = message?.interactiveMessage
+    || message?.templateMessage?.interactiveMessageTemplate
+    || message?.templateMessage?.interactiveMessage;
+  const interactiveTitle = interactive?.header?.title || interactive?.header?.text || message?.templateMessage?.hydratedTemplate?.hydratedTitleText;
+  const interactiveFooter = interactive?.footer?.text || message?.templateMessage?.hydratedTemplate?.hydratedFooterText;
+  const interactiveButtons = providerInteractiveButtons(message);
+  if (typeof interactiveTitle === 'string' && interactiveTitle.trim()) metadata.interactiveTitle = interactiveTitle.trim();
+  if (typeof interactiveFooter === 'string' && interactiveFooter.trim()) metadata.interactiveFooter = interactiveFooter.trim();
+  if (interactiveButtons.length) metadata.interactiveButtons = interactiveButtons;
+
+  if (!fromMe && typeof metadata.trafficSource !== 'string') delete metadata.trafficSource;
+  return metadata;
+}
+
 function providerMessageContent(record: any) {
   const message = unwrapProviderMessage(record?.message);
+  const fromMe = record?.key?.fromMe === true;
+  const metadata = providerMessageMetadata(record, message, fromMe);
   const interactive = message?.interactiveMessage
     || message?.templateMessage?.interactiveMessageTemplate
     || message?.templateMessage?.interactiveMessage;
@@ -154,13 +291,22 @@ function providerMessageContent(record: any) {
     message?.templateMessage?.hydratedFourRowTemplate?.content,
   );
   if (text) return text;
+  if (metadata.reaction) return `Reagiu com: ${metadata.reaction}`;
+  if (metadata.contactCard) {
+    const phone = metadata.contactCard.phone ? `\n${metadata.contactCard.phone}` : '';
+    return `[Contato compartilhado]\n${metadata.contactCard.displayName}${phone}`;
+  }
+  if (metadata.location) return '[Localização compartilhada]';
+  if (metadata.systemLabel) return `[${metadata.systemLabel}]`;
   if (message?.stickerMessage) return '[Figurinha]';
   if (message?.audioMessage) return '[Mensagem de Áudio]';
   if (message?.imageMessage) return '[Imagem]';
   if (message?.videoMessage) return '[Vídeo]';
   if (message?.documentMessage) return '[Documento]';
+  if (message?.pollCreationMessage) return '[Enquete]';
+  if (message?.pollUpdateMessage) return '[Resposta de enquete]';
   if (interactive || message?.buttonsMessage || message?.listMessage) return '[Mensagem interativa]';
-  return '[Mensagem não suportada]';
+  return '[Mensagem não identificada]';
 }
 
 function providerMessageMedia(record: any) {
@@ -209,6 +355,11 @@ function providerMessageDate(record: any) {
 function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
   const media = providerMessageMedia(record);
   const fromMe = record?.key?.fromMe === true;
+  const message = unwrapProviderMessage(record?.message);
+  const metadata = providerMessageMetadata(record, message, fromMe);
+  const mediaDuration = media?.type === 'audio' || media?.type === 'video'
+    ? Number(media?.type === 'audio' ? message?.audioMessage?.seconds : message?.videoMessage?.seconds)
+    : undefined;
   return {
     id: providerMessageId(record),
     remoteJid: providerRemoteJid(record),
@@ -220,6 +371,12 @@ function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
     content: providerMessageContent(record),
     mediaUrl: media?.url,
     mediaType: media?.type,
+    mediaDuration: typeof mediaDuration === 'number' && Number.isFinite(mediaDuration) && mediaDuration > 0 ? mediaDuration : undefined,
+    interactiveTitle: metadata.interactiveTitle,
+    interactiveFooter: metadata.interactiveFooter,
+    interactiveButtons: metadata.interactiveButtons,
+    metadata,
+    rawKey: record?.key,
     sentAt: providerMessageDate(record),
     status: normalizeProviderMessageStatus(record?.status || record?.update?.status) || 'sent',
   };
@@ -230,6 +387,7 @@ function localMessageToProviderRecord(row: any) {
   const id = row.evolution_message_id || row.id;
   const timestamp = Math.floor(new Date(row.sent_at).getTime() / 1000);
   const key = { id, remoteJid, fromMe: row.sender === 'attendant' };
+  const metadata = row.metadata || {};
   const mediaMessage = row.media_type === 'image'
     ? { imageMessage: { url: row.media_url || undefined, caption: row.content } }
     : row.media_type === 'audio'
@@ -247,6 +405,10 @@ function localMessageToProviderRecord(row: any) {
     pushName: row.sender_name || 'Contato',
     messageTimestamp: timestamp,
     status: row.status,
+    metadata,
+    interactiveTitle: row.interactive_title || metadata.interactiveTitle,
+    interactiveFooter: row.interactive_footer || metadata.interactiveFooter,
+    interactiveButtons: row.interactive_buttons || metadata.interactiveButtons,
   };
 }
 
@@ -301,11 +463,24 @@ async function persistProviderMessage(companyId: string, record: any, options: {
 
     const inserted = await client.query(
       `INSERT INTO messages
-        (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_url, media_type, status, sent_at, is_internal_note)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false)
-       ON CONFLICT (company_id, evolution_message_id) DO NOTHING
+       (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_url, media_type, metadata, status, sent_at, is_internal_note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false)
+       ON CONFLICT (company_id, evolution_message_id) DO UPDATE SET
+         metadata = COALESCE(messages.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+         content = CASE
+           WHEN messages.content ILIKE '[mensagem%suportada]'
+             OR messages.content ILIKE '[mensagem%identificada]'
+           THEN EXCLUDED.content
+           ELSE messages.content
+         END,
+         media_url = COALESCE(messages.media_url, EXCLUDED.media_url),
+         media_type = COALESCE(messages.media_type, EXCLUDED.media_type)
+       WHERE messages.metadata IS DISTINCT FROM (COALESCE(messages.metadata, '{}'::jsonb) || EXCLUDED.metadata)
+          OR messages.content ILIKE '[mensagem%suportada]'
+          OR messages.content ILIKE '[mensagem%identificada]'
+          OR (messages.media_url IS NULL AND EXCLUDED.media_url IS NOT NULL)
        RETURNING id`,
-      [companyId, conversationId, local.id, local.sender, local.senderName, local.content, local.mediaUrl || null, local.mediaType || null, local.status, local.sentAt],
+      [companyId, conversationId, local.id, local.sender, local.senderName, local.content, local.mediaUrl || null, local.mediaType || null, JSON.stringify(local.metadata || {}), local.status, local.sentAt],
     );
 
     if (inserted.rowCount && options.incrementUnread && local.sender === 'contact') {
@@ -784,7 +959,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
 
     const localMessages = await db.query(`
       SELECT m.id, m.evolution_message_id, m.sender, m.sender_name, m.content, m.media_url,
-             m.media_type, m.status, m.sent_at, c.evolution_remote_jid
+             m.media_type, m.metadata, m.status, m.sent_at, c.evolution_remote_jid
       FROM messages m
       JOIN conversations c ON c.id = m.conversation_id
       WHERE m.company_id = $1
@@ -835,7 +1010,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
 
     const reconciledMessages = await db.query(`
       SELECT m.id, m.evolution_message_id, m.sender, m.sender_name, m.content, m.media_url,
-             m.media_type, m.status, m.sent_at, c.evolution_remote_jid
+             m.media_type, m.metadata, m.status, m.sent_at, c.evolution_remote_jid
       FROM messages m
       JOIN conversations c ON c.id = m.conversation_id
       WHERE m.company_id = $1

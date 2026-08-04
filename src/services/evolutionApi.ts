@@ -8,6 +8,7 @@ const unwrapEvolutionMessage = (message: any) => {
       || current?.viewOnceMessage?.message
       || current?.viewOnceMessageV2?.message
       || current?.documentWithCaptionMessage?.message
+      || current?.associatedChildMessage?.message
       || current?.editedMessage?.message;
     if (!nested) break;
     current = nested;
@@ -91,6 +92,19 @@ const extractEvolutionMessageText = (message: any): string | undefined => {
   );
 
   if (text) return text;
+  if (msg.reactionMessage?.text) return `Reagiu com: ${msg.reactionMessage.text}`;
+  if (msg.contactMessage) {
+    const vcard = String(msg.contactMessage.vcard || '');
+    const phone = vcard.match(/waid=(\d+)/i)?.[1] || vcard.match(/(?:TEL[^:]*:)([^\n\r]+)/i)?.[1]?.trim();
+    return `[Contato compartilhado]\n${msg.contactMessage.displayName || 'Contato'}${phone ? `\n+${phone.replace(/\D/g, '')}` : ''}`;
+  }
+  if (msg.locationMessage) return '[Localização compartilhada]';
+  if (msg.callLogMessage || msg.call || msg.offerMessage) return '[Ligação de voz]';
+  if (msg.protocolMessage) return Number(msg.protocolMessage.type) === 0 ? '[Mensagem apagada]' : '[Evento do WhatsApp]';
+  if (msg.placeholderMessage) return '[Mensagem indisponível]';
+  if (msg.secretEncryptedMessage) return '[Mensagem protegida]';
+  if (msg.pollCreationMessage) return '[Enquete]';
+  if (msg.pollUpdateMessage) return '[Resposta de enquete]';
   if (interactive || msg.buttonsMessage || msg.listMessage) return '🔘 [Mensagem interativa]';
   if (msg.stickerMessage) return '🧩 [Figurinha]';
   if (msg.audioMessage) return '🎵 [Mensagem de Áudio]';
@@ -98,6 +112,41 @@ const extractEvolutionMessageText = (message: any): string | undefined => {
   if (msg.videoMessage) return '🎬 [Vídeo]';
   if (msg.documentMessage) return '📄 [Documento]';
   return undefined;
+};
+
+const extractEvolutionMessageMetadata = (message: any, record: any = {}) => {
+  const msg = unwrapEvolutionMessage(message);
+  const metadata = { ...(record?.metadata || {}) } as Record<string, any>;
+  const context = record?.contextInfo
+    || msg.contextInfo
+    || msg.extendedTextMessage?.contextInfo
+    || msg.imageMessage?.contextInfo
+    || msg.videoMessage?.contextInfo
+    || msg.documentMessage?.contextInfo
+    || {};
+  const externalAd = context?.externalAdReply || msg.extendedTextMessage?.contextInfo?.externalAdReply;
+  const trafficSource = context?.conversionSource
+    || context?.conversion_source
+    || (context?.ctwaSignals || context?.conversionData || context?.conversion_data ? 'FB_Ads' : undefined);
+  if (!metadata.trafficSource && typeof trafficSource === 'string' && trafficSource.trim()) metadata.trafficSource = trafficSource.trim();
+  if (!metadata.trafficTitle && typeof externalAd?.title === 'string' && externalAd.title.trim()) metadata.trafficTitle = externalAd.title.trim();
+  if (!metadata.trafficUrl && typeof (externalAd?.sourceUrl || externalAd?.sourceURL) === 'string') metadata.trafficUrl = externalAd.sourceUrl || externalAd.sourceURL;
+  if (!metadata.contactCard && msg.contactMessage) {
+    const vcard = String(msg.contactMessage.vcard || '');
+    const phone = vcard.match(/waid=(\d+)/i)?.[1] || vcard.match(/(?:TEL[^:]*:)([^\n\r]+)/i)?.[1]?.trim();
+    metadata.contactCard = { displayName: msg.contactMessage.displayName || 'Contato compartilhado', phone: phone ? `+${phone.replace(/\D/g, '')}` : undefined };
+  }
+  if (!metadata.location && msg.locationMessage && Number.isFinite(Number(msg.locationMessage.degreesLatitude)) && Number.isFinite(Number(msg.locationMessage.degreesLongitude))) {
+    const latitude = Number(msg.locationMessage.degreesLatitude);
+    const longitude = Number(msg.locationMessage.degreesLongitude);
+    metadata.location = { latitude, longitude, name: msg.locationMessage.name, address: msg.locationMessage.address, url: msg.locationMessage.url || `https://www.google.com/maps?q=${latitude},${longitude}` };
+  }
+  if (!metadata.reaction && msg.reactionMessage?.text) metadata.reaction = msg.reactionMessage.text;
+  const messageType = String(record?.messageType || metadata.providerType || '');
+  if (!metadata.systemLabel && (msg.callLogMessage || msg.call || msg.offerMessage || /call/i.test(messageType))) metadata.systemLabel = 'Ligação de voz';
+  if (!metadata.systemLabel && msg.protocolMessage) metadata.systemLabel = Number(msg.protocolMessage.type) === 0 ? 'Mensagem apagada' : 'Evento do WhatsApp';
+  if (!metadata.systemLabel && msg.placeholderMessage) metadata.systemLabel = 'Mensagem indisponível';
+  return metadata;
 };
 
 const extractEvolutionButtons = (message: any): NonNullable<Message['interactiveButtons']> => {
@@ -634,6 +683,7 @@ export class EvolutionApiService {
         const reactionMsg = msgObj.reactionMessage;
         const interactiveMsg = getInteractiveMessage(msgObj);
         const interactiveButtons = extractEvolutionButtons(msgObj);
+        const metadata = extractEvolutionMessageMetadata(rawMessage, m);
 
         if (imgMsg) {
           mediaType = 'image';
@@ -698,6 +748,7 @@ export class EvolutionApiService {
             || msgObj.templateMessage?.hydratedFourRowTemplate?.footer
             || undefined,
           interactiveButtons,
+          metadata,
           rawKey: m.key,
           timestampMs: m.messageTimestamp ? Number(m.messageTimestamp) * 1000 : undefined,
           timestamp: timestampStr,

@@ -45,6 +45,26 @@ export interface Message {
     url?: string;
     value?: string;
   }>;
+  metadata?: {
+    providerType?: string;
+    trafficSource?: string;
+    trafficTitle?: string;
+    trafficUrl?: string;
+    location?: {
+      latitude: number;
+      longitude: number;
+      name?: string;
+      address?: string;
+      url?: string;
+    };
+    contactCard?: {
+      displayName: string;
+      phone?: string;
+    };
+    reaction?: string;
+    systemLabel?: string;
+    forwarded?: boolean;
+  };
   rawKey?: any;
   timestampMs?: number;
   timestamp: string;
