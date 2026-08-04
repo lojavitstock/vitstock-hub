@@ -8,6 +8,10 @@ import { db } from './db.js';
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
   phone: z.string().max(32).optional(),
+  // A reconciliação é feita somente na primeira abertura da conversa. As
+  // atualizações seguintes usam o PostgreSQL e não ficam consultando a
+  // Evolution a cada ciclo de atualização da tela.
+  reconcile: z.boolean().optional(),
 });
 const sendTextSchema = z.object({
   number: z.string().regex(/^\d{8,20}$/),
@@ -185,6 +189,8 @@ function providerPhone(record: any) {
   const phoneJid = record?.key?.senderPn
     || record?.key?.participantPn
     || record?.senderPn
+    || record?.key?.remoteJidAlt
+    || record?.remoteJidAlt
     || remoteJid;
   const digits = String(phoneJid).split('@')[0]?.replace(/\D/g, '') || '';
   return digits.length >= 8 && digits.length <= 20 ? digits : '';
@@ -200,13 +206,13 @@ function providerMessageDate(record: any) {
   return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : new Date();
 }
 
-function providerRecordToLocalMessage(record: any) {
+function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
   const media = providerMessageMedia(record);
   const fromMe = record?.key?.fromMe === true;
   return {
     id: providerMessageId(record),
     remoteJid: providerRemoteJid(record),
-    phone: providerPhone(record),
+    phone: providerPhone(record) || fallbackPhone.replace(/\D/g, ''),
     sender: fromMe ? 'attendant' as const : 'contact' as const,
     senderName: fromMe
       ? (record?.senderName || record?.pushName || 'Atendente')
@@ -244,8 +250,8 @@ function localMessageToProviderRecord(row: any) {
   };
 }
 
-async function persistProviderMessage(companyId: string, record: any, options: { incrementUnread: boolean; reopen: boolean }) {
-  const local = providerRecordToLocalMessage(record);
+async function persistProviderMessage(companyId: string, record: any, options: { incrementUnread: boolean; reopen: boolean; fallbackPhone?: string }) {
+  const local = providerRecordToLocalMessage(record, options.fallbackPhone);
   if (!local.id || !local.remoteJid || local.remoteJid.endsWith('@g.us') || !local.phone) return false;
 
   const client = await db.connect();
@@ -751,20 +757,44 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       jids.add(canonicalPhoneJid(phoneDigits));
     }
 
+    // A contact may alternate between its phone JID and an internal @lid JID.
+    // Merge all local conversations for the same phone before reading history.
+    const contactIds = phoneDigits.length >= 8 && phoneDigits.length <= 20
+      ? (await db.query<{ id: string }>(
+          `SELECT id FROM contacts
+           WHERE company_id = $1 AND regexp_replace(phone, '\\D', '', 'g') = $2`,
+          [request.user!.companyId, phoneDigits],
+        )).rows.map((row) => row.id)
+      : [];
+    if (contactIds.length > 0) {
+      const contactJids = await db.query<{ evolution_remote_jid: string }>(
+        `SELECT evolution_remote_jid FROM conversations
+         WHERE company_id = $1 AND contact_id = ANY($2::uuid[])`,
+        [request.user!.companyId, contactIds],
+      );
+      contactJids.rows.forEach((row) => jids.add(row.evolution_remote_jid));
+    }
+
+    const conversationFilter = contactIds.length > 0
+      ? `(c.evolution_remote_jid = ANY($2::text[]) OR c.contact_id = ANY($3::uuid[]))`
+      : `c.evolution_remote_jid = ANY($2::text[])`;
+    const queryParams = contactIds.length > 0
+      ? [request.user!.companyId, [...jids], contactIds]
+      : [request.user!.companyId, [...jids]];
+
     const localMessages = await db.query(`
       SELECT m.id, m.evolution_message_id, m.sender, m.sender_name, m.content, m.media_url,
              m.media_type, m.status, m.sent_at, c.evolution_remote_jid
       FROM messages m
       JOIN conversations c ON c.id = m.conversation_id
       WHERE m.company_id = $1
-        AND c.evolution_remote_jid = ANY($2::text[])
+        AND ${conversationFilter}
         AND m.is_internal_note = false
-      ORDER BY m.sent_at ASC`,
-    [request.user!.companyId, [...jids]]);
+      ORDER BY m.sent_at ASC`, queryParams);
 
     // Depois que o webhook persiste a conversa, a leitura deixa de depender da Evolution.
     // A consulta externa serve apenas para uma reconciliação inicial do histórico antigo.
-    if (localMessages.rows.some((row: any) => row.sender === 'contact')) {
+    if (!parsed.data.reconcile && localMessages.rows.some((row: any) => row.sender === 'contact')) {
       return { messages: { records: localMessages.rows.map(localMessageToProviderRecord) } };
     }
 
@@ -793,7 +823,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
 
     for (const record of recordsById.values()) {
       try {
-        await persistProviderMessage(request.user!.companyId, record, { incrementUnread: false, reopen: false });
+        await persistProviderMessage(request.user!.companyId, record, {
+          incrementUnread: false,
+          reopen: false,
+          fallbackPhone: parsed.data.phone,
+        });
       } catch (error) {
         request.log.warn({ err: error, messageId: providerMessageId(record) }, 'Falha ao reconciliar mensagem da Evolution com o PostgreSQL');
       }
@@ -805,10 +839,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       FROM messages m
       JOIN conversations c ON c.id = m.conversation_id
       WHERE m.company_id = $1
-        AND c.evolution_remote_jid = ANY($2::text[])
+        AND ${conversationFilter}
         AND m.is_internal_note = false
-      ORDER BY m.sent_at ASC`,
-    [request.user!.companyId, [...jids]]);
+      ORDER BY m.sent_at ASC`, queryParams);
 
     return {
       messages: {

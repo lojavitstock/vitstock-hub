@@ -555,9 +555,9 @@ export class EvolutionApiService {
     return Array.isArray(body?.notes) ? body.notes as Message[] : [];
   }
 
-  static async fetchConversationMessages(instanceName: string, remoteJid: string, phone: string, attendantLabel = 'Atendente') {
+  static async fetchConversationMessages(instanceName: string, remoteJid: string, phone: string, attendantLabel = 'Atendente', reconcile = false) {
     const [evolutionMessages, internalNotes] = await Promise.all([
-      this.fetchMessages(instanceName, remoteJid, phone, attendantLabel),
+      this.fetchMessages(instanceName, remoteJid, phone, attendantLabel, reconcile),
       this.fetchInternalNotes(remoteJid, phone),
     ]);
     return [...evolutionMessages, ...internalNotes].sort((a, b) => (a.timestampMs || 0) - (b.timestampMs || 0));
@@ -598,7 +598,7 @@ export class EvolutionApiService {
   /**
    * Buscar histórico de mensagens de uma conversa diretamente da Evolution API no Railway
    */
-  static async fetchMessages(instanceName: string, remoteJid: string, phone = '', attendantLabel = 'Atendente'): Promise<Message[]> {
+  static async fetchMessages(instanceName: string, remoteJid: string, phone = '', attendantLabel = 'Atendente', reconcile = false): Promise<Message[]> {
     if (USE_MOCK) return [];
 
     try {
@@ -606,7 +606,7 @@ export class EvolutionApiService {
 
       const res = await apiFetch('/api/evolution/messages', {
         method: 'POST',
-        body: JSON.stringify({ remoteJid: cleanJid, phone })
+        body: JSON.stringify({ remoteJid: cleanJid, phone, reconcile })
       });
 
       if (!res.ok) return [];

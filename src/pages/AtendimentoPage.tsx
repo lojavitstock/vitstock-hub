@@ -482,6 +482,7 @@ export const AtendimentoPage: React.FC = () => {
 
     let isSubscribed = true;
     let isInitialFetch = true;
+    let shouldReconcile = true;
     setMessages([]);
 
     const fetchConvMessages = async () => {
@@ -492,7 +493,9 @@ export const AtendimentoPage: React.FC = () => {
       const shouldScroll = isInitialFetch || distanceFromBottom <= 120;
       isInitialFetch = false;
       const phone = conversationsRef.current.find((conversation) => conversation.id === activeConvId)?.contact.phone || activeConvId;
-      const realMsgs = await EvolutionApiService.fetchConversationMessages(instanceName, activeConvId, phone, attendantLabel);
+      const reconcileThisFetch = shouldReconcile;
+      shouldReconcile = false;
+      const realMsgs = await EvolutionApiService.fetchConversationMessages(instanceName, activeConvId, phone, attendantLabel, reconcileThisFetch);
       if (isSubscribed && realMsgs.length > 0) {
         setMessages((previous) => mergeConversationMessages(previous, realMsgs));
         if (shouldScroll) window.setTimeout(scrollToBottom, 0);
@@ -837,7 +840,7 @@ export const AtendimentoPage: React.FC = () => {
       
       // Busca atualizada do backend imediatamente apos enviar
       setTimeout(async () => {
-        const updatedMsgs = await EvolutionApiService.fetchConversationMessages(instanceName, activeConv.id, activeConv.contact.phone, attendantLabel);
+        const updatedMsgs = await EvolutionApiService.fetchConversationMessages(instanceName, activeConv.id, activeConv.contact.phone, attendantLabel, true);
         if (updatedMsgs.length > 0) setMessages((previous) => mergeConversationMessages(previous, updatedMsgs));
         loadChats(false);
       }, 800);
