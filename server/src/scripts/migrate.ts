@@ -4,23 +4,47 @@ import { closeDatabase, db } from '../db.js';
 
 const migrationsDirectory = resolve(process.cwd(), 'migrations');
 
+const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function withConnectionRetry<T>(operation: () => Promise<T>, label: string) {
+  const delays = [0, 3000, 6000, 12_000, 24_000];
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < delays.length; attempt += 1) {
+    const delay = delays[attempt] ?? 0;
+    if (delay) await sleep(delay);
+    try {
+      return await operation();
+    } catch (error: any) {
+      lastError = error;
+      if (error?.code !== '53300' || attempt === delays.length - 1) throw error;
+      console.warn(`PostgreSQL sem conexões disponíveis; nova tentativa de ${label} em breve.`);
+    }
+  }
+
+  throw lastError;
+}
+
 async function migrate() {
-  await db.query(`
+  await withConnectionRetry(() => db.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       name TEXT PRIMARY KEY,
       applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
-  `);
+  `), 'criação do controle de migrações');
 
   const files = (await readdir(migrationsDirectory))
     .filter((file) => file.endsWith('.sql'))
     .sort();
 
   for (const file of files) {
-    const alreadyApplied = await db.query('SELECT 1 FROM schema_migrations WHERE name = $1', [file]);
+    const alreadyApplied = await withConnectionRetry(
+      () => db.query('SELECT 1 FROM schema_migrations WHERE name = $1', [file]),
+      `verificação de ${file}`,
+    );
     if (alreadyApplied.rowCount) continue;
 
-    const client = await db.connect();
+    const client = await withConnectionRetry(() => db.connect(), `abertura de ${file}`);
     try {
       await client.query('BEGIN');
       await client.query(await readFile(resolve(migrationsDirectory, file), 'utf8'));
