@@ -1452,9 +1452,11 @@ export const AtendimentoPage: React.FC = () => {
                         <InteractiveMessageContent msg={msg} />
 
                         {/* Texto da Mensagem */}
+                        {!msg.metadata?.contactCard && !msg.metadata?.location && !msg.metadata?.systemLabel && <>
                         {!isMediaPlaceholder(msg) && msg.content && !msg.content.startsWith('🖼️') && !msg.content.startsWith('🎵') && !msg.content.startsWith('🎬') && (
                           <p className="whitespace-pre-wrap">{msg.content}</p>
                         )}
+                        </>}
                       </div>
                       <div className={`flex items-center gap-1 mt-1 text-[10px] text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
                         <span>{formatMessageTimestamp(msg.timestampMs, msg.timestamp)}</span>
