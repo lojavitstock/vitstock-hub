@@ -714,7 +714,7 @@ export class EvolutionApiService {
 
         const rawContent = reactionMsg
           ? `Reagiu com: ${reactionMsg.text || '👍'}`
-          : extractEvolutionMessageText(rawMessage) || '[Mensagem não suportada]';
+          : extractEvolutionMessageText(rawMessage) || '[Mensagem não identificada]';
 
         const signature = fromMe
           ? parseAttendantSignature(rawContent)
