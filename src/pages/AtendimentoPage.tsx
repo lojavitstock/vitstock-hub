@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { 
   Search, 
   Send, 
@@ -30,7 +31,8 @@ import {
   Copy,
   X,
   Building2,
-  Globe
+  Globe,
+  Archive
 } from 'lucide-react';
 import { mockConversations } from '../services/mockData';
 import { ChatStatus, Conversation, Message } from '../types';
@@ -97,6 +99,51 @@ const conversationNeedsResponse = (conversation: Conversation) => (
   ?? (conversation.status !== 'resolved' && !conversation.lastMessageFromMe && conversation.unreadCount > 0)
 );
 
+const isMediaPlaceholder = (message: Message) => {
+  const content = message.content.trim().toLocaleLowerCase();
+  if (message.mediaType === 'image') return content === '[imagem]' || content === '[image]';
+  if (message.mediaType === 'video') return content === '[vídeo]' || content === '[video]';
+  if (message.mediaType === 'document') return content === '[documento]' || content === '[document]';
+  if (message.mediaType === 'audio') return content === '[mensagem de áudio]' || content === '[audio]';
+  return message.mediaType === 'sticker' && (content === '[figurinha]' || content === '[sticker]' || !content);
+};
+
+const mergeConversationMessages = (current: Message[], incoming: Message[]) => {
+  const byId = new Map<string, Message>();
+  current.forEach((message) => byId.set(message.id, message));
+  incoming.forEach((message) => byId.set(message.id, message));
+  return Array.from(byId.values()).sort((a, b) => (a.timestampMs || 0) - (b.timestampMs || 0));
+};
+
+const formatMessageTimestamp = (timestampMs: number | undefined, fallback: string) => {
+  if (!timestampMs || !Number.isFinite(timestampMs)) return fallback;
+  const date = new Date(timestampMs);
+  if (Number.isNaN(date.getTime())) return fallback;
+  const now = new Date();
+  const isToday = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+  const time = date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  if (isToday) return time;
+  const dayMonth = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+  return `${dayMonth} - ${time}`;
+};
+
+const normalizeSearchText = (value: string) => value
+  .toLocaleLowerCase()
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '');
+
+const isPhoneOnlyName = (value?: string | null) => !value || /^\+?[\d\s().-]+$/.test(value.trim());
+
+const extractBusinessProfile = (profile: any) => {
+  const value = profile?.data || profile?.businessProfile || profile || {};
+  return {
+    ...value,
+    name: value.verifiedName || value.businessName || value.name || value.profileName || '',
+  };
+};
+
 type GoogleContactForm = {
   name: string;
   phone: string;
@@ -106,6 +153,8 @@ type GoogleContactForm = {
   address: string;
   resourceName: string;
 };
+
+type ConversationFilter = 'all' | 'unread' | 'unanswered' | 'delivery' | 'resolved';
 
 const AudioMessagePlayer: React.FC<{ src: string; durationHint?: number }> = ({ src, durationHint }) => {
   const audioRef = React.useRef<HTMLAudioElement>(null);
@@ -180,7 +229,7 @@ const AudioMessagePlayer: React.FC<{ src: string; durationHint?: number }> = ({ 
 };
 
 const MediaMessageContent: React.FC<{ msg: Message; instanceName: string }> = ({ msg, instanceName }) => {
-  const isMedia = msg.mediaType === 'image' || msg.mediaType === 'audio' || msg.mediaType === 'document' || msg.mediaType === 'sticker';
+  const isMedia = msg.mediaType === 'image' || msg.mediaType === 'audio' || msg.mediaType === 'video' || msg.mediaType === 'document' || msg.mediaType === 'sticker';
   if (!isMedia) return null;
 
   const isDataUri = (url?: string | null) => !!url && url.startsWith('data:');
@@ -209,7 +258,7 @@ const MediaMessageContent: React.FC<{ msg: Message; instanceName: string }> = ({
     return (
       <div className="p-2.5 rounded-lg bg-black/30 border border-amber-400/20 text-[11px] text-amber-300 flex items-center gap-2 font-bold animate-pulse my-1 max-w-xs">
         <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
-        Descriptografando imagem/áudio...
+        Descriptografando mídia...
       </div>
     );
   }
@@ -278,6 +327,23 @@ const MediaMessageContent: React.FC<{ msg: Message; instanceName: string }> = ({
     return <AudioMessagePlayer src={src} durationHint={msg.mediaDuration} />;
   }
 
+  if (msg.mediaType === 'video' && src) {
+    return (
+      <div className="max-w-sm overflow-hidden rounded-xl border border-white/10 bg-black/30 shadow-xl">
+        <video
+          src={src}
+          controls
+          preload="metadata"
+          className="max-h-80 w-full bg-black object-contain"
+          aria-label="Vídeo recebido no WhatsApp"
+        />
+        <a href={src} download="video-whatsapp.mp4" className="block px-3 py-2 text-center text-[11px] font-bold text-amber-300 hover:bg-white/5">
+          Baixar vídeo
+        </a>
+      </div>
+    );
+  }
+
   if (msg.mediaType === 'sticker') {
     if (!src) return <div className="text-[11px] text-slate-400">Figurinha indisponível</div>;
     return (
@@ -293,6 +359,14 @@ const MediaMessageContent: React.FC<{ msg: Message; instanceName: string }> = ({
     return (
       <div className="w-[310px] max-w-[58vw] px-3 py-3 rounded-xl bg-black/20 border border-white/10 text-[11px] text-slate-400">
         Áudio indisponível para reprodução
+      </div>
+    );
+  }
+
+  if (msg.mediaType === 'video') {
+    return (
+      <div className="w-[310px] max-w-[58vw] rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-[11px] text-slate-400">
+        Vídeo indisponível para reprodução
       </div>
     );
   }
@@ -319,15 +393,19 @@ const MediaMessageContent: React.FC<{ msg: Message; instanceName: string }> = ({
 export const AtendimentoPage: React.FC = () => {
   const instanceName = 'vitstock_atendimento';
   const isMock = import.meta.env.VITE_USE_MOCK_DATA === 'true';
+  const location = useLocation();
   const { user } = useAuth();
   const attendantLabel = user
     ? `${user.name} • ${user.companyName || 'Vitstock'}`
     : 'Atendente • Vitstock';
 
+  const attendantName = user?.name || 'Atendente';
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string>('');
-  const [filterTab, setFilterTab] = useState<'open' | 'pending' | 'resolved'>('open');
+  const [filterTab, setFilterTab] = useState<ConversationFilter>('all');
+  const [conversationSearch, setConversationSearch] = useState('');
   const [inputText, setInputText] = useState('');
+  const [sendingMedia, setSendingMedia] = useState(false);
   const [isInternalNote, setIsInternalNote] = useState(false);
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
   const [loadingChats, setLoadingChats] = useState(false);
@@ -349,10 +427,32 @@ export const AtendimentoPage: React.FC = () => {
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [newChatNumber, setNewChatNumber] = useState('');
   const [newChatName, setNewChatName] = useState('');
+  const [newChatMessage, setNewChatMessage] = useState('');
+  const [startingNewChat, setStartingNewChat] = useState(false);
 
   // Mensagens do chat ativo
   const [messages, setMessages] = useState<Message[]>([]);
   const readOverridesRef = React.useRef(new Map<string, number>());
+  const conversationsRef = React.useRef<Conversation[]>([]);
+  const activeConvIdRef = React.useRef('');
+
+  useEffect(() => {
+    const state = location.state as { startChat?: { phone?: string; name?: string } } | null;
+    if (!state?.startChat?.phone) return;
+    setNewChatNumber(state.startChat.phone.replace(/\D/g, ''));
+    setNewChatName(state.startChat.name || '');
+    setNewChatMessage('');
+    setAssignmentFeedback('');
+    setShowNewChatModal(true);
+  }, [location.state]);
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
+  useEffect(() => {
+    activeConvIdRef.current = activeConvId;
+  }, [activeConvId]);
 
 
   // Carregar conversas ao iniciar e manter atualizado a cada 4 segundos
@@ -369,13 +469,11 @@ export const AtendimentoPage: React.FC = () => {
   }, [isMock]);
 
   const messagesContainerRef = React.useRef<HTMLDivElement>(null);
-  const messagesEndRef = React.useRef<HTMLDivElement>(null);
+  const attachmentInputRef = React.useRef<HTMLInputElement>(null);
 
-  const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
-    if (messagesContainerRef.current) {
-      messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
-    }
-    messagesEndRef.current?.scrollIntoView({ behavior });
+  const scrollToBottom = () => {
+    const container = messagesContainerRef.current;
+    if (container) container.scrollTop = container.scrollHeight;
   };
 
   // Carregar mensagens quando trocar de conversa e manter sincronizado a cada 2 segundos
@@ -383,19 +481,25 @@ export const AtendimentoPage: React.FC = () => {
     if (!activeConvId || isMock) return;
 
     let isSubscribed = true;
+    let isInitialFetch = true;
+    setMessages([]);
 
     const fetchConvMessages = async () => {
-      const realMsgs = await EvolutionApiService.fetchMessages(instanceName, activeConvId, attendantLabel);
-      if (isSubscribed) {
-        setMessages(realMsgs);
+      const container = messagesContainerRef.current;
+      const distanceFromBottom = container
+        ? container.scrollHeight - container.scrollTop - container.clientHeight
+        : 0;
+      const shouldScroll = isInitialFetch || distanceFromBottom <= 120;
+      isInitialFetch = false;
+      const phone = conversationsRef.current.find((conversation) => conversation.id === activeConvId)?.contact.phone || activeConvId;
+      const realMsgs = await EvolutionApiService.fetchConversationMessages(instanceName, activeConvId, phone, attendantLabel);
+      if (isSubscribed && realMsgs.length > 0) {
+        setMessages((previous) => mergeConversationMessages(previous, realMsgs));
+        if (shouldScroll) window.setTimeout(scrollToBottom, 0);
       }
     };
 
-    fetchConvMessages().then(() => {
-      if (isSubscribed) {
-        setTimeout(() => scrollToBottom('auto'), 50);
-      }
-    });
+    fetchConvMessages();
 
     const interval = setInterval(fetchConvMessages, 2000);
     return () => {
@@ -405,12 +509,6 @@ export const AtendimentoPage: React.FC = () => {
   }, [activeConvId, attendantLabel, isMock, instanceName]);
 
   // Rolar para a última mensagem automaticamente quando a conversa mudar ou chegar mensagem nova
-  useEffect(() => {
-    if (messages.length > 0) {
-      scrollToBottom('smooth');
-    }
-  }, [messages.length, activeConvId]);
-
   const loadChats = async (showLoading = true) => {
     if (showLoading) setLoadingChats(true);
     if (isMock) {
@@ -419,6 +517,8 @@ export const AtendimentoPage: React.FC = () => {
     } else {
       const realChats = await EvolutionApiService.fetchRealChats(instanceName);
       if (realChats.length > 0) {
+        const previousActiveConversation = conversationsRef.current.find((conversation) => conversation.id === activeConvIdRef.current);
+        const previousActivePhone = previousActiveConversation?.contact.phone.replace(/\D/g, '');
         const mergedChats = realChats.map((conversation) => {
           const locallyReadAt = readOverridesRef.current.get(conversation.id);
           return locallyReadAt && conversation.lastMessageAt && conversation.lastMessageAt <= locallyReadAt
@@ -426,10 +526,17 @@ export const AtendimentoPage: React.FC = () => {
             : conversation;
         });
         setConversations(mergedChats);
-        setActiveConvId(prev => prev || mergedChats[0].id);
+        setActiveConvId((previousId) => {
+          if (mergedChats.some((conversation) => conversation.id === previousId)) return previousId;
+          const replacement = previousActivePhone
+            ? mergedChats.find((conversation) => conversation.contact.phone.replace(/\D/g, '') === previousActivePhone)
+            : undefined;
+          return replacement?.id || previousId || mergedChats[0].id;
+        });
       } else {
-        setConversations([]);
-        setMessages([]);
+        // Uma resposta vazia pode ocorrer enquanto a Evolution reorganiza o chat após o envio.
+        // Mantemos a lista atual para não fechar a conversa ativa por engano.
+        setConversations((previous) => previous.length > 0 ? previous : []);
       }
     }
     if (showLoading) setLoadingChats(false);
@@ -437,6 +544,40 @@ export const AtendimentoPage: React.FC = () => {
 
 
   const activeConv = conversations.find(c => c.id === activeConvId);
+  const activeChatLocked = Boolean(
+    activeConv?.assignedAttendant
+      && activeConv.assignedAttendant.id !== user?.id
+      && user?.role !== 'admin',
+  );
+
+  useEffect(() => {
+    if (!activeConv || isMock || !isPhoneOnlyName(activeConv.contact.name)) return;
+    let mounted = true;
+    EvolutionApiService.fetchBusinessProfile(activeConv.contact.phone).then((profile) => {
+      if (!mounted || !profile) return;
+      const normalizedProfile = extractBusinessProfile(profile);
+      if (!normalizedProfile.name) return;
+      setBusinessProfile(normalizedProfile);
+      setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id && isPhoneOnlyName(conversation.contact.name) ? {
+        ...conversation,
+        contact: { ...conversation.contact, name: normalizedProfile.name },
+      } : conversation));
+    });
+    return () => { mounted = false; };
+  }, [activeConvId, isMock]);
+
+  const normalizedConversationSearch = normalizeSearchText(conversationSearch.trim());
+  const visibleConversations = conversations.filter((conversation) => {
+    const matchesFilter = filterTab === 'all'
+      || filterTab === 'unread' && conversation.unreadCount > 0
+      || filterTab === 'unanswered' && conversationNeedsResponse(conversation)
+      || filterTab === 'delivery' && conversation.status === 'pending'
+      || filterTab === 'resolved' && conversation.status === 'resolved';
+    if (!matchesFilter) return false;
+    if (!normalizedConversationSearch) return true;
+    return [conversation.contact.name, conversation.contact.phone]
+      .some((value) => normalizeSearchText(value).includes(normalizedConversationSearch));
+  });
 
   const markConversationAsRead = async (conversation: Conversation) => {
     setConversations((previous) => previous.map((item) => item.id === conversation.id ? { ...item, unreadCount: 0 } : item));
@@ -484,7 +625,7 @@ export const AtendimentoPage: React.FC = () => {
         assignedAttendant: undefined,
         contact: {
           ...conversation.contact,
-          tags: [{ id: 't-real', name: 'WhatsApp', color: '#10B981' }],
+          tags: [],
         },
       } : conversation));
       setAssignmentFeedback('Atendimento liberado para a equipe.');
@@ -624,41 +765,88 @@ export const AtendimentoPage: React.FC = () => {
       }
     });
     EvolutionApiService.fetchBusinessProfile(activeConv.contact.phone)
-      .then((profile) => { if (mounted) setBusinessProfile(profile); })
+      .then((profile) => {
+        if (!mounted || !profile) return;
+        const normalizedProfile = extractBusinessProfile(profile);
+        setBusinessProfile(normalizedProfile);
+        if (normalizedProfile.name && isPhoneOnlyName(activeConv.contact.name)) {
+          setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
+            ...conversation,
+            contact: { ...conversation.contact, name: normalizedProfile.name },
+          } : conversation));
+        }
+      })
       .finally(() => { if (mounted) setLoadingBusinessProfile(false); });
     return () => { mounted = false; setShowGoogleContactForm(false); };
   }, [showContactInfo, activeConvId]);
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim() || !activeConv) return;
+    if (!inputText.trim() || !activeConv || activeChatLocked) return;
 
-    const newMsgText = inputText;
+    const newMsgText = inputText.trim();
+    const outboundText = `*${attendantName}*\n${newMsgText}`;
     setInputText('');
 
     const newMsg: Message = {
       id: `msg-${Date.now()}`,
       conversationId: activeConv.id,
       sender: 'attendant',
-      senderName: attendantLabel,
+      senderName: attendantName,
       content: newMsgText,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      status: 'sent',
+      timestampMs: Date.now(),
+      status: isInternalNote ? 'sent' : 'pending',
       isInternalNote
     };
 
     setMessages(prev => [...prev, newMsg]);
+    window.setTimeout(scrollToBottom, 0);
 
     // Se NÃO for nota interna e NÃO for mock, envia mensagem real no WhatsApp via Evolution API!
+    if (isInternalNote && !isMock) {
+      try {
+        const savedNote = await EvolutionApiService.saveInternalNote(activeConv.id, activeConv.contact.phone, newMsgText);
+        setMessages((previous) => previous.map((message) => message.id === newMsg.id ? savedNote : message));
+      } catch (error) {
+        setMessages((previous) => previous.filter((message) => message.id !== newMsg.id));
+        setInputText(newMsgText);
+        setAssignmentFeedback(error instanceof Error ? error.message : 'NÃ£o foi possÃ­vel salvar a nota interna.');
+        return;
+      }
+    }
+
     if (!isInternalNote && !isMock) {
-      await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, newMsgText);
+      try {
+      const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, outboundText, activeConv.id);
+      setMessages((previous) => previous.map((message) => message.id === newMsg.id ? {
+        ...message,
+        id: result?.message?.evolutionMessageId || result?.message?.id || message.id,
+        status: 'sent',
+      } : message));
+      const dailyResponder = result?.dailyResponder;
+      if (dailyResponder?.id && dailyResponder?.name) {
+        setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
+          ...conversation,
+          contact: {
+            ...conversation.contact,
+            tags: [{ id: `daily-responder-${dailyResponder.id}`, name: `👤 ${dailyResponder.name}`, color: '#A78BFA' }],
+          },
+        } : conversation));
+      }
       
       // Busca atualizada do backend imediatamente apos enviar
       setTimeout(async () => {
-        const updatedMsgs = await EvolutionApiService.fetchMessages(instanceName, activeConv.id, attendantLabel);
-        if (updatedMsgs.length > 0) setMessages(updatedMsgs);
+        const updatedMsgs = await EvolutionApiService.fetchConversationMessages(instanceName, activeConv.id, activeConv.contact.phone, attendantLabel);
+        if (updatedMsgs.length > 0) setMessages((previous) => mergeConversationMessages(previous, updatedMsgs));
         loadChats(false);
       }, 800);
+      } catch (error) {
+        setMessages((previous) => previous.map((message) => message.id === newMsg.id ? { ...message, status: 'failed' } : message));
+        setInputText(newMsgText);
+        setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar a mensagem.');
+        return;
+      }
     }
 
     // Atualiza última mensagem na lista lateral
@@ -672,13 +860,157 @@ export const AtendimentoPage: React.FC = () => {
     } : c));
   };
 
-  const handleStartNewChat = (e: React.FormEvent) => {
+  const handleAttachmentChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || !activeConv || activeChatLocked || isInternalNote || sendingMedia) return;
+    if (file.size > 10 * 1024 * 1024) {
+      setAssignmentFeedback('O anexo deve ter no máximo 10 MB.');
+      return;
+    }
+    const isImage = file.type.startsWith('image/');
+    const isVideo = file.type.startsWith('video/');
+    const fileExtension = file.name.toLowerCase().split('.').pop() || '';
+    const isDocument = file.type === 'application/pdf'
+      || file.type.startsWith('application/msword')
+      || file.type.startsWith('application/vnd.openxmlformats-officedocument')
+      || ['pdf', 'doc', 'docx'].includes(fileExtension);
+    if (!isImage && !isVideo && !isDocument) {
+      setAssignmentFeedback('Formato não suportado. Envie uma imagem, vídeo ou documento.');
+      return;
+    }
+
+    const mediatype: 'image' | 'video' | 'document' = isImage ? 'image' : isVideo ? 'video' : 'document';
+    const label = mediatype === 'image' ? '[Imagem]' : mediatype === 'video' ? '[Vídeo]' : '[Documento]';
+    const caption = inputText.trim();
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(new Error('Não foi possível ler o anexo'));
+      reader.readAsDataURL(file);
+    }).catch((error) => {
+      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível ler o anexo.');
+      return '';
+    });
+    if (!dataUrl) return;
+    const media = dataUrl.split(',')[1];
+    if (!media) return;
+    const localMessage: Message = {
+      id: `media-${Date.now()}`,
+      conversationId: activeConv.id,
+      sender: 'attendant',
+      senderName: attendantName,
+      content: caption || label,
+      mediaUrl: dataUrl,
+      mediaType: mediatype,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      timestampMs: Date.now(),
+      status: 'pending',
+    };
+    setAssignmentFeedback('');
+    setSendingMedia(true);
+    setInputText('');
+    setMessages((previous) => [...previous, localMessage]);
+    window.setTimeout(scrollToBottom, 0);
+    try {
+      const result = await EvolutionApiService.sendMediaMessage({
+        instanceName,
+        number: activeConv.contact.phone,
+        remoteJid: activeConv.id,
+        mediatype,
+        mimetype: file.type || (mediatype === 'image' ? 'image/jpeg' : mediatype === 'video' ? 'video/mp4' : fileExtension === 'pdf' ? 'application/pdf' : 'application/octet-stream'),
+        media,
+        fileName: file.name,
+        caption: caption || undefined,
+      });
+      setMessages((previous) => previous.map((message) => message.id === localMessage.id ? {
+        ...message,
+        id: result?.message?.evolutionMessageId || result?.message?.id || message.id,
+        status: 'sent',
+      } : message));
+      const dailyResponder = result?.dailyResponder;
+      setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
+        ...conversation,
+        contact: dailyResponder?.id && dailyResponder?.name
+          ? {
+              ...conversation.contact,
+              tags: [{ id: `daily-responder-${dailyResponder.id}`, name: `👤 ${dailyResponder.name}`, color: '#A78BFA' }],
+            }
+          : conversation.contact,
+        lastMessage: caption || label,
+        lastMessageTimestamp: 'Agora',
+        lastMessageFromMe: true,
+        needsResponse: false,
+      } : conversation));
+      window.setTimeout(() => { void loadChats(false); }, 800);
+    } catch (error) {
+      setMessages((previous) => previous.map((message) => message.id === localMessage.id ? { ...message, status: 'failed' } : message));
+      setInputText(caption);
+      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar o anexo.');
+    } finally {
+      setSendingMedia(false);
+    }
+  };
+
+  const retryFailedMessage = async (message: Message) => {
+    if (!activeConv || isMock || message.status !== 'failed' || message.isInternalNote) return;
+
+    const retryText = message.content.trim();
+    if (!retryText) return;
+    const outboundText = `*${attendantName}*\n${retryText}`;
+    setAssignmentFeedback('');
+    setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'pending' } : item));
+
+    try {
+      const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, outboundText, activeConv.id);
+      setMessages((previous) => previous.map((item) => item.id === message.id ? {
+        ...item,
+        id: result?.message?.evolutionMessageId || result?.message?.id || item.id,
+        status: 'sent',
+      } : item));
+      const dailyResponder = result?.dailyResponder;
+      if (dailyResponder?.id && dailyResponder?.name) {
+        setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
+          ...conversation,
+          contact: {
+            ...conversation.contact,
+            tags: [{ id: `daily-responder-${dailyResponder.id}`, name: `👤 ${dailyResponder.name}`, color: '#A78BFA' }],
+          },
+        } : conversation));
+      }
+      window.setTimeout(() => { void loadChats(false); }, 800);
+    } catch (error) {
+      setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'failed' } : item));
+      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível reenviar a mensagem.');
+    }
+  };
+
+  const handleStartNewChat = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newChatNumber.trim()) return;
+    if (!newChatNumber.trim() || !newChatMessage.trim() || startingNewChat) return;
 
     const cleanNum = newChatNumber.replace(/\D/g, '');
+    if (cleanNum.length < 8) {
+      setAssignmentFeedback('Informe um número válido com DDD.');
+      return;
+    }
     const jid = `${cleanNum}@s.whatsapp.net`;
     const contactName = newChatName.trim() || `+${cleanNum}`;
+    const messageText = newChatMessage.trim();
+    const outboundText = `*${attendantName}*\n${messageText}`;
+
+    setStartingNewChat(true);
+    setAssignmentFeedback('');
+    let result: any = null;
+    if (!isMock) {
+      try {
+        result = await EvolutionApiService.sendTextMessage(instanceName, cleanNum, outboundText, jid);
+      } catch (error) {
+        setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível iniciar a conversa.');
+        setStartingNewChat(false);
+        return;
+      }
+    }
 
     const newConv: Conversation = {
       id: jid,
@@ -687,22 +1019,36 @@ export const AtendimentoPage: React.FC = () => {
         name: contactName,
         phone: `+${cleanNum}`,
         avatar: '',
-        tags: [{ id: 't-new', name: 'WhatsApp', color: '#10B981' }],
+        tags: [],
         createdAt: new Date().toISOString().split('T')[0]
       },
-      lastMessage: 'Nova conversa iniciada',
+      lastMessage: messageText,
       lastMessageTimestamp: 'Agora',
       unreadCount: 0,
+      lastMessageFromMe: true,
+      needsResponse: false,
       status: 'open',
       department: 'Atendimento Geral'
     };
 
     setConversations(prev => [newConv, ...prev]);
     setActiveConvId(jid);
-    setMessages([]);
+    setMessages([{
+      id: result?.message?.id || `new-chat-${Date.now()}`,
+      conversationId: jid,
+      sender: 'attendant',
+      senderName: attendantName,
+      content: messageText,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      timestampMs: Date.now(),
+      status: 'sent',
+    }]);
     setShowNewChatModal(false);
     setNewChatNumber('');
     setNewChatName('');
+    setNewChatMessage('');
+    setStartingNewChat(false);
+    window.setTimeout(() => { void loadChats(false); }, 800);
   };
 
   const insertQuickReply = (text: string) => {
@@ -742,6 +1088,18 @@ export const AtendimentoPage: React.FC = () => {
                   className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-amber-400"
                 />
               </div>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-400 mb-1">Primeira mensagem</label>
+                <textarea
+                  value={newChatMessage}
+                  onChange={e => setNewChatMessage(e.target.value)}
+                  placeholder="Escreva a mensagem que será enviada agora..."
+                  rows={3}
+                  className="w-full resize-none bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-amber-400"
+                  required
+                />
+              </div>
+              {assignmentFeedback && <p className="text-xs font-semibold text-red-300">{assignmentFeedback}</p>}
               <div className="flex items-center justify-end gap-2 pt-2">
                 <button 
                   type="button" 
@@ -752,9 +1110,10 @@ export const AtendimentoPage: React.FC = () => {
                 </button>
                 <button 
                   type="submit"
-                  className="px-4 py-2 rounded-xl bg-amber-400 text-zinc-950 text-xs font-extrabold hover:bg-amber-300"
+                  disabled={startingNewChat}
+                  className="px-4 py-2 rounded-xl bg-amber-400 text-zinc-950 text-xs font-extrabold hover:bg-amber-300 disabled:cursor-wait disabled:opacity-60"
                 >
-                  Iniciar Chat
+                  {startingNewChat ? 'Enviando...' : 'Enviar e iniciar'}
                 </button>
               </div>
             </form>
@@ -795,36 +1154,72 @@ export const AtendimentoPage: React.FC = () => {
             <input 
               type="text" 
               placeholder="Buscar cliente, telefone..."
+              value={conversationSearch}
+              onChange={(event) => setConversationSearch(event.target.value)}
+              aria-label="Buscar atendimento por nome ou telefone"
               className="w-full bg-[#2a343a] border border-transparent rounded-full pl-9 pr-3 py-2.5 text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:border-amber-400/70 transition-colors"
             />
           </div>
 
-          {/* Abas de Status */}
-          <div className="flex rounded-lg bg-[#182126] p-1 border border-[#344047]">
-            {(['open', 'pending', 'resolved'] as const).map(tab => {
-              const needsResponseCount = conversations.filter((conversation) => (
-                conversation.status === tab && conversationNeedsResponse(conversation)
-              )).length;
-              const tabLabel = tab === 'open' ? 'Abertos' : tab === 'pending' ? 'Entrega' : 'Resolvidos';
+          {/* Filtros de atendimento */}
+          <div className="grid grid-cols-6 gap-1.5 rounded-xl border border-[#3a474e] bg-[#141d22] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.025),0_8px_24px_rgba(0,0,0,0.14)]">
+            {(['all', 'unread', 'unanswered', 'delivery', 'resolved'] as const).map(tab => {
+              const count = tab === 'all'
+                ? conversations.length
+                : tab === 'unread'
+                  ? conversations.filter((conversation) => conversation.unreadCount > 0).length
+                  : tab === 'unanswered'
+                    ? conversations.filter(conversationNeedsResponse).length
+                    : tab === 'delivery'
+                      ? conversations.filter((conversation) => conversation.status === 'pending').length
+                      : conversations.filter((conversation) => conversation.status === 'resolved').length;
+              const tabLabel = tab === 'all'
+                ? 'Todos'
+                : tab === 'unread'
+                  ? 'Não lidas'
+                  : tab === 'unanswered'
+                    ? 'Não respondidas'
+                    : tab === 'delivery'
+                      ? 'Entregas'
+                      : 'Resolvidas';
+              const tabWidth = tab === 'all' || tab === 'unread' || tab === 'unanswered'
+                ? 'col-span-3'
+                : tab === 'delivery'
+                  ? 'col-span-2'
+                : tab === 'resolved'
+                    ? 'col-span-1'
+                    : 'col-span-2';
+              const isActive = filterTab === tab;
 
               return (
                 <button
                   key={tab}
                   onClick={() => setFilterTab(tab)}
-                  className={`flex-1 py-1.5 text-xs font-bold rounded-md capitalize transition-all flex items-center justify-center gap-1.5 ${
-                    filterTab === tab 
-                      ? 'bg-amber-400 text-zinc-950 shadow-sm' 
-                      : 'text-zinc-400 hover:text-zinc-200'
+                  title={tab === 'resolved' ? `${tabLabel}: ${count}` : undefined}
+                  aria-label={`${tabLabel}: ${count}`}
+                  aria-pressed={isActive}
+                  className={`${tabWidth} group relative flex h-9 min-w-0 items-center overflow-hidden rounded-lg border ${tab === 'resolved' ? 'justify-center pl-2 pr-6' : 'justify-start pl-2.5 pr-8'} text-[11px] font-semibold tracking-[-0.01em] transition-all duration-200 ${
+                    isActive
+                      ? 'border-amber-300/80 bg-gradient-to-b from-amber-300 to-amber-400 text-[#17130a] shadow-[0_4px_14px_rgba(251,191,36,0.18),inset_0_1px_0_rgba(255,255,255,0.55)]'
+                      : 'border-transparent bg-[#1b252a] text-slate-300 hover:border-[#46545c] hover:bg-[#222e34] hover:text-white'
                   }`}
                 >
-                  <span>{tabLabel}</span>
-                  {tab !== 'resolved' && needsResponseCount > 0 && (
-                    <span className={`min-w-4 h-4 px-1 rounded-full text-[10px] leading-4 font-extrabold ${
-                      filterTab === tab ? 'bg-zinc-950 text-amber-300' : 'bg-emerald-400 text-zinc-950'
-                    }`}>
-                      {needsResponseCount}
-                    </span>
+                  {tab === 'resolved' ? (
+                    <Archive className="h-[17px] w-[17px] shrink-0" strokeWidth={2} aria-hidden="true" />
+                  ) : (
+                    <span className="truncate whitespace-nowrap">{tabLabel}</span>
                   )}
+                  <span className={`inline-flex shrink-0 items-center justify-center rounded-md border font-extrabold leading-none tabular-nums ${
+                    tab === 'resolved'
+                      ? 'absolute right-1 top-1 h-4 min-w-4 px-1 text-[9px]'
+                      : 'absolute right-1.5 top-1/2 h-5 min-w-6 -translate-y-1/2 px-1.5 text-[10px]'
+                  } ${
+                    isActive
+                      ? 'border-[#17130a]/15 bg-[#17130a] text-amber-300'
+                      : 'border-[#3b484f] bg-[#263239] text-slate-200 group-hover:border-[#52616a]'
+                  }`}>
+                    {count}
+                  </span>
                 </button>
               );
             })}
@@ -839,13 +1234,16 @@ export const AtendimentoPage: React.FC = () => {
               <p className="text-xs font-bold text-zinc-400">Nenhuma conversa encontrada</p>
               <p className="text-[11px] text-zinc-500">Assim que um cliente enviar mensagem no seu WhatsApp, ela aparecerá aqui em tempo real.</p>
             </div>
-          ) : (
-            conversations
-              .filter(c => c.status === filterTab)
-              .map(conv => {
+           ) : visibleConversations.length === 0 ? (
+             <div className="p-8 text-center space-y-2">
+               <Search className="w-8 h-8 text-zinc-600 mx-auto" />
+               <p className="text-xs font-bold text-zinc-400">Nenhum atendimento corresponde à busca</p>
+               <p className="text-[11px] text-zinc-500">Tente outro nome ou número de telefone.</p>
+             </div>
+           ) : (
+             visibleConversations.map(conv => {
                 const isSelected = conv.id === activeConvId;
                 const needsResponse = conversationNeedsResponse(conv);
-                const assignedToOther = Boolean(conv.assignedAttendant && conv.assignedAttendant.id !== user?.id);
                 return (
                   <div
                     key={conv.id}
@@ -864,7 +1262,7 @@ export const AtendimentoPage: React.FC = () => {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between mb-1 gap-2">
                         <p className={`text-xs truncate ${needsResponse ? 'font-extrabold text-white' : 'font-bold text-zinc-100'}`}>{conv.contact.name}</p>
-                        <span className="text-[10px] font-semibold text-zinc-500">{conv.lastMessageTimestamp}</span>
+                        <span className="text-[10px] font-semibold text-zinc-500">{formatMessageTimestamp(conv.lastMessageAt, conv.lastMessageTimestamp)}</span>
                       </div>
 
                       <p className={`text-xs truncate mb-1.5 ${needsResponse ? 'font-bold text-slate-200' : 'text-zinc-400'}`}>{conv.lastMessage}</p>
@@ -882,7 +1280,6 @@ export const AtendimentoPage: React.FC = () => {
                             {tag.name}
                           </span>
                         ))}
-                        {assignedToOther && <span className="text-[9px] text-violet-300 font-semibold">Atendimento em andamento</span>}
                       </div>
                     </div>
                   </div>
@@ -913,21 +1310,21 @@ export const AtendimentoPage: React.FC = () => {
 
               {/* Ações Rápidas do Atendimento */}
               <div className="flex items-center gap-2">
-                {activeConv.assignedAttendant ? (
-                  activeConv.assignedAttendant.id === user?.id ? (
+                {false && (activeConv!.assignedAttendant ? (
+                  activeConv!.assignedAttendant!.id === user?.id ? (
                     <button type="button" onClick={releaseActiveChat} disabled={capturingChat} className="px-3 py-1.5 text-xs font-bold rounded-lg bg-violet-400/10 text-violet-300 border border-violet-400/30 hover:bg-violet-400 hover:text-zinc-950 transition-all flex items-center gap-1.5 disabled:opacity-60">
                       <UserCheck className="w-3.5 h-3.5" /> {capturingChat ? 'Atualizando...' : 'Liberar atendimento'}
                     </button>
                   ) : (
                     <span className="px-3 py-1.5 text-xs font-bold rounded-lg bg-violet-400/10 text-violet-300 border border-violet-400/30 flex items-center gap-1.5" title="Este atendimento foi capturado por outro usuário">
-                      <UserCheck className="w-3.5 h-3.5" /> {activeConv.assignedAttendant.name}
+                      <UserCheck className="w-3.5 h-3.5" /> {activeConv!.assignedAttendant!.name}
                     </span>
                   )
                 ) : (
                   <button type="button" onClick={captureActiveChat} disabled={capturingChat} className="px-3 py-1.5 text-xs font-bold rounded-lg bg-amber-400/10 text-amber-300 border border-amber-400/30 hover:bg-amber-400 hover:text-zinc-950 transition-all flex items-center gap-1.5 disabled:opacity-60">
                     <UserCheck className="w-3.5 h-3.5" /> {capturingChat ? 'Capturando...' : 'Capturar atendimento'}
                   </button>
-                )}
+                ))}
                 <button type="button" onClick={() => updateActiveChatStatus(activeConv.status === 'resolved' ? 'open' : 'resolved')} className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500 hover:text-zinc-950 transition-all flex items-center gap-1.5">
                   <CheckCircle className="w-3.5 h-3.5" />
                   {activeConv.status === 'resolved' ? 'Reabrir Conversa' : 'Concluído'}
@@ -950,7 +1347,7 @@ export const AtendimentoPage: React.FC = () => {
             {assignmentFeedback && <div className="px-5 py-2 text-xs font-semibold text-violet-200 bg-violet-400/10 border-b border-violet-400/20">{assignmentFeedback}</div>}
 
             {/* Mensagens com Scroll */}
-            <div ref={messagesContainerRef} className="chat-wallpaper flex-1 px-6 py-5 overflow-y-auto space-y-3">
+            <div ref={messagesContainerRef} style={{ overflowAnchor: 'none' }} className="chat-wallpaper flex-1 px-6 py-5 overflow-y-auto space-y-3">
               <div className="flex justify-center my-2">
                 <span className="text-[10px] font-bold px-3 py-1 rounded-lg bg-[#20292f]/95 border border-white/5 text-slate-400 shadow-sm">
                   Atendimento em tempo real via Evolution API
@@ -968,7 +1365,7 @@ export const AtendimentoPage: React.FC = () => {
                         <div className="flex items-center gap-1.5 font-bold mb-1 text-amber-400">
                           <Lock className="w-3.5 h-3.5" />
                           <span>Nota Interna ({msg.senderName})</span>
-                          <span className="text-[10px] opacity-70 ml-auto">{msg.timestamp}</span>
+                          <span className="text-[10px] opacity-70 ml-auto">{formatMessageTimestamp(msg.timestampMs, msg.timestamp)}</span>
                         </div>
                         <p>{msg.content}</p>
                         <span className="text-[9px] font-semibold text-amber-400/70 block mt-1">
@@ -993,26 +1390,40 @@ export const AtendimentoPage: React.FC = () => {
                           ? 'bg-[#5b4b20] text-[#fff8df] border border-amber-300/15 font-medium rounded-tr-none'
                           : 'bg-[#273238] text-slate-100 border border-white/5 rounded-tl-none'
                       }`}>
-                        {isMe && <p className="text-[10px] font-bold text-amber-200/75 mb-1">{msg.senderName}</p>}
+                        {isMe && (
+                          <p className="text-[10px] font-bold text-amber-200/75 mb-1">{msg.senderName}</p>
+                        )}
 
                         {/* Renderização Inteligente de Mídias (Imagem, Áudio, Documentos em Base64) */}
                         <MediaMessageContent msg={msg} instanceName={instanceName} />
                         <InteractiveMessageContent msg={msg} />
 
                         {/* Texto da Mensagem */}
-                        {msg.mediaType !== 'sticker' && msg.content && msg.content !== '[Imagem]' && msg.content !== '[Mensagem de Áudio]' && !msg.content.startsWith('🖼️') && !msg.content.startsWith('🎵') && (
+                        {!isMediaPlaceholder(msg) && msg.content && !msg.content.startsWith('🖼️') && !msg.content.startsWith('🎵') && !msg.content.startsWith('🎬') && (
                           <p className="whitespace-pre-wrap">{msg.content}</p>
                         )}
                       </div>
                       <div className={`flex items-center gap-1 mt-1 text-[10px] text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
-                        <span>{msg.timestamp}</span>
-                        {isMe && <CheckCheck className="w-3.5 h-3.5 text-amber-500" />}
+                        <span>{formatMessageTimestamp(msg.timestampMs, msg.timestamp)}</span>
+                        {isMe && msg.status === 'failed' && <span className="font-bold text-red-300">Falha no envio</span>}
+                        {isMe && msg.status === 'pending' && <span className="font-semibold text-amber-300">Enviando...</span>}
+                        {isMe && msg.status !== 'failed' && msg.status !== 'pending' && (
+                          <CheckCheck className={`w-3.5 h-3.5 ${msg.status === 'read' ? 'text-emerald-400' : msg.status === 'delivered' ? 'text-amber-400' : 'text-slate-400'}`} />
+                        )}
+                        {isMe && msg.status === 'failed' && (
+                          <button
+                            type="button"
+                            onClick={() => { void retryFailedMessage(msg); }}
+                            className="ml-1 font-bold text-amber-300 underline decoration-amber-300/50 underline-offset-2 hover:text-amber-200"
+                          >
+                            Tentar novamente
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
                 );
               })}
-              <div ref={messagesEndRef} />
             </div>
 
             {/* Caixas de Resposta Rápida (Pop-over) */}
@@ -1041,6 +1452,11 @@ export const AtendimentoPage: React.FC = () => {
 
             {/* Input de Envio de Mensagem */}
             <form onSubmit={handleSendMessage} className="p-3 bg-[#20292f] border-t border-[#344047]">
+              {activeChatLocked && (
+                <div className="mb-2 rounded-lg border border-violet-300/20 bg-violet-300/10 px-3 py-2 text-[11px] font-semibold text-violet-200">
+                  Este atendimento está capturado por {activeConv?.assignedAttendant?.name || 'outro atendente'}.
+                </div>
+              )}
               <div className="flex items-center gap-2 mb-2">
                 <button
                   type="button"
@@ -1075,7 +1491,20 @@ export const AtendimentoPage: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-2">
-                <button type="button" className="p-2.5 rounded-full bg-transparent text-slate-400 hover:text-amber-300 hover:bg-[#2a343a] transition-colors">
+                <input
+                  ref={attachmentInputRef}
+                  type="file"
+                  accept="image/*,video/*,application/pdf,.doc,.docx"
+                  className="hidden"
+                  onChange={handleAttachmentChange}
+                />
+                <button
+                  type="button"
+                  onClick={() => attachmentInputRef.current?.click()}
+                  disabled={activeChatLocked || isInternalNote || sendingMedia}
+                  title="Enviar imagem, vídeo ou documento"
+                  className="p-2.5 rounded-full bg-transparent text-slate-400 hover:text-amber-300 hover:bg-[#2a343a] transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+                >
                   <Paperclip className="w-4 h-4" />
                 </button>
 
@@ -1083,6 +1512,7 @@ export const AtendimentoPage: React.FC = () => {
                   type="text" 
                   value={inputText}
                   onChange={(e) => setInputText(e.target.value)}
+                  disabled={activeChatLocked || sendingMedia}
                   placeholder={isInternalNote ? "Digite uma nota interna para a equipe..." : "Digite sua mensagem para o WhatsApp..."}
                   className={`flex-1 bg-[#2a343a] border text-xs text-slate-100 placeholder-slate-400 rounded-full px-4 py-3 focus:outline-none transition-colors ${
                     isInternalNote 
@@ -1093,11 +1523,12 @@ export const AtendimentoPage: React.FC = () => {
 
                 <button 
                   type="submit"
+                  disabled={activeChatLocked || sendingMedia}
                   className={`p-3 rounded-full font-bold flex items-center justify-center transition-all ${
                     isInternalNote 
                       ? 'bg-amber-500 text-zinc-950 hover:bg-amber-400' 
                       : 'bg-amber-400 text-zinc-950 hover:bg-amber-300 shadow-[0_0_12px_rgba(238,187,44,0.3)]'
-                  }`}
+                  } disabled:cursor-not-allowed disabled:opacity-40`}
                 >
                   <Send className="w-4 h-4" />
                 </button>
@@ -1145,7 +1576,7 @@ export const AtendimentoPage: React.FC = () => {
             </div>
           </div>
 
-          <div className="pt-4">
+          <div className="pt-4" style={{ display: 'none' }}>
             <button className="w-full btn-primary text-xs justify-center py-2.5">
               <Kanban className="w-4 h-4" /> Criar Negócio no Funil
             </button>

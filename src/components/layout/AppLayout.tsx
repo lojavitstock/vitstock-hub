@@ -3,7 +3,6 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { 
   MessageSquare, 
   Users, 
-  Kanban, 
   Megaphone, 
   QrCode, 
   Settings, 
@@ -47,7 +46,6 @@ export const AppLayout: React.FC = () => {
   }> = [
     { path: '/atendimento', label: 'Atendimento', icon: MessageSquare },
     { path: '/contatos', label: 'Contatos', icon: Users },
-    { path: '/funil', label: 'Funil CRM', icon: Kanban },
     { path: '/campanhas', label: 'Campanhas', icon: Megaphone },
     { path: '/conexoes', label: 'Conexões', icon: QrCode },
     { path: '/configuracoes', label: 'Configurações', icon: Settings },

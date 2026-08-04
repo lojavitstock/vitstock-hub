@@ -1,10 +1,44 @@
 import React, { useState } from 'react';
-import { Settings, Users, Shield, Zap, Layers, Plus, Check } from 'lucide-react';
+import { Settings, Users, Shield, Zap, Layers, Plus, Check, KeyRound, Loader2 } from 'lucide-react';
 import { Attendant } from '../types';
+import { apiRequest } from '../services/api';
+import { useAuth } from '../auth/AuthContext';
 
 export const ConfiguracoesPage: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'attendants' | 'departments' | 'quickReplies'>('attendants');
+  const { user } = useAuth();
+  const [activeTab, setActiveTab] = useState<'attendants' | 'departments' | 'quickReplies' | 'security'>('attendants');
   const [attendants, setAttendants] = useState<Attendant[]>([]);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordFeedback, setPasswordFeedback] = useState('');
+  const [passwordError, setPasswordError] = useState('');
+  const [savingPassword, setSavingPassword] = useState(false);
+
+  const handleChangePassword = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setPasswordFeedback('');
+    setPasswordError('');
+    if (newPassword !== confirmPassword) {
+      setPasswordError('A confirmação não coincide com a nova senha.');
+      return;
+    }
+    setSavingPassword(true);
+    try {
+      await apiRequest<{ changed: boolean }>('/api/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setPasswordFeedback('Senha alterada com sucesso.');
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : 'Não foi possível alterar a senha.');
+    } finally {
+      setSavingPassword(false);
+    }
+  };
 
   return (
     <div className="flex-1 h-full p-6 overflow-y-auto bg-zinc-950 font-overpass">
@@ -45,9 +79,48 @@ export const ConfiguracoesPage: React.FC = () => {
             </button>
           );
         })}
+        <button
+          type="button"
+          onClick={() => setActiveTab('security')}
+          className={`pb-3 text-xs font-bold transition-all flex items-center gap-2 border-b-2 ${activeTab === 'security' ? 'border-amber-400 text-amber-400' : 'border-transparent text-zinc-400 hover:text-zinc-200'}`}
+        >
+          <KeyRound className="w-4 h-4" /> Minha Senha
+        </button>
       </div>
 
       {/* Conteúdo da Aba */}
+      {activeTab === 'security' && (
+        <div className="max-w-xl space-y-5">
+          <div>
+            <h3 className="text-sm font-extrabold text-zinc-100">Alterar minha senha</h3>
+            <p className="text-xs text-zinc-400 mt-1">Atualize a senha da conta {user?.email || 'atual'}.</p>
+          </div>
+          <form onSubmit={handleChangePassword} className="space-y-4 rounded-xl border border-zinc-800 bg-[#0C0C0E] p-5">
+            <label className="block text-xs font-bold text-zinc-300">
+              Senha atual
+              <input required type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-amber-400" />
+            </label>
+            <label className="block text-xs font-bold text-zinc-300">
+              Nova senha
+              <input required minLength={8} type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-amber-400" />
+              <span className="mt-1 block text-[11px] font-normal text-zinc-500">Use pelo menos 8 caracteres.</span>
+            </label>
+            <label className="block text-xs font-bold text-zinc-300">
+              Confirmar nova senha
+              <input required minLength={8} type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-amber-400" />
+            </label>
+            {passwordError && <p role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-300">{passwordError}</p>}
+            {passwordFeedback && <p role="status" className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-xs text-emerald-300">{passwordFeedback}</p>}
+            <div className="flex justify-end border-t border-zinc-800 pt-4">
+              <button type="submit" disabled={savingPassword} className="btn-primary text-xs disabled:cursor-not-allowed disabled:opacity-60">
+                {savingPassword && <Loader2 className="w-4 h-4 animate-spin" />}
+                {savingPassword ? 'Salvando...' : 'Alterar senha'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {activeTab === 'attendants' && (
         <div className="space-y-4 max-w-3xl">
           <div className="flex items-center justify-between">

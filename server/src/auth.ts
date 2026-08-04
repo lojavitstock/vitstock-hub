@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { db } from './db.js';
 import { isProduction } from './config.js';
-import { verifyPassword } from './security/password.js';
+import { hashPassword, verifyPassword } from './security/password.js';
 import {
   createSessionToken,
   hashSessionToken,
@@ -13,6 +13,11 @@ import {
 const credentialsSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1).max(256),
+});
+
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1).max(256),
+  newPassword: z.string().min(8).max(256),
 });
 
 export async function loadUser(request: FastifyRequest) {
@@ -113,6 +118,33 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     if (token) await db.query('DELETE FROM sessions WHERE token_hash = $1', [hashSessionToken(token)]);
     reply.clearCookie(SESSION_COOKIE, { path: '/' });
     return reply.code(204).send();
+  });
+
+  app.post('/api/auth/change-password', { preHandler: requireUser }, async (request, reply) => {
+    const parsed = changePasswordSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'A nova senha deve ter pelo menos 8 caracteres' });
+
+    const currentUser = request.user!;
+    const result = await db.query<{ password_hash: string }>(
+      'SELECT password_hash FROM users WHERE id = $1 AND company_id = $2 AND active = true',
+      [currentUser.id, currentUser.companyId],
+    );
+    const user = result.rows[0];
+    if (!user || !(await verifyPassword(parsed.data.currentPassword, user.password_hash))) {
+      return reply.code(400).send({ error: 'A senha atual está incorreta' });
+    }
+    if (parsed.data.currentPassword === parsed.data.newPassword) {
+      return reply.code(400).send({ error: 'A nova senha deve ser diferente da atual' });
+    }
+
+    await db.query(
+      `UPDATE users
+       SET password_hash = $1, must_change_password = false, updated_at = now()
+       WHERE id = $2 AND company_id = $3`,
+      [await hashPassword(parsed.data.newPassword), currentUser.id, currentUser.companyId],
+    );
+
+    return { changed: true };
   });
 
   app.get('/api/auth/me', { preHandler: requireUser }, async (request) => ({ user: request.user }));

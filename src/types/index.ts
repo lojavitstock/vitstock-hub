@@ -35,7 +35,7 @@ export interface Message {
   senderName?: string;
   content: string;
   mediaUrl?: string;
-  mediaType?: 'image' | 'audio' | 'document' | 'sticker';
+  mediaType?: 'image' | 'audio' | 'video' | 'document' | 'sticker';
   mediaDuration?: number;
   interactiveTitle?: string;
   interactiveFooter?: string;
@@ -46,8 +46,9 @@ export interface Message {
     value?: string;
   }>;
   rawKey?: any;
+  timestampMs?: number;
   timestamp: string;
-  status: 'sent' | 'delivered' | 'read';
+  status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
   isInternalNote?: boolean;
 }
 

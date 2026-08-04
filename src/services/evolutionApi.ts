@@ -19,6 +19,23 @@ const firstMessageText = (...values: unknown[]) => values.find(
   (value): value is string => typeof value === 'string' && value.trim().length > 0,
 )?.trim();
 
+const normalizeProviderMessageStatus = (value: unknown): Message['status'] => {
+  const raw = String(value ?? '').trim().toUpperCase();
+  if (['ERROR', 'FAILED', 'FAILURE', 'REJECTED', '0'].includes(raw)) return 'failed';
+  if (['READ', 'PLAYED', '4', '5'].includes(raw)) return 'read';
+  if (['DELIVERY_ACK', 'DELIVERED', '2', '3'].includes(raw)) return 'delivered';
+  return 'sent';
+};
+
+const parseAttendantSignature = (content: string) => {
+  const match = content.match(/^\*(?:👤\s*)?([^*\r\n]+)\*\s*(?:\r?\n|$)/);
+  if (!match) return { senderName: undefined, content };
+  return {
+    senderName: match[1].trim(),
+    content: content.slice(match[0].length).trimStart(),
+  };
+};
+
 const getInteractiveMessage = (message: any) => {
   const msg = unwrapEvolutionMessage(message);
   return msg.interactiveMessage
@@ -213,6 +230,23 @@ export class EvolutionApiService {
   }
 
   /**
+   * Encerrar a sessão atual para permitir um novo pareamento por QR Code.
+   */
+  static async logoutInstance(instanceName: string) {
+    if (USE_MOCK) return { status: 'SUCCESS' };
+
+    const response = await apiFetch('/api/evolution/logout', {
+      method: 'POST',
+      body: '{}',
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(body?.error || 'Não foi possível desconectar o WhatsApp');
+    }
+    return body;
+  }
+
+  /**
    * Buscar conversas reais diretamente da Evolution API no Railway
    */
   /**
@@ -233,8 +267,10 @@ export class EvolutionApiService {
       const chatsData = payload.chats;
       const storedContactsData = payload.storedContacts;
       const storedContactsMap = new Map<string, { name: string; source: string }>();
+      const whatsappNamesMap = new Map<string, { name: string; avatar?: string }>();
       const assignmentsMap = new Map<string, { id: string; name: string }>();
       const assignmentsByNumber = new Map<string, { id: string; name: string }>();
+      const dailyRespondersByNumber = new Map<string, { id: string; name: string; date: string }>();
       const statusesMap = new Map<string, { status: ChatStatus; updatedAt: number }>();
       const statusesByNumber = new Map<string, { status: ChatStatus; updatedAt: number }>();
       const readStatesMap = new Map<string, number>();
@@ -246,6 +282,20 @@ export class EvolutionApiService {
             assignmentsMap.set(assignment.evolution_remote_jid, value);
             const number = assignment.evolution_remote_jid.split('@')[0].replace(/\D/g, '');
             if (number) assignmentsByNumber.set(number, value);
+          }
+        });
+      }
+
+      if (Array.isArray(payload.dailyResponders)) {
+        payload.dailyResponders.forEach((responder: any) => {
+          if (!responder?.evolution_remote_jid || !responder?.user_id || !responder?.user_name) return;
+          const number = responder.evolution_remote_jid.split('@')[0].replace(/\D/g, '');
+          if (number) {
+            dailyRespondersByNumber.set(number, {
+              id: responder.user_id,
+              name: responder.user_name,
+              date: responder.response_date,
+            });
           }
         });
       }
@@ -299,6 +349,17 @@ export class EvolutionApiService {
         });
       }
 
+      if (Array.isArray(payload.whatsappNames)) {
+        payload.whatsappNames.forEach((contact: any) => {
+          if (!contact?.phone || !contact?.name) return;
+          phoneVariants(contact.phone).forEach((phone) => {
+            if (!whatsappNamesMap.has(phone)) {
+              whatsappNamesMap.set(phone, { name: contact.name, avatar: contact.avatar_url || undefined });
+            }
+          });
+        });
+      }
+
       // Popula o mapa de contatos para resolver nomes salvos
       if (Array.isArray(contactsData)) {
         contactsData.forEach((c: any) => {
@@ -332,6 +393,9 @@ export class EvolutionApiService {
         const assignment = assignmentsMap.get(rawRemoteJid)
           || (altJid ? assignmentsMap.get(altJid) : undefined)
           || phoneVariants(cleanNumber).map((phone) => assignmentsByNumber.get(phone)).find(Boolean);
+        const dailyResponder = phoneVariants(cleanNumber)
+          .map((phone) => dailyRespondersByNumber.get(phone))
+          .find(Boolean);
         const lastMessageFromMe = Boolean(item.lastMessage?.key?.fromMe);
         const lastMessageAt = item.lastMessage?.messageTimestamp
           ? Number(item.lastMessage.messageTimestamp) * 1000
@@ -363,8 +427,15 @@ export class EvolutionApiService {
         const storedContact = phoneVariants(cleanNumber)
           .map((phone) => storedContactsMap.get(phone))
           .find(Boolean);
-        let displayName = storedContact?.name ||
+        const savedName = storedContact?.name && !/^\+?[\d\s().-]+$/.test(storedContact.name.trim())
+          ? storedContact.name
+          : undefined;
+        const whatsappContact = phoneVariants(cleanNumber)
+          .map((phone) => whatsappNamesMap.get(phone))
+          .find(Boolean);
+        let displayName = savedName ||
                           savedContact?.name ||
+                          whatsappContact?.name ||
                           item.lastMessage?.pushName || 
                           item.pushName || 
                           item.name || 
@@ -386,10 +457,10 @@ export class EvolutionApiService {
             id: rawRemoteJid,
             name: displayName,
             phone: `+${cleanNumber}`,
-            avatar: savedContact?.avatar || item.profilePicUrl || item.profilePictureUrl || '',
-            tags: [assignment
-              ? { id: `assigned-${assignment.id}`, name: assignment.name, color: '#A78BFA' }
-              : { id: 't-real', name: 'WhatsApp', color: '#10B981' }],
+            avatar: savedContact?.avatar || whatsappContact?.avatar || item.profilePicUrl || item.profilePictureUrl || '',
+            tags: dailyResponder
+              ? [{ id: `daily-responder-${dailyResponder.id}`, name: `👤 ${dailyResponder.name}`, color: '#A78BFA' }]
+              : [],
             createdAt: new Date().toISOString().split('T')[0]
           },
           lastMessage: messageContent,
@@ -464,10 +535,38 @@ export class EvolutionApiService {
     return body as { remoteJid: string; messageTimestamp: number; providerMarked?: boolean };
   }
 
+  static async saveInternalNote(remoteJid: string, phone: string, content: string) {
+    const response = await apiFetch('/api/evolution/notes', {
+      method: 'POST',
+      body: JSON.stringify({ remoteJid, phone, content }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body?.error || 'NÃ£o foi possÃ­vel salvar a nota interna');
+    return body.note as Message;
+  }
+
+  static async fetchInternalNotes(remoteJid: string, phone: string): Promise<Message[]> {
+    const response = await apiFetch('/api/evolution/notes/list', {
+      method: 'POST',
+      body: JSON.stringify({ remoteJid, phone }),
+    });
+    if (!response.ok) return [];
+    const body = await response.json().catch(() => ({}));
+    return Array.isArray(body?.notes) ? body.notes as Message[] : [];
+  }
+
+  static async fetchConversationMessages(instanceName: string, remoteJid: string, phone: string, attendantLabel = 'Atendente') {
+    const [evolutionMessages, internalNotes] = await Promise.all([
+      this.fetchMessages(instanceName, remoteJid, phone, attendantLabel),
+      this.fetchInternalNotes(remoteJid, phone),
+    ]);
+    return [...evolutionMessages, ...internalNotes].sort((a, b) => (a.timestampMs || 0) - (b.timestampMs || 0));
+  }
+
   /**
    * Enviar mensagem de texto diretamente via Evolution API no Railway
    */
-  static async sendTextMessage(instanceName: string, number: string, text: string) {
+  static async sendTextMessage(instanceName: string, number: string, text: string, remoteJid?: string) {
     if (USE_MOCK) {
       console.log(`[MOCK EVOLUTION API] Enviar para ${number}: "${text}"`);
       return { status: 'SUCCESS', messageId: `msg-${Date.now()}` };
@@ -480,16 +579,18 @@ export class EvolutionApiService {
         method: 'POST',
         body: JSON.stringify({
           number: cleanNumber,
-          text: text
+          text,
+          remoteJid,
         })
       });
 
-      const responseData = await res.json();
+      const responseData = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(responseData?.error || 'NÃ£o foi possÃ­vel enviar a mensagem');
       console.log('[EvolutionAPI] Resposta do envio real:', responseData);
       return responseData;
     } catch (err) {
       console.error('[EvolutionAPI] Erro ao enviar mensagem:', err);
-      return null;
+      throw err;
     }
   }
 
@@ -497,7 +598,7 @@ export class EvolutionApiService {
   /**
    * Buscar histórico de mensagens de uma conversa diretamente da Evolution API no Railway
    */
-  static async fetchMessages(instanceName: string, remoteJid: string, attendantLabel = 'Atendente'): Promise<Message[]> {
+  static async fetchMessages(instanceName: string, remoteJid: string, phone = '', attendantLabel = 'Atendente'): Promise<Message[]> {
     if (USE_MOCK) return [];
 
     try {
@@ -505,7 +606,7 @@ export class EvolutionApiService {
 
       const res = await apiFetch('/api/evolution/messages', {
         method: 'POST',
-        body: JSON.stringify({ remoteJid: cleanJid })
+        body: JSON.stringify({ remoteJid: cleanJid, phone })
       });
 
       if (!res.ok) return [];
@@ -521,12 +622,13 @@ export class EvolutionApiService {
         const fromMe = m.key?.fromMe ?? false;
         
         let mediaUrl: string | undefined = undefined;
-        let mediaType: 'image' | 'audio' | 'document' | 'sticker' | undefined = undefined;
+        let mediaType: 'image' | 'audio' | 'video' | 'document' | 'sticker' | undefined = undefined;
 
         const rawMessage = m.message || {};
         const msgObj = unwrapEvolutionMessage(rawMessage);
         const imgMsg = msgObj.imageMessage || rawMessage.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
         const audioMsg = msgObj.audioMessage || rawMessage.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
+        const videoMsg = msgObj.videoMessage || rawMessage.extendedTextMessage?.contextInfo?.quotedMessage?.videoMessage;
         const docMsg = msgObj.documentMessage;
         const stickerMsg = msgObj.stickerMessage;
         const reactionMsg = msgObj.reactionMessage;
@@ -545,6 +647,11 @@ export class EvolutionApiService {
           if (audioMsg.url && audioMsg.url.startsWith('http')) {
             mediaUrl = audioMsg.url;
           }
+        } else if (videoMsg) {
+          mediaType = 'video';
+          if (videoMsg.url && videoMsg.url.startsWith('http')) {
+            mediaUrl = videoMsg.url;
+          }
         } else if (docMsg) {
           mediaType = 'document';
           mediaUrl = docMsg.url;
@@ -555,26 +662,32 @@ export class EvolutionApiService {
           }
         }
 
-        const msgContent = reactionMsg
+        const rawContent = reactionMsg
           ? `Reagiu com: ${reactionMsg.text || '👍'}`
           : extractEvolutionMessageText(rawMessage) || '[Mensagem não suportada]';
+
+        const signature = fromMe
+          ? parseAttendantSignature(rawContent)
+          : { senderName: undefined, content: rawContent };
 
         const timestampStr = m.messageTimestamp 
           ? new Date(Number(m.messageTimestamp) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
           : 'Agora';
 
         const senderType: 'attendant' | 'contact' = fromMe ? 'attendant' : 'contact';
-        const msgStatus: 'sent' | 'delivered' | 'read' = 'read';
+        const msgStatus: Message['status'] = fromMe
+          ? normalizeProviderMessageStatus(m.status || m.update?.status || m.key?.status)
+          : 'read';
 
         return {
           id: m.key?.id || m.id || `real-msg-${idx}`,
           conversationId: remoteJid,
           sender: senderType,
-          senderName: fromMe ? attendantLabel : (m.pushName || 'Contato'),
-          content: msgContent,
+          senderName: fromMe ? (signature.senderName || attendantLabel) : (m.pushName || 'Contato'),
+          content: signature.content,
           mediaUrl: mediaUrl,
           mediaType: mediaType,
-          mediaDuration: audioMsg?.seconds ? Number(audioMsg.seconds) : undefined,
+          mediaDuration: (audioMsg?.seconds || videoMsg?.seconds) ? Number(audioMsg?.seconds || videoMsg?.seconds) : undefined,
           interactiveTitle: interactiveMsg?.header?.title
             || interactiveMsg?.header?.text
             || msgObj.templateMessage?.hydratedTemplate?.hydratedTitleText
@@ -586,6 +699,7 @@ export class EvolutionApiService {
             || undefined,
           interactiveButtons,
           rawKey: m.key,
+          timestampMs: m.messageTimestamp ? Number(m.messageTimestamp) * 1000 : undefined,
           timestamp: timestampStr,
           status: msgStatus,
           isInternalNote: false
@@ -619,6 +733,36 @@ export class EvolutionApiService {
       console.error('[EvolutionAPI] Erro ao buscar mídia decodificada:', err);
       return null;
     }
+  }
+
+  static async sendMediaMessage(input: {
+    instanceName: string;
+    number: string;
+    remoteJid?: string;
+    mediatype: 'image' | 'video' | 'document';
+    mimetype: string;
+    media: string;
+    fileName?: string;
+    caption?: string;
+  }) {
+    if (USE_MOCK) {
+      return { status: 'SUCCESS', message: { id: `media-${Date.now()}`, status: 'sent' } };
+    }
+    const response = await apiFetch('/api/evolution/messages/send-media', {
+      method: 'POST',
+      body: JSON.stringify({
+        number: input.number.replace(/\D/g, ''),
+        remoteJid: input.remoteJid,
+        mediatype: input.mediatype,
+        mimetype: input.mimetype,
+        media: input.media,
+        fileName: input.fileName,
+        caption: input.caption,
+      }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body?.error || 'Não foi possível enviar o anexo');
+    return body;
   }
 
   static async fetchBusinessProfile(number: string): Promise<any | null> {

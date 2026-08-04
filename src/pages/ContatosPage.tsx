@@ -236,7 +236,7 @@ export const ContatosPage: React.FC = () => {
                 <td className="py-3.5 px-4 text-zinc-500">{contact.createdAt}</td>
                 <td className="py-3.5 px-4 text-right">
                   <button 
-                    onClick={() => navigate('/atendimento')}
+                    onClick={() => navigate('/atendimento', { state: { startChat: { phone: contact.phone, name: contact.name } } })}
                     className="px-3 py-1.5 rounded-lg bg-amber-400/10 text-amber-400 border border-amber-400/30 hover:bg-amber-400 hover:text-zinc-950 font-bold transition-all inline-flex items-center gap-1.5"
                   >
                     <MessageSquare className="w-3.5 h-3.5" /> Iniciar Chat

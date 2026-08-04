@@ -5,13 +5,32 @@ import { config } from './config.js';
 import { requireUser } from './auth.js';
 import { db } from './db.js';
 
-const jidSchema = z.object({ remoteJid: z.string().min(3).max(128) });
+const jidSchema = z.object({
+  remoteJid: z.string().min(3).max(128),
+  phone: z.string().max(32).optional(),
+});
 const sendTextSchema = z.object({
   number: z.string().regex(/^\d{8,20}$/),
   text: z.string().min(1).max(4096),
+  remoteJid: z.string().min(3).max(128).optional(),
+});
+const sendMediaSchema = z.object({
+  number: z.string().regex(/^\d{8,20}$/),
+  remoteJid: z.string().min(3).max(128).optional(),
+  mediatype: z.enum(['image', 'video', 'document']),
+  mimetype: z.string().min(3).max(100),
+  media: z.string().min(1).max(14_000_000),
+  fileName: z.string().max(180).optional(),
+  caption: z.string().max(4096).optional(),
 });
 const mediaSchema = z.object({ messageKey: z.record(z.string(), z.unknown()) });
 const phoneSchema = z.object({ number: z.string().regex(/^\d{8,20}$/) });
+const noteSchema = z.object({
+  remoteJid: z.string().min(3).max(128),
+  phone: z.string().max(32).optional(),
+  content: z.string().trim().min(1).max(4096),
+});
+const noteLookupSchema = noteSchema.pick({ remoteJid: true, phone: true });
 const assignmentSchema = z.object({
   remoteJid: z.string().min(3).max(128),
   phone: z.string().max(32).optional(),
@@ -63,6 +82,350 @@ function assignmentJids(input: { remoteJid: string; phone?: string }) {
   return [...new Set(jids)];
 }
 
+function canonicalPhoneJid(number: string) {
+  return `${number.replace(/\D/g, '')}@s.whatsapp.net`;
+}
+
+function providerContactName(value: any) {
+  const candidate = value?.pushName || value?.notify || value?.verifiedName || value?.name;
+  if (typeof candidate !== 'string') return '';
+  const name = candidate.trim();
+  if (!name || name === 'Você' || name === 'WhatsApp Business' || /^\+?[\d\s().-]+$/.test(name)) return '';
+  return name;
+}
+
+function providerContactPhone(value: any) {
+  const rawJid = value?.remoteJid || value?.id || value?.key?.remoteJid || '';
+  const digits = String(rawJid).split('@')[0]?.replace(/\D/g, '') || '';
+  return digits.length >= 8 && digits.length <= 20 ? digits : '';
+}
+
+function normalizeProviderMessageStatus(value: unknown): 'sent' | 'delivered' | 'read' | 'failed' | undefined {
+  const raw = String(value ?? '').trim().toUpperCase();
+  if (!raw) return undefined;
+  if (['ERROR', 'FAILED', 'FAILURE', 'REJECTED'].includes(raw) || raw === '0') return 'failed';
+  if (['READ', 'PLAYED', '4', '5'].includes(raw)) return 'read';
+  if (['DELIVERY_ACK', 'DELIVERED', '2', '3'].includes(raw)) return 'delivered';
+  if (['SERVER_ACK', 'SENT', 'PENDING', '1'].includes(raw)) return 'sent';
+  return undefined;
+}
+
+function unwrapProviderMessage(message: any) {
+  let current = message || {};
+  for (let index = 0; index < 6; index += 1) {
+    const nested = current?.ephemeralMessage?.message
+      || current?.viewOnceMessage?.message
+      || current?.viewOnceMessageV2?.message
+      || current?.documentWithCaptionMessage?.message
+      || current?.editedMessage?.message;
+    if (!nested) break;
+    current = nested;
+  }
+  return current;
+}
+
+function firstProviderText(...values: unknown[]) {
+  return values.find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim();
+}
+
+function providerMessageContent(record: any) {
+  const message = unwrapProviderMessage(record?.message);
+  const interactive = message?.interactiveMessage
+    || message?.templateMessage?.interactiveMessageTemplate
+    || message?.templateMessage?.interactiveMessage;
+  const text = firstProviderText(
+    message?.conversation,
+    message?.extendedTextMessage?.text,
+    message?.imageMessage?.caption,
+    message?.videoMessage?.caption,
+    message?.documentMessage?.caption,
+    interactive?.body?.text,
+    interactive?.header?.text,
+    interactive?.header?.title,
+    message?.buttonsMessage?.contentText,
+    message?.listMessage?.description,
+    message?.listMessage?.title,
+    message?.templateMessage?.hydratedTemplate?.hydratedContentText,
+    message?.templateMessage?.hydratedTemplate?.hydratedTitleText,
+    message?.templateMessage?.hydratedFourRowTemplate?.content,
+  );
+  if (text) return text;
+  if (message?.stickerMessage) return '[Figurinha]';
+  if (message?.audioMessage) return '[Mensagem de Áudio]';
+  if (message?.imageMessage) return '[Imagem]';
+  if (message?.videoMessage) return '[Vídeo]';
+  if (message?.documentMessage) return '[Documento]';
+  if (interactive || message?.buttonsMessage || message?.listMessage) return '[Mensagem interativa]';
+  return '[Mensagem não suportada]';
+}
+
+function providerMessageMedia(record: any) {
+  const message = unwrapProviderMessage(record?.message);
+  const candidates: Array<{ type: 'image' | 'audio' | 'video' | 'document' | 'sticker'; value: any }> = [
+    { type: 'image', value: message?.imageMessage },
+    { type: 'audio', value: message?.audioMessage },
+    { type: 'video', value: message?.videoMessage },
+    { type: 'document', value: message?.documentMessage },
+    { type: 'sticker', value: message?.stickerMessage },
+  ];
+  const found = candidates.find((candidate) => candidate.value);
+  if (!found) return undefined;
+  const url = typeof found.value?.url === 'string' && found.value.url.startsWith('http')
+    ? found.value.url
+    : undefined;
+  return { type: found.type, url };
+}
+
+function providerRemoteJid(record: any) {
+  return String(record?.key?.remoteJid || record?.remoteJid || '').trim();
+}
+
+function providerPhone(record: any) {
+  const remoteJid = providerRemoteJid(record);
+  const phoneJid = record?.key?.senderPn
+    || record?.key?.participantPn
+    || record?.senderPn
+    || remoteJid;
+  const digits = String(phoneJid).split('@')[0]?.replace(/\D/g, '') || '';
+  return digits.length >= 8 && digits.length <= 20 ? digits : '';
+}
+
+function providerMessageId(record: any) {
+  const value = record?.key?.id || record?.id;
+  return typeof value === 'string' && value.trim() ? value.trim() : '';
+}
+
+function providerMessageDate(record: any) {
+  const seconds = Number(record?.messageTimestamp || record?.message?.messageTimestamp);
+  return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : new Date();
+}
+
+function providerRecordToLocalMessage(record: any) {
+  const media = providerMessageMedia(record);
+  const fromMe = record?.key?.fromMe === true;
+  return {
+    id: providerMessageId(record),
+    remoteJid: providerRemoteJid(record),
+    phone: providerPhone(record),
+    sender: fromMe ? 'attendant' as const : 'contact' as const,
+    senderName: fromMe
+      ? (record?.senderName || record?.pushName || 'Atendente')
+      : (providerContactName(record) || record?.pushName || 'Contato'),
+    content: providerMessageContent(record),
+    mediaUrl: media?.url,
+    mediaType: media?.type,
+    sentAt: providerMessageDate(record),
+    status: normalizeProviderMessageStatus(record?.status || record?.update?.status) || 'sent',
+  };
+}
+
+function localMessageToProviderRecord(row: any) {
+  const remoteJid = row.evolution_remote_jid;
+  const id = row.evolution_message_id || row.id;
+  const timestamp = Math.floor(new Date(row.sent_at).getTime() / 1000);
+  const key = { id, remoteJid, fromMe: row.sender === 'attendant' };
+  const mediaMessage = row.media_type === 'image'
+    ? { imageMessage: { url: row.media_url || undefined, caption: row.content } }
+    : row.media_type === 'audio'
+      ? { audioMessage: { url: row.media_url || undefined } }
+      : row.media_type === 'video'
+        ? { videoMessage: { url: row.media_url || undefined, caption: row.content } }
+        : row.media_type === 'document'
+          ? { documentMessage: { url: row.media_url || undefined, caption: row.content } }
+          : row.media_type === 'sticker'
+            ? { stickerMessage: { url: row.media_url || undefined } }
+            : { conversation: row.content };
+  return {
+    key,
+    message: mediaMessage,
+    pushName: row.sender_name || 'Contato',
+    messageTimestamp: timestamp,
+    status: row.status,
+  };
+}
+
+async function persistProviderMessage(companyId: string, record: any, options: { incrementUnread: boolean; reopen: boolean }) {
+  const local = providerRecordToLocalMessage(record);
+  if (!local.id || !local.remoteJid || local.remoteJid.endsWith('@g.us') || !local.phone) return false;
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const contact = await client.query<{ id: string }>(
+      `INSERT INTO contacts (company_id, name, phone, avatar_url)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (company_id, phone) DO UPDATE SET
+         name = CASE
+           WHEN contacts.source = 'google' THEN contacts.name
+           WHEN contacts.name ~ '^\\+?[0-9 ]+$' AND EXCLUDED.name !~ '^\\+?[0-9 ]+$' THEN EXCLUDED.name
+           ELSE contacts.name
+         END,
+         avatar_url = COALESCE(EXCLUDED.avatar_url, contacts.avatar_url),
+         updated_at = now()
+       RETURNING id`,
+      [companyId, local.sender === 'contact' ? local.senderName : `+${local.phone}`, `+${local.phone}`, null],
+    );
+    const contactId = contact.rows[0]?.id;
+    if (!contactId) throw new Error('Contato não pôde ser preparado para a mensagem recebida');
+
+    const conversation = await client.query<{ id: string }>(
+      `INSERT INTO conversations
+        (company_id, contact_id, evolution_remote_jid, status, last_message, last_message_at)
+       VALUES ($1, $2, $3, 'open', $4, $5)
+       ON CONFLICT (company_id, evolution_remote_jid) DO UPDATE SET
+         contact_id = EXCLUDED.contact_id,
+         last_message = CASE
+           WHEN EXCLUDED.last_message_at >= COALESCE(conversations.last_message_at, to_timestamp(0)) THEN EXCLUDED.last_message
+           ELSE conversations.last_message
+         END,
+         last_message_at = CASE
+           WHEN EXCLUDED.last_message_at >= COALESCE(conversations.last_message_at, to_timestamp(0)) THEN EXCLUDED.last_message_at
+           ELSE conversations.last_message_at
+         END,
+         status = CASE
+           WHEN $6 AND conversations.status = 'resolved' THEN 'open'
+           ELSE conversations.status
+         END,
+         updated_at = now()
+       RETURNING id`,
+      [companyId, contactId, local.remoteJid, local.content, local.sentAt, options.reopen && local.sender === 'contact'],
+    );
+    const conversationId = conversation.rows[0]?.id;
+    if (!conversationId) throw new Error('Conversa não pôde ser preparada para a mensagem recebida');
+
+    const inserted = await client.query(
+      `INSERT INTO messages
+        (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_url, media_type, status, sent_at, is_internal_note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false)
+       ON CONFLICT (company_id, evolution_message_id) DO NOTHING
+       RETURNING id`,
+      [companyId, conversationId, local.id, local.sender, local.senderName, local.content, local.mediaUrl || null, local.mediaType || null, local.status, local.sentAt],
+    );
+
+    if (inserted.rowCount && options.incrementUnread && local.sender === 'contact') {
+      await client.query('UPDATE conversations SET unread_count = unread_count + 1, updated_at = now() WHERE id = $1', [conversationId]);
+    }
+    await client.query('COMMIT');
+    return Boolean(inserted.rowCount);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function extractWebhookMessageStatus(body: any) {
+  const data = body?.data || body?.payload || body;
+  const messageId = data?.key?.id || data?.message?.key?.id || data?.id || data?.messageId;
+  const rawStatus = data?.update?.status
+    ?? data?.status
+    ?? data?.message?.status
+    ?? data?.key?.status;
+  const status = normalizeProviderMessageStatus(rawStatus);
+  return typeof messageId === 'string' && status ? { messageId, status } : undefined;
+}
+
+async function recordDailyResponder(companyId: string, number: string, user: { id: string; name: string }) {
+  const remoteJid = canonicalPhoneJid(number);
+  const existing = await db.query<{
+    user_id: string;
+    user_name: string;
+    response_date: string;
+  }>(
+    `SELECT first_user_id AS user_id, first_user_name AS user_name, response_date
+     FROM conversation_daily_responders
+     WHERE company_id = $1
+       AND evolution_remote_jid = $2
+       AND response_date = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Sao_Paulo')::date
+     LIMIT 1`,
+    [companyId, remoteJid],
+  );
+
+  if (!existing.rows[0]) {
+    await db.query(
+      `INSERT INTO conversation_daily_responders
+        (company_id, evolution_remote_jid, response_date, first_user_id, first_user_name)
+       VALUES ($1, $2, (CURRENT_TIMESTAMP AT TIME ZONE 'America/Sao_Paulo')::date, $3, $4)
+       ON CONFLICT (company_id, evolution_remote_jid, response_date) DO NOTHING`,
+      [companyId, remoteJid, user.id, user.name],
+    );
+  }
+
+  const result = await db.query<{
+    user_id: string;
+    user_name: string;
+    response_date: string;
+  }>(
+    `SELECT first_user_id AS user_id, first_user_name AS user_name, response_date
+     FROM conversation_daily_responders
+     WHERE company_id = $1
+       AND evolution_remote_jid = $2
+       AND response_date = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Sao_Paulo')::date
+     LIMIT 1`,
+    [companyId, remoteJid],
+  );
+  const first = result.rows[0];
+  return first ? { id: first.user_id, name: first.user_name, date: first.response_date } : undefined;
+}
+
+async function ensureOutboundMessage(input: {
+  companyId: string;
+  userId: string;
+  userName: string;
+  number: string;
+  remoteJid: string;
+  content: string;
+  mediaType?: 'image' | 'video' | 'document';
+}) {
+  const contact = await db.query<{ id: string }>(
+    `INSERT INTO contacts (company_id, name, phone)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (company_id, phone) DO UPDATE SET updated_at = now()
+     RETURNING id`,
+    [input.companyId, `+${input.number}`, `+${input.number}`],
+  );
+  const contactId = contact.rows[0]?.id;
+  if (!contactId) throw new Error('Contato não pôde ser preparado para o envio');
+
+  const conversation = await db.query<{ id: string }>(
+    `INSERT INTO conversations
+      (company_id, contact_id, evolution_remote_jid, assigned_user_id, status, last_message, last_message_at)
+     VALUES ($1, $2, $3, $4, 'open', $5, now())
+     ON CONFLICT (company_id, evolution_remote_jid) DO UPDATE SET
+       last_message = EXCLUDED.last_message,
+       last_message_at = EXCLUDED.last_message_at,
+       updated_at = now(),
+       status = CASE WHEN conversations.status = 'resolved' THEN 'open' ELSE conversations.status END
+     RETURNING id`,
+    [input.companyId, contactId, input.remoteJid, input.userId, input.content],
+  );
+  const conversationId = conversation.rows[0]?.id;
+  if (!conversationId) throw new Error('Conversa não pôde ser preparada para o envio');
+
+  const message = await db.query<{ id: string }>(
+    `INSERT INTO messages
+      (company_id, conversation_id, sender, sender_name, content, media_type, status, is_internal_note)
+     VALUES ($1, $2, 'attendant', $3, $4, $5, 'pending', false)
+     RETURNING id`,
+    [input.companyId, conversationId, input.userName, input.content, input.mediaType || null],
+  );
+  const messageId = message.rows[0]?.id;
+  if (!messageId) throw new Error('Mensagem não pôde ser registrada');
+  return { conversationId, messageId };
+}
+
+async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed', evolutionMessageId?: string) {
+  await db.query(
+    `UPDATE messages
+     SET status = $2,
+         evolution_message_id = COALESCE($3, evolution_message_id),
+         sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END
+     WHERE id = $1`,
+    [messageId, status, evolutionMessageId || null],
+  );
+}
+
 export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.get('/api/evolution/status', { preHandler: requireUser }, async (_request, reply) => {
     const response = await evolutionRequest(
@@ -78,6 +441,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     return forwardJson(response, reply);
   });
 
+  app.post('/api/evolution/logout', { preHandler: requireUser }, async (_request, reply) => {
+    const response = await evolutionRequest(
+      `/instance/logout/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+      { method: 'DELETE', body: '{}' },
+    );
+    return forwardJson(response, reply);
+  });
+
   app.get('/api/evolution/chats', { preHandler: requireUser }, async (_request, reply) => {
     const instance = encodeURIComponent(config.EVOLUTION_INSTANCE_NAME);
     const [chatsResponse, contactsResponse] = await Promise.all([
@@ -86,6 +457,42 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     ]);
     if (!chatsResponse.ok || !contactsResponse.ok) {
       return reply.code(502).send({ error: 'Não foi possível consultar as conversas' });
+    }
+    const [chatsData, contactsData] = await Promise.all([
+      chatsResponse.json().catch(() => []),
+      contactsResponse.json().catch(() => []),
+    ]);
+    const providerNames = new Map<string, { phone: string; name: string; avatar_url: string | null }>();
+    const rememberProviderContact = (value: any) => {
+      const phone = providerContactPhone(value);
+      const name = providerContactName(value);
+      if (!phone || !name) return;
+      providerNames.set(phone, {
+        phone,
+        name,
+        avatar_url: value?.profilePicUrl || value?.profilePictureUrl || null,
+      });
+    };
+    (Array.isArray(contactsData) ? contactsData : []).forEach(rememberProviderContact);
+    (Array.isArray(chatsData) ? chatsData : []).forEach((chat: any) => {
+      rememberProviderContact(chat);
+      rememberProviderContact(chat?.lastMessage);
+    });
+    if (providerNames.size > 0) {
+      try {
+        await db.query(
+          `INSERT INTO whatsapp_contact_names (company_id, phone, name, avatar_url)
+           SELECT $1, item.phone, item.name, item.avatar_url
+           FROM jsonb_to_recordset($2::jsonb) AS item(phone text, name text, avatar_url text)
+           ON CONFLICT (company_id, phone) DO UPDATE SET
+             name = EXCLUDED.name,
+             avatar_url = COALESCE(EXCLUDED.avatar_url, whatsapp_contact_names.avatar_url),
+             updated_at = now()`,
+          [_request.user!.companyId, JSON.stringify(Array.from(providerNames.values()))],
+        );
+      } catch (error) {
+        _request.log.warn({ err: error }, 'Tabela de nomes do WhatsApp ainda não está disponível');
+      }
     }
     const [storedContacts, assignments, statuses, readStates] = await Promise.all([db.query<{
       name: string;
@@ -125,13 +532,38 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
        WHERE company_id = $1`,
       [_request.user!.companyId],
     )]);
+    let whatsappNames: { rows: Array<{ phone: string; name: string; avatar_url: string | null }> } = { rows: [] };
+    try {
+      whatsappNames = await db.query(
+        `SELECT phone, name, avatar_url
+         FROM whatsapp_contact_names
+         WHERE company_id = $1`,
+        [_request.user!.companyId],
+      );
+    } catch (error) {
+      _request.log.warn({ err: error }, 'Tabela de nomes do WhatsApp ainda não está disponível');
+    }
+    let dailyResponders: { rows: Array<{ evolution_remote_jid: string; user_id: string; user_name: string; response_date: string }> } = { rows: [] };
+    try {
+      dailyResponders = await db.query(
+        `SELECT evolution_remote_jid, first_user_id AS user_id, first_user_name AS user_name, response_date
+         FROM conversation_daily_responders
+         WHERE company_id = $1
+           AND response_date = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Sao_Paulo')::date`,
+        [_request.user!.companyId],
+      );
+    } catch (error) {
+      _request.log.warn({ err: error }, 'Tabela de primeiros atendentes ainda nÃ£o estÃ¡ disponÃ­vel');
+    }
     return {
-      chats: await chatsResponse.json(),
-      contacts: await contactsResponse.json(),
+      chats: chatsData,
+      contacts: contactsData,
       storedContacts: storedContacts.rows,
+      whatsappNames: whatsappNames.rows,
       assignments: assignments.rows,
       statuses: statuses.rows,
       readStates: readStates.rows,
+      dailyResponders: dailyResponders.rows,
     };
   });
 
@@ -240,30 +672,292 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     return { remoteJid: parsed.data.remoteJid, messageTimestamp: parsed.data.messageTimestamp, providerMarked };
   });
 
+  app.post('/api/evolution/notes', { preHandler: requireUser }, async (request, reply) => {
+    const parsed = noteSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Nota interna invÃ¡lida' });
+
+    const remoteJid = parsed.data.phone?.replace(/\D/g, '')
+      ? canonicalPhoneJid(parsed.data.phone)
+      : parsed.data.remoteJid;
+    const result = await db.query<{
+      id: string;
+      author_name: string;
+      content: string;
+      created_at: string;
+    }>(
+      `INSERT INTO conversation_notes
+        (company_id, evolution_remote_jid, author_id, author_name, content)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, author_name, content, created_at`,
+      [request.user!.companyId, remoteJid, request.user!.id, request.user!.name, parsed.data.content],
+    );
+    const note = result.rows[0];
+    if (!note) return reply.code(500).send({ error: 'NÃ£o foi possÃ­vel salvar a nota interna' });
+    return {
+      note: {
+        id: note.id,
+        conversationId: parsed.data.remoteJid,
+        sender: 'attendant',
+        senderName: note.author_name,
+        content: note.content,
+        timestamp: new Date(note.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        timestampMs: Date.parse(note.created_at),
+        status: 'sent',
+        isInternalNote: true,
+      },
+    };
+  });
+
+  app.post('/api/evolution/notes/list', { preHandler: requireUser }, async (request, reply) => {
+    const parsed = noteLookupSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Conversa invÃ¡lida' });
+    const jids = assignmentJids({ remoteJid: parsed.data.remoteJid, phone: parsed.data.phone });
+    const result = await db.query<{
+      id: string;
+      evolution_remote_jid: string;
+      author_name: string;
+      content: string;
+      created_at: string;
+    }>(
+      `SELECT id, evolution_remote_jid, author_name, content, created_at
+       FROM conversation_notes
+       WHERE company_id = $1 AND evolution_remote_jid = ANY($2::text[])
+       ORDER BY created_at ASC`,
+      [request.user!.companyId, jids],
+    );
+    return {
+      notes: result.rows.map((note) => ({
+        id: note.id,
+        conversationId: parsed.data.remoteJid,
+        sender: 'attendant',
+        senderName: note.author_name,
+        content: note.content,
+        timestamp: new Date(note.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        timestampMs: Date.parse(note.created_at),
+        status: 'sent',
+        isInternalNote: true,
+      })),
+    };
+  });
+
   app.post('/api/evolution/messages', { preHandler: requireUser }, async (request, reply) => {
     const parsed = jidSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Conversa inválida' });
-    const response = await evolutionRequest(
+    // Alguns contatos alternam entre o JID do telefone e o JID interno (@lid).
+    // Buscamos os dois para preservar todo o historico da conversa.
+    const jids = new Set([parsed.data.remoteJid]);
+    const phoneDigits = parsed.data.phone?.replace(/\D/g, '') || '';
+    if (phoneDigits.length >= 8 && phoneDigits.length <= 20) {
+      jids.add(canonicalPhoneJid(phoneDigits));
+    }
+
+    const localMessages = await db.query(`
+      SELECT m.id, m.evolution_message_id, m.sender, m.sender_name, m.content, m.media_url,
+             m.media_type, m.status, m.sent_at, c.evolution_remote_jid
+      FROM messages m
+      JOIN conversations c ON c.id = m.conversation_id
+      WHERE m.company_id = $1
+        AND c.evolution_remote_jid = ANY($2::text[])
+        AND m.is_internal_note = false
+      ORDER BY m.sent_at ASC`,
+    [request.user!.companyId, [...jids]]);
+
+    // Depois que o webhook persiste a conversa, a leitura deixa de depender da Evolution.
+    // A consulta externa serve apenas para uma reconciliação inicial do histórico antigo.
+    if (localMessages.rows.some((row: any) => row.sender === 'contact')) {
+      return { messages: { records: localMessages.rows.map(localMessageToProviderRecord) } };
+    }
+
+    const responses = await Promise.all([...jids].map((remoteJid) => evolutionRequest(
       `/chat/findMessages/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
       {
         method: 'POST',
-        body: JSON.stringify({ where: { key: { remoteJid: parsed.data.remoteJid } }, limit: 100 }),
+        body: JSON.stringify({ where: { key: { remoteJid } }, limit: 500 }),
       },
-    );
-    return forwardJson(response, reply);
+    )));
+    const successfulResponses = responses.filter((response) => response.ok);
+    if (successfulResponses.length === 0) {
+      return { messages: { records: localMessages.rows.map(localMessageToProviderRecord) } };
+    }
+
+    const recordsById = new Map<string, any>();
+    for (const response of successfulResponses) {
+      const body: any = await response.json().catch(() => ({}));
+      const records = body?.messages?.records || body?.records || (Array.isArray(body) ? body : []);
+      if (!Array.isArray(records)) continue;
+      records.forEach((record: any, index: number) => {
+        const id = record?.key?.id || record?.id || `${record?.messageTimestamp || 'unknown'}-${index}`;
+        if (!recordsById.has(String(id))) recordsById.set(String(id), record);
+      });
+    }
+
+    for (const record of recordsById.values()) {
+      try {
+        await persistProviderMessage(request.user!.companyId, record, { incrementUnread: false, reopen: false });
+      } catch (error) {
+        request.log.warn({ err: error, messageId: providerMessageId(record) }, 'Falha ao reconciliar mensagem da Evolution com o PostgreSQL');
+      }
+    }
+
+    const reconciledMessages = await db.query(`
+      SELECT m.id, m.evolution_message_id, m.sender, m.sender_name, m.content, m.media_url,
+             m.media_type, m.status, m.sent_at, c.evolution_remote_jid
+      FROM messages m
+      JOIN conversations c ON c.id = m.conversation_id
+      WHERE m.company_id = $1
+        AND c.evolution_remote_jid = ANY($2::text[])
+        AND m.is_internal_note = false
+      ORDER BY m.sent_at ASC`,
+    [request.user!.companyId, [...jids]]);
+
+    return {
+      messages: {
+        records: reconciledMessages.rows.length > 0
+          ? reconciledMessages.rows.map(localMessageToProviderRecord)
+          : Array.from(recordsById.values()),
+      },
+    };
   });
 
   app.post('/api/evolution/messages/send', { preHandler: requireUser }, async (request, reply) => {
     const parsed = sendTextSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Mensagem inválida' });
-    const response = await evolutionRequest(
+    const { number, text, remoteJid } = parsed.data;
+    const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
+    const assigned = await db.query<{ assigned_user_id: string; user_name: string }>(
+      `SELECT a.assigned_user_id, u.name AS user_name
+       FROM conversation_assignments a
+       JOIN users u ON u.id = a.assigned_user_id
+       WHERE a.company_id = $1
+         AND a.evolution_remote_jid = ANY($2::text[])
+       ORDER BY a.updated_at DESC
+       LIMIT 1`,
+      [request.user!.companyId, assignmentJids({ remoteJid: canonicalRemoteJid, phone: number })],
+    );
+    if (assigned.rows[0] && assigned.rows[0].assigned_user_id !== request.user!.id && request.user!.role !== 'admin') {
+      return reply.code(409).send({ error: `Atendimento capturado por ${assigned.rows[0].user_name}` });
+    }
+    const localMessage = await ensureOutboundMessage({
+      companyId: request.user!.companyId,
+      userId: request.user!.id,
+      userName: request.user!.name,
+      number,
+      remoteJid: canonicalRemoteJid,
+      content: text,
+    });
+    let response: Response;
+    let body: any;
+    try {
+      response = await evolutionRequest(
       `/message/sendText/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
       {
         method: 'POST',
-        body: JSON.stringify({ ...parsed.data, delay: 1200, linkPreview: true }),
+        body: JSON.stringify({ number, text, delay: 1200, linkPreview: true }),
       },
+      );
+      body = await response.json().catch(() => ({ error: 'Evolution API response invalid' }));
+    } catch (error) {
+      await updateOutboundMessage(localMessage.messageId, 'failed');
+      request.log.warn({ err: error }, 'Falha de comunicação com a Evolution API');
+      return reply.code(502).send({ error: 'Evolution API unavailable', messageId: localMessage.messageId });
+    }
+    if (!response.ok) {
+      await updateOutboundMessage(localMessage.messageId, 'failed');
+      return reply.code(502).send({ error: 'Evolution API unavailable', messageId: localMessage.messageId });
+    }
+    const evolutionMessageId = body?.key?.id || body?.message?.key?.id || body?.data?.key?.id;
+    await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
+
+    let dailyResponder: { id: string; name: string; date: string } | undefined;
+    try {
+      dailyResponder = await recordDailyResponder(request.user!.companyId, number, request.user!);
+    } catch (error) {
+      request.log.warn({ err: error }, 'NÃ£o foi possÃ­vel registrar o primeiro atendente do dia');
+    }
+    return {
+      evolution: body,
+      dailyResponder,
+      remoteJid: canonicalRemoteJid,
+      message: { id: localMessage.messageId, evolutionMessageId, status: 'sent', senderName: request.user!.name },
+    };
+  });
+
+  app.post('/api/evolution/messages/send-media', { preHandler: requireUser }, async (request, reply) => {
+    const parsed = sendMediaSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Anexo inválido' });
+    const { number, text, remoteJid } = {
+      number: parsed.data.number,
+      text: parsed.data.caption?.trim() || `[${parsed.data.mediatype}]`,
+      remoteJid: parsed.data.remoteJid,
+    };
+    const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
+    const assigned = await db.query<{ assigned_user_id: string; user_name: string }>(
+      `SELECT a.assigned_user_id, u.name AS user_name
+       FROM conversation_assignments a
+       JOIN users u ON u.id = a.assigned_user_id
+       WHERE a.company_id = $1
+         AND a.evolution_remote_jid = ANY($2::text[])
+       ORDER BY a.updated_at DESC
+       LIMIT 1`,
+      [request.user!.companyId, assignmentJids({ remoteJid: canonicalRemoteJid, phone: number })],
     );
-    return forwardJson(response, reply);
+    if (assigned.rows[0] && assigned.rows[0].assigned_user_id !== request.user!.id && request.user!.role !== 'admin') {
+      return reply.code(409).send({ error: `Atendimento capturado por ${assigned.rows[0].user_name}` });
+    }
+
+    const localMessage = await ensureOutboundMessage({
+      companyId: request.user!.companyId,
+      userId: request.user!.id,
+      userName: request.user!.name,
+      number,
+      remoteJid: canonicalRemoteJid,
+      content: text,
+      mediaType: parsed.data.mediatype,
+    });
+    let response: Response;
+    let body: any;
+    try {
+      const caption = parsed.data.caption?.trim()
+        ? `*${request.user!.name}*\n${parsed.data.caption.trim()}`
+        : undefined;
+      response = await evolutionRequest(
+        `/message/sendMedia/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            number,
+            mediatype: parsed.data.mediatype,
+            mimetype: parsed.data.mimetype,
+            media: parsed.data.media,
+            fileName: parsed.data.fileName,
+            caption,
+          }),
+        },
+      );
+      body = await response.json().catch(() => ({ error: 'Evolution API response invalid' }));
+    } catch (error) {
+      await updateOutboundMessage(localMessage.messageId, 'failed');
+      request.log.warn({ err: error }, 'Falha de comunicação com a Evolution API ao enviar anexo');
+      return reply.code(502).send({ error: 'Evolution API indisponível', messageId: localMessage.messageId });
+    }
+    if (!response.ok) {
+      await updateOutboundMessage(localMessage.messageId, 'failed');
+      return reply.code(502).send({ error: 'Evolution API indisponível', messageId: localMessage.messageId });
+    }
+    const evolutionMessageId = body?.key?.id || body?.message?.key?.id || body?.data?.key?.id;
+    await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
+    let dailyResponder: { id: string; name: string; date: string } | undefined;
+    try {
+      dailyResponder = await recordDailyResponder(request.user!.companyId, number, request.user!);
+    } catch (error) {
+      request.log.warn({ err: error }, 'Não foi possível registrar o primeiro atendente do dia');
+    }
+    return {
+      evolution: body,
+      dailyResponder,
+      remoteJid: canonicalRemoteJid,
+      message: { id: localMessage.messageId, evolutionMessageId, status: 'sent', senderName: request.user!.name },
+    };
   });
 
   app.post('/api/evolution/media', { preHandler: requireUser }, async (request, reply) => {
@@ -284,7 +978,25 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       { method: 'POST', body: JSON.stringify(parsed.data) },
     );
     if (!response.ok) return reply.code(404).send({ error: 'Perfil empresarial não disponível' });
-    return forwardJson(response, reply);
+    const body: any = await response.json().catch(() => ({}));
+    const profile = body?.data || body?.businessProfile || body;
+    const name = profile?.verifiedName || profile?.businessName || profile?.name || profile?.profileName;
+    if (typeof name === 'string' && name.trim() && !/^\+?[\d\s().-]+$/.test(name.trim())) {
+      try {
+        await db.query(
+          `INSERT INTO whatsapp_contact_names (company_id, phone, name, avatar_url)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (company_id, phone) DO UPDATE SET
+             name = EXCLUDED.name,
+             avatar_url = COALESCE(EXCLUDED.avatar_url, whatsapp_contact_names.avatar_url),
+             updated_at = now()`,
+          [request.user!.companyId, parsed.data.number, name.trim(), profile?.profilePicUrl || profile?.profilePictureUrl || null],
+        );
+      } catch (error) {
+        request.log.warn({ err: error }, 'Não foi possível persistir o nome empresarial do WhatsApp');
+      }
+    }
+    return body;
   });
 
   app.post('/webhooks/evolution', async (request, reply) => {
@@ -292,7 +1004,67 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const value = Array.isArray(providedSecret) ? providedSecret[0] : providedSecret;
     if (!matchesWebhookSecret(value)) return reply.code(401).send({ error: 'Webhook não autorizado' });
 
-    request.log.info({ event: (request.body as { event?: string } | null)?.event }, 'Evento Evolution recebido');
+    const body = request.body as any;
+    const event = String(body?.event || body?.type || 'unknown');
+    const normalizedEvent = event.toLowerCase().replace(/_/g, '.');
+    const isMessageEvent = normalizedEvent === 'messages.upsert' || normalizedEvent === 'messages.set';
+    let persistedMessages = 0;
+
+    if (isMessageEvent) {
+      const company = await db.query<{ id: string }>('SELECT id FROM companies ORDER BY created_at LIMIT 1');
+      const data = body?.data || body?.payload || body;
+      const records = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.messages)
+          ? data.messages
+          : Array.isArray(data?.records)
+            ? data.records
+            : [data];
+
+      if (company.rows[0]) {
+        for (const record of records) {
+          try {
+            if (await persistProviderMessage(company.rows[0].id, record, { incrementUnread: true, reopen: true })) {
+              persistedMessages += 1;
+            }
+          } catch (error) {
+            request.log.warn({ err: error, event, messageId: providerMessageId(record) }, 'Falha ao persistir mensagem recebida no PostgreSQL');
+          }
+        }
+      }
+    }
+
+    const statusUpdate = extractWebhookMessageStatus(body);
+    if (statusUpdate) {
+      const eventKey = `${event}:${statusUpdate.messageId}:${statusUpdate.status}`;
+      try {
+        const inserted = await db.query(
+          `INSERT INTO webhook_events (provider, event_key, event_type)
+           VALUES ('evolution', $1, $2)
+           ON CONFLICT (provider, event_key) DO NOTHING
+           RETURNING id`,
+          [eventKey, event],
+        );
+        if (inserted.rowCount) {
+          await db.query(
+            `UPDATE messages
+             SET status = CASE
+               WHEN status = 'failed' THEN status
+               WHEN $1 = 'failed' THEN 'failed'
+               WHEN $1 = 'read' THEN 'read'
+               WHEN $1 = 'delivered' AND status NOT IN ('read') THEN 'delivered'
+               ELSE status
+             END
+             WHERE evolution_message_id = $2`,
+            [statusUpdate.status, statusUpdate.messageId],
+          );
+          await db.query('UPDATE webhook_events SET processed_at = now() WHERE id = $1', [inserted.rows[0]?.id]);
+        }
+      } catch (error) {
+        request.log.warn({ err: error, event, messageId: statusUpdate.messageId }, 'Falha ao atualizar status da mensagem');
+      }
+    }
+    request.log.info({ event, messageId: statusUpdate?.messageId, status: statusUpdate?.status, persistedMessages }, 'Evento Evolution recebido');
     return reply.code(202).send({ accepted: true });
   });
 }
