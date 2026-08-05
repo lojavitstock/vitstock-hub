@@ -722,33 +722,42 @@ async function persistProviderMessage(companyId: string, record: any, options: {
            AND sender = 'attendant'
            AND evolution_message_id IS NULL
            AND is_internal_note = false
-           AND sent_at BETWEEN $11::timestamptz - interval '5 minutes'
-                           AND $11::timestamptz + interval '5 minutes'
-           AND (content = $6 OR media_type = $8)
-         ORDER BY abs(extract(epoch FROM (sent_at - $11::timestamptz))) ASC
+           AND sent_at BETWEEN $3::timestamptz - interval '5 minutes'
+                           AND $3::timestamptz + interval '5 minutes'
+           AND (content = $4 OR media_type = $5)
+         ORDER BY abs(extract(epoch FROM (sent_at - $3::timestamptz))) ASC
          LIMIT 1
          FOR UPDATE`,
-        messageParams,
+         [companyId, conversationId, local.sentAt, local.content, local.mediaType || null],
       );
       const pendingId = pending.rows[0]?.id;
       if (pendingId) {
         const linked = await client.query(
           `UPDATE messages
-           SET evolution_message_id = $3,
-               metadata = COALESCE(metadata, '{}'::jsonb) || $9::jsonb,
+           SET evolution_message_id = $1,
+               metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
                content = CASE
-                 WHEN content ILIKE '[mensagem%suportada]'
-                   OR content ILIKE '[mensagem%identificada]'
-                 THEN $6
-                 ELSE content
+                  WHEN content ILIKE '[mensagem%suportada]'
+                    OR content ILIKE '[mensagem%identificada]'
+                  THEN $3
+                  ELSE content
                END,
-               media_url = COALESCE(media_url, $7),
-               media_type = COALESCE(media_type, $8),
-               status = $10,
-               sent_at = $11
-           WHERE id = $12
+               media_url = COALESCE(media_url, $4),
+               media_type = COALESCE(media_type, $5),
+               status = $6,
+               sent_at = $7
+           WHERE id = $8
              AND evolution_message_id IS NULL`,
-          [...messageParams, pendingId],
+           [
+             local.id,
+             JSON.stringify(local.metadata || {}),
+             local.content,
+             local.mediaUrl || null,
+             local.mediaType || null,
+             local.status,
+             local.sentAt,
+             pendingId,
+           ],
         );
         linkedPendingMessage = Boolean(linked.rowCount);
       }
@@ -772,33 +781,43 @@ async function persistProviderMessage(companyId: string, record: any, options: {
       if (!insertedNewMessage) {
         await client.query(
           `UPDATE messages
-           SET metadata = COALESCE(messages.metadata, '{}'::jsonb) || $9::jsonb,
-               sender_name = CASE
-                 WHEN messages.sender = 'contact'
-                   AND ($5 IS NOT NULL AND $5 <> '')
-                 THEN $5
-                 ELSE messages.sender_name
-               END,
-               content = CASE
-                 WHEN messages.content ILIKE '[mensagem%suportada]'
-                   OR messages.content ILIKE '[mensagem%identificada]'
-                 THEN $6
-                 ELSE messages.content
-               END,
-               media_url = COALESCE(messages.media_url, $7),
-               media_type = COALESCE(messages.media_type, $8),
-               status = CASE
-                 WHEN messages.status IN ('failed', 'read') THEN messages.status
-                 WHEN $10 = 'failed' THEN 'failed'
-                 WHEN $10 = 'read' THEN 'read'
-                 WHEN $10 = 'delivered' THEN 'delivered'
-                 WHEN messages.status = 'pending' THEN $10
-                 ELSE messages.status
-               END,
-               sent_at = $11
-           WHERE company_id = $1
-             AND evolution_message_id = $3`,
-          messageParams,
+            SET metadata = COALESCE(messages.metadata, '{}'::jsonb) || $1::jsonb,
+                sender_name = CASE
+                  WHEN messages.sender = 'contact'
+                    AND ($2 IS NOT NULL AND $2 <> '')
+                  THEN $2
+                  ELSE messages.sender_name
+                END,
+                content = CASE
+                  WHEN messages.content ILIKE '[mensagem%suportada]'
+                    OR messages.content ILIKE '[mensagem%identificada]'
+                  THEN $3
+                  ELSE messages.content
+                END,
+                media_url = COALESCE(messages.media_url, $4),
+                media_type = COALESCE(messages.media_type, $5),
+                status = CASE
+                  WHEN messages.status IN ('failed', 'read') THEN messages.status
+                  WHEN $6 = 'failed' THEN 'failed'
+                  WHEN $6 = 'read' THEN 'read'
+                  WHEN $6 = 'delivered' THEN 'delivered'
+                  WHEN messages.status = 'pending' THEN $6
+                  ELSE messages.status
+                END,
+                sent_at = $7
+            WHERE company_id = $8
+              AND evolution_message_id = $9`,
+           [
+             JSON.stringify(local.metadata || {}),
+             local.senderName,
+             local.content,
+             local.mediaUrl || null,
+             local.mediaType || null,
+             local.status,
+             local.sentAt,
+             companyId,
+             local.id,
+           ],
         );
       }
     }
