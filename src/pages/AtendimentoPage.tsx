@@ -6,14 +6,11 @@ import {
   Paperclip, 
   Mic, 
   MoreVertical, 
-  CheckCheck, 
   Tag as TagIcon, 
   UserCheck, 
   CheckCircle, 
-  Lock, 
   Mail, 
   Zap, 
-  Image as ImageIcon,
   Kanban,
   RefreshCw,
   MessageSquare,
@@ -22,18 +19,9 @@ import {
   UserPlus,
   Pencil,
   Save,
-  Play,
-  Pause,
-  Download,
-  UserRound,
-  ExternalLink,
-  PhoneCall,
-  Copy,
   X,
   Building2,
   Globe,
-  MapPin,
-  Megaphone,
   Archive,
 } from 'lucide-react';
 import { mockConversations } from '../services/mockData';
@@ -44,99 +32,15 @@ import { useAuth } from '../auth/AuthContext';
 import { ConversationFilters, ConversationFilter } from '../components/conversations/ConversationFilters';
 import { ConversationList } from '../components/conversations/ConversationList';
 import { ContactPhoto } from '../components/conversations/ContactPhoto';
+import { MessageTimeline } from '../components/conversations/MessageTimeline';
+import { MessageComposer } from '../components/conversations/MessageComposer';
 import { formatMessageTimestamp } from '../components/conversations/conversationFormatters';
 
-const InteractiveMessageContent: React.FC<{ msg: Message }> = ({ msg }) => {
-  if (!msg.interactiveTitle && !msg.interactiveFooter && !msg.interactiveButtons?.length) return null;
-  return (
-    <div className="space-y-2">
-      {msg.interactiveTitle && <p className="font-extrabold text-sm text-slate-50">{msg.interactiveTitle}</p>}
-      {msg.interactiveFooter && <p className="text-[11px] text-slate-400">{msg.interactiveFooter}</p>}
-      {msg.interactiveButtons?.map((button, index) => button.type === 'url' && button.url ? (
-        <a key={`${button.label}-${index}`} href={button.url} target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-2 w-full px-3 py-2 mt-2 rounded-lg border border-emerald-400/30 bg-emerald-400/10 text-emerald-300 font-bold hover:bg-emerald-400/20">
-          <ExternalLink className="w-4 h-4" /> {button.label}
-        </a>
-      ) : button.type === 'call' && button.value ? (
-        <a key={`${button.label}-${index}`} href={`tel:${button.value}`} className="flex items-center justify-center gap-2 w-full px-3 py-2 mt-2 rounded-lg border border-emerald-400/30 bg-emerald-400/10 text-emerald-300 font-bold">
-          <PhoneCall className="w-4 h-4" /> {button.label}
-        </a>
-      ) : button.type === 'copy' && button.value ? (
-        <button key={`${button.label}-${index}`} type="button" onClick={() => void navigator.clipboard?.writeText(button.value || '')} className="flex items-center justify-center gap-2 w-full px-3 py-2 mt-2 rounded-lg border border-emerald-400/30 bg-emerald-400/10 text-emerald-300 font-bold">
-          <Copy className="w-4 h-4" /> {button.label}
-        </button>
-      ) : (
-        <button key={`${button.label}-${index}`} type="button" className="w-full px-3 py-2 mt-2 rounded-lg border border-slate-500/30 bg-white/5 text-slate-300 font-bold">{button.label}</button>
-      ))}
-    </div>
-  );
-};
-
-const SpecialMessageContent: React.FC<{ msg: Message }> = ({ msg }) => {
-  const metadata = msg.metadata;
-  if (!metadata) return null;
-  const trafficLabel = metadata.trafficSource === 'FB_Ads'
-    ? 'Anúncio do Facebook ou Instagram'
-    : metadata.trafficSource
-      ? `Origem: ${metadata.trafficSource}`
-      : '';
-  return (
-    <div className="space-y-2">
-      {trafficLabel && (
-        <div className="rounded-xl border border-emerald-400/25 bg-emerald-500/10 p-2.5 text-emerald-100">
-          <div className="flex items-center gap-2 text-[11px] font-extrabold uppercase tracking-wide text-emerald-300">
-            <Megaphone className="h-4 w-4" /> {trafficLabel}
-          </div>
-          {metadata.trafficTitle && <p className="mt-1 text-xs font-semibold text-slate-100">{metadata.trafficTitle}</p>}
-          {metadata.trafficUrl && (
-            <a href={metadata.trafficUrl} target="_blank" rel="noopener noreferrer" className="mt-1 inline-flex items-center gap-1 text-[11px] font-bold text-emerald-300 hover:text-emerald-200">
-              <ExternalLink className="h-3 w-3" /> Mostrar detalhes
-            </a>
-          )}
-        </div>
-      )}
-      {metadata.contactCard && (
-        <div className="flex items-center gap-2.5 rounded-xl border border-sky-300/20 bg-sky-400/10 p-2.5">
-          <UserRound className="h-5 w-5 text-sky-300" />
-          <div className="min-w-0">
-            <p className="text-xs font-extrabold text-slate-100">{metadata.contactCard.displayName}</p>
-            {metadata.contactCard.phone && <p className="text-[11px] text-slate-300">{metadata.contactCard.phone}</p>}
-          </div>
-        </div>
-      )}
-      {metadata.location && (
-        <a href={metadata.location.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2.5 rounded-xl border border-amber-300/20 bg-amber-400/10 p-2.5 text-amber-100 hover:bg-amber-400/15">
-          <MapPin className="h-5 w-5 text-amber-300" />
-          <span className="text-xs font-bold">{metadata.location.name || 'Localização compartilhada'}{metadata.location.address ? `\n${metadata.location.address}` : ''}</span>
-        </a>
-      )}
-      {metadata.systemLabel && (
-        <div className="flex items-center gap-2 rounded-xl border border-slate-300/15 bg-black/20 p-2.5 text-xs font-bold text-slate-300">
-          <PhoneCall className="h-4 w-4 text-amber-300" /> {metadata.systemLabel}
-        </div>
-      )}
-    </div>
-  );
-};
-
-const formatAudioTime = (seconds: number) => {
-  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}:${Math.floor(seconds % 60).toString().padStart(2, '0')}`;
-};
 
 const conversationNeedsResponse = (conversation: Conversation) => (
   conversation.needsResponse
   ?? (conversation.status !== 'resolved' && !conversation.lastMessageFromMe && conversation.unreadCount > 0)
 );
-
-const isMediaPlaceholder = (message: Message) => {
-  const content = message.content.trim().toLocaleLowerCase();
-  if (message.mediaType === 'image') return content === '[imagem]' || content === '[image]';
-  if (message.mediaType === 'video') return content === '[vídeo]' || content === '[video]';
-  if (message.mediaType === 'document') return content === '[documento]' || content === '[document]';
-  if (message.mediaType === 'audio') return content === '[mensagem de áudio]' || content === '[audio]';
-  return message.mediaType === 'sticker' && (content === '[figurinha]' || content === '[sticker]' || !content);
-};
 
 const mergeConversationMessages = (current: Message[], incoming: Message[]) => {
   const byId = new Map<string, Message>();
@@ -170,239 +74,6 @@ type GoogleContactForm = {
   resourceName: string;
 };
 
-const AudioMessagePlayer: React.FC<{ src: string; durationHint?: number }> = ({ src, durationHint }) => {
-  const audioRef = React.useRef<HTMLAudioElement>(null);
-  const [playing, setPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(durationHint || 0);
-  const [playbackRate, setPlaybackRate] = useState(1);
-
-  const togglePlayback = async () => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    if (audio.paused) {
-      await audio.play();
-    } else {
-      audio.pause();
-    }
-  };
-
-  const seek = (value: number) => {
-    if (!audioRef.current) return;
-    audioRef.current.currentTime = value;
-    setCurrentTime(value);
-  };
-
-  const cyclePlaybackRate = () => {
-    const nextRate = playbackRate === 1 ? 1.5 : playbackRate === 1.5 ? 2 : 1;
-    setPlaybackRate(nextRate);
-    if (audioRef.current) audioRef.current.playbackRate = nextRate;
-  };
-
-  return (
-    <div className="w-[310px] max-w-[58vw] flex items-center gap-3 px-3 py-2.5 rounded-xl bg-black/20 border border-white/10 shadow-inner">
-      <audio
-        ref={audioRef}
-        src={src}
-        preload="metadata"
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
-        onEnded={() => setPlaying(false)}
-        onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
-        onLoadedMetadata={(event) => {
-          if (Number.isFinite(event.currentTarget.duration)) setDuration(event.currentTarget.duration);
-        }}
-      />
-      <button type="button" onClick={togglePlayback} className="w-9 h-9 rounded-full bg-amber-400 text-zinc-950 flex items-center justify-center flex-shrink-0 hover:bg-amber-300 transition-colors">
-        {playing ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
-      </button>
-      <div className="flex-1 min-w-0 space-y-1">
-        <input
-          type="range"
-          min={0}
-          max={duration || 1}
-          step={0.1}
-          value={Math.min(currentTime, duration || 1)}
-          onChange={(event) => seek(Number(event.target.value))}
-          className="w-full h-1 accent-amber-400 cursor-pointer"
-          aria-label="Posição do áudio"
-        />
-        <div className="flex justify-between text-[10px] text-slate-400 font-medium tabular-nums">
-          <span>{formatAudioTime(currentTime)}</span>
-          <span>{formatAudioTime(duration || durationHint || 0)}</span>
-        </div>
-      </div>
-      <button type="button" onClick={cyclePlaybackRate} className="min-w-9 px-1.5 py-1 rounded-md bg-white/5 text-[11px] font-extrabold text-slate-300 hover:text-amber-300 hover:bg-white/10" title="Velocidade de reprodução">
-        {playbackRate.toString().replace('.', ',')}x
-      </button>
-      <a href={src} download="audio-whatsapp.ogg" className="p-1.5 rounded-full text-slate-400 hover:text-amber-300 hover:bg-white/5" title="Baixar áudio">
-        <Download className="w-4 h-4" />
-      </a>
-    </div>
-  );
-};
-
-const MediaMessageContent: React.FC<{ msg: Message; instanceName: string }> = ({ msg, instanceName }) => {
-  const isMedia = msg.mediaType === 'image' || msg.mediaType === 'audio' || msg.mediaType === 'video' || msg.mediaType === 'document' || msg.mediaType === 'sticker';
-  if (!isMedia) return null;
-
-  const isDataUri = (url?: string | null) => !!url && url.startsWith('data:');
-
-  const [src, setSrc] = useState<string | null>(isDataUri(msg.mediaUrl) ? msg.mediaUrl! : null);
-  const [loadingMedia, setLoadingMedia] = useState<boolean>(!isDataUri(msg.mediaUrl) && !!msg.rawKey);
-  const [showModal, setShowModal] = useState<boolean>(false);
-
-  useEffect(() => {
-    if (msg.rawKey) {
-      let isMounted = true;
-      if (!src) setLoadingMedia(true);
-      EvolutionApiService.getDecodedMedia(instanceName, msg.rawKey).then(base64 => {
-        if (isMounted) {
-          if (base64) {
-            setSrc(base64);
-          }
-          setLoadingMedia(false);
-        }
-      });
-      return () => { isMounted = false; };
-    }
-  }, [msg.id, instanceName]);
-
-  if (loadingMedia) {
-    return (
-      <div className="p-2.5 rounded-lg bg-black/30 border border-amber-400/20 text-[11px] text-amber-300 flex items-center gap-2 font-bold animate-pulse my-1 max-w-xs">
-        <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
-        Descriptografando mídia...
-      </div>
-    );
-  }
-
-  if (msg.mediaType === 'image') {
-    const finalImageSrc = src || (isDataUri(msg.mediaUrl) ? msg.mediaUrl : null);
-
-    if (!finalImageSrc) {
-      return (
-        <div className="p-3 rounded-xl bg-zinc-900 border border-zinc-800 text-[11px] text-zinc-400 flex items-center gap-2 my-1">
-          <ImageIcon className="w-4 h-4 text-zinc-500" />
-          <span>Imagem indisponível no WhatsApp</span>
-        </div>
-      );
-    }
-
-    return (
-      <>
-        <div className="rounded-xl overflow-hidden max-w-xs mb-2 border border-black/20 shadow-xl group relative">
-          <img 
-            src={finalImageSrc} 
-            alt="Imagem WhatsApp" 
-            className="w-full h-auto object-cover max-h-72 rounded-lg cursor-pointer hover:opacity-90 transition-all"
-            onClick={() => setShowModal(true)}
-          />
-          <div className="absolute bottom-2 right-2 bg-black/60 backdrop-blur-md px-2 py-1 rounded text-[10px] text-white opacity-0 group-hover:opacity-100 transition-opacity font-bold">
-            Clique para ampliar 🔍
-          </div>
-        </div>
-
-        {/* Modal Lightbox de Zoom da Imagem */}
-        {showModal && (
-          <div 
-            className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in"
-            onClick={() => setShowModal(false)}
-          >
-            <div className="relative max-w-4xl w-full max-h-[90vh] flex flex-col items-center justify-center" onClick={e => e.stopPropagation()}>
-              <div className="absolute -top-12 right-0 flex items-center gap-3">
-                <a
-                  href={finalImageSrc}
-                  download="imagem-whatsapp.jpg"
-                  className="px-3 py-1.5 rounded-lg bg-amber-400 text-zinc-950 font-bold text-xs hover:bg-amber-300 transition-colors flex items-center gap-1"
-                >
-                  Download HD
-                </a>
-                <button
-                  onClick={() => setShowModal(false)}
-                  className="w-8 h-8 rounded-full bg-zinc-800 text-zinc-200 hover:text-white font-bold flex items-center justify-center border border-zinc-700"
-                >
-                  ✕
-                </button>
-              </div>
-              <img 
-                src={finalImageSrc} 
-                alt="Imagem Ampliada" 
-                className="max-w-full max-h-[85vh] object-contain rounded-xl shadow-2xl border border-zinc-800"
-              />
-            </div>
-          </div>
-        )}
-      </>
-    );
-  }
-
-  if (msg.mediaType === 'audio' && src) {
-    return <AudioMessagePlayer src={src} durationHint={msg.mediaDuration} />;
-  }
-
-  if (msg.mediaType === 'video' && src) {
-    return (
-      <div className="max-w-sm overflow-hidden rounded-xl border border-white/10 bg-black/30 shadow-xl">
-        <video
-          src={src}
-          controls
-          preload="metadata"
-          className="max-h-80 w-full bg-black object-contain"
-          aria-label="Vídeo recebido no WhatsApp"
-        />
-        <a href={src} download="video-whatsapp.mp4" className="block px-3 py-2 text-center text-[11px] font-bold text-amber-300 hover:bg-white/5">
-          Baixar vídeo
-        </a>
-      </div>
-    );
-  }
-
-  if (msg.mediaType === 'sticker') {
-    if (!src) return <div className="text-[11px] text-slate-400">Figurinha indisponível</div>;
-    return (
-      <img
-        src={src}
-        alt="Figurinha do WhatsApp"
-        className="w-40 h-40 object-contain drop-shadow-lg"
-      />
-    );
-  }
-
-  if (msg.mediaType === 'audio') {
-    return (
-      <div className="w-[310px] max-w-[58vw] px-3 py-3 rounded-xl bg-black/20 border border-white/10 text-[11px] text-slate-400">
-        Áudio indisponível para reprodução
-      </div>
-    );
-  }
-
-  if (msg.mediaType === 'video') {
-    return (
-      <div className="w-[310px] max-w-[58vw] rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-[11px] text-slate-400">
-        Vídeo indisponível para reprodução
-      </div>
-    );
-  }
-
-  if (msg.mediaType === 'document' && src) {
-    return (
-      <div className="flex items-center gap-2.5 p-2.5 rounded-xl bg-black/30 my-1 border border-white/10 max-w-xs shadow-inner">
-        <Paperclip className="w-4 h-4 flex-shrink-0 text-amber-400" />
-        <span className="truncate flex-1 font-bold text-xs">{msg.content || 'Documento'}</span>
-        <a 
-          href={src} 
-          download="documento.pdf"
-          className="px-2.5 py-1 rounded bg-amber-400 text-zinc-950 font-bold hover:bg-amber-300 transition-colors text-[11px]"
-        >
-          Baixar
-        </a>
-      </div>
-    );
-  }
-
-  return null;
-};
 
 export const AtendimentoPage: React.FC = () => {
   const instanceName = 'vitstock_atendimento';
@@ -1383,196 +1054,29 @@ export const AtendimentoPage: React.FC = () => {
             {assignmentFeedback && <div className="px-5 py-2 text-xs font-semibold text-violet-200 bg-violet-400/10 border-b border-violet-400/20">{assignmentFeedback}</div>}
 
             {/* Mensagens com Scroll */}
-            <div ref={messagesContainerRef} style={{ overflowAnchor: 'none' }} className="chat-wallpaper flex-1 px-6 py-5 overflow-y-auto space-y-3">
-              <div className="flex justify-center my-2">
-                <span className="text-[10px] font-bold px-3 py-1 rounded-lg bg-[#20292f]/95 border border-white/5 text-slate-400 shadow-sm">
-                  Atendimento em tempo real via Evolution API
-                </span>
-              </div>
+            <MessageTimeline
+              messages={messages}
+              activeConversation={activeConv}
+              instanceName={instanceName}
+              containerRef={messagesContainerRef}
+              onRetryMessage={(message) => { void retryFailedMessage(message); }}
+            />
 
-              {messages.map(msg => {
-                const isMe = msg.sender === 'attendant';
-                const isNote = msg.isInternalNote;
-
-                if (isNote) {
-                  return (
-                    <div key={msg.id} className="flex justify-center my-2 animate-fade-in">
-                      <div className="max-w-xl w-full p-3 rounded-lg bg-amber-400/10 border border-amber-400/40 text-amber-300 text-xs">
-                        <div className="flex items-center gap-1.5 font-bold mb-1 text-amber-400">
-                          <Lock className="w-3.5 h-3.5" />
-                          <span>Nota Interna ({msg.senderName})</span>
-                          <span className="text-[10px] opacity-70 ml-auto">{formatMessageTimestamp(msg.timestampMs, msg.timestamp)}</span>
-                        </div>
-                        <p>{msg.content}</p>
-                        <span className="text-[9px] font-semibold text-amber-400/70 block mt-1">
-                          🔒 Invisível para o cliente
-                        </span>
-                      </div>
-                    </div>
-                  );
-                }
-
-                return (
-                  <div 
-                    key={msg.id} 
-                    className={`flex gap-2 max-w-[72%] animate-fade-in ${isMe ? 'ml-auto flex-row-reverse' : ''}`}
-                  >
-                    {!isMe && (
-                      <ContactPhoto name={activeConv.contact.name} avatar={activeConv.contact.avatar} size="small" />
-                    )}
-                    <div>
-                      <div className={`px-3 py-2.5 rounded-lg text-[13px] leading-relaxed space-y-2 shadow-sm ${
-                        isMe 
-                          ? 'bg-[#5b4b20] text-[#fff8df] border border-amber-300/15 font-medium rounded-tr-none'
-                          : 'bg-[#273238] text-slate-100 border border-white/5 rounded-tl-none'
-                      }`}>
-                        {isMe && (
-                          <p className="text-[10px] font-bold text-amber-200/75 mb-1">{msg.senderName}</p>
-                        )}
-
-                        {/* Renderização Inteligente de Mídias (Imagem, Áudio, Documentos em Base64) */}
-                        <MediaMessageContent msg={msg} instanceName={instanceName} />
-                        <SpecialMessageContent msg={msg} />
-                        <InteractiveMessageContent msg={msg} />
-
-                        {/* Texto da Mensagem */}
-                        {!msg.metadata?.contactCard && !msg.metadata?.location && !msg.metadata?.systemLabel && <>
-                        {!isMediaPlaceholder(msg) && msg.content && !msg.content.startsWith('🖼️') && !msg.content.startsWith('🎵') && !msg.content.startsWith('🎬') && (
-                          <p className="whitespace-pre-wrap">{msg.content}</p>
-                        )}
-                        </>}
-                      </div>
-                      <div className={`flex items-center gap-1 mt-1 text-[10px] text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
-                        <span>{formatMessageTimestamp(msg.timestampMs, msg.timestamp)}</span>
-                        {isMe && msg.status === 'failed' && <span className="font-bold text-red-300">Falha no envio</span>}
-                        {isMe && msg.status === 'pending' && <span className="font-semibold text-amber-300">Enviando...</span>}
-                        {isMe && msg.status !== 'failed' && msg.status !== 'pending' && (
-                          <CheckCheck className={`w-3.5 h-3.5 ${msg.status === 'read' ? 'text-emerald-400' : msg.status === 'delivered' ? 'text-amber-400' : 'text-slate-400'}`} />
-                        )}
-                        {isMe && msg.status === 'failed' && (
-                          <button
-                            type="button"
-                            onClick={() => { void retryFailedMessage(msg); }}
-                            className="ml-1 font-bold text-amber-300 underline decoration-amber-300/50 underline-offset-2 hover:text-amber-200"
-                          >
-                            Tentar novamente
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Caixas de Resposta Rápida (Pop-over) */}
-            {quickReplyOpen && (
-              <div className="mx-5 p-3 rounded-lg bg-zinc-900 border border-amber-400/30 shadow-2xl space-y-2 animate-fade-in">
-                <div className="flex items-center justify-between text-xs font-bold text-amber-400">
-                  <span className="flex items-center gap-1.5"><Zap className="w-3.5 h-3.5" /> Respostas Rápidas</span>
-                  <button onClick={() => setQuickReplyOpen(false)} className="text-zinc-500 hover:text-zinc-300">✕</button>
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <button 
-                    onClick={() => insertQuickReply('Segue a proposta comercial para o lote com 5% de desconto no PIX: R$ 58.995,00.')}
-                    className="p-2 text-left rounded bg-zinc-800/80 hover:bg-amber-400/20 hover:text-amber-300 text-zinc-300 border border-zinc-700/60"
-                  >
-                    <span className="font-bold block text-amber-400">/proposta</span> Proposta Comercial PIX
-                  </button>
-                  <button 
-                    onClick={() => insertQuickReply('O prazo de entrega para Curitiba é de 2 a 3 dias úteis após a confirmação do pagamento.')}
-                    className="p-2 text-left rounded bg-zinc-800/80 hover:bg-amber-400/20 hover:text-amber-300 text-zinc-300 border border-zinc-700/60"
-                  >
-                    <span className="font-bold block text-amber-400">/frete</span> Prazo de Entrega
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Input de Envio de Mensagem */}
-            <form onSubmit={handleSendMessage} className="p-3 bg-[#20292f] border-t border-[#344047]">
-              {activeChatLocked && (
-                <div className="mb-2 rounded-lg border border-violet-300/20 bg-violet-300/10 px-3 py-2 text-[11px] font-semibold text-violet-200">
-                  Este atendimento está capturado por {activeConv?.assignedAttendant?.name || 'outro atendente'}.
-                </div>
-              )}
-              <div className="flex items-center gap-2 mb-2">
-                <button
-                  type="button"
-                  onClick={() => setIsInternalNote(false)}
-                  className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${
-                    !isInternalNote 
-                      ? 'bg-amber-400 text-zinc-950 shadow-sm' 
-                      : 'text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  💬 Mensagem WhatsApp
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsInternalNote(true)}
-                  className={`px-3 py-1 rounded-md text-xs font-bold transition-all flex items-center gap-1 ${
-                    isInternalNote 
-                      ? 'bg-amber-400/20 text-amber-400 border border-amber-400/40' 
-                      : 'text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  🔒 Nota Interna (Privada)
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setQuickReplyOpen(!quickReplyOpen)}
-                  className="ml-auto text-xs font-bold text-amber-400 hover:text-amber-300 flex items-center gap-1 bg-amber-400/10 px-2.5 py-1 rounded border border-amber-400/20"
-                >
-                  <Zap className="w-3.5 h-3.5" /> Resposta Rápida
-                </button>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <input
-                  ref={attachmentInputRef}
-                  type="file"
-                  accept="image/*,video/*,application/pdf,.doc,.docx"
-                  className="hidden"
-                  onChange={handleAttachmentChange}
-                />
-                <button
-                  type="button"
-                  onClick={() => attachmentInputRef.current?.click()}
-                  disabled={activeChatLocked || isInternalNote || sendingMedia}
-                  title="Enviar imagem, vídeo ou documento"
-                  className="p-2.5 rounded-full bg-transparent text-slate-400 hover:text-amber-300 hover:bg-[#2a343a] transition-colors disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  <Paperclip className="w-4 h-4" />
-                </button>
-
-                <input 
-                  type="text" 
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  disabled={activeChatLocked || sendingMedia}
-                  placeholder={isInternalNote ? "Digite uma nota interna para a equipe..." : "Digite sua mensagem para o WhatsApp..."}
-                  className={`flex-1 bg-[#2a343a] border text-xs text-slate-100 placeholder-slate-400 rounded-full px-4 py-3 focus:outline-none transition-colors ${
-                    isInternalNote 
-                      ? 'border-amber-400/50 bg-amber-400/5 focus:border-amber-400' 
-                      : 'border-transparent focus:border-amber-400/70'
-                  }`}
-                />
-
-                <button 
-                  type="submit"
-                  disabled={activeChatLocked || sendingMedia}
-                  className={`p-3 rounded-full font-bold flex items-center justify-center transition-all ${
-                    isInternalNote 
-                      ? 'bg-amber-500 text-zinc-950 hover:bg-amber-400' 
-                      : 'bg-amber-400 text-zinc-950 hover:bg-amber-300 shadow-[0_0_12px_rgba(238,187,44,0.3)]'
-                  } disabled:cursor-not-allowed disabled:opacity-40`}
-                >
-                  <Send className="w-4 h-4" />
-                </button>
-              </div>
-            </form>
+            <MessageComposer
+              inputText={inputText}
+              isInternalNote={isInternalNote}
+              quickReplyOpen={quickReplyOpen}
+              activeChatLocked={activeChatLocked}
+              assignedAttendantName={activeConv.assignedAttendant?.name}
+              sendingMedia={sendingMedia}
+              attachmentInputRef={attachmentInputRef}
+              onSubmit={handleSendMessage}
+              onInputChange={setInputText}
+              onToggleInternalNote={setIsInternalNote}
+              onToggleQuickReply={() => setQuickReplyOpen((open) => !open)}
+              onAttachmentChange={handleAttachmentChange}
+              onInsertQuickReply={insertQuickReply}
+            />
           </>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center text-center p-8 text-zinc-500">
