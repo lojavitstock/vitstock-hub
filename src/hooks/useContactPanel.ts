@@ -29,12 +29,14 @@ type UseContactPanelOptions = {
   activeConversation?: Conversation;
   isMock: boolean;
   setConversations: React.Dispatch<React.SetStateAction<Conversation[]>>;
+  rememberContactName?: (phone: string, name: string) => void;
 };
 
 export const useContactPanel = ({
   activeConversation,
   isMock,
   setConversations,
+  rememberContactName,
 }: UseContactPanelOptions) => {
   const [showContactInfo, setShowContactInfo] = useState(false);
   const [businessProfile, setBusinessProfile] = useState<any | null>(null);
@@ -68,7 +70,7 @@ export const useContactPanel = ({
       // O nome local continua válido quando a Evolution não disponibiliza o perfil.
     });
     return () => { mounted = false; };
-  }, [activeContactName, activeContactPhone, activeConversationId, isMock, setConversations]);
+  }, [activeContactPhone, activeConversationId, isMock, setConversations]);
 
   useEffect(() => {
     if (!showContactInfo || !activeConversation || !activeContactPhone) return;
@@ -126,6 +128,7 @@ export const useContactPanel = ({
         resourceName: status.resourceName || '',
       });
       if (status.saved && status.name) {
+        rememberContactName?.(activeContactPhone, status.name);
         setConversations((previous) => previous.map((conversation) => conversation.id === activeConversation.id ? {
           ...conversation,
           contact: { ...conversation.contact, name: status.name || conversation.contact.name },
@@ -159,7 +162,7 @@ export const useContactPanel = ({
       window.clearTimeout(statusTimeout);
       setShowGoogleContactForm(false);
     };
-  }, [activeContactName, activeContactPhone, activeConversationId, showContactInfo, setConversations]);
+  }, [activeContactPhone, activeConversationId, rememberContactName, showContactInfo, setConversations]);
 
   const openGoogleContactForm = useCallback(() => {
     if (!activeConversation) return;
@@ -191,12 +194,13 @@ export const useContactPanel = ({
         ...conversation,
         contact: { ...conversation.contact, name: googleContactForm.name, phone: googleContactForm.phone },
       } : conversation));
+      rememberContactName?.(googleContactForm.phone, googleContactForm.name);
     } catch (error) {
       setGoogleContactFeedback(error instanceof Error ? error.message : 'Não foi possível salvar o contato');
     } finally {
       setSavingGoogleContact(false);
     }
-  }, [activeConversation, googleContactForm, setConversations]);
+  }, [activeConversation, googleContactForm, rememberContactName, setConversations]);
 
   return {
     showContactInfo,

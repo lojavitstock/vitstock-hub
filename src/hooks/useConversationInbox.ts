@@ -14,6 +14,19 @@ const normalizeSearchText = (value: string) => value
   .normalize('NFD')
   .replace(/[\u0300-\u036f]/g, '');
 
+const isPhoneOnlyName = (value?: string | null) => !value || /^\+?[\d\s().-]+$/.test(value.trim());
+
+const phoneVariants = (value: string) => {
+  const digits = value.replace(/\D/g, '');
+  const variants = new Set([digits]);
+  if (digits.startsWith('55') && digits.length === 13) {
+    variants.add(`${digits.slice(0, 4)}${digits.slice(5)}`);
+  } else if (digits.startsWith('55') && digits.length === 12) {
+    variants.add(`${digits.slice(0, 4)}9${digits.slice(4)}`);
+  }
+  return Array.from(variants).filter(Boolean);
+};
+
 type UseConversationInboxOptions = {
   instanceName: string;
   isMock: boolean;
@@ -38,6 +51,7 @@ export const useConversationInbox = ({
   const conversationsRef = useRef<Conversation[]>([]);
   const activeConversationIdRef = useRef('');
   const readOverridesRef = useRef(new Map<string, number>());
+  const contactNameOverridesRef = useRef(new Map<string, string>());
   const loadingChatsRef = useRef(false);
 
   useEffect(() => {
@@ -79,9 +93,16 @@ export const useConversationInbox = ({
       const previousActivePhone = previousActiveConversation?.contact.phone.replace(/\D/g, '');
       const mergedChats = realChats.map((conversation) => {
         const locallyReadAt = readOverridesRef.current.get(conversation.id);
-        return locallyReadAt && conversation.lastMessageAt && conversation.lastMessageAt <= locallyReadAt
-          ? { ...conversation, unreadCount: 0 }
+        const phone = conversation.contact.phone.replace(/\D/g, '');
+        const savedName = phoneVariants(phone)
+          .map((variant) => contactNameOverridesRef.current.get(variant))
+          .find(Boolean);
+        const withNameOverride = savedName && !isPhoneOnlyName(savedName)
+          ? { ...conversation, contact: { ...conversation.contact, name: savedName } }
           : conversation;
+        return locallyReadAt && conversation.lastMessageAt && conversation.lastMessageAt <= locallyReadAt
+          ? { ...withNameOverride, unreadCount: 0 }
+          : withNameOverride;
       });
 
       setConversations(mergedChats);
@@ -147,6 +168,20 @@ export const useConversationInbox = ({
     } catch (error) {
       console.warn('[Atendimento] Não foi possível persistir a leitura:', error);
     }
+  }, []);
+
+  const rememberContactName = useCallback((phone: string, name: string) => {
+    const normalizedPhone = phone.replace(/\D/g, '');
+    const normalizedName = name.trim();
+    if (!normalizedPhone || isPhoneOnlyName(normalizedName)) return;
+    phoneVariants(normalizedPhone).forEach((variant) => {
+      contactNameOverridesRef.current.set(variant, normalizedName);
+    });
+    setConversations((previous) => previous.map((conversation) => (
+      conversation.contact.phone.replace(/\D/g, '') === normalizedPhone
+        ? { ...conversation, contact: { ...conversation.contact, name: normalizedName } }
+        : conversation
+    )));
   }, []);
 
   const captureActiveChat = useCallback(async () => {
@@ -246,6 +281,7 @@ export const useConversationInbox = ({
     loadingChats,
     loadChats,
     markConversationAsRead,
+    rememberContactName,
     capturingChat,
     assignmentFeedback,
     setAssignmentFeedback,

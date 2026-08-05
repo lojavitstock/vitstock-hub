@@ -80,6 +80,7 @@ export const AtendimentoPage: React.FC = () => {
     captureActiveChat,
     releaseActiveChat,
     updateActiveChatStatus,
+    rememberContactName,
   } = useConversationInbox({
     instanceName,
     isMock,
@@ -106,6 +107,7 @@ export const AtendimentoPage: React.FC = () => {
     activeConversation: activeConv,
     isMock,
     setConversations,
+    rememberContactName,
   });
 
   useEffect(() => {
