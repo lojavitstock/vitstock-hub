@@ -8,8 +8,8 @@ import {
   Settings, 
   Wifi, 
   WifiOff,
-  LogOut,
-  ShieldCheck
+  RefreshCw,
+  LogOut
 } from 'lucide-react';
 import { EvolutionApiService } from '../../services/evolutionApi';
 import { useAuth } from '../../auth/AuthContext';
@@ -54,12 +54,12 @@ export const AppLayout: React.FC = () => {
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#11181d] text-slate-100 font-overpass">
       {/* Sidebar Lateral Desktop (Layout Vitstock Hub) */}
-      <aside className="w-60 flex-shrink-0 bg-[#182126] border-r border-[#344047] flex flex-col justify-between select-none">
+      <aside className="w-20 flex-shrink-0 bg-[#182126] border-r border-[#344047] flex flex-col justify-between select-none">
         
         {/* Top Header: Logo Oficial VITSTOCK® */}
         <div>
-          <div className="p-5 border-b border-[#344047] bg-[#20292f] flex items-center gap-3.5">
-            <div className="w-11 h-11 min-w-[44px] max-w-[44px] max-h-[44px] overflow-hidden rounded-2xl bg-amber-400/10 border border-amber-400/30 flex items-center justify-center p-1.5 shadow-[0_0_15px_rgba(238,187,44,0.15)] flex-shrink-0">
+          <div className="flex items-center justify-center border-b border-[#344047] bg-[#20292f] p-3">
+            <div className="flex h-11 w-11 min-w-[44px] max-w-[44px] max-h-[44px] items-center justify-center overflow-hidden rounded-2xl border border-amber-400/30 bg-amber-400/10 p-1.5 shadow-[0_0_15px_rgba(238,187,44,0.15)]" title="Vitstock Hub">
               <img 
                 src="/VITSTOCK®/SIMBOLO/1.png" 
                 alt="VITSTOCK Simbolo" 
@@ -70,22 +70,11 @@ export const AppLayout: React.FC = () => {
                 }}
               />
             </div>
-            <div>
-              <div className="flex items-center gap-1.5">
-                <span className="font-extrabold tracking-[0.01em] text-[19px] leading-none text-amber-400">vitstock</span>
-                <span className="text-[10px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-400/20 text-amber-300 border border-amber-400/30">
-                  HUB
-                </span>
-              </div>
-              <p className="mt-1 text-[11px] text-slate-400 font-medium tracking-wide">Atendimento &amp; CRM</p>
-            </div>
           </div>
 
           {/* Menu de Navegação em Português */}
-          <nav className="p-3.5 space-y-1.5" aria-label="Menu principal">
-            <p className="px-3 py-2 text-[10px] font-extrabold uppercase tracking-[0.18em] text-slate-500">
-              Menu Principal
-            </p>
+          <nav className="space-y-1.5 p-2" aria-label="Menu principal">
+            <span className="sr-only">Menu Principal</span>
             {navItems.map((item) => {
               const Icon = item.icon;
               const isActive = location.pathname === item.path || (item.path === '/atendimento' && location.pathname === '/');
@@ -93,18 +82,20 @@ export const AppLayout: React.FC = () => {
                 <NavLink
                   key={item.path}
                   to={item.path}
+                  title={item.label}
+                  aria-label={item.label}
                   className={({ isActive: navActive }) => {
                     const active = navActive || (item.path === '/atendimento' && location.pathname === '/');
-                    return `group flex min-h-11 items-center justify-between rounded-xl border px-3.5 py-2.5 text-[13px] font-semibold transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70 ${
+                    return `group flex min-h-11 items-center justify-center rounded-xl border px-2 py-2.5 text-[13px] font-semibold transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70 ${
                       active
                         ? 'border-amber-300/40 bg-amber-400/15 text-amber-200 font-bold shadow-[inset_3px_0_0_#EEBB2C,0_4px_14px_rgba(0,0,0,0.12)]'
                         : 'border-transparent text-slate-300 hover:border-[#3c4a51] hover:bg-[#263138] hover:text-white'
                     }`;
                   }}
                 >
-                  <div className="flex items-center gap-3.5">
-                    <Icon className={`h-[18px] w-[18px] flex-shrink-0 transition-colors ${isActive ? 'text-amber-300' : 'text-slate-400 group-hover:text-slate-200'}`} />
-                    <span>{item.label}</span>
+                  <div className="flex items-center justify-center">
+                    <Icon className={`h-5 w-5 flex-shrink-0 transition-colors ${isActive ? 'text-amber-300' : 'text-slate-400 group-hover:text-slate-200'}`} />
+                    <span className="sr-only">{item.label}</span>
                   </div>
                   {item.badge && (
                     <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
@@ -122,32 +113,30 @@ export const AppLayout: React.FC = () => {
         </div>
 
         {/* Bottom Section: Status da Conexão & Perfil do Atendente */}
-        <div className="p-3.5 border-t border-[#344047] bg-[#151e23]">
+        <div className="border-t border-[#344047] bg-[#151e23] p-2">
           
           {/* Status WhatsApp (Evolution API em Tempo Real) */}
-          <div className="mb-3 rounded-xl bg-[#20292f] border border-[#3a474e] p-3">
-            <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="relative flex h-2.5 w-2.5">
-                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${connectionStatus === 'connected' ? 'bg-emerald-400' : connectionStatus === 'connecting' ? 'bg-amber-400' : 'bg-red-400'} opacity-75`}></span>
-                <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${connectionStatus === 'connected' ? 'bg-emerald-500' : connectionStatus === 'connecting' ? 'bg-amber-400' : 'bg-red-500'}`}></span>
-              </span>
-              <span className={`text-[12px] font-bold ${connectionStatus === 'connected' ? 'text-slate-200' : connectionStatus === 'connecting' ? 'text-amber-300' : 'text-red-300'}`}>
-                {connectionStatus === 'connected' ? 'WhatsApp Conectado' : connectionStatus === 'connecting' ? 'Reconectando WhatsApp' : 'WhatsApp Desconectado'}
-              </span>
-            </div>
+          <div
+            className="mb-2 flex h-11 items-center justify-center rounded-xl border border-[#3a474e] bg-[#20292f]"
+            title={connectionStatus === 'connected' ? 'WhatsApp conectado' : connectionStatus === 'connecting' ? 'Reconectando WhatsApp' : 'WhatsApp desconectado'}
+            aria-label={connectionStatus === 'connected' ? 'WhatsApp conectado' : connectionStatus === 'connecting' ? 'Reconectando WhatsApp' : 'WhatsApp desconectado'}
+          >
+            <span className="relative flex h-2.5 w-2.5" aria-hidden="true">
+              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${connectionStatus === 'connected' ? 'bg-emerald-400' : connectionStatus === 'connecting' ? 'bg-amber-400' : 'bg-red-400'} opacity-75`}></span>
+              <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${connectionStatus === 'connected' ? 'bg-emerald-500' : connectionStatus === 'connecting' ? 'bg-amber-400' : 'bg-red-500'}`}></span>
+            </span>
             {connectionStatus === 'connected' ? (
-              <Wifi className="w-3.5 h-3.5 text-emerald-400" />
+              <Wifi className="ml-2 h-4 w-4 text-emerald-400" aria-hidden="true" />
+            ) : connectionStatus === 'connecting' ? (
+              <RefreshCw className="ml-2 h-4 w-4 animate-spin text-amber-400" aria-hidden="true" />
             ) : (
-              <WifiOff className={`w-3.5 h-3.5 ${connectionStatus === 'connecting' ? 'text-amber-400 animate-pulse' : 'text-red-400'}`} />
+              <WifiOff className="ml-2 h-4 w-4 text-red-400" aria-hidden="true" />
             )}
-            </div>
-            <p className="mt-1.5 pl-[18px] text-[10px] font-medium tracking-wide text-slate-500">Canal em tempo real</p>
           </div>
 
           {/* Card Atendente */}
-          <div className="flex items-center justify-between rounded-xl p-2.5 transition-colors hover:bg-[#263138]">
-            <div className="flex items-center gap-2.5">
+          <div className="flex flex-col items-center gap-2 rounded-xl p-2 transition-colors hover:bg-[#263138]">
+            <div className="flex items-center justify-center">
               <div className="relative">
                 <img 
                   src={`https://ui-avatars.com/api/?name=${encodeURIComponent(currentUser?.name || 'Usuário')}&background=EEBB2C&color=000`}
@@ -159,18 +148,12 @@ export const AppLayout: React.FC = () => {
                 />
                 <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-emerald-500 rounded-full border-2 border-zinc-950"></span>
               </div>
-              <div className="overflow-hidden">
-                <p className="text-[12px] font-bold text-zinc-100 truncate flex items-center gap-1">
-                  {currentUser?.name}
-                  <ShieldCheck className="w-3 h-3 text-amber-400 inline" />
-                </p>
-                <p className="text-[11px] text-slate-400 truncate capitalize">{currentUser?.role}</p>
-              </div>
             </div>
-            <button 
+            <button
               onClick={() => void logout()}
-              className="text-zinc-500 hover:text-red-400 p-1.5 rounded-md hover:bg-zinc-800/50 transition-colors"
-              title="Sair da Plataforma"
+              className="rounded-lg p-2 text-zinc-500 transition-colors hover:bg-zinc-800/50 hover:text-red-400 focus-visible:ring-2 focus-visible:ring-amber-300/70"
+              title={`Sair da plataforma${currentUser?.name ? ` — ${currentUser.name}` : ''}`}
+              aria-label="Sair da plataforma"
             >
               <LogOut className="w-4 h-4" />
             </button>
