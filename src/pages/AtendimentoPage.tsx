@@ -34,13 +34,14 @@ import {
   Globe,
   MapPin,
   Megaphone,
-  Archive
+  Archive,
 } from 'lucide-react';
 import { mockConversations } from '../services/mockData';
 import { ChatStatus, Conversation, Message } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { apiRequest } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
+import { ConversationFilters, ConversationFilter } from '../components/conversations/ConversationFilters';
 
 const ContactPhoto: React.FC<{
   name: string;
@@ -202,8 +203,6 @@ type GoogleContactForm = {
   address: string;
   resourceName: string;
 };
-
-type ConversationFilter = 'all' | 'unread' | 'unanswered' | 'delivery' | 'resolved';
 
 const AudioMessagePlayer: React.FC<{ src: string; durationHint?: number }> = ({ src, durationHint }) => {
   const audioRef = React.useRef<HTMLAudioElement>(null);
@@ -1214,7 +1213,7 @@ export const AtendimentoPage: React.FC = () => {
           </div>
 
           {/* Filtros de atendimento */}
-          <div className="grid grid-cols-6 gap-1.5 rounded-xl border border-[#3a474e] bg-[#141d22] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.025),0_8px_24px_rgba(0,0,0,0.14)]">
+          <div className="hidden grid grid-cols-6 gap-1.5 rounded-xl border border-[#3a474e] bg-[#141d22] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.025),0_8px_24px_rgba(0,0,0,0.14)]">
             {(['all', 'unread', 'unanswered', 'delivery', 'resolved'] as const).map(tab => {
               const count = tab === 'all'
                 ? conversations.length
@@ -1276,6 +1275,12 @@ export const AtendimentoPage: React.FC = () => {
               );
             })}
           </div>
+          <ConversationFilters
+            conversations={conversations}
+            activeFilter={filterTab}
+            onFilterChange={setFilterTab}
+            needsResponse={conversationNeedsResponse}
+          />
         </div>
 
         {/* Lista de Conversas com Scroll */}
