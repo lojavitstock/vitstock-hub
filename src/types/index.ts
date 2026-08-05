@@ -3,9 +3,11 @@ export type ChatStatus = 'open' | 'pending' | 'resolved';
 export interface Attendant {
   id: string;
   name: string;
-  avatar: string;
+  avatar?: string;
+  email?: string;
   role: 'admin' | 'attendant';
   online: boolean;
+  active?: boolean;
 }
 
 export interface Tag {

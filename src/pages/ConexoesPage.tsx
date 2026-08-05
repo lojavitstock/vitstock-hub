@@ -3,7 +3,11 @@ import { LogOut, QrCode, RefreshCw, Smartphone, ShieldCheck, CheckCircle } from 
 import { WhatsappInstance } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 
-export const ConexoesPage: React.FC = () => {
+type ConexoesPageProps = {
+  embedded?: boolean;
+};
+
+export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) => {
   const instanceName = 'vitstock_atendimento';
   const isMock = import.meta.env.VITE_USE_MOCK_DATA === 'true';
 
@@ -92,12 +96,12 @@ export const ConexoesPage: React.FC = () => {
   const visibleStatus = showQr ? 'disconnected' : instance.status;
 
   return (
-    <div className="flex-1 h-full p-6 overflow-y-auto bg-zinc-950 font-overpass">
+    <div className={`${embedded ? 'w-full' : 'flex-1 h-full'} overflow-y-auto bg-zinc-950 ${embedded ? 'p-0' : 'p-6'} font-overpass`}>
       
       {/* Header */}
-      <div className="flex items-center justify-between mb-6 pb-4 border-b border-zinc-800">
+      <div className="mb-6 flex items-center justify-between border-b border-zinc-800 pb-4">
         <div>
-          <h1 className="text-xl font-extrabold text-zinc-100 flex items-center gap-2">
+          <h1 className="flex items-center gap-2 text-2xl font-extrabold text-zinc-100">
             Gestão de Conexões WhatsApp (Evolution API)
             {visibleStatus === 'connected' ? (
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-bold">
@@ -113,7 +117,7 @@ export const ConexoesPage: React.FC = () => {
               </span>
             )}
           </h1>
-          <p className="text-xs text-zinc-400 mt-1">
+          <p className="mt-1 text-sm text-zinc-400">
             Conexão com a Evolution API v2 em produção na Oracle Cloud
           </p>
         </div>
@@ -121,7 +125,7 @@ export const ConexoesPage: React.FC = () => {
         <button 
           onClick={handleConnectOrRefresh}
           disabled={loading}
-          className="btn-primary text-xs"
+        className="btn-primary text-sm"
         >
           <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> 
           {loading ? 'Verificando...' : 'Reverificar Status'}

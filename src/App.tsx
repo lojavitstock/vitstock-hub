@@ -4,7 +4,6 @@ import { AppLayout } from './components/layout/AppLayout';
 import { AtendimentoPage } from './pages/AtendimentoPage';
 import { ContatosPage } from './pages/ContatosPage';
 import { CampanhasPage } from './pages/CampanhasPage';
-import { ConexoesPage } from './pages/ConexoesPage';
 import { ConfiguracoesPage } from './pages/ConfiguracoesPage';
 import { LoginPage } from './pages/LoginPage';
 import { useAuth } from './auth/AuthContext';
@@ -25,7 +24,7 @@ const AuthenticatedApp: React.FC = () => {
         <Route path="atendimento" element={<AtendimentoPage />} />
         <Route path="contatos" element={<ContatosPage />} />
         <Route path="campanhas" element={<CampanhasPage />} />
-        <Route path="conexoes" element={<ConexoesPage />} />
+        <Route path="conexoes" element={<Navigate to="/configuracoes?tab=connections" replace />} />
         <Route path="configuracoes" element={<ConfiguracoesPage />} />
         <Route path="*" element={<Navigate to="/atendimento" replace />} />
       </Route>

@@ -4,7 +4,6 @@ import {
   MessageSquare, 
   Users, 
   Megaphone, 
-  QrCode, 
   Settings, 
   Wifi, 
   WifiOff,
@@ -47,7 +46,6 @@ export const AppLayout: React.FC = () => {
     { path: '/atendimento', label: 'Atendimento', icon: MessageSquare },
     { path: '/contatos', label: 'Contatos', icon: Users },
     { path: '/campanhas', label: 'Campanhas', icon: Megaphone },
-    { path: '/conexoes', label: 'Conexões', icon: QrCode },
     { path: '/configuracoes', label: 'Configurações', icon: Settings },
   ];
 

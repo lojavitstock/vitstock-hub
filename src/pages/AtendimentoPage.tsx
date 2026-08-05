@@ -486,9 +486,7 @@ export const AtendimentoPage: React.FC = () => {
     } : c));
   };
 
-  const handleAttachmentChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = '';
+  const handleAttachmentFile = async (file: File) => {
     if (!file || !activeConv || activeChatLocked || isInternalNote || sendingMedia) return;
     if (file.size > 10 * 1024 * 1024) {
       setAssignmentFeedback('O anexo deve ter no máximo 10 MB.');
@@ -576,6 +574,22 @@ export const AtendimentoPage: React.FC = () => {
     } finally {
       setSendingMedia(false);
     }
+  };
+
+  const handleAttachmentChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (file) await handleAttachmentFile(file);
+  };
+
+  const handleInputPaste = (event: React.ClipboardEvent<HTMLInputElement>) => {
+    if (!activeConv || activeChatLocked || isInternalNote || sendingMedia) return;
+    const imageItem = Array.from(event.clipboardData.items).find((item) => item.kind === 'file' && item.type.startsWith('image/'));
+    const file = imageItem?.getAsFile()
+      || Array.from(event.clipboardData.files).find((candidate) => candidate.type.startsWith('image/'));
+    if (!file) return;
+    event.preventDefault();
+    void handleAttachmentFile(file);
   };
 
   const retryFailedMessage = async (message: Message) => {
@@ -1016,6 +1030,7 @@ export const AtendimentoPage: React.FC = () => {
               onToggleInternalNote={setIsInternalNote}
               onToggleQuickReply={() => setQuickReplyOpen((open) => !open)}
               onAttachmentChange={handleAttachmentChange}
+              onInputPaste={handleInputPaste}
               onInsertQuickReply={insertQuickReply}
             />
           </>

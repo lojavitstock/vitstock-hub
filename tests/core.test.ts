@@ -5,6 +5,7 @@ import type { ServerResponse } from 'node:http';
 import { phoneVariants } from '../src/utils/phone';
 import { mergeConversationMessages } from '../src/utils/messageMerge';
 import { normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
+import { callMessageInfo } from '../src/utils/callMessage';
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
 import type { Message } from '../src/types';
 
@@ -61,6 +62,21 @@ test('normaliza figurinha recebida sem transformá-la em mensagem genérica', ()
   assert.equal(normalized.mediaType, 'sticker');
   assert.match(normalized.content, /Figurinha/i);
   assert.equal(normalized.senderName, 'Cliente');
+});
+
+test('normaliza chamadas do WhatsApp como ligação perdida ou realizada', () => {
+  const missed = callMessageInfo({ key: { fromMe: false } }, { callLogMessage: { callOutcome: 1, isVideo: false } });
+  const completed = callMessageInfo({ key: { fromMe: true } }, { callLogMessage: { callOutcome: 0, durationSecs: 18 } });
+  assert.equal(missed.label, 'Ligação de voz perdida');
+  assert.equal(completed.label, 'Ligação de voz realizada');
+
+  const normalized = normalizeEvolutionMessage({
+    key: { id: 'call-1', fromMe: false },
+    message: { callLogMessage: { callOutcome: 1, isVideo: false } },
+    messageTimestamp: 1_700_000_002,
+  }, 0, 'conversation-1', 'Atendente');
+  assert.equal(normalized.content, '[Ligação de voz perdida]');
+  assert.equal(normalized.metadata?.systemLabel, 'Ligação de voz perdida');
 });
 
 class FakeResponse extends EventEmitter {

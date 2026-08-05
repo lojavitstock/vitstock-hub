@@ -1,19 +1,117 @@
-import React, { useState } from 'react';
-import { Settings, Users, Shield, Zap, Layers, Plus, Check, KeyRound, Loader2 } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { Users, Zap, Layers, Plus, KeyRound, Loader2, QrCode, UserPlus, Power, Save, X } from 'lucide-react';
 import { Attendant } from '../types';
 import { apiRequest } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
+import { mockAttendants } from '../services/mockData';
+import { ConexoesPage } from './ConexoesPage';
+
+type SettingsTab = 'attendants' | 'departments' | 'quickReplies' | 'security' | 'connections';
+
+const isSettingsTab = (value: string | null): value is SettingsTab => (
+  value === 'attendants'
+  || value === 'departments'
+  || value === 'quickReplies'
+  || value === 'security'
+  || value === 'connections'
+);
 
 export const ConfiguracoesPage: React.FC = () => {
   const { user } = useAuth();
-  const [activeTab, setActiveTab] = useState<'attendants' | 'departments' | 'quickReplies' | 'security'>('attendants');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState<SettingsTab>(() => isSettingsTab(searchParams.get('tab')) ? searchParams.get('tab') as SettingsTab : 'attendants');
   const [attendants, setAttendants] = useState<Attendant[]>([]);
+  const [teamLoading, setTeamLoading] = useState(false);
+  const [teamError, setTeamError] = useState('');
+  const [teamFeedback, setTeamFeedback] = useState('');
+  const [showAttendantForm, setShowAttendantForm] = useState(false);
+  const [savingAttendant, setSavingAttendant] = useState(false);
+  const [updatingAttendantId, setUpdatingAttendantId] = useState<string | null>(null);
+  const [attendantForm, setAttendantForm] = useState({ name: '', email: '', password: '', role: 'attendant' as 'attendant' | 'admin' });
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [passwordFeedback, setPasswordFeedback] = useState('');
   const [passwordError, setPasswordError] = useState('');
   const [savingPassword, setSavingPassword] = useState(false);
+
+  useEffect(() => {
+    const requestedTab = searchParams.get('tab');
+    if (isSettingsTab(requestedTab) && requestedTab !== activeTab) setActiveTab(requestedTab);
+  }, [activeTab, searchParams]);
+
+  const changeTab = (tab: SettingsTab) => {
+    setActiveTab(tab);
+    setSearchParams(tab === 'attendants' ? {} : { tab });
+  };
+
+  const loadAttendants = useCallback(async () => {
+    setTeamLoading(true);
+    setTeamError('');
+    if (import.meta.env.VITE_USE_MOCK_DATA === 'true') {
+      setAttendants(mockAttendants);
+      setTeamLoading(false);
+      return;
+    }
+    try {
+      const response = await apiRequest<{ attendants: Attendant[] }>('/api/team/attendants');
+      setAttendants(response.attendants || []);
+    } catch (error) {
+      setTeamError(error instanceof Error ? error.message : 'Não foi possível carregar a equipe.');
+    } finally {
+      setTeamLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'attendants' && user) void loadAttendants();
+  }, [activeTab, loadAttendants, user]);
+
+  const resetAttendantForm = () => {
+    setAttendantForm({ name: '', email: '', password: '', role: 'attendant' });
+    setShowAttendantForm(false);
+  };
+
+  const handleCreateAttendant = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setTeamError('');
+    setTeamFeedback('');
+    setSavingAttendant(true);
+    try {
+      await apiRequest('/api/team/attendants', {
+        method: 'POST',
+        body: JSON.stringify(attendantForm),
+      });
+      resetAttendantForm();
+      setTeamFeedback('Atendente cadastrado com sucesso.');
+      await loadAttendants();
+    } catch (error) {
+      setTeamError(error instanceof Error ? error.message : 'Não foi possível cadastrar o atendente.');
+    } finally {
+      setSavingAttendant(false);
+    }
+  };
+
+  const handleToggleAttendant = async (attendant: Attendant) => {
+    if (attendant.id === user?.id && attendant.active !== false) return;
+    setTeamError('');
+    setTeamFeedback('');
+    setUpdatingAttendantId(attendant.id);
+    try {
+      const nextActive = attendant.active === false;
+      await apiRequest(`/api/team/attendants/${attendant.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ active: nextActive }),
+      });
+      setAttendants((current) => current.map((item) => item.id === attendant.id ? { ...item, active: nextActive, online: false } : item));
+      setTeamFeedback(nextActive ? `${attendant.name} foi reativado.` : `${attendant.name} foi desativado.`);
+    } catch (error) {
+      setTeamError(error instanceof Error ? error.message : 'Não foi possível atualizar o atendente.');
+    } finally {
+      setUpdatingAttendantId(null);
+    }
+  };
 
   const handleChangePassword = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -41,34 +139,35 @@ export const ConfiguracoesPage: React.FC = () => {
   };
 
   return (
-    <div className="flex-1 h-full p-6 overflow-y-auto bg-zinc-950 font-overpass">
+    <div className="flex-1 h-full overflow-y-auto bg-zinc-950 p-6 font-overpass text-sm">
       
       {/* Header */}
       <div className="flex items-center justify-between mb-6 pb-4 border-b border-zinc-800">
         <div>
-          <h1 className="text-xl font-extrabold text-zinc-100 flex items-center gap-2">
+          <h1 className="flex items-center gap-2 text-2xl font-extrabold text-zinc-100">
             Configurações da Plataforma
           </h1>
-          <p className="text-xs text-zinc-400 mt-1">
-            Gerencie atendentes, setores de atendimento e atalhos de mensagens
+          <p className="mt-1 text-sm text-zinc-400">
+            Gerencie equipe, setores, conexões e atalhos de mensagens
           </p>
         </div>
       </div>
 
       {/* Navegação por Abas */}
-      <div className="flex border-b border-zinc-800 mb-6 gap-6">
+      <div className="mb-6 flex flex-wrap gap-4 border-b border-zinc-800">
         {[
-          { id: 'attendants', label: 'Equipe de Atendentes', icon: Users },
+          { id: 'attendants', label: 'Equipe de Atendimentos', icon: Users },
           { id: 'departments', label: 'Setores & Filas', icon: Layers },
-          { id: 'quickReplies', label: 'Respostas Rápidas', icon: Zap }
+          { id: 'quickReplies', label: 'Respostas Rápidas', icon: Zap },
+          { id: 'connections', label: 'Conexão WhatsApp', icon: QrCode },
         ].map(tab => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
           return (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id as any)}
-              className={`pb-3 text-xs font-bold transition-all flex items-center gap-2 border-b-2 ${
+              onClick={() => changeTab(tab.id as SettingsTab)}
+              className={`flex items-center gap-2 border-b-2 pb-3 text-sm font-bold transition-all ${
                 isActive 
                   ? 'border-amber-400 text-amber-400' 
                   : 'border-transparent text-zinc-400 hover:text-zinc-200'
@@ -81,10 +180,10 @@ export const ConfiguracoesPage: React.FC = () => {
         })}
         <button
           type="button"
-          onClick={() => setActiveTab('security')}
-          className={`pb-3 text-xs font-bold transition-all flex items-center gap-2 border-b-2 ${activeTab === 'security' ? 'border-amber-400 text-amber-400' : 'border-transparent text-zinc-400 hover:text-zinc-200'}`}
+          onClick={() => changeTab('security')}
+          className={`flex items-center gap-2 border-b-2 pb-3 text-sm font-bold transition-all ${activeTab === 'security' ? 'border-amber-400 text-amber-400' : 'border-transparent text-zinc-400 hover:text-zinc-200'}`}
         >
-          <KeyRound className="w-4 h-4" /> Minha Senha
+          <KeyRound className="h-4 w-4" /> Minha Senha
         </button>
       </div>
 
@@ -92,27 +191,27 @@ export const ConfiguracoesPage: React.FC = () => {
       {activeTab === 'security' && (
         <div className="max-w-xl space-y-5">
           <div>
-            <h3 className="text-sm font-extrabold text-zinc-100">Alterar minha senha</h3>
-            <p className="text-xs text-zinc-400 mt-1">Atualize a senha da conta {user?.email || 'atual'}.</p>
+            <h3 className="text-lg font-extrabold text-zinc-100">Alterar minha senha</h3>
+            <p className="mt-1 text-sm text-zinc-400">Atualize a senha da conta {user?.email || 'atual'}.</p>
           </div>
           <form onSubmit={handleChangePassword} className="space-y-4 rounded-xl border border-zinc-800 bg-[#0C0C0E] p-5">
-            <label className="block text-xs font-bold text-zinc-300">
+            <label className="block text-sm font-bold text-zinc-300">
               Senha atual
-              <input required type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-amber-400" />
+              <input required type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-3 text-base text-zinc-100 outline-none focus:border-amber-400" />
             </label>
-            <label className="block text-xs font-bold text-zinc-300">
+            <label className="block text-sm font-bold text-zinc-300">
               Nova senha
-              <input required minLength={8} type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-amber-400" />
-              <span className="mt-1 block text-[11px] font-normal text-zinc-500">Use pelo menos 8 caracteres.</span>
+              <input required minLength={8} type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-3 text-base text-zinc-100 outline-none focus:border-amber-400" />
+              <span className="mt-1 block text-xs font-normal text-zinc-500">Use pelo menos 8 caracteres.</span>
             </label>
-            <label className="block text-xs font-bold text-zinc-300">
+            <label className="block text-sm font-bold text-zinc-300">
               Confirmar nova senha
-              <input required minLength={8} type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-amber-400" />
+              <input required minLength={8} type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-3 text-base text-zinc-100 outline-none focus:border-amber-400" />
             </label>
-            {passwordError && <p role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-300">{passwordError}</p>}
-            {passwordFeedback && <p role="status" className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-xs text-emerald-300">{passwordFeedback}</p>}
+            {passwordError && <p role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{passwordError}</p>}
+            {passwordFeedback && <p role="status" className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-sm text-emerald-300">{passwordFeedback}</p>}
             <div className="flex justify-end border-t border-zinc-800 pt-4">
-              <button type="submit" disabled={savingPassword} className="btn-primary text-xs disabled:cursor-not-allowed disabled:opacity-60">
+              <button type="submit" disabled={savingPassword} className="btn-primary text-sm disabled:cursor-not-allowed disabled:opacity-60">
                 {savingPassword && <Loader2 className="w-4 h-4 animate-spin" />}
                 {savingPassword ? 'Salvando...' : 'Alterar senha'}
               </button>
@@ -122,52 +221,107 @@ export const ConfiguracoesPage: React.FC = () => {
       )}
 
       {activeTab === 'attendants' && (
-        <div className="space-y-4 max-w-3xl">
+        <div className="max-w-4xl space-y-5">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-extrabold text-zinc-100">Atendentes Cadastrados</h3>
-            <button className="btn-primary text-xs"><Plus className="w-4 h-4" /> Convidar Atendente</button>
+            <div>
+              <h3 className="text-lg font-extrabold text-zinc-100">Equipe de Atendimentos</h3>
+              <p className="mt-1 text-sm text-zinc-400">Cadastre e controle quem pode acessar os atendimentos da empresa.</p>
+            </div>
+            {user?.role === 'admin' && (
+              <button type="button" onClick={() => { setTeamError(''); setTeamFeedback(''); setShowAttendantForm(true); }} className="btn-primary text-sm">
+                <UserPlus className="h-4 w-4" /> Novo atendente
+              </button>
+            )}
           </div>
 
-          <div className="bg-[#0C0C0E] border border-zinc-800 rounded-xl divide-y divide-zinc-900">
-            {attendants.length === 0 ? (
-              <div className="p-8 text-center text-zinc-500 text-xs">
-                A equipe será carregada pela nova API do Railway.
+          {showAttendantForm && user?.role === 'admin' && (
+            <form onSubmit={handleCreateAttendant} className="space-y-4 rounded-xl border border-amber-400/25 bg-amber-400/5 p-5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-base font-extrabold text-zinc-100">Cadastrar atendente</h4>
+                  <p className="mt-1 text-sm text-zinc-400">A pessoa poderá entrar com o e-mail e a senha provisória informada.</p>
+                </div>
+                <button type="button" onClick={resetAttendantForm} className="rounded-lg p-2 text-zinc-400 hover:bg-white/5 hover:text-zinc-100" aria-label="Fechar formulário">
+                  <X className="h-5 w-5" />
+                </button>
               </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="block text-sm font-bold text-zinc-300">
+                  Nome completo
+                  <input required minLength={2} value={attendantForm.name} onChange={(event) => setAttendantForm((current) => ({ ...current, name: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 text-base text-zinc-100 outline-none focus:border-amber-400" placeholder="Ex.: Maria Oliveira" />
+                </label>
+                <label className="block text-sm font-bold text-zinc-300">
+                  E-mail de acesso
+                  <input required type="email" value={attendantForm.email} onChange={(event) => setAttendantForm((current) => ({ ...current, email: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 text-base text-zinc-100 outline-none focus:border-amber-400" placeholder="maria@empresa.com" />
+                </label>
+                <label className="block text-sm font-bold text-zinc-300">
+                  Senha provisória
+                  <input required minLength={8} type="password" value={attendantForm.password} onChange={(event) => setAttendantForm((current) => ({ ...current, password: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 text-base text-zinc-100 outline-none focus:border-amber-400" placeholder="Mínimo de 8 caracteres" />
+                </label>
+                <label className="block text-sm font-bold text-zinc-300">
+                  Perfil de acesso
+                  <select value={attendantForm.role} onChange={(event) => setAttendantForm((current) => ({ ...current, role: event.target.value as 'attendant' | 'admin' }))} className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 text-base text-zinc-100 outline-none focus:border-amber-400">
+                    <option value="attendant">Atendente</option>
+                    <option value="admin">Administrador</option>
+                  </select>
+                </label>
+              </div>
+              <div className="flex justify-end border-t border-amber-400/15 pt-4">
+                <button type="submit" disabled={savingAttendant} className="btn-primary text-sm disabled:cursor-not-allowed disabled:opacity-60">
+                  {savingAttendant ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                  {savingAttendant ? 'Salvando...' : 'Salvar atendente'}
+                </button>
+              </div>
+            </form>
+          )}
+
+          {teamError && <p role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{teamError}</p>}
+          {teamFeedback && <p role="status" className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-sm text-emerald-300">{teamFeedback}</p>}
+
+          <div className="divide-y divide-zinc-800 overflow-hidden rounded-xl border border-zinc-800 bg-[#0C0C0E]">
+            {teamLoading ? (
+              <div className="flex items-center justify-center gap-2 p-10 text-sm text-zinc-400"><Loader2 className="h-5 w-5 animate-spin text-amber-400" /> Carregando equipe...</div>
+            ) : attendants.length === 0 ? (
+              <div className="p-10 text-center text-sm text-zinc-500">Nenhum usuário encontrado nesta empresa.</div>
             ) : (
-              attendants.map(attendant => (
-                <div key={attendant.id} className="p-4 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <img 
-                      src={attendant.avatar} 
-                      alt={attendant.name} 
-                      className="w-10 h-10 rounded-full object-cover border border-zinc-800"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).src = `https://ui-avatars.com/api/?name=${encodeURIComponent(attendant.name)}&background=EEBB2C&color=000`;
-                      }}
-                    />
-                    <div>
-                      <h4 className="text-xs font-bold text-zinc-100">{attendant.name}</h4>
-                      <span className="text-[11px] text-zinc-400 capitalize">{attendant.role}</span>
+              attendants.map((attendant) => {
+                const fallbackAvatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(attendant.name)}&background=EEBB2C&color=000`;
+                const active = attendant.active !== false;
+                return (
+                  <div key={attendant.id} className={`flex items-center justify-between gap-4 p-5 ${!active ? 'opacity-60' : ''}`}>
+                    <div className="flex min-w-0 items-center gap-3">
+                      <img src={attendant.avatar || fallbackAvatar} alt={attendant.name} className="h-12 w-12 rounded-full border border-amber-400/30 object-cover" onError={(event) => { event.currentTarget.src = fallbackAvatar; }} />
+                      <div className="min-w-0">
+                        <h4 className="truncate text-base font-bold text-zinc-100">{attendant.name}</h4>
+                        <p className="truncate text-sm text-zinc-400">{attendant.email || 'E-mail não informado'}</p>
+                        <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">{attendant.role === 'admin' ? 'Administrador' : 'Atendente'}</span>
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-3">
+                      <span className={`rounded-full border px-3 py-1 text-xs font-bold ${active && attendant.online ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400' : active ? 'border-zinc-700 bg-zinc-800 text-zinc-300' : 'border-zinc-700 bg-zinc-900 text-zinc-500'}`}>
+                        {!active ? 'Desativado' : attendant.online ? 'Online' : 'Ativo'}
+                      </span>
+                      {user?.role === 'admin' && (
+                        <button type="button" onClick={() => void handleToggleAttendant(attendant)} disabled={updatingAttendantId === attendant.id || attendant.id === user.id} className={`rounded-lg border p-2 transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${active ? 'border-red-400/20 text-red-300 hover:bg-red-400/10' : 'border-emerald-400/20 text-emerald-300 hover:bg-emerald-400/10'}`} title={attendant.id === user.id ? 'Sua conta não pode ser desativada' : active ? 'Desativar atendente' : 'Reativar atendente'}>
+                          {updatingAttendantId === attendant.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Power className="h-4 w-4" />}
+                        </button>
+                      )}
                     </div>
                   </div>
-
-                  <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
-                    attendant.online ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30' : 'bg-zinc-800 text-zinc-500'
-                  }`}>
-                    {attendant.online ? 'Online' : 'Offline'}
-                  </span>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>
       )}
 
+      {activeTab === 'connections' && <ConexoesPage embedded />}
+
       {activeTab === 'departments' && (
-        <div className="space-y-4 max-w-3xl">
+        <div className="max-w-3xl space-y-4">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-extrabold text-zinc-100">Setores de Atendimento</h3>
-            <button className="btn-primary text-xs"><Plus className="w-4 h-4" /> Criar Setor</button>
+            <h3 className="text-lg font-extrabold text-zinc-100">Setores de Atendimento</h3>
+            <button className="btn-primary text-sm"><Plus className="h-4 w-4" /> Criar Setor</button>
           </div>
 
           <div className="grid grid-cols-3 gap-4">
@@ -182,10 +336,10 @@ export const ConfiguracoesPage: React.FC = () => {
       )}
 
       {activeTab === 'quickReplies' && (
-        <div className="space-y-4 max-w-3xl">
+        <div className="max-w-3xl space-y-4">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-extrabold text-zinc-100">Respostas Rápidas Configuradas</h3>
-            <button className="btn-primary text-xs"><Plus className="w-4 h-4" /> Criar Atalho</button>
+            <h3 className="text-lg font-extrabold text-zinc-100">Respostas Rápidas Configuradas</h3>
+            <button className="btn-primary text-sm"><Plus className="h-4 w-4" /> Criar Atalho</button>
           </div>
 
           <div className="space-y-3">

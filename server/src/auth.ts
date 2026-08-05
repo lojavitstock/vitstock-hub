@@ -20,6 +20,20 @@ const changePasswordSchema = z.object({
   newPassword: z.string().min(8).max(256),
 });
 
+const createAttendantSchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  email: z.string().trim().email().max(180),
+  password: z.string().min(8).max(256),
+  role: z.enum(['attendant', 'admin']).default('attendant'),
+});
+
+const updateAttendantSchema = z.object({
+  active: z.boolean().optional(),
+  name: z.string().trim().min(2).max(120).optional(),
+  email: z.string().trim().email().max(180).optional(),
+  password: z.string().min(8).max(256).optional(),
+}).refine((value) => Object.keys(value).length > 0, { message: 'Nenhuma alteração informada' });
+
 export async function loadUser(request: FastifyRequest) {
   request.user = null;
   const token = request.cookies[SESSION_COOKIE];
@@ -56,6 +70,11 @@ export async function loadUser(request: FastifyRequest) {
 
 export async function requireUser(request: FastifyRequest, reply: FastifyReply) {
   if (!request.user) return reply.code(401).send({ error: 'Não autenticado' });
+}
+
+async function requireAdmin(request: FastifyRequest, reply: FastifyReply) {
+  if (!request.user) return reply.code(401).send({ error: 'Não autenticado' });
+  if (request.user.role !== 'admin') return reply.code(403).send({ error: 'Apenas administradores podem gerenciar a equipe' });
 }
 
 export async function registerAuthRoutes(app: FastifyInstance) {
@@ -145,6 +164,101 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     );
 
     return { changed: true };
+  });
+
+  app.get('/api/team/attendants', { preHandler: requireUser }, async (request) => {
+    const result = await db.query<{
+      id: string;
+      name: string;
+      email: string;
+      role: 'admin' | 'attendant';
+      active: boolean;
+      online: boolean;
+    }>(
+      `SELECT u.id, u.name, u.email, u.role, u.active,
+              EXISTS (
+                SELECT 1 FROM sessions s
+                WHERE s.user_id = u.id AND s.expires_at > now()
+              ) AS online
+       FROM users u
+       WHERE u.company_id = $1
+       ORDER BY u.active DESC, lower(u.name), lower(u.email)`,
+      [request.user!.companyId],
+    );
+
+    return {
+      attendants: result.rows.map((attendant) => ({
+        id: attendant.id,
+        name: attendant.name,
+        email: attendant.email,
+        role: attendant.role,
+        active: attendant.active,
+        online: attendant.online,
+      })),
+    };
+  });
+
+  app.post('/api/team/attendants', { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = createAttendantSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Informe nome, e-mail e uma senha de pelo menos 8 caracteres' });
+
+    try {
+      const passwordHash = await hashPassword(parsed.data.password);
+      const result = await db.query<{
+        id: string;
+        name: string;
+        email: string;
+        role: 'admin' | 'attendant';
+        active: boolean;
+      }>(
+        `INSERT INTO users (company_id, name, email, password_hash, role, active, must_change_password)
+         VALUES ($1, $2, lower($3), $4, $5, true, true)
+         RETURNING id, name, email, role, active`,
+        [request.user!.companyId, parsed.data.name, parsed.data.email, passwordHash, parsed.data.role],
+      );
+      const attendant = result.rows[0];
+      return reply.code(201).send({
+        attendant: attendant ? { ...attendant, online: false } : undefined,
+      });
+    } catch (error: any) {
+      if (error?.code === '23505') return reply.code(409).send({ error: 'Este e-mail já está cadastrado' });
+      throw error;
+    }
+  });
+
+  app.patch('/api/team/attendants/:id', { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = updateAttendantSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Informe ao menos uma alteração válida' });
+    const memberId = String((request.params as { id?: string }).id || '').trim();
+    if (!memberId) return reply.code(400).send({ error: 'Atendente inválido' });
+    if (memberId === request.user!.id && parsed.data.active === false) return reply.code(400).send({ error: 'Você não pode desativar a própria conta' });
+
+    const fields: string[] = [];
+    const values: unknown[] = [];
+    const addField = (field: string, value: unknown) => {
+      fields.push(`${field} = $${values.length + 1}`);
+      values.push(value);
+    };
+    if (parsed.data.name !== undefined) addField('name', parsed.data.name);
+    if (parsed.data.email !== undefined) addField('email', parsed.data.email.toLowerCase());
+    if (parsed.data.active !== undefined) addField('active', parsed.data.active);
+    if (parsed.data.password !== undefined) addField('password_hash', await hashPassword(parsed.data.password));
+    fields.push('updated_at = now()');
+    values.push(memberId, request.user!.companyId);
+
+    try {
+      const result = await db.query(
+        `UPDATE users SET ${fields.join(', ')}
+         WHERE id = $${values.length - 1} AND company_id = $${values.length}
+         RETURNING id, name, email, role, active`,
+        values,
+      );
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Atendente não encontrado' });
+      return { attendant: { ...result.rows[0], online: false } };
+    } catch (error: any) {
+      if (error?.code === '23505') return reply.code(409).send({ error: 'Este e-mail já está cadastrado' });
+      throw error;
+    }
   });
 
   app.get('/api/auth/me', { preHandler: requireUser }, async (request) => ({ user: request.user }));

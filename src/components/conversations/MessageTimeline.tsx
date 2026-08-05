@@ -10,6 +10,9 @@ import {
   Megaphone,
   Pause,
   PhoneCall,
+  PhoneIncoming,
+  PhoneMissed,
+  PhoneOutgoing,
   Play,
   Paperclip,
   RefreshCw,
@@ -70,9 +73,30 @@ const InteractiveMessageContent: React.FC<{ message: Message }> = ({ message }) 
   );
 };
 
-const SpecialMessageContent: React.FC<{ message: Message }> = ({ message }) => {
+const SpecialMessageContent: React.FC<{ message: Message; contactPhone?: string }> = ({ message, contactPhone }) => {
   const metadata = message.metadata;
   if (!metadata) return null;
+
+  const callLabel = metadata.systemLabel || '';
+  const isCall = /^Ligação de (?:voz|vídeo) (?:perdida|realizada|recebida)$/i.test(callLabel);
+  if (isCall) {
+    const missed = / perdida$/i.test(callLabel);
+    const outgoing = / realizada$/i.test(callLabel);
+    const CallIcon = missed ? PhoneMissed : outgoing ? PhoneOutgoing : PhoneIncoming;
+    const iconClass = missed ? 'text-red-400' : outgoing ? 'text-emerald-400' : 'text-sky-400';
+    const href = contactPhone ? `tel:${contactPhone.replace(/\D/g, '')}` : undefined;
+    return (
+      <a href={href} className="flex min-w-[250px] max-w-sm items-center gap-3 rounded-xl border border-white/5 bg-[#202020] px-3.5 py-3 text-left transition-colors hover:bg-[#292929]">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-black/20">
+          <CallIcon className={`h-5 w-5 ${iconClass}`} />
+        </span>
+        <span className="min-w-0">
+          <span className="block text-sm font-semibold text-slate-100">{callLabel}</span>
+          {missed && <span className="mt-0.5 block text-xs text-slate-400">Clique para retornar</span>}
+        </span>
+      </a>
+    );
+  }
 
   const trafficLabel = metadata.trafficSource === 'FB_Ads'
     ? 'Anúncio do Facebook ou Instagram'
@@ -258,7 +282,7 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({ messages, acti
             <div className={`space-y-2 rounded-lg px-3 py-2.5 text-[13px] leading-relaxed shadow-sm ${isMe ? 'rounded-tr-none border border-amber-300/15 bg-[#5b4b20] font-medium text-[#fff8df]' : 'rounded-tl-none border border-white/5 bg-[#273238] text-slate-100'}`}>
               {isMe && <p className="mb-1 text-[10px] font-bold text-amber-200/75">{message.senderName}</p>}
               <MediaMessageContent message={message} instanceName={instanceName} />
-              <SpecialMessageContent message={message} />
+              <SpecialMessageContent message={message} contactPhone={activeConversation.contact.phone} />
               <InteractiveMessageContent message={message} />
               {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap">{message.content}</p>}
             </div>

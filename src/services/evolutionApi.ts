@@ -2,6 +2,7 @@ import { ChatStatus, WhatsappInstance, Conversation, Message } from '../types';
 import { mockInstances, mockConversations } from './mockData';
 import { evolutionMessagePreview, normalizeEvolutionMessage } from './evolutionMessageAdapter';
 import { phoneVariants } from '../utils/phone';
+import { callMessageInfo } from '../utils/callMessage';
 
 const unwrapEvolutionMessage = (message: any) => {
   let current = message || {};
@@ -59,7 +60,7 @@ const getInteractiveResponseText = (message: any) => {
   }
 };
 
-const extractEvolutionMessageText = (message: any): string | undefined => {
+const extractEvolutionMessageText = (message: any, record: any = {}): string | undefined => {
   const msg = unwrapEvolutionMessage(message);
   const interactive = getInteractiveMessage(msg);
   const template = msg.templateMessage?.hydratedTemplate;
@@ -101,7 +102,8 @@ const extractEvolutionMessageText = (message: any): string | undefined => {
     return `[Contato compartilhado]\n${msg.contactMessage.displayName || 'Contato'}${phone ? `\n+${phone.replace(/\D/g, '')}` : ''}`;
   }
   if (msg.locationMessage) return '[Localização compartilhada]';
-  if (msg.callLogMessage || msg.call || msg.offerMessage) return '[Ligação de voz]';
+  const callInfo = callMessageInfo(record, msg, String(record?.messageType || ''), record?.key?.fromMe === true);
+  if (callInfo.isCall) return `[${callInfo.label || 'Ligação de voz'}]`;
   if (msg.protocolMessage) return Number(msg.protocolMessage.type) === 0 ? '[Mensagem apagada]' : '[Evento do WhatsApp]';
   if (msg.placeholderMessage) return '[Mensagem indisponível]';
   if (msg.secretEncryptedMessage) return '[Mensagem protegida]';
@@ -120,6 +122,7 @@ const extractEvolutionMessageMetadata = (message: any, record: any = {}) => {
   const msg = unwrapEvolutionMessage(message);
   const metadata = { ...(record?.metadata || {}) } as Record<string, any>;
   const fromMe = record?.key?.fromMe === true;
+  const callInfo = callMessageInfo(record, msg, String(record?.messageType || metadata.providerType || ''), fromMe);
   const context = record?.contextInfo
     || msg.contextInfo
     || msg.extendedTextMessage?.contextInfo
@@ -151,8 +154,7 @@ const extractEvolutionMessageMetadata = (message: any, record: any = {}) => {
     metadata.location = { latitude, longitude, name: msg.locationMessage.name, address: msg.locationMessage.address, url: msg.locationMessage.url || `https://www.google.com/maps?q=${latitude},${longitude}` };
   }
   if (!metadata.reaction && msg.reactionMessage?.text) metadata.reaction = msg.reactionMessage.text;
-  const messageType = String(record?.messageType || metadata.providerType || '');
-  if (!metadata.systemLabel && (msg.callLogMessage || msg.call || msg.offerMessage || /call/i.test(messageType))) metadata.systemLabel = 'Ligação de voz';
+  if (callInfo.isCall) metadata.systemLabel = callInfo.label;
   if (!metadata.systemLabel && msg.protocolMessage) metadata.systemLabel = Number(msg.protocolMessage.type) === 0 ? 'Mensagem apagada' : 'Evento do WhatsApp';
   if (!metadata.systemLabel && msg.placeholderMessage) metadata.systemLabel = 'Mensagem indisponível';
   return metadata;
@@ -833,7 +835,7 @@ export class EvolutionApiService {
 
         const rawContent = reactionMsg
           ? `Reagiu com: ${reactionMsg.text || '👍'}`
-          : extractEvolutionMessageText(rawMessage) || '[Mensagem não identificada]';
+          : extractEvolutionMessageText(rawMessage, m) || '[Mensagem não identificada]';
 
         const signature = fromMe
           ? parseAttendantSignature(rawContent)
