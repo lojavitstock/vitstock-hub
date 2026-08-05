@@ -211,6 +211,8 @@ const apiFetch = (path: string, init?: RequestInit) => fetch(`${API_URL}${path}`
 
 export class EvolutionApiService {
   private static lastKnownStatus: WhatsappInstance['status'] = 'connecting';
+  private static businessProfileCache = new Map<string, { expiresAt: number; profile: any | null }>();
+  private static businessProfileInFlight = new Map<string, Promise<any | null>>();
 
   private static publishStatus(status: WhatsappInstance['status']) {
     this.lastKnownStatus = status;
@@ -821,15 +823,31 @@ export class EvolutionApiService {
   }
 
   static async fetchBusinessProfile(number: string): Promise<any | null> {
+    const normalizedNumber = number.replace(/\D/g, '');
+    const cached = this.businessProfileCache.get(normalizedNumber);
+    if (cached && cached.expiresAt > Date.now()) return cached.profile;
+    const pending = this.businessProfileInFlight.get(normalizedNumber);
+    if (pending) return pending;
+
+    const request = (async () => {
     try {
       const res = await apiFetch('/api/evolution/business-profile', {
         method: 'POST',
-        body: JSON.stringify({ number: number.replace(/\D/g, '') }),
+        body: JSON.stringify({ number: normalizedNumber }),
       });
       if (!res.ok) return null;
       return res.json();
     } catch {
       return null;
+    }
+    })();
+    this.businessProfileInFlight.set(normalizedNumber, request);
+    try {
+      const profile = await request;
+      this.businessProfileCache.set(normalizedNumber, { profile, expiresAt: Date.now() + 5 * 60_000 });
+      return profile;
+    } finally {
+      this.businessProfileInFlight.delete(normalizedNumber);
     }
   }
 }

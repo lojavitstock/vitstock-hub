@@ -43,9 +43,12 @@ export const useConversationMessages = ({
     let isSubscribed = true;
     let isInitialFetch = true;
     let shouldReconcile = true;
+    let fetchInProgress = false;
     setMessages([]);
 
     const fetchConversationMessages = async () => {
+      if (fetchInProgress) return;
+      fetchInProgress = true;
       const container = messagesContainerRef.current;
       const distanceFromBottom = container
         ? container.scrollHeight - container.scrollTop - container.clientHeight
@@ -70,6 +73,8 @@ export const useConversationMessages = ({
         if (shouldScroll) window.setTimeout(scrollToBottom, 0);
       } catch {
         // A temporary provider/network failure should not erase the messages already rendered.
+      } finally {
+        fetchInProgress = false;
       }
     };
 

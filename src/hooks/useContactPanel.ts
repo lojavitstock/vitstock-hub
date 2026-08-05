@@ -89,6 +89,15 @@ export const useContactPanel = ({
       resourceName: '',
     };
 
+    let statusSettled = false;
+    const statusTimeout = window.setTimeout(() => {
+      if (!mounted || statusSettled) return;
+      statusSettled = true;
+      setGoogleContactStatus('unavailable');
+      setGoogleContactFeedback('A verificação do Google demorou mais que o esperado. Você ainda pode tentar novamente.');
+      setGoogleContactForm(fallbackForm);
+    }, 8_000);
+
     apiRequest<{
       connected: boolean;
       saved: boolean;
@@ -102,7 +111,9 @@ export const useContactPanel = ({
       method: 'POST',
       body: JSON.stringify({ phone: activeContactPhone }),
     }).then((status) => {
-      if (!mounted) return;
+      if (!mounted || statusSettled) return;
+      statusSettled = true;
+      window.clearTimeout(statusTimeout);
       setGoogleContactStatus(!status.connected ? 'unavailable' : status.saved ? 'saved' : 'not_saved');
       setGoogleMatchedName(status.saved ? status.name : null);
       setGoogleContactForm({
@@ -121,7 +132,9 @@ export const useContactPanel = ({
         } : conversation));
       }
     }).catch(() => {
-      if (!mounted) return;
+      if (!mounted || statusSettled) return;
+      statusSettled = true;
+      window.clearTimeout(statusTimeout);
       setGoogleContactStatus('unavailable');
       setGoogleContactForm(fallbackForm);
     });
@@ -143,6 +156,7 @@ export const useContactPanel = ({
 
     return () => {
       mounted = false;
+      window.clearTimeout(statusTimeout);
       setShowGoogleContactForm(false);
     };
   }, [activeContactName, activeContactPhone, activeConversationId, showContactInfo, setConversations]);

@@ -160,6 +160,32 @@ async function listGoogleContacts(accessToken: string) {
   return people;
 }
 
+type GoogleContactsCacheEntry = { expiresAt: number; people: GooglePerson[] };
+const googleContactsCache = new Map<string, GoogleContactsCacheEntry>();
+const googleContactsInFlight = new Map<string, Promise<GooglePerson[]>>();
+
+async function listGoogleContactsForCompany(companyId: string) {
+  const cached = googleContactsCache.get(companyId);
+  if (cached && cached.expiresAt > Date.now()) return cached.people;
+
+  const current = googleContactsInFlight.get(companyId);
+  if (current) return current;
+
+  const request = (async () => {
+    const token = await accessTokenForCompany(companyId);
+    const people = await listGoogleContacts(token);
+    // Evita baixar a agenda inteira novamente ao abrir o painel repetidas vezes.
+    googleContactsCache.set(companyId, { people, expiresAt: Date.now() + 60_000 });
+    return people;
+  })();
+  googleContactsInFlight.set(companyId, request);
+  try {
+    return await request;
+  } finally {
+    googleContactsInFlight.delete(companyId);
+  }
+}
+
 function personAddress(person: GooglePerson) {
   const address = person.addresses?.[0];
   if (!address) return '';
@@ -264,8 +290,7 @@ async function upsertLocalContacts(companyId: string, people: GooglePerson[]) {
 }
 
 export async function syncGoogleContactsForCompany(companyId: string) {
-  const token = await accessTokenForCompany(companyId);
-  const people = await listGoogleContacts(token);
+  const people = await listGoogleContactsForCompany(companyId);
   const imported = await upsertLocalContacts(companyId, people);
   return { imported, total: people.length };
 }
@@ -333,21 +358,55 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
     const parsed = contactStatusSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Telefone inválido' });
     try {
-      const token = await accessTokenForCompany(request.user!.companyId);
-      const people = await listGoogleContacts(token);
       const variants = phoneVariants(parsed.data.phone);
-      const match = people.find((person) => person.phoneNumbers?.some((item) => variants.has(normalizePhone(item.value || ''))));
+      const local = await db.query<{
+        name: string;
+        phone: string;
+        email: string | null;
+        cpf: string | null;
+        address: string | null;
+        secondary_phone: string | null;
+        google_resource_name: string | null;
+        source: string | null;
+      }>(
+        `SELECT name, phone, email, cpf, address, secondary_phone, google_resource_name, source
+         FROM contacts
+         WHERE company_id = $1
+           AND (
+             regexp_replace(phone, '\\D', '', 'g') = ANY($2::text[])
+             OR regexp_replace(COALESCE(secondary_phone, ''), '\\D', '', 'g') = ANY($2::text[])
+           )
+         ORDER BY CASE WHEN source = 'google' OR google_resource_name IS NOT NULL THEN 0 ELSE 1 END
+         LIMIT 1`,
+        [request.user!.companyId, [...variants]],
+      );
+      const localContact = local.rows[0];
+      if (localContact && (localContact.source === 'google' || localContact.google_resource_name)) {
+        return {
+          connected: true,
+          saved: true,
+          name: localContact.name,
+          resourceName: localContact.google_resource_name,
+          email: localContact.email || '',
+          cpf: localContact.cpf || '',
+          address: localContact.address || '',
+          otherPhone: localContact.secondary_phone || '',
+          phone: normalizePhone(parsed.data.phone),
+        };
+      }
+
+      // Só acessa a agenda remota quando não há um contato sincronizado localmente.
+      const connection = await db.query('SELECT 1 FROM google_connections WHERE company_id = $1 LIMIT 1', [request.user!.companyId]);
       const phone = normalizePhone(parsed.data.phone);
-      const otherPhone = match ? personPhoneValues(match).find((value) => !variants.has(value)) || '' : '';
       return {
-        connected: true,
-        saved: Boolean(match),
-        name: match?.names?.[0]?.displayName || null,
-        resourceName: match?.resourceName || null,
-        email: match?.emailAddresses?.[0]?.value || '',
-        cpf: match ? personCpf(match) : '',
-        address: match ? personAddress(match) : '',
-        otherPhone,
+        connected: Boolean(connection.rows[0]),
+        saved: false,
+        name: null,
+        resourceName: null,
+        email: '',
+        cpf: '',
+        address: '',
+        otherPhone: '',
         phone,
       };
     } catch (error) {

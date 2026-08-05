@@ -38,6 +38,7 @@ export const useConversationInbox = ({
   const conversationsRef = useRef<Conversation[]>([]);
   const activeConversationIdRef = useRef('');
   const readOverridesRef = useRef(new Map<string, number>());
+  const loadingChatsRef = useRef(false);
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -48,6 +49,10 @@ export const useConversationInbox = ({
   }, [activeConversationId]);
 
   const loadChats = useCallback(async (showLoading = true) => {
+    // A Evolution pode levar vários segundos para responder. Não iniciamos
+    // outra sincronização enquanto a anterior ainda está em andamento.
+    if (loadingChatsRef.current) return;
+    loadingChatsRef.current = true;
     if (showLoading) setLoadingChats(true);
 
     try {
@@ -91,6 +96,7 @@ export const useConversationInbox = ({
       // Uma falha temporária não deve apagar a lista já renderizada.
       console.warn('[Atendimento] Não foi possível atualizar as conversas:', error);
     } finally {
+      loadingChatsRef.current = false;
       if (showLoading) setLoadingChats(false);
     }
   }, [instanceName, isMock]);
