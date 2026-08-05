@@ -24,29 +24,19 @@ import {
   Globe,
   Archive,
 } from 'lucide-react';
-import { mockConversations } from '../services/mockData';
-import { ChatStatus, Conversation, Message } from '../types';
+import { Conversation, Message } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { apiRequest } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
-import { ConversationFilters, ConversationFilter } from '../components/conversations/ConversationFilters';
+import { ConversationFilters } from '../components/conversations/ConversationFilters';
 import { ConversationList } from '../components/conversations/ConversationList';
 import { ContactPhoto } from '../components/conversations/ContactPhoto';
 import { MessageTimeline } from '../components/conversations/MessageTimeline';
 import { MessageComposer } from '../components/conversations/MessageComposer';
 import { formatMessageTimestamp } from '../components/conversations/conversationFormatters';
 import { mergeConversationMessages, useConversationMessages } from '../hooks/useConversationMessages';
+import { conversationNeedsResponse, useConversationInbox } from '../hooks/useConversationInbox';
 
-
-const conversationNeedsResponse = (conversation: Conversation) => (
-  conversation.needsResponse
-  ?? (conversation.status !== 'resolved' && !conversation.lastMessageFromMe && conversation.unreadCount > 0)
-);
-
-const normalizeSearchText = (value: string) => value
-  .toLocaleLowerCase()
-  .normalize('NFD')
-  .replace(/[\u0300-\u036f]/g, '');
 
 const isPhoneOnlyName = (value?: string | null) => !value || /^\+?[\d\s().-]+$/.test(value.trim());
 
@@ -79,15 +69,10 @@ export const AtendimentoPage: React.FC = () => {
     : 'Atendente • Vitstock';
 
   const attendantName = user?.name || 'Atendente';
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeConvId, setActiveConvId] = useState<string>('');
-  const [filterTab, setFilterTab] = useState<ConversationFilter>('all');
-  const [conversationSearch, setConversationSearch] = useState('');
   const [inputText, setInputText] = useState('');
   const [sendingMedia, setSendingMedia] = useState(false);
   const [isInternalNote, setIsInternalNote] = useState(false);
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
-  const [loadingChats, setLoadingChats] = useState(false);
   const [showContactInfo, setShowContactInfo] = useState(false);
   const [businessProfile, setBusinessProfile] = useState<any | null>(null);
   const [loadingBusinessProfile, setLoadingBusinessProfile] = useState(false);
@@ -95,8 +80,6 @@ export const AtendimentoPage: React.FC = () => {
   const [googleContactFeedback, setGoogleContactFeedback] = useState('');
   const [googleContactStatus, setGoogleContactStatus] = useState<'checking' | 'saved' | 'not_saved' | 'unavailable'>('checking');
   const [googleMatchedName, setGoogleMatchedName] = useState<string | null>(null);
-  const [capturingChat, setCapturingChat] = useState(false);
-  const [assignmentFeedback, setAssignmentFeedback] = useState('');
   const [showGoogleContactForm, setShowGoogleContactForm] = useState(false);
   const [googleContactForm, setGoogleContactForm] = useState<GoogleContactForm>({
     name: '', phone: '', otherPhone: '', email: '', cpf: '', address: '', resourceName: '',
@@ -109,9 +92,33 @@ export const AtendimentoPage: React.FC = () => {
   const [newChatMessage, setNewChatMessage] = useState('');
   const [startingNewChat, setStartingNewChat] = useState(false);
 
-  const readOverridesRef = React.useRef(new Map<string, number>());
-  const conversationsRef = React.useRef<Conversation[]>([]);
-  const activeConvIdRef = React.useRef('');
+  const {
+    conversations,
+    setConversations,
+    activeConversation: activeConv,
+    activeConversationId: activeConvId,
+    setActiveConversationId: setActiveConvId,
+    activeChatLocked,
+    filterTab,
+    setFilterTab,
+    conversationSearch,
+    setConversationSearch,
+    visibleConversations,
+    loadingChats,
+    loadChats,
+    markConversationAsRead,
+    capturingChat,
+    assignmentFeedback,
+    setAssignmentFeedback,
+    captureActiveChat,
+    releaseActiveChat,
+    updateActiveChatStatus,
+  } = useConversationInbox({
+    instanceName,
+    isMock,
+    userId: user?.id,
+    userRole: user?.role,
+  });
 
   useEffect(() => {
     const state = location.state as { startChat?: { phone?: string; name?: string } } | null;
@@ -123,18 +130,10 @@ export const AtendimentoPage: React.FC = () => {
     setShowNewChatModal(true);
   }, [location.state]);
 
-  useEffect(() => {
-    conversationsRef.current = conversations;
-  }, [conversations]);
 
+  /* // Carregar conversas ao iniciar e manter atualizado a cada 4 segundos
   useEffect(() => {
-    activeConvIdRef.current = activeConvId;
-  }, [activeConvId]);
-
-
-  // Carregar conversas ao iniciar e manter atualizado a cada 4 segundos
-  useEffect(() => {
-    loadChats();
+    return;
 
     if (isMock) return;
 
@@ -143,7 +142,7 @@ export const AtendimentoPage: React.FC = () => {
     }, 4000);
 
     return () => clearInterval(interval);
-  }, [isMock]);
+  }, [isMock]); */
 
   const attachmentInputRef = React.useRef<HTMLInputElement>(null);
   const {
@@ -160,7 +159,7 @@ export const AtendimentoPage: React.FC = () => {
   });
 
   // Rolar para a última mensagem automaticamente quando a conversa mudar ou chegar mensagem nova
-  const loadChats = async (showLoading = true) => {
+  /* const loadChats = async (showLoading = true) => {
     if (showLoading) setLoadingChats(true);
     if (isMock) {
       setConversations(mockConversations);
@@ -191,15 +190,8 @@ export const AtendimentoPage: React.FC = () => {
       }
     }
     if (showLoading) setLoadingChats(false);
-  };
+  }; */
 
-
-  const activeConv = conversations.find(c => c.id === activeConvId);
-  const activeChatLocked = Boolean(
-    activeConv?.assignedAttendant
-      && activeConv.assignedAttendant.id !== user?.id
-      && user?.role !== 'admin',
-  );
 
   useEffect(() => {
     if (!activeConv || isMock || !isPhoneOnlyName(activeConv.contact.name)) return;
@@ -217,20 +209,7 @@ export const AtendimentoPage: React.FC = () => {
     return () => { mounted = false; };
   }, [activeConvId, isMock]);
 
-  const normalizedConversationSearch = normalizeSearchText(conversationSearch.trim());
-  const visibleConversations = conversations.filter((conversation) => {
-    const matchesFilter = filterTab === 'all'
-      || filterTab === 'unread' && conversation.unreadCount > 0
-      || filterTab === 'unanswered' && conversationNeedsResponse(conversation)
-      || filterTab === 'delivery' && conversation.status === 'pending'
-      || filterTab === 'resolved' && conversation.status === 'resolved';
-    if (!matchesFilter) return false;
-    if (!normalizedConversationSearch) return true;
-    return [conversation.contact.name, conversation.contact.phone]
-      .some((value) => normalizeSearchText(value).includes(normalizedConversationSearch));
-  });
-
-  const markConversationAsRead = async (conversation: Conversation) => {
+  /* const markConversationAsRead = async (conversation: Conversation) => {
     setConversations((previous) => previous.map((item) => item.id === conversation.id ? { ...item, unreadCount: 0 } : item));
     if (!conversation.lastMessageAt) return;
 
@@ -321,6 +300,7 @@ export const AtendimentoPage: React.FC = () => {
     }
   };
 
+  */
   const saveContactToGoogle = async () => {
     if (!activeConv) return;
     setSavingGoogleContact(true);
