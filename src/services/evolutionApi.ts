@@ -1,5 +1,6 @@
 import { ChatStatus, WhatsappInstance, Conversation, Message } from '../types';
 import { mockInstances, mockConversations } from './mockData';
+import { normalizeEvolutionMessage } from './evolutionMessageAdapter';
 
 const unwrapEvolutionMessage = (message: any) => {
   let current = message || {};
@@ -667,6 +668,9 @@ export class EvolutionApiService {
       // A Evolution API retorna do mais recente para o mais antigo. Invertemos para exibir cronologicamente.
       const chronologicalMsgs = [...rawMsgs].reverse();
 
+      return chronologicalMsgs.map((m: any, idx: number) => normalizeEvolutionMessage(m, idx, remoteJid, attendantLabel));
+
+      /* Legacy inline mapper kept temporarily while the adapter rollout is verified.
       return chronologicalMsgs.map((m: any, idx: number) => {
         const fromMe = m.key?.fromMe ?? false;
         
@@ -755,7 +759,7 @@ export class EvolutionApiService {
           status: msgStatus,
           isInternalNote: false
         };
-      });
+      }); */
     } catch (err) {
       console.error('[EvolutionAPI] Erro ao buscar mensagens:', err);
       return [];
