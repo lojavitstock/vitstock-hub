@@ -106,6 +106,10 @@ const messageText = (message: any): string | undefined => {
   return '[Mensagem não identificada]';
 };
 
+export const evolutionMessagePreview = (record: any): string | undefined => (
+  messageText(record?.message || record)
+);
+
 const messageMetadata = (record: ProviderRecord, message: any): Message['metadata'] => {
   const msg = unwrapMessage(message);
   const context = record.contextInfo

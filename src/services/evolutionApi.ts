@@ -1,6 +1,6 @@
 import { ChatStatus, WhatsappInstance, Conversation, Message } from '../types';
 import { mockInstances, mockConversations } from './mockData';
-import { normalizeEvolutionMessage } from './evolutionMessageAdapter';
+import { evolutionMessagePreview, normalizeEvolutionMessage } from './evolutionMessageAdapter';
 
 const unwrapEvolutionMessage = (message: any) => {
   let current = message || {};
@@ -495,7 +495,7 @@ export class EvolutionApiService {
           displayName = `+${cleanNumber}`;
         }
 
-        const messageContent = extractEvolutionMessageText(item.lastMessage?.message) || 'Conversa iniciada';
+        const messageContent = evolutionMessagePreview(item.lastMessage) || 'Conversa iniciada';
 
         const timestampStr = item.updatedAt || item.lastMessage?.messageTimestamp
           ? new Date(item.updatedAt || Number(item.lastMessage?.messageTimestamp) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
