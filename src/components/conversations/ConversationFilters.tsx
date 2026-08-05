@@ -51,7 +51,7 @@ export const ConversationFilters: React.FC<ConversationFiltersProps> = ({
           title={isResolved ? `${label}: ${count}` : undefined}
           aria-label={`${label}: ${count}`}
           aria-pressed={isActive}
-          className={`${width} group relative flex h-9 min-w-0 items-center overflow-hidden rounded-lg border ${isResolved ? 'justify-center pl-2 pr-6' : 'justify-start pl-2.5 pr-8'} text-[11px] font-semibold tracking-[-0.01em] transition-all duration-200 ${
+          className={`${width} group relative flex h-10 min-w-0 items-center overflow-hidden rounded-lg border ${isResolved ? 'justify-center pl-2 pr-6' : 'justify-start pl-2.5 pr-8'} text-[11px] font-semibold tracking-[-0.01em] transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 ${
             isActive
               ? 'border-amber-300/80 bg-gradient-to-b from-amber-300 to-amber-400 text-[#17130a] shadow-[0_4px_14px_rgba(251,191,36,0.18),inset_0_1px_0_rgba(255,255,255,0.55)]'
               : 'border-transparent bg-[#1b252a] text-slate-300 hover:border-[#46545c] hover:bg-[#222e34] hover:text-white'

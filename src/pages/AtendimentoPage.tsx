@@ -1139,25 +1139,25 @@ export const AtendimentoPage: React.FC = () => {
       )}
 
       {/* Coluna 1: Lista de Conversas (Inbox) */}
-      <div className="w-[340px] border-r border-[#344047] flex flex-col bg-[#182126] flex-shrink-0">
+      <div className="w-[360px] border-r border-[#344047] flex flex-col bg-[#182126] flex-shrink-0">
         
         {/* Topo do Inbox: Busca e Filtros */}
-        <div className="p-4 border-b border-[#344047] bg-[#20292f] space-y-3">
+        <div className="space-y-3.5 border-b border-[#344047] bg-[#20292f] px-4 py-4">
           <div className="flex items-center justify-between">
-            <h1 className="text-lg font-extrabold tracking-tight text-zinc-100 flex items-center gap-2">
+            <h1 className="flex items-center gap-2 text-[19px] font-extrabold tracking-[-0.02em] text-zinc-100">
               Atendimento
             </h1>
             <div className="flex items-center gap-1.5">
               <button 
                 onClick={() => setShowNewChatModal(true)}
-                className="p-1.5 rounded-lg bg-amber-400 text-zinc-950 hover:bg-amber-300 transition-colors font-bold"
+                className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-400 text-zinc-950 shadow-[0_4px_12px_rgba(238,187,44,0.2)] transition-colors hover:bg-amber-300"
                 title="Nova Conversa"
               >
                 <Plus className="w-3.5 h-3.5" />
               </button>
               <button 
                 onClick={() => loadChats(true)} 
-                className="p-1.5 rounded-lg bg-[#2a343a] border border-[#46535a] text-slate-300 hover:text-amber-300 transition-colors"
+                className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#46535a] bg-[#2a343a] text-slate-300 transition-colors hover:border-amber-300/50 hover:text-amber-300"
                 title="Sincronizar Mensagens"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${loadingChats ? 'animate-spin' : ''}`} />
@@ -1174,7 +1174,7 @@ export const AtendimentoPage: React.FC = () => {
               value={conversationSearch}
               onChange={(event) => setConversationSearch(event.target.value)}
               aria-label="Buscar atendimento por nome ou telefone"
-              className="w-full bg-[#2a343a] border border-transparent rounded-full pl-9 pr-3 py-2.5 text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:border-amber-400/70 transition-colors"
+              className="h-11 w-full rounded-xl border border-transparent bg-[#2a343a] pl-10 pr-3 text-[13px] text-slate-100 placeholder-slate-400 transition-colors focus:border-amber-400/70 focus:outline-none"
             />
           </div>
 
@@ -1311,7 +1311,7 @@ export const AtendimentoPage: React.FC = () => {
           )}
         </div>
 
-        <div className="flex-1 overflow-y-auto divide-y divide-[#273239]">
+        <div className="min-h-0 flex-1 overflow-y-auto">
           <ConversationList
             conversations={conversations}
             visibleConversations={visibleConversations}

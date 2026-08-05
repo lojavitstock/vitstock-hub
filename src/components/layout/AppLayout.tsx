@@ -54,12 +54,12 @@ export const AppLayout: React.FC = () => {
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#11181d] text-slate-100 font-overpass">
       {/* Sidebar Lateral Desktop (Layout Vitstock Hub) */}
-      <aside className="w-56 flex-shrink-0 bg-[#182126] border-r border-[#344047] flex flex-col justify-between select-none">
+      <aside className="w-60 flex-shrink-0 bg-[#182126] border-r border-[#344047] flex flex-col justify-between select-none">
         
         {/* Top Header: Logo Oficial VITSTOCK® */}
         <div>
-          <div className="p-4 border-b border-[#344047] bg-[#20292f] flex items-center gap-3">
-            <div className="w-10 h-10 min-w-[40px] max-w-[40px] max-h-[40px] overflow-hidden rounded-xl bg-amber-400/10 border border-amber-400/30 flex items-center justify-center p-1.5 shadow-[0_0_15px_rgba(238,187,44,0.15)] flex-shrink-0">
+          <div className="p-5 border-b border-[#344047] bg-[#20292f] flex items-center gap-3.5">
+            <div className="w-11 h-11 min-w-[44px] max-w-[44px] max-h-[44px] overflow-hidden rounded-2xl bg-amber-400/10 border border-amber-400/30 flex items-center justify-center p-1.5 shadow-[0_0_15px_rgba(238,187,44,0.15)] flex-shrink-0">
               <img 
                 src="/VITSTOCK®/SIMBOLO/1.png" 
                 alt="VITSTOCK Simbolo" 
@@ -72,18 +72,18 @@ export const AppLayout: React.FC = () => {
             </div>
             <div>
               <div className="flex items-center gap-1.5">
-                <span className="font-extrabold tracking-wide text-lg text-amber-400">vitstock</span>
+                <span className="font-extrabold tracking-[0.01em] text-[19px] leading-none text-amber-400">vitstock</span>
                 <span className="text-[10px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-400/20 text-amber-300 border border-amber-400/30">
                   HUB
                 </span>
               </div>
-              <p className="text-xs text-zinc-400 font-medium">Atendimento & CRM</p>
+              <p className="mt-1 text-[11px] text-slate-400 font-medium tracking-wide">Atendimento &amp; CRM</p>
             </div>
           </div>
 
           {/* Menu de Navegação em Português */}
-          <nav className="p-3 space-y-1">
-            <p className="px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+          <nav className="p-3.5 space-y-1.5" aria-label="Menu principal">
+            <p className="px-3 py-2 text-[10px] font-extrabold uppercase tracking-[0.18em] text-slate-500">
               Menu Principal
             </p>
             {navItems.map((item) => {
@@ -95,15 +95,15 @@ export const AppLayout: React.FC = () => {
                   to={item.path}
                   className={({ isActive: navActive }) => {
                     const active = navActive || (item.path === '/atendimento' && location.pathname === '/');
-                    return `flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-semibold transition-all duration-150 ${
+                    return `group flex min-h-11 items-center justify-between rounded-xl border px-3.5 py-2.5 text-[13px] font-semibold transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70 ${
                       active
-                        ? 'bg-amber-400/15 text-amber-300 border border-amber-400/35 shadow-sm font-bold'
-                        : 'text-slate-400 border border-transparent hover:text-slate-100 hover:bg-[#263138]'
+                        ? 'border-amber-300/40 bg-amber-400/15 text-amber-200 font-bold shadow-[inset_3px_0_0_#EEBB2C,0_4px_14px_rgba(0,0,0,0.12)]'
+                        : 'border-transparent text-slate-300 hover:border-[#3c4a51] hover:bg-[#263138] hover:text-white'
                     }`;
                   }}
                 >
-                  <div className="flex items-center gap-3">
-                    <Icon className="w-5 h-5 flex-shrink-0" />
+                  <div className="flex items-center gap-3.5">
+                    <Icon className={`h-[18px] w-[18px] flex-shrink-0 transition-colors ${isActive ? 'text-amber-300' : 'text-slate-400 group-hover:text-slate-200'}`} />
                     <span>{item.label}</span>
                   </div>
                   {item.badge && (
@@ -122,16 +122,17 @@ export const AppLayout: React.FC = () => {
         </div>
 
         {/* Bottom Section: Status da Conexão & Perfil do Atendente */}
-        <div className="p-3 border-t border-[#344047] bg-[#151e23]">
+        <div className="p-3.5 border-t border-[#344047] bg-[#151e23]">
           
           {/* Status WhatsApp (Evolution API em Tempo Real) */}
-          <div className="mb-3 p-2.5 rounded-lg bg-[#20292f] border border-[#344047] flex items-center justify-between">
+          <div className="mb-3 rounded-xl bg-[#20292f] border border-[#3a474e] p-3">
+            <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="relative flex h-2.5 w-2.5">
                 <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${connectionStatus === 'connected' ? 'bg-emerald-400' : connectionStatus === 'connecting' ? 'bg-amber-400' : 'bg-red-400'} opacity-75`}></span>
                 <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${connectionStatus === 'connected' ? 'bg-emerald-500' : connectionStatus === 'connecting' ? 'bg-amber-400' : 'bg-red-500'}`}></span>
               </span>
-              <span className={`text-xs font-semibold ${connectionStatus === 'connected' ? 'text-zinc-300' : connectionStatus === 'connecting' ? 'text-amber-300' : 'text-red-300'}`}>
+              <span className={`text-[12px] font-bold ${connectionStatus === 'connected' ? 'text-slate-200' : connectionStatus === 'connecting' ? 'text-amber-300' : 'text-red-300'}`}>
                 {connectionStatus === 'connected' ? 'WhatsApp Conectado' : connectionStatus === 'connecting' ? 'Reconectando WhatsApp' : 'WhatsApp Desconectado'}
               </span>
             </div>
@@ -140,16 +141,18 @@ export const AppLayout: React.FC = () => {
             ) : (
               <WifiOff className={`w-3.5 h-3.5 ${connectionStatus === 'connecting' ? 'text-amber-400 animate-pulse' : 'text-red-400'}`} />
             )}
+            </div>
+            <p className="mt-1.5 pl-[18px] text-[10px] font-medium tracking-wide text-slate-500">Canal em tempo real</p>
           </div>
 
           {/* Card Atendente */}
-          <div className="flex items-center justify-between p-2 rounded-lg hover:bg-[#263138] transition-colors">
+          <div className="flex items-center justify-between rounded-xl p-2.5 transition-colors hover:bg-[#263138]">
             <div className="flex items-center gap-2.5">
               <div className="relative">
                 <img 
                   src={`https://ui-avatars.com/api/?name=${encodeURIComponent(currentUser?.name || 'Usuário')}&background=EEBB2C&color=000`}
                   alt={currentUser?.name || 'Usuário'}
-                  className="w-9 h-9 rounded-full object-cover border border-amber-400/40" 
+                  className="h-10 w-10 rounded-full object-cover border border-amber-400/40"
                   onError={(e) => {
                     (e.target as HTMLImageElement).src = 'https://ui-avatars.com/api/?name=Leo+Vitorino&background=EEBB2C&color=000';
                   }}
@@ -157,11 +160,11 @@ export const AppLayout: React.FC = () => {
                 <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-emerald-500 rounded-full border-2 border-zinc-950"></span>
               </div>
               <div className="overflow-hidden">
-                <p className="text-xs font-bold text-zinc-100 truncate flex items-center gap-1">
+                <p className="text-[12px] font-bold text-zinc-100 truncate flex items-center gap-1">
                   {currentUser?.name}
                   <ShieldCheck className="w-3 h-3 text-amber-400 inline" />
                 </p>
-                <p className="text-[11px] text-zinc-400 truncate capitalize">{currentUser?.role}</p>
+                <p className="text-[11px] text-slate-400 truncate capitalize">{currentUser?.role}</p>
               </div>
             </div>
             <button 
