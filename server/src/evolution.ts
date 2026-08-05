@@ -798,8 +798,8 @@ async function persistProviderMessage(companyId: string, record: any, options: {
             SET metadata = COALESCE(messages.metadata, '{}'::jsonb) || $1::jsonb,
                 sender_name = CASE
                   WHEN messages.sender = 'contact'
-                    AND ($2 IS NOT NULL AND $2 <> '')
-                  THEN $2
+                    AND COALESCE($2::text, '') <> ''
+                  THEN $2::text
                   ELSE messages.sender_name
                 END,
                 content = CASE
