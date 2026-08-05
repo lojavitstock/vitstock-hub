@@ -73,6 +73,46 @@ async function evolutionRequest(path: string, init?: RequestInit) {
   });
 }
 
+type EvolutionChatsSnapshot = { chats: any[]; contacts: any[]; expiresAt: number };
+const evolutionChatsCache = new Map<string, EvolutionChatsSnapshot>();
+const evolutionChatsInFlight = new Map<string, Promise<{ chats: any[]; contacts: any[] }>>();
+
+async function fetchEvolutionChatsSnapshot(companyId: string) {
+  const cached = evolutionChatsCache.get(companyId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { chats: cached.chats, contacts: cached.contacts };
+  }
+  const current = evolutionChatsInFlight.get(companyId);
+  if (current) return current;
+
+  const instance = encodeURIComponent(config.EVOLUTION_INSTANCE_NAME);
+  const request = (async () => {
+    const [chatsResponse, contactsResponse] = await Promise.all([
+      evolutionRequest(`/chat/findChats/${instance}`, { method: 'POST', body: '{}' }),
+      evolutionRequest(`/chat/findContacts/${instance}`, { method: 'POST', body: '{}' }),
+    ]);
+    if (!chatsResponse.ok || !contactsResponse.ok) {
+      throw new Error('Evolution API indisponÃ­vel para consultar as conversas');
+    }
+    const [chats, contacts] = await Promise.all([
+      chatsResponse.json().catch(() => []),
+      contactsResponse.json().catch(() => []),
+    ]);
+    const snapshot = {
+      chats: Array.isArray(chats) ? chats : [],
+      contacts: Array.isArray(contacts) ? contacts : [],
+    };
+    evolutionChatsCache.set(companyId, { ...snapshot, expiresAt: Date.now() + 3_000 });
+    return snapshot;
+  })();
+  evolutionChatsInFlight.set(companyId, request);
+  try {
+    return await request;
+  } finally {
+    evolutionChatsInFlight.delete(companyId);
+  }
+}
+
 async function forwardJson(response: Response, reply: FastifyReply) {
   const body = await response.json().catch(() => ({ error: 'Resposta inválida da Evolution API' }));
   if (!response.ok) return reply.code(502).send({ error: 'Evolution API indisponível' });
@@ -631,18 +671,15 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/evolution/chats', { preHandler: requireUser }, async (_request, reply) => {
-    const instance = encodeURIComponent(config.EVOLUTION_INSTANCE_NAME);
-    const [chatsResponse, contactsResponse] = await Promise.all([
-      evolutionRequest(`/chat/findChats/${instance}`, { method: 'POST', body: '{}' }),
-      evolutionRequest(`/chat/findContacts/${instance}`, { method: 'POST', body: '{}' }),
-    ]);
-    if (!chatsResponse.ok || !contactsResponse.ok) {
-      return reply.code(502).send({ error: 'Não foi possível consultar as conversas' });
+    let snapshot: { chats: any[]; contacts: any[] };
+    try {
+      snapshot = await fetchEvolutionChatsSnapshot(_request.user!.companyId);
+    } catch (error) {
+      _request.log.warn({ err: error }, 'Evolution nÃ£o respondeu a consulta de conversas');
+      return reply.code(502).send({ error: 'NÃ£o foi possÃ­vel consultar as conversas' });
     }
-    const [chatsData, contactsData] = await Promise.all([
-      chatsResponse.json().catch(() => []),
-      contactsResponse.json().catch(() => []),
-    ]);
+    const chatsData = snapshot.chats;
+    const contactsData = snapshot.contacts;
     const providerNames = new Map<string, { phone: string; name: string; avatar_url: string | null }>();
     const rememberProviderContact = (value: any) => {
       const phone = providerContactPhone(value);
