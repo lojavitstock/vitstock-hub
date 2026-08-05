@@ -358,14 +358,19 @@ function providerMessageMetadata(record: any, message: any, fromMe: boolean) {
   const call = message?.callLogMessage || message?.call || message?.offerMessage;
   const metadata: Record<string, any> = { providerType: type };
 
-  const trafficSource = context?.conversionSource
-    || context?.conversion_source
-    || (context?.ctwaSignals || context?.conversionData || context?.conversion_data ? 'FB_Ads' : undefined);
-  if (typeof trafficSource === 'string' && trafficSource.trim()) metadata.trafficSource = trafficSource.trim();
-  const trafficTitle = externalAd?.title || externalAd?.sourceApp || externalAd?.mediaType;
-  const trafficUrl = externalAd?.sourceUrl || externalAd?.sourceURL;
-  if (typeof trafficTitle === 'string' && trafficTitle.trim()) metadata.trafficTitle = trafficTitle.trim();
-  if (typeof trafficUrl === 'string' && trafficUrl.trim()) metadata.trafficUrl = trafficUrl.trim();
+  // A referência de anúncio pertence somente à mensagem recebida que iniciou
+  // a conversa. Mensagens enviadas pela loja podem carregar o mesmo
+  // contextInfo do WhatsApp, mas não devem herdar a etiqueta do anúncio.
+  if (!fromMe) {
+    const trafficSource = context?.conversionSource
+      || context?.conversion_source
+      || (context?.ctwaSignals || context?.conversionData || context?.conversion_data ? 'FB_Ads' : undefined);
+    if (typeof trafficSource === 'string' && trafficSource.trim()) metadata.trafficSource = trafficSource.trim();
+    const trafficTitle = externalAd?.title || externalAd?.sourceApp || externalAd?.mediaType;
+    const trafficUrl = externalAd?.sourceUrl || externalAd?.sourceURL;
+    if (typeof trafficTitle === 'string' && trafficTitle.trim()) metadata.trafficTitle = trafficTitle.trim();
+    if (typeof trafficUrl === 'string' && trafficUrl.trim()) metadata.trafficUrl = trafficUrl.trim();
+  }
 
   if (contact) {
     metadata.contactCard = {
@@ -415,7 +420,11 @@ function providerMessageMetadata(record: any, message: any, fromMe: boolean) {
   if (typeof interactiveFooter === 'string' && interactiveFooter.trim()) metadata.interactiveFooter = interactiveFooter.trim();
   if (interactiveButtons.length) metadata.interactiveButtons = interactiveButtons;
 
-  if (!fromMe && typeof metadata.trafficSource !== 'string') delete metadata.trafficSource;
+  if (fromMe) {
+    delete metadata.trafficSource;
+    delete metadata.trafficTitle;
+    delete metadata.trafficUrl;
+  }
   return metadata;
 }
 
@@ -539,7 +548,12 @@ function localMessageToProviderRecord(row: any) {
   const id = row.evolution_message_id || row.id;
   const timestamp = Math.floor(new Date(row.sent_at).getTime() / 1000);
   const key = { id, remoteJid, fromMe: row.sender === 'attendant' };
-  const metadata = row.metadata || {};
+  const metadata = { ...(row.metadata || {}) };
+  if (row.sender === 'attendant') {
+    delete metadata.trafficSource;
+    delete metadata.trafficTitle;
+    delete metadata.trafficUrl;
+  }
   const mediaMessage = row.media_type === 'image'
     ? { imageMessage: { url: row.media_url || undefined, caption: row.content } }
     : row.media_type === 'audio'

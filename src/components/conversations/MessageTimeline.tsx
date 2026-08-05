@@ -238,7 +238,6 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
 
 export const MessageTimeline: React.FC<MessageTimelineProps> = ({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, onLoadOlder, onRetryMessage }) => (
   <div ref={containerRef} style={{ overflowAnchor: 'none' }} className="chat-wallpaper flex-1 space-y-3 overflow-y-auto px-6 py-5">
-    <div className="my-2 flex justify-center"><span className="rounded-lg border border-white/5 bg-[#20292f]/95 px-3 py-1 text-[10px] font-bold text-slate-400 shadow-sm">Atendimento em tempo real via Evolution API</span></div>
     {hasMoreMessages && onLoadOlder && (
       <div className="flex justify-center py-1">
         <button type="button" onClick={onLoadOlder} disabled={loadingOlderMessages} className="rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-1.5 text-[11px] font-bold text-amber-200 transition-colors hover:bg-amber-400/20 disabled:cursor-wait disabled:opacity-60">

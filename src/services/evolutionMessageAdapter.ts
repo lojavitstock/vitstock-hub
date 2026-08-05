@@ -120,13 +120,20 @@ const messageMetadata = (record: ProviderRecord, message: any): Message['metadat
     || msg.documentMessage?.contextInfo
     || {};
   const metadata: NonNullable<Message['metadata']> = { ...(record.metadata || {}) };
-  const externalAd = context?.externalAdReply || msg.extendedTextMessage?.contextInfo?.externalAdReply;
-  const trafficSource = context?.conversionSource
-    || context?.conversion_source
-    || (context?.ctwaSignals || context?.conversionData || context?.conversion_data ? 'FB_Ads' : undefined);
-  if (!metadata.trafficSource && typeof trafficSource === 'string' && trafficSource.trim()) metadata.trafficSource = trafficSource.trim();
-  if (!metadata.trafficTitle && typeof externalAd?.title === 'string' && externalAd.title.trim()) metadata.trafficTitle = externalAd.title.trim();
-  if (!metadata.trafficUrl && typeof (externalAd?.sourceUrl || externalAd?.sourceURL) === 'string') metadata.trafficUrl = externalAd.sourceUrl || externalAd.sourceURL;
+  const fromMe = record.key?.fromMe === true;
+  if (!fromMe) {
+    const externalAd = context?.externalAdReply || msg.extendedTextMessage?.contextInfo?.externalAdReply;
+    const trafficSource = context?.conversionSource
+      || context?.conversion_source
+      || (context?.ctwaSignals || context?.conversionData || context?.conversion_data ? 'FB_Ads' : undefined);
+    if (!metadata.trafficSource && typeof trafficSource === 'string' && trafficSource.trim()) metadata.trafficSource = trafficSource.trim();
+    if (!metadata.trafficTitle && typeof externalAd?.title === 'string' && externalAd.title.trim()) metadata.trafficTitle = externalAd.title.trim();
+    if (!metadata.trafficUrl && typeof (externalAd?.sourceUrl || externalAd?.sourceURL) === 'string') metadata.trafficUrl = externalAd.sourceUrl || externalAd.sourceURL;
+  } else {
+    delete metadata.trafficSource;
+    delete metadata.trafficTitle;
+    delete metadata.trafficUrl;
+  }
 
   if (!metadata.contactCard && msg.contactMessage) {
     const vcard = String(msg.contactMessage.vcard || '');

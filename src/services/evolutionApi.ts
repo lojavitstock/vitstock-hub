@@ -119,6 +119,7 @@ const extractEvolutionMessageText = (message: any): string | undefined => {
 const extractEvolutionMessageMetadata = (message: any, record: any = {}) => {
   const msg = unwrapEvolutionMessage(message);
   const metadata = { ...(record?.metadata || {}) } as Record<string, any>;
+  const fromMe = record?.key?.fromMe === true;
   const context = record?.contextInfo
     || msg.contextInfo
     || msg.extendedTextMessage?.contextInfo
@@ -126,13 +127,19 @@ const extractEvolutionMessageMetadata = (message: any, record: any = {}) => {
     || msg.videoMessage?.contextInfo
     || msg.documentMessage?.contextInfo
     || {};
-  const externalAd = context?.externalAdReply || msg.extendedTextMessage?.contextInfo?.externalAdReply;
-  const trafficSource = context?.conversionSource
-    || context?.conversion_source
-    || (context?.ctwaSignals || context?.conversionData || context?.conversion_data ? 'FB_Ads' : undefined);
-  if (!metadata.trafficSource && typeof trafficSource === 'string' && trafficSource.trim()) metadata.trafficSource = trafficSource.trim();
-  if (!metadata.trafficTitle && typeof externalAd?.title === 'string' && externalAd.title.trim()) metadata.trafficTitle = externalAd.title.trim();
-  if (!metadata.trafficUrl && typeof (externalAd?.sourceUrl || externalAd?.sourceURL) === 'string') metadata.trafficUrl = externalAd.sourceUrl || externalAd.sourceURL;
+  if (!fromMe) {
+    const externalAd = context?.externalAdReply || msg.extendedTextMessage?.contextInfo?.externalAdReply;
+    const trafficSource = context?.conversionSource
+      || context?.conversion_source
+      || (context?.ctwaSignals || context?.conversionData || context?.conversion_data ? 'FB_Ads' : undefined);
+    if (!metadata.trafficSource && typeof trafficSource === 'string' && trafficSource.trim()) metadata.trafficSource = trafficSource.trim();
+    if (!metadata.trafficTitle && typeof externalAd?.title === 'string' && externalAd.title.trim()) metadata.trafficTitle = externalAd.title.trim();
+    if (!metadata.trafficUrl && typeof (externalAd?.sourceUrl || externalAd?.sourceURL) === 'string') metadata.trafficUrl = externalAd.sourceUrl || externalAd.sourceURL;
+  } else {
+    delete metadata.trafficSource;
+    delete metadata.trafficTitle;
+    delete metadata.trafficUrl;
+  }
   if (!metadata.contactCard && msg.contactMessage) {
     const vcard = String(msg.contactMessage.vcard || '');
     const phone = vcard.match(/waid=(\d+)/i)?.[1] || vcard.match(/(?:TEL[^:]*:)([^\n\r]+)/i)?.[1]?.trim();
