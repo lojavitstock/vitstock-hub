@@ -42,29 +42,9 @@ import { EvolutionApiService } from '../services/evolutionApi';
 import { apiRequest } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
 import { ConversationFilters, ConversationFilter } from '../components/conversations/ConversationFilters';
-
-const ContactPhoto: React.FC<{
-  name: string;
-  avatar?: string;
-  size?: 'small' | 'medium' | 'large';
-  emphasized?: boolean;
-}> = ({ name, avatar, size = 'medium', emphasized = false }) => {
-  const sizeClass = size === 'small' ? 'w-8 h-8' : size === 'large' ? 'w-16 h-16' : 'w-11 h-11';
-  const iconClass = size === 'small' ? 'w-4 h-4' : size === 'large' ? 'w-7 h-7' : 'w-5 h-5';
-  return (
-    <div className={`${sizeClass} relative rounded-full overflow-hidden flex-shrink-0 bg-[#2a343a] border ${emphasized ? 'border-amber-400/60' : 'border-[#46535a]'} flex items-center justify-center`} title={name}>
-      <UserRound className={`${iconClass} text-slate-400`} />
-      {avatar && (
-        <img
-          src={avatar}
-          alt=""
-          className="absolute inset-0 w-full h-full object-cover"
-          onError={(event) => { event.currentTarget.style.display = 'none'; }}
-        />
-      )}
-    </div>
-  );
-};
+import { ConversationList } from '../components/conversations/ConversationList';
+import { ContactPhoto } from '../components/conversations/ContactPhoto';
+import { formatMessageTimestamp } from '../components/conversations/conversationFormatters';
 
 const InteractiveMessageContent: React.FC<{ msg: Message }> = ({ msg }) => {
   if (!msg.interactiveTitle && !msg.interactiveFooter && !msg.interactiveButtons?.length) return null;
@@ -163,20 +143,6 @@ const mergeConversationMessages = (current: Message[], incoming: Message[]) => {
   current.forEach((message) => byId.set(message.id, message));
   incoming.forEach((message) => byId.set(message.id, message));
   return Array.from(byId.values()).sort((a, b) => (a.timestampMs || 0) - (b.timestampMs || 0));
-};
-
-const formatMessageTimestamp = (timestampMs: number | undefined, fallback: string) => {
-  if (!timestampMs || !Number.isFinite(timestampMs)) return fallback;
-  const date = new Date(timestampMs);
-  if (Number.isNaN(date.getTime())) return fallback;
-  const now = new Date();
-  const isToday = date.getFullYear() === now.getFullYear()
-    && date.getMonth() === now.getMonth()
-    && date.getDate() === now.getDate();
-  const time = date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-  if (isToday) return time;
-  const dayMonth = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
-  return `${dayMonth} - ${time}`;
 };
 
 const normalizeSearchText = (value: string) => value
@@ -1284,7 +1250,7 @@ export const AtendimentoPage: React.FC = () => {
         </div>
 
         {/* Lista de Conversas com Scroll */}
-        <div className="flex-1 overflow-y-auto divide-y divide-[#273239]">
+        <div className="hidden flex-1 overflow-y-auto divide-y divide-[#273239]">
           {conversations.length === 0 ? (
             <div className="p-8 text-center space-y-2">
               <MessageSquare className="w-8 h-8 text-zinc-600 mx-auto" />
@@ -1343,6 +1309,19 @@ export const AtendimentoPage: React.FC = () => {
                 );
               })
           )}
+        </div>
+
+        <div className="flex-1 overflow-y-auto divide-y divide-[#273239]">
+          <ConversationList
+            conversations={conversations}
+            visibleConversations={visibleConversations}
+            activeConversationId={activeConvId}
+            needsResponse={conversationNeedsResponse}
+            onSelectConversation={(conversation) => {
+              setActiveConvId(conversation.id);
+              void markConversationAsRead(conversation);
+            }}
+          />
         </div>
       </div>
 
