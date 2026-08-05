@@ -7,9 +7,22 @@ export type GoogleContactForm = {
   name: string;
   phone: string;
   otherPhone: string;
+  otherPhones: string;
   email: string;
+  emails: string;
   cpf: string;
   address: string;
+  addresses: string;
+  birthday: string;
+  nickname: string;
+  company: string;
+  jobTitle: string;
+  occupation: string;
+  relations: string;
+  events: string;
+  customFields: string;
+  website: string;
+  notes: string;
   resourceName: string;
 };
 
@@ -47,7 +60,8 @@ export const useContactPanel = ({
   const [googleMatchedName, setGoogleMatchedName] = useState<string | null>(null);
   const [showGoogleContactForm, setShowGoogleContactForm] = useState(false);
   const [googleContactForm, setGoogleContactForm] = useState<GoogleContactForm>({
-    name: '', phone: '', otherPhone: '', email: '', cpf: '', address: '', resourceName: '',
+    name: '', phone: '', otherPhone: '', otherPhones: '', email: '', emails: '', cpf: '', address: '',
+    birthday: '', nickname: '', company: '', jobTitle: '', occupation: '', relations: '', events: '', customFields: '', website: '', notes: '', addresses: '', resourceName: '',
   });
 
   const activeConversationId = activeConversation?.id;
@@ -85,9 +99,22 @@ export const useContactPanel = ({
       name: isPhoneOnlyName(activeContactName) ? '' : activeContactName || '',
       phone: activeContactPhone,
       otherPhone: '',
+      otherPhones: '',
       email: '',
+      emails: '',
       cpf: '',
       address: '',
+      addresses: '',
+      birthday: '',
+      nickname: '',
+      company: '',
+      jobTitle: '',
+      occupation: '',
+      relations: '',
+      events: '',
+      customFields: '',
+      website: '',
+      notes: '',
       resourceName: '',
     };
 
@@ -108,7 +135,20 @@ export const useContactPanel = ({
       email: string;
       cpf: string;
       address: string;
+      addresses?: string[];
       otherPhone: string;
+      otherPhones?: string[];
+      emails?: string[];
+      birthday?: string;
+      nickname?: string;
+      company?: string;
+      jobTitle?: string;
+      occupation?: string;
+      relations?: string;
+      events?: string;
+      customFields?: string;
+      website?: string;
+      notes?: string;
     }>('/api/google/contact-status', {
       method: 'POST',
       body: JSON.stringify({ phone: activeContactPhone }),
@@ -122,9 +162,22 @@ export const useContactPanel = ({
         name: status.saved && status.name ? status.name : fallbackForm.name,
         phone: activeContactPhone,
         otherPhone: status.otherPhone || '',
+        otherPhones: Array.isArray(status.otherPhones) ? status.otherPhones.join(', ') : status.otherPhone || '',
         email: status.email || '',
+        emails: Array.isArray(status.emails) ? status.emails.slice(1).join(', ') : '',
         cpf: status.cpf || '',
         address: status.address || '',
+        addresses: Array.isArray(status.addresses) ? status.addresses.join('\n') : status.address || '',
+        birthday: status.birthday || '',
+        nickname: status.nickname || '',
+        company: status.company || '',
+        jobTitle: status.jobTitle || '',
+        occupation: status.occupation || '',
+        relations: status.relations || '',
+        events: status.events || '',
+        customFields: status.customFields || '',
+        website: status.website || '',
+        notes: status.notes || '',
         resourceName: status.resourceName || '',
       });
       if (status.saved && status.name) {

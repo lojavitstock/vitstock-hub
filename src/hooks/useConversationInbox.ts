@@ -3,6 +3,7 @@ import { mockConversations } from '../services/mockData';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { ChatStatus, Conversation } from '../types';
 import { ConversationFilter } from '../components/conversations/ConversationFilters';
+import { phoneVariants } from '../utils/phone';
 
 export const conversationNeedsResponse = (conversation: Conversation) => (
   conversation.needsResponse
@@ -15,17 +16,6 @@ const normalizeSearchText = (value: string) => value
   .replace(/[\u0300-\u036f]/g, '');
 
 const isPhoneOnlyName = (value?: string | null) => !value || /^\+?[\d\s().-]+$/.test(value.trim());
-
-const phoneVariants = (value: string) => {
-  const digits = value.replace(/\D/g, '');
-  const variants = new Set([digits]);
-  if (digits.startsWith('55') && digits.length === 13) {
-    variants.add(`${digits.slice(0, 4)}${digits.slice(5)}`);
-  } else if (digits.startsWith('55') && digits.length === 12) {
-    variants.add(`${digits.slice(0, 4)}9${digits.slice(4)}`);
-  }
-  return Array.from(variants).filter(Boolean);
-};
 
 type UseConversationInboxOptions = {
   instanceName: string;
@@ -97,7 +87,7 @@ export const useConversationInbox = ({
         const savedName = phoneVariants(phone)
           .map((variant) => contactNameOverridesRef.current.get(variant))
           .find(Boolean);
-        const withNameOverride = savedName && !isPhoneOnlyName(savedName)
+        const withNameOverride = savedName && isPhoneOnlyName(conversation.contact.name)
           ? { ...conversation, contact: { ...conversation.contact, name: savedName } }
           : conversation;
         return locallyReadAt && conversation.lastMessageAt && conversation.lastMessageAt <= locallyReadAt
@@ -126,10 +116,23 @@ export const useConversationInbox = ({
     void loadChats();
     if (isMock) return undefined;
 
+    const unsubscribe = EvolutionApiService.subscribeToRealtimeEvents((event) => {
+      if (event.type === 'message.upsert' || event.type === 'message.status' || event.type === 'conversation.updated') {
+        void loadChats(false);
+      }
+    });
     const interval = window.setInterval(() => {
-      void loadChats(false);
-    }, 4000);
-    return () => window.clearInterval(interval);
+      if (document.visibilityState === 'visible') void loadChats(false);
+    }, 15000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void loadChats(false);
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      unsubscribe();
+    };
   }, [isMock, loadChats]);
 
   const activeConversation = useMemo(

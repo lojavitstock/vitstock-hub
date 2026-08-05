@@ -7,6 +7,11 @@ import { requireUser } from './auth.js';
 import { decryptSecret, encryptSecret } from './security/encryption.js';
 
 const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/contacts';
+const GOOGLE_PERSON_FIELDS = [
+  'names', 'nicknames', 'photos', 'coverPhotos', 'emailAddresses', 'phoneNumbers',
+  'addresses', 'organizations', 'birthdays', 'biographies', 'occupations',
+  'relations', 'urls', 'userDefined', 'events', 'metadata',
+].join(',');
 const contactSchema = z.object({
   name: z.string().trim().min(2).max(160),
   phone: z.string().trim().min(8).max(30),
@@ -17,21 +22,45 @@ const googleContactFormSchema = z.object({
   name: z.string().trim().min(2).max(160),
   phone: z.string().trim().min(8).max(30),
   otherPhone: z.string().trim().max(30).optional().or(z.literal('')),
+  otherPhones: z.union([z.string().trim().max(1000), z.array(z.string().trim().max(30))]).optional(),
   email: z.string().email().optional().or(z.literal('')),
+  emails: z.union([z.string().trim().max(2000), z.array(z.string().email())]).optional(),
   cpf: z.string().trim().max(30).optional().or(z.literal('')),
   address: z.string().trim().max(500).optional().or(z.literal('')),
+  addresses: z.union([z.string().trim().max(3000), z.array(z.string().trim().max(500))]).optional(),
+  birthday: z.string().trim().max(30).optional().or(z.literal('')),
+  nickname: z.string().trim().max(160).optional().or(z.literal('')),
+  company: z.string().trim().max(160).optional().or(z.literal('')),
+  jobTitle: z.string().trim().max(160).optional().or(z.literal('')),
+  occupation: z.string().trim().max(160).optional().or(z.literal('')),
+  relations: z.union([z.string().trim().max(2000), z.array(z.string().trim().max(500))]).optional(),
+  events: z.union([z.string().trim().max(2000), z.array(z.string().trim().max(500))]).optional(),
+  customFields: z.union([z.string().trim().max(3000), z.array(z.string().trim().max(500))]).optional(),
+  website: z.string().trim().max(500).optional().or(z.literal('')),
+  notes: z.string().trim().max(5000).optional().or(z.literal('')),
   resourceName: z.string().trim().max(200).optional().or(z.literal('')),
 });
 
+type GoogleDate = { year?: number; month?: number; day?: number };
 type GooglePerson = {
   resourceName?: string;
   etag?: string;
-  names?: Array<{ displayName?: string; givenName?: string }>;
-  phoneNumbers?: Array<{ value?: string }>;
-  emailAddresses?: Array<{ value?: string }>;
-  addresses?: Array<{ formattedValue?: string; streetAddress?: string; city?: string; region?: string; postalCode?: string; country?: string }>;
+  names?: Array<{ displayName?: string; givenName?: string; middleName?: string; familyName?: string }>;
+  nicknames?: Array<{ value?: string; type?: string }>;
+  phoneNumbers?: Array<{ value?: string; type?: string; formattedType?: string }>;
+  emailAddresses?: Array<{ value?: string; type?: string; formattedType?: string }>;
+  addresses?: Array<{ formattedValue?: string; streetAddress?: string; city?: string; region?: string; postalCode?: string; country?: string; type?: string; formattedType?: string }>;
+  organizations?: Array<{ name?: string; title?: string; department?: string; type?: string; current?: boolean }>;
+  birthdays?: Array<{ date?: GoogleDate; text?: string }>;
+  biographies?: Array<{ value?: string; contentType?: string }>;
+  occupations?: Array<{ value?: string }>;
+  relations?: Array<{ person?: string; type?: string; formattedType?: string }>;
+  urls?: Array<{ value?: string; type?: string; formattedType?: string }>;
   userDefined?: Array<{ key?: string; value?: string }>;
   photos?: Array<{ url?: string; default?: boolean }>;
+  events?: Array<{ date?: GoogleDate; type?: string; formattedType?: string }>;
+  metadata?: Record<string, unknown>;
+  coverPhotos?: Array<{ url?: string; default?: boolean }>;
 };
 
 function ensureConfigured(reply: FastifyReply) {
@@ -150,7 +179,7 @@ async function listGoogleContacts(accessToken: string) {
   const people: GooglePerson[] = [];
   let pageToken = '';
   do {
-    const query = new URLSearchParams({ personFields: 'names,phoneNumbers,emailAddresses,addresses,userDefined,photos', pageSize: '1000' });
+    const query = new URLSearchParams({ personFields: GOOGLE_PERSON_FIELDS, pageSize: '1000' });
     if (pageToken) query.set('pageToken', pageToken);
     const response = await googleFetch(`/people/me/connections?${query}`, accessToken);
     const data = await response.json() as { connections?: GooglePerson[]; nextPageToken?: string };
@@ -164,7 +193,8 @@ type GoogleContactsCacheEntry = { expiresAt: number; people: GooglePerson[] };
 const googleContactsCache = new Map<string, GoogleContactsCacheEntry>();
 const googleContactsInFlight = new Map<string, Promise<GooglePerson[]>>();
 
-async function listGoogleContactsForCompany(companyId: string) {
+async function listGoogleContactsForCompany(companyId: string, forceRefresh = false) {
+  if (forceRefresh) googleContactsCache.delete(companyId);
   const cached = googleContactsCache.get(companyId);
   if (cached && cached.expiresAt > Date.now()) return cached.people;
 
@@ -202,6 +232,138 @@ function personCpf(person: GooglePerson) {
 
 function personPhoneValues(person: GooglePerson) {
   return Array.from(new Set((person.phoneNumbers || []).map((item) => normalizePhone(item.value || '')).filter(Boolean)));
+}
+
+function personAddresses(person: GooglePerson) {
+  return (person.addresses || []).map((address) => {
+    if (address.formattedValue?.trim()) return address.formattedValue.trim();
+    return [address.streetAddress, address.city, address.region, address.postalCode, address.country]
+      .filter(Boolean)
+      .join(', ')
+      .trim();
+  }).filter(Boolean);
+}
+
+function personEmailValues(person: GooglePerson) {
+  return Array.from(new Set((person.emailAddresses || []).map((item) => item.value?.trim() || '').filter(Boolean)));
+}
+
+function formatGoogleDate(value?: GoogleDate) {
+  if (!value?.month || !value.day) return '';
+  const month = String(value.month).padStart(2, '0');
+  const day = String(value.day).padStart(2, '0');
+  return value.year ? `${value.year}-${month}-${day}` : `${month}-${day}`;
+}
+
+function personBirthday(person: GooglePerson) {
+  return formatGoogleDate(person.birthdays?.[0]?.date);
+}
+
+function personOrganization(person: GooglePerson) {
+  const organization = person.organizations?.find((item) => item.current !== false) || person.organizations?.[0];
+  return {
+    company: organization?.name?.trim() || '',
+    jobTitle: organization?.title?.trim() || '',
+  };
+}
+
+function personWebsite(person: GooglePerson) {
+  return person.urls?.find((item) => item.value?.trim())?.value?.trim() || '';
+}
+
+function personNotes(person: GooglePerson) {
+  return person.biographies?.map((item) => item.value?.trim() || '').filter(Boolean).join('\n\n') || '';
+}
+
+function personNickname(person: GooglePerson) {
+  return person.nicknames?.find((item) => item.value?.trim())?.value?.trim() || '';
+}
+
+function personOccupation(person: GooglePerson) {
+  return person.occupations?.find((item) => item.value?.trim())?.value?.trim() || '';
+}
+
+function personRelations(person: GooglePerson) {
+  return (person.relations || []).map((item) => [item.type || item.formattedType, item.person].filter(Boolean).join(': ')).filter(Boolean).join('\n');
+}
+
+function personEvents(person: GooglePerson) {
+  return (person.events || []).map((item) => {
+    const date = formatGoogleDate(item.date);
+    return [item.type || item.formattedType, date].filter(Boolean).join(': ');
+  }).filter(Boolean).join('\n');
+}
+
+function personCustomFields(person: GooglePerson) {
+  return (person.userDefined || [])
+    .filter((item) => item.key && !['cpf', 'documento', 'document'].includes(item.key.trim().toLowerCase()))
+    .map((item) => `${item.key}: ${item.value || ''}`)
+    .join('\n');
+}
+
+function personDisplayName(person: GooglePerson) {
+  const name = person.names?.[0];
+  return name?.displayName?.trim() || [name?.givenName, name?.middleName, name?.familyName]
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+}
+
+function splitFormValues(value: string | string[] | undefined) {
+  const values = Array.isArray(value) ? value : (value || '').split(/[;,\n]/);
+  return Array.from(new Set(values.map((item) => item.trim()).filter(Boolean)));
+}
+
+function splitLabeledLines(value: string | string[] | undefined) {
+  const lines = Array.isArray(value) ? value : (value || '').split(/\r?\n/);
+  return lines.map((item) => item.trim()).filter(Boolean).map((line) => {
+    const separator = line.indexOf(':');
+    return separator > 0
+      ? { key: line.slice(0, separator).trim(), value: line.slice(separator + 1).trim() }
+      : { key: 'other', value: line };
+  }).filter((item) => item.value);
+}
+
+function parseBirthday(value: string) {
+  const clean = value.trim();
+  if (!clean) return undefined;
+  const iso = clean.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) return { year: Number(iso[1]), month: Number(iso[2]), day: Number(iso[3]) };
+  const brazilian = clean.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (brazilian) return { year: Number(brazilian[3]), month: Number(brazilian[2]), day: Number(brazilian[1]) };
+  const partial = clean.match(/^(\d{2})[-\/]?(\d{2})$/);
+  if (partial) return { month: Number(partial[1]), day: Number(partial[2]) };
+  return undefined;
+}
+
+function contactFieldsFromPerson(person: GooglePerson) {
+  const phones = personPhoneValues(person);
+  const emails = personEmailValues(person);
+  const organization = personOrganization(person);
+  return {
+    name: personDisplayName(person),
+    phone: phones[0] || '',
+    otherPhones: phones.slice(1),
+    email: emails[0] || '',
+    emails,
+    cpf: personCpf(person),
+    address: personAddress(person),
+    addresses: personAddresses(person),
+    birthday: personBirthday(person),
+    nickname: personNickname(person),
+    company: organization.company,
+    jobTitle: organization.jobTitle,
+    occupation: personOccupation(person),
+    relations: personRelations(person),
+    events: personEvents(person),
+    customFields: personCustomFields(person),
+    website: personWebsite(person),
+    notes: personNotes(person),
+    resourceName: person.resourceName || '',
+    etag: person.etag || '',
+    avatarUrl: person.photos?.find((photo) => !photo.default)?.url || '',
+    googleData: person,
+  };
 }
 
 async function upsertLocalContact(companyId: string, person: GooglePerson) {
@@ -289,20 +451,133 @@ async function upsertLocalContacts(companyId: string, people: GooglePerson[]) {
   return contacts.length;
 }
 
+async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]) {
+  const unique = new Map<string, ReturnType<typeof contactFieldsFromPerson>>();
+  for (const person of people) {
+    const fields = contactFieldsFromPerson(person);
+    if (!fields.name || !fields.phone) continue;
+    for (const phone of [fields.phone, ...fields.otherPhones]) {
+      unique.set(phone, { ...fields, phone });
+    }
+  }
+  const contacts = Array.from(unique.values());
+  if (contacts.length === 0) return 0;
+
+  await db.query(
+    `INSERT INTO contacts (
+       company_id, name, phone, email, avatar_url, cpf, address, secondary_phone,
+       google_resource_name, source, nickname, birthday, company, job_title,
+       website, notes, google_etag, google_data, google_synced_at
+     )
+     SELECT $1, item.name, item.phone, item.email, item.avatar_url, item.cpf, item.address,
+            item.secondary_phone, item.resource_name, 'google', item.nickname, item.birthday,
+            item.company, item.job_title, item.website, item.notes, item.etag,
+            item.google_data, now()
+     FROM jsonb_to_recordset($2::jsonb) AS item(
+       name text, phone text, email text, avatar_url text, cpf text, address text,
+       secondary_phone text, resource_name text, nickname text, birthday text,
+       company text, job_title text, website text, notes text, etag text, google_data jsonb
+     )
+     ON CONFLICT (company_id, phone) DO UPDATE SET
+       name = EXCLUDED.name,
+       email = EXCLUDED.email,
+       avatar_url = EXCLUDED.avatar_url,
+       cpf = EXCLUDED.cpf,
+       address = EXCLUDED.address,
+       secondary_phone = EXCLUDED.secondary_phone,
+       google_resource_name = EXCLUDED.google_resource_name,
+       source = 'google',
+       nickname = EXCLUDED.nickname,
+       birthday = EXCLUDED.birthday,
+       company = EXCLUDED.company,
+       job_title = EXCLUDED.job_title,
+       website = EXCLUDED.website,
+       notes = EXCLUDED.notes,
+       google_etag = EXCLUDED.google_etag,
+       google_data = EXCLUDED.google_data,
+       google_synced_at = now(),
+       updated_at = now()`,
+    [companyId, JSON.stringify(contacts.map((contact) => ({
+      name: contact.name,
+      phone: contact.phone,
+      email: contact.email || null,
+      avatar_url: contact.avatarUrl || null,
+      cpf: contact.cpf || null,
+      address: contact.address || null,
+      secondary_phone: contact.otherPhones[0] || null,
+      resource_name: contact.resourceName || null,
+      nickname: contact.nickname || null,
+      birthday: contact.birthday || null,
+      company: contact.company || null,
+      job_title: contact.jobTitle || null,
+      website: contact.website || null,
+      notes: contact.notes || null,
+      etag: contact.etag || null,
+      google_data: contact.googleData,
+    })))],
+  );
+  return contacts.length;
+}
+
 export async function syncGoogleContactsForCompany(companyId: string) {
-  const people = await listGoogleContactsForCompany(companyId);
-  const imported = await upsertLocalContacts(companyId, people);
+  const people = await listGoogleContactsForCompany(companyId, true);
+  const imported = await upsertFullLocalContacts(companyId, people);
+  const resourceNames = people.map((person) => person.resourceName).filter((value): value is string => Boolean(value));
+  await db.query(
+    `UPDATE contacts
+     SET google_resource_name = NULL,
+         google_etag = NULL,
+         google_data = '{}'::jsonb,
+         google_synced_at = NULL,
+         source = CASE WHEN source = 'google' THEN 'hub' ELSE source END,
+         updated_at = now()
+     WHERE company_id = $1
+       AND google_resource_name IS NOT NULL
+       AND NOT (google_resource_name = ANY($2::text[]))`,
+    [companyId, resourceNames],
+  );
   return { imported, total: people.length };
 }
 
 function buildGooglePersonPayload(contact: z.infer<typeof googleContactFormSchema>) {
-  const phoneValues = Array.from(new Set([normalizePhone(contact.phone), normalizePhone(contact.otherPhone || '')].filter(Boolean)));
+  const phoneValues = Array.from(new Set([
+    normalizePhone(contact.phone),
+    ...splitFormValues(contact.otherPhone).map(normalizePhone),
+    ...splitFormValues(contact.otherPhones).map(normalizePhone),
+  ].filter(Boolean)));
+  const emailValues = Array.from(new Set([
+    ...(contact.email ? [contact.email.trim()] : []),
+    ...splitFormValues(contact.emails),
+  ].filter(Boolean)));
+  const birthday = parseBirthday(contact.birthday || '');
+  const events = splitLabeledLines(contact.events).map((item) => {
+    const date = parseBirthday(item.value);
+    return date ? { type: item.key, date } : null;
+  }).filter((item): item is { type: string; date: { year?: number; month: number; day: number } } => Boolean(item));
+  const relations = splitLabeledLines(contact.relations).map((item) => ({ type: item.key, person: item.value }));
+  const customFields = splitLabeledLines(contact.customFields)
+    .filter((item) => !['cpf', 'documento', 'document'].includes(item.key.toLowerCase()))
+    .map((item) => ({ key: item.key, value: item.value }));
+  if (contact.cpf) customFields.unshift({ key: 'CPF', value: contact.cpf });
+  const addressValues = Array.from(new Set([
+    ...(contact.address ? [contact.address.trim()] : []),
+    ...((Array.isArray(contact.addresses) ? contact.addresses : (contact.addresses || '').split(/\r?\n/))
+      .map((value) => value.trim()).filter(Boolean)),
+  ]));
   return {
     names: [{ givenName: contact.name }],
+    nicknames: contact.nickname ? [{ value: contact.nickname }] : [],
     phoneNumbers: phoneValues.map((value, index) => ({ value: `+${value}`, type: index === 0 ? 'mobile' : 'other' })),
-    emailAddresses: contact.email ? [{ value: contact.email }] : [],
-    addresses: contact.address ? [{ streetAddress: contact.address, type: 'home' }] : [],
-    userDefined: contact.cpf ? [{ key: 'CPF', value: contact.cpf }] : [],
+    emailAddresses: emailValues.map((value, index) => ({ value, type: index === 0 ? 'home' : 'other' })),
+    addresses: addressValues.map((value, index) => ({ streetAddress: value, type: index === 0 ? 'home' : 'other' })),
+    birthdays: birthday ? [{ date: birthday }] : [],
+    occupations: contact.occupation ? [{ value: contact.occupation }] : [],
+    relations,
+    events,
+    organizations: contact.company || contact.jobTitle ? [{ name: contact.company || undefined, title: contact.jobTitle || undefined, current: true }] : [],
+    urls: contact.website ? [{ value: contact.website, type: 'home' }] : [],
+    biographies: contact.notes ? [{ value: contact.notes, contentType: 'TEXT_PLAIN' }] : [],
+    userDefined: customFields,
   };
 }
 
@@ -368,8 +643,17 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
         secondary_phone: string | null;
         google_resource_name: string | null;
         source: string | null;
+        nickname: string | null;
+        birthday: string | null;
+        company: string | null;
+        job_title: string | null;
+        website: string | null;
+        notes: string | null;
+        google_etag: string | null;
+        google_data: GooglePerson;
       }>(
-        `SELECT name, phone, email, cpf, address, secondary_phone, google_resource_name, source
+        `SELECT name, phone, email, cpf, address, secondary_phone, google_resource_name, source,
+                nickname, birthday, company, job_title, website, notes, google_etag, google_data
          FROM contacts
          WHERE company_id = $1
            AND (
@@ -390,7 +674,28 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
           email: localContact.email || '',
           cpf: localContact.cpf || '',
           address: localContact.address || '',
+          addresses: Array.isArray(localContact.google_data?.addresses)
+            ? personAddresses(localContact.google_data)
+            : localContact.address ? [localContact.address] : [],
           otherPhone: localContact.secondary_phone || '',
+          otherPhones: Array.isArray(localContact.google_data?.phoneNumbers)
+            ? personPhoneValues(localContact.google_data).filter((value) => !variants.has(value))
+            : [],
+          emails: Array.isArray(localContact.google_data?.emailAddresses)
+            ? personEmailValues(localContact.google_data)
+            : localContact.email ? [localContact.email] : [],
+          birthday: localContact.birthday || '',
+          nickname: localContact.nickname || '',
+          company: localContact.company || '',
+          jobTitle: localContact.job_title || '',
+          occupation: personOccupation(localContact.google_data || {}),
+          relations: personRelations(localContact.google_data || {}),
+          events: personEvents(localContact.google_data || {}),
+          customFields: personCustomFields(localContact.google_data || {}),
+          website: localContact.website || '',
+          notes: localContact.notes || '',
+          etag: localContact.google_etag || '',
+          googleData: localContact.google_data || {},
           phone: normalizePhone(parsed.data.phone),
         };
       }
@@ -420,32 +725,69 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
     if (!parsed.success) return reply.code(400).send({ error: 'Preencha nome e telefone para salvar o contato' });
     const contact = parsed.data;
     const phone = normalizePhone(contact.phone);
-    const otherPhone = normalizePhone(contact.otherPhone || '');
+    const otherPhones = Array.from(new Set([
+      ...splitFormValues(contact.otherPhone).map(normalizePhone),
+      ...splitFormValues(contact.otherPhones).map(normalizePhone),
+    ].filter(Boolean))).filter((value) => value !== phone);
+    const otherPhone = otherPhones[0] || '';
     if (!phone || phone.length < 8) return reply.code(400).send({ error: 'Telefone principal inválido' });
-    if (otherPhone && otherPhone === phone) return reply.code(400).send({ error: 'O outro telefone deve ser diferente do principal' });
+    const emailValues = Array.from(new Set([
+      ...(contact.email ? [contact.email.trim()] : []),
+      ...splitFormValues(contact.emails),
+    ].filter(Boolean)));
 
     try {
       const token = await accessTokenForCompany(request.user!.companyId);
-      const people = await listGoogleContacts(token);
+      const people = await listGoogleContactsForCompany(request.user!.companyId);
       const variants = phoneVariants(phone);
       const existing = contact.resourceName
         ? people.find((person) => person.resourceName === contact.resourceName)
         : people.find((person) => person.phoneNumbers?.some((item) => variants.has(normalizePhone(item.value || ''))));
       const payload = buildGooglePersonPayload(contact);
       const response = existing?.resourceName
-        ? await googleFetch(`/${existing.resourceName}:updateContact?updatePersonFields=names,emailAddresses,phoneNumbers,addresses,userDefined`, token, {
+        ? await googleFetch(`/${existing.resourceName}:updateContact?updatePersonFields=names,nicknames,emailAddresses,phoneNumbers,addresses,organizations,birthdays,biographies,occupations,relations,events,urls,userDefined&personFields=${encodeURIComponent(GOOGLE_PERSON_FIELDS)}`, token, {
             method: 'PATCH',
             body: JSON.stringify({ ...payload, etag: existing.etag }),
           })
-        : await googleFetch('/people:createContact', token, {
+        : await googleFetch(`/people:createContact?personFields=${encodeURIComponent(GOOGLE_PERSON_FIELDS)}`, token, {
             method: 'POST',
             body: JSON.stringify(payload),
           });
       const person = await response.json() as GooglePerson;
       const resourceName = person.resourceName || existing?.resourceName || null;
+      const savedFromGoogle = contactFieldsFromPerson({
+        ...person,
+        ...(!person.names?.length ? { names: [{ displayName: contact.name }] } : {}),
+        ...(!person.phoneNumbers?.length ? { phoneNumbers: [{ value: phone }] } : {}),
+      });
+      const saved = {
+        ...savedFromGoogle,
+        name: contact.name,
+        phone,
+        otherPhones,
+        email: emailValues[0] || '',
+        emails: emailValues,
+        cpf: contact.cpf || '',
+        address: contact.address || '',
+        birthday: contact.birthday || '',
+        nickname: contact.nickname || '',
+        company: contact.company || '',
+        jobTitle: contact.jobTitle || '',
+        occupation: contact.occupation || '',
+        relations: contact.relations || '',
+        events: contact.events || '',
+        customFields: contact.customFields || '',
+        website: contact.website || '',
+        notes: contact.notes || '',
+        googleData: { ...person, ...payload, resourceName, etag: person.etag || existing?.etag || null },
+      };
       await db.query(
-        `INSERT INTO contacts (company_id, name, phone, email, cpf, address, secondary_phone, avatar_url, google_resource_name, source)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'google')
+        `INSERT INTO contacts (
+           company_id, name, phone, email, cpf, address, secondary_phone, avatar_url,
+           google_resource_name, source, nickname, birthday, company, job_title,
+           website, notes, google_etag, google_data, google_synced_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'google', $10, $11, $12, $13, $14, $15, $16, $17, now())
          ON CONFLICT (company_id, phone) DO UPDATE SET
            name = EXCLUDED.name,
            email = EXCLUDED.email,
@@ -455,10 +797,20 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
            avatar_url = COALESCE(EXCLUDED.avatar_url, contacts.avatar_url),
            google_resource_name = EXCLUDED.google_resource_name,
            source = 'google',
+           nickname = EXCLUDED.nickname,
+           birthday = EXCLUDED.birthday,
+           company = EXCLUDED.company,
+           job_title = EXCLUDED.job_title,
+           website = EXCLUDED.website,
+           notes = EXCLUDED.notes,
+           google_etag = EXCLUDED.google_etag,
+           google_data = EXCLUDED.google_data,
+           google_synced_at = now(),
            updated_at = now()`,
-        [request.user!.companyId, contact.name, phone, contact.email || null, contact.cpf || null, contact.address || null, otherPhone || null, person.photos?.find((photo) => !photo.default)?.url || null, resourceName],
+        [request.user!.companyId, contact.name, phone, emailValues[0] || null, contact.cpf || null, contact.address || null, otherPhone || null, saved.avatarUrl || null, resourceName, saved.nickname || contact.nickname || null, saved.birthday || contact.birthday || null, saved.company || contact.company || null, saved.jobTitle || contact.jobTitle || null, saved.website || contact.website || null, saved.notes || contact.notes || null, person.etag || existing?.etag || null, saved.googleData],
       );
-      return reply.code(existing ? 200 : 201).send({ saved: true, name: contact.name, resourceName, phone, otherPhone });
+      googleContactsCache.delete(request.user!.companyId);
+      return reply.code(existing ? 200 : 201).send({ saved: true, ...saved, name: contact.name, resourceName, phone, otherPhone, otherPhones, emails: emailValues });
     } catch (error) {
       request.log.warn({ err: error }, 'Não foi possível salvar contato no Google');
       return reply.code(502).send({ error: 'Não foi possível salvar o contato no Google Contacts' });
@@ -467,7 +819,9 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
 
   app.get('/api/contacts', { preHandler: requireUser }, async (request) => {
     const result = await db.query(
-      `SELECT id, name, phone, email, avatar_url, notes, cpf, address, secondary_phone, source, created_at
+      `SELECT id, name, phone, email, avatar_url, notes, cpf, address, secondary_phone,
+              nickname, birthday, company, job_title, website, google_resource_name,
+              google_etag, google_data, google_synced_at, source, created_at
        FROM contacts WHERE company_id = $1 ORDER BY name`, [request.user!.companyId],
     );
     return { contacts: result.rows };
@@ -486,21 +840,37 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
     let googleSynced = false;
     try {
       const token = await accessTokenForCompany(request.user!.companyId);
-      const people = await listGoogleContacts(token);
-      const existing = people.find((person) => person.phoneNumbers?.some((item) => normalizePhone(item.value || '') === phone));
+      const people = await listGoogleContactsForCompany(request.user!.companyId);
+      const variants = phoneVariants(phone);
+      const existing = people.find((person) => person.phoneNumbers?.some((item) => variants.has(normalizePhone(item.value || ''))));
       let person: GooglePerson;
       if (existing?.resourceName) {
-        const response = await googleFetch(`/${existing.resourceName}:updateContact?updatePersonFields=names,emailAddresses,phoneNumbers`, token, {
+        const response = await googleFetch(`/${existing.resourceName}:updateContact?updatePersonFields=names,emailAddresses,phoneNumbers&personFields=${encodeURIComponent(GOOGLE_PERSON_FIELDS)}`, token, {
           method: 'PATCH', body: JSON.stringify({ etag: existing.etag, names: [{ givenName: parsed.data.name }], phoneNumbers: [{ value: `+${phone}` }], emailAddresses: parsed.data.email ? [{ value: parsed.data.email }] : [] }),
         });
         person = await response.json() as GooglePerson;
       } else {
-        const response = await googleFetch('/people:createContact', token, {
+        const response = await googleFetch(`/people:createContact?personFields=${encodeURIComponent(GOOGLE_PERSON_FIELDS)}`, token, {
           method: 'POST', body: JSON.stringify({ names: [{ givenName: parsed.data.name }], phoneNumbers: [{ value: `+${phone}` }], emailAddresses: parsed.data.email ? [{ value: parsed.data.email }] : [] }),
         });
         person = await response.json() as GooglePerson;
       }
-      await db.query('UPDATE contacts SET google_resource_name = $2 WHERE id = $1', [local.rows[0]!.id, person.resourceName || null]);
+      const fields = contactFieldsFromPerson({
+        ...person,
+        ...(!person.names?.length ? { names: [{ displayName: parsed.data.name }] } : {}),
+        ...(!person.phoneNumbers?.length ? { phoneNumbers: [{ value: phone }] } : {}),
+      });
+      await db.query(
+        `UPDATE contacts SET
+           name = $2, phone = $3, email = $4, avatar_url = $5, cpf = $6, address = $7,
+           secondary_phone = $8, google_resource_name = $9, source = 'google',
+           nickname = $10, birthday = $11, company = $12, job_title = $13,
+           website = $14, notes = $15, google_etag = $16, google_data = $17,
+           google_synced_at = now(), updated_at = now()
+         WHERE id = $1`,
+        [local.rows[0]!.id, parsed.data.name, phone, fields.email || parsed.data.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, fields.otherPhones[0] || null, fields.resourceName || existing?.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, person.etag || existing?.etag || null, fields.googleData],
+      );
+      googleContactsCache.delete(request.user!.companyId);
       googleSynced = true;
     } catch (error) {
       request.log.warn({ err: error }, 'Contato salvo localmente, mas não sincronizado com Google');

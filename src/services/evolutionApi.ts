@@ -1,6 +1,7 @@
 import { ChatStatus, WhatsappInstance, Conversation, Message } from '../types';
 import { mockInstances, mockConversations } from './mockData';
 import { evolutionMessagePreview, normalizeEvolutionMessage } from './evolutionMessageAdapter';
+import { phoneVariants } from '../utils/phone';
 
 const unwrapEvolutionMessage = (message: any) => {
   let current = message || {};
@@ -199,9 +200,11 @@ const extractEvolutionButtons = (message: any): NonNullable<Message['interactive
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 const USE_MOCK = import.meta.env.VITE_USE_MOCK_DATA === 'true';
+const API_TIMEOUT_MS = 30_000;
 
 const apiFetch = (path: string, init?: RequestInit) => fetch(`${API_URL}${path}`, {
   ...init,
+  signal: init?.signal || AbortSignal.timeout(API_TIMEOUT_MS),
   credentials: 'include',
   headers: {
     'Content-Type': 'application/json',
@@ -209,10 +212,76 @@ const apiFetch = (path: string, init?: RequestInit) => fetch(`${API_URL}${path}`
   },
 });
 
+export type EvolutionRealtimeEvent = {
+  type: string;
+  remoteJid?: string;
+  phone?: string;
+  messageId?: string;
+  timestampMs?: number;
+  fromMe?: boolean;
+  status?: string;
+  [key: string]: unknown;
+};
+
 export class EvolutionApiService {
   private static lastKnownStatus: WhatsappInstance['status'] = 'connecting';
   private static businessProfileCache = new Map<string, { expiresAt: number; profile: any | null }>();
   private static businessProfileInFlight = new Map<string, Promise<any | null>>();
+  private static mediaCache = new Map<string, { expiresAt: number; data: string | null }>();
+  private static mediaInFlight = new Map<string, Promise<string | null>>();
+  private static statusCache = new Map<string, { expiresAt: number; value: WhatsappInstance }>();
+  private static statusInFlight = new Map<string, Promise<WhatsappInstance>>();
+  private static realtimeSource: EventSource | null = null;
+  private static realtimeListeners = new Set<(event: EvolutionRealtimeEvent) => void>();
+  private static realtimeOnlineHandler: (() => void) | null = null;
+
+  static subscribeToRealtimeEvents(listener: (event: EvolutionRealtimeEvent) => void) {
+    if (USE_MOCK || typeof window === 'undefined' || typeof EventSource === 'undefined') return () => undefined;
+    this.realtimeListeners.add(listener);
+    this.ensureRealtimeStream();
+    return () => {
+      this.realtimeListeners.delete(listener);
+      if (this.realtimeListeners.size === 0) this.closeRealtimeStream();
+    };
+  }
+
+  private static ensureRealtimeStream() {
+    if (this.realtimeSource || this.realtimeListeners.size === 0) return;
+    try {
+      const source = new EventSource(`${API_URL}/api/evolution/events`, { withCredentials: true });
+      const handleMessage = (event: MessageEvent<string>) => {
+        try {
+          const payload = JSON.parse(event.data) as EvolutionRealtimeEvent;
+          if (!payload || typeof payload.type !== 'string') return;
+          this.realtimeListeners.forEach((listener) => listener(payload));
+        } catch {
+          // Um heartbeat ou uma resposta intermediária não deve interromper o stream.
+        }
+      };
+      source.addEventListener('evolution', handleMessage as EventListener);
+      source.onmessage = handleMessage;
+      this.realtimeSource = source;
+      this.realtimeOnlineHandler = () => {
+        if (this.realtimeSource?.readyState === EventSource.CLOSED) {
+          this.closeRealtimeStream();
+          this.ensureRealtimeStream();
+        }
+      };
+      window.addEventListener('online', this.realtimeOnlineHandler);
+    } catch {
+      // Navegadores sem suporte a EventSource continuam usando o polling de segurança.
+      this.realtimeSource = null;
+    }
+  }
+
+  private static closeRealtimeStream() {
+    this.realtimeSource?.close();
+    this.realtimeSource = null;
+    if (this.realtimeOnlineHandler) {
+      window.removeEventListener('online', this.realtimeOnlineHandler);
+      this.realtimeOnlineHandler = null;
+    }
+  }
 
   private static publishStatus(status: WhatsappInstance['status']) {
     this.lastKnownStatus = status;
@@ -225,6 +294,22 @@ export class EvolutionApiService {
    * Buscar status da conexão da instância
    */
   static async getInstanceStatus(instanceName: string): Promise<WhatsappInstance> {
+    const cached = this.statusCache.get(instanceName);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const pending = this.statusInFlight.get(instanceName);
+    if (pending) return pending;
+    const request = this.fetchInstanceStatus(instanceName);
+    this.statusInFlight.set(instanceName, request);
+    try {
+      const value = await request;
+      this.statusCache.set(instanceName, { value, expiresAt: Date.now() + 5_000 });
+      return value;
+    } finally {
+      this.statusInFlight.delete(instanceName);
+    }
+  }
+
+  private static async fetchInstanceStatus(instanceName: string): Promise<WhatsappInstance> {
     if (USE_MOCK) {
       return mockInstances[0];
     }
@@ -292,10 +377,11 @@ export class EvolutionApiService {
       body: '{}',
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(body?.error || 'Não foi possível desconectar o WhatsApp');
-    }
-    return body;
+      if (!response.ok) {
+        throw new Error(body?.error || 'Não foi possível desconectar o WhatsApp');
+      }
+      this.statusCache.delete(instanceName);
+      return body;
   }
 
   /**
@@ -308,7 +394,6 @@ export class EvolutionApiService {
     if (USE_MOCK) return mockConversations;
 
     try {
-      console.log(`[EvolutionAPI] Buscando conversas e contatos do Railway para: ${instanceName}`);
       let rawChats: any[] = [];
       let contactsMap = new Map<string, { name: string; avatar: string }>();
 
@@ -374,17 +459,6 @@ export class EvolutionApiService {
           }
         });
       }
-
-      const phoneVariants = (value: string) => {
-        const digits = value.replace(/\D/g, '');
-        const variants = new Set([digits]);
-        if (digits.startsWith('55') && digits.length === 13) {
-          variants.add(`${digits.slice(0, 4)}${digits.slice(5)}`);
-        } else if (digits.startsWith('55') && digits.length === 12) {
-          variants.add(`${digits.slice(0, 4)}9${digits.slice(4)}`);
-        }
-        return Array.from(variants);
-      };
 
       if (Array.isArray(storedContactsData)) {
         const ordered = [...storedContactsData].sort((a: any, b: any) => {
@@ -607,12 +681,30 @@ export class EvolutionApiService {
     return Array.isArray(body?.notes) ? body.notes as Message[] : [];
   }
 
-  static async fetchConversationMessages(instanceName: string, remoteJid: string, phone: string, attendantLabel = 'Atendente', reconcile = false) {
+  static async fetchConversationMessagesPage(
+    instanceName: string,
+    remoteJid: string,
+    phone: string,
+    attendantLabel = 'Atendente',
+    reconcile = false,
+    beforeTimestamp?: number,
+    afterTimestamp?: number,
+    limit = 100,
+  ) {
     const [evolutionMessages, internalNotes] = await Promise.all([
-      this.fetchMessages(instanceName, remoteJid, phone, attendantLabel, reconcile),
+      this.fetchMessagesPage(instanceName, remoteJid, phone, attendantLabel, reconcile, beforeTimestamp, afterTimestamp, limit),
       this.fetchInternalNotes(remoteJid, phone),
     ]);
-    return [...evolutionMessages, ...internalNotes].sort((a, b) => (a.timestampMs || 0) - (b.timestampMs || 0));
+    return {
+      messages: [...evolutionMessages.messages, ...internalNotes]
+        .sort((a, b) => (a.timestampMs || 0) - (b.timestampMs || 0)),
+      hasMore: evolutionMessages.hasMore,
+    };
+  }
+
+  static async fetchConversationMessages(instanceName: string, remoteJid: string, phone: string, attendantLabel = 'Atendente', reconcile = false) {
+    const page = await this.fetchConversationMessagesPage(instanceName, remoteJid, phone, attendantLabel, reconcile);
+    return page.messages;
   }
 
   /**
@@ -650,27 +742,41 @@ export class EvolutionApiService {
   /**
    * Buscar histórico de mensagens de uma conversa diretamente da Evolution API no Railway
    */
-  static async fetchMessages(instanceName: string, remoteJid: string, phone = '', attendantLabel = 'Atendente', reconcile = false): Promise<Message[]> {
-    if (USE_MOCK) return [];
+  static async fetchMessagesPage(
+    instanceName: string,
+    remoteJid: string,
+    phone = '',
+    attendantLabel = 'Atendente',
+    reconcile = false,
+    beforeTimestamp?: number,
+    afterTimestamp?: number,
+    limit = 100,
+  ): Promise<{ messages: Message[]; hasMore: boolean }> {
+    if (USE_MOCK) return { messages: [], hasMore: false };
 
     try {
       const cleanJid = remoteJid.includes('@') ? remoteJid : `${remoteJid.replace(/\D/g, '')}@s.whatsapp.net`;
 
       const res = await apiFetch('/api/evolution/messages', {
         method: 'POST',
-        body: JSON.stringify({ remoteJid: cleanJid, phone, reconcile })
+        body: JSON.stringify({ remoteJid: cleanJid, phone, reconcile, beforeTimestamp, afterTimestamp, limit })
       });
 
-      if (!res.ok) return [];
+      if (!res.ok) return { messages: [], hasMore: false };
       const data = await res.json();
       const rawMsgs = data?.messages?.records || data?.records || (Array.isArray(data) ? data : []);
 
-      if (!Array.isArray(rawMsgs) || rawMsgs.length === 0) return [];
+      if (!Array.isArray(rawMsgs) || rawMsgs.length === 0) {
+        return { messages: [], hasMore: Boolean(data?.messages?.hasMore) };
+      }
 
       // A Evolution API retorna do mais recente para o mais antigo. Invertemos para exibir cronologicamente.
       const chronologicalMsgs = [...rawMsgs].reverse();
 
-      return chronologicalMsgs.map((m: any, idx: number) => normalizeEvolutionMessage(m, idx, remoteJid, attendantLabel));
+      return {
+        messages: chronologicalMsgs.map((m: any, idx: number) => normalizeEvolutionMessage(m, idx, remoteJid, attendantLabel)),
+        hasMore: Boolean(data?.messages?.hasMore),
+      };
 
       /* Legacy inline mapper kept temporarily while the adapter rollout is verified.
       return chronologicalMsgs.map((m: any, idx: number) => {
@@ -764,8 +870,13 @@ export class EvolutionApiService {
       }); */
     } catch (err) {
       console.error('[EvolutionAPI] Erro ao buscar mensagens:', err);
-      return [];
+      return { messages: [], hasMore: false };
     }
+  }
+
+  static async fetchMessages(instanceName: string, remoteJid: string, phone = '', attendantLabel = 'Atendente', reconcile = false): Promise<Message[]> {
+    const page = await this.fetchMessagesPage(instanceName, remoteJid, phone, attendantLabel, reconcile);
+    return page.messages;
   }
 
   /**
@@ -774,21 +885,37 @@ export class EvolutionApiService {
   static async getDecodedMedia(instanceName: string, messageKey: any): Promise<string | null> {
     if (!messageKey || USE_MOCK) return null;
 
-    try {
-      const res = await apiFetch('/api/evolution/media', {
-        method: 'POST',
-        body: JSON.stringify({ messageKey })
-      });
+    const cacheKey = `${messageKey.id || ''}:${messageKey.remoteJid || ''}:${messageKey.fromMe ? 'out' : 'in'}`;
+    const cached = this.mediaCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.data;
+    const pending = this.mediaInFlight.get(cacheKey);
+    if (pending) return pending;
 
-      if (!res.ok) return null;
-      const data = await res.json();
-      if (data.base64) {
-        return data.base64.startsWith('data:') ? data.base64 : `data:${data.mimetype || 'image/jpeg'};base64,${data.base64}`;
+    const request = (async () => {
+      try {
+        const res = await apiFetch('/api/evolution/media', {
+          method: 'POST',
+          body: JSON.stringify({ messageKey })
+        });
+
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (data.base64) {
+          return data.base64.startsWith('data:') ? data.base64 : `data:${data.mimetype || 'image/jpeg'};base64,${data.base64}`;
+        }
+        return null;
+      } catch (err) {
+        console.error('[EvolutionAPI] Erro ao buscar mídia decodificada:', err);
+        return null;
       }
-      return null;
-    } catch (err) {
-      console.error('[EvolutionAPI] Erro ao buscar mídia decodificada:', err);
-      return null;
+    })();
+    this.mediaInFlight.set(cacheKey, request);
+    try {
+      const data = await request;
+      this.mediaCache.set(cacheKey, { data, expiresAt: Date.now() + (data ? 10 * 60_000 : 30_000) });
+      return data;
+    } finally {
+      this.mediaInFlight.delete(cacheKey);
     }
   }
 

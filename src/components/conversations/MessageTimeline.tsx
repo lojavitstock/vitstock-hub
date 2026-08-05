@@ -25,6 +25,9 @@ type MessageTimelineProps = {
   activeConversation: Conversation;
   instanceName: string;
   containerRef: React.RefObject<HTMLDivElement>;
+  hasMoreMessages?: boolean;
+  loadingOlderMessages?: boolean;
+  onLoadOlder?: () => void;
   onRetryMessage: (message: Message) => void;
 };
 
@@ -187,7 +190,12 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
   }, [instanceName, message.id, message.rawKey, src]);
 
   if (loadingMedia) {
-    return <div className="my-1 flex max-w-xs items-center gap-2 rounded-lg border border-amber-400/20 bg-black/30 p-2.5 text-[11px] font-bold text-amber-300"><RefreshCw className="h-3.5 w-3.5 animate-spin text-amber-400" /> Descriptografando mídia...</div>;
+    const mediaPlaceholderClass = message.mediaType === 'image'
+      ? 'h-48 w-72'
+      : message.mediaType === 'sticker'
+        ? 'h-40 w-40'
+        : 'min-h-16 w-[310px] max-w-[58vw]';
+    return <div className={`my-1 flex items-center justify-center gap-2 rounded-lg border border-amber-400/20 bg-black/30 p-2.5 text-[11px] font-bold text-amber-300 ${mediaPlaceholderClass}`}><RefreshCw className="h-3.5 w-3.5 animate-spin text-amber-400" /> Descriptografando mídia...</div>;
   }
 
   if (message.mediaType === 'image') {
@@ -228,9 +236,16 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
   return null;
 };
 
-export const MessageTimeline: React.FC<MessageTimelineProps> = ({ messages, activeConversation, instanceName, containerRef, onRetryMessage }) => (
+export const MessageTimeline: React.FC<MessageTimelineProps> = ({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, onLoadOlder, onRetryMessage }) => (
   <div ref={containerRef} style={{ overflowAnchor: 'none' }} className="chat-wallpaper flex-1 space-y-3 overflow-y-auto px-6 py-5">
     <div className="my-2 flex justify-center"><span className="rounded-lg border border-white/5 bg-[#20292f]/95 px-3 py-1 text-[10px] font-bold text-slate-400 shadow-sm">Atendimento em tempo real via Evolution API</span></div>
+    {hasMoreMessages && onLoadOlder && (
+      <div className="flex justify-center py-1">
+        <button type="button" onClick={onLoadOlder} disabled={loadingOlderMessages} className="rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-1.5 text-[11px] font-bold text-amber-200 transition-colors hover:bg-amber-400/20 disabled:cursor-wait disabled:opacity-60">
+          {loadingOlderMessages ? 'Carregando histórico...' : 'Carregar mensagens anteriores'}
+        </button>
+      </div>
+    )}
     {messages.map((message) => {
       const isMe = message.sender === 'attendant';
       if (message.isInternalNote) {

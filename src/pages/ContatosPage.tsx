@@ -16,6 +16,15 @@ type ApiContact = {
   secondary_phone?: string | null;
   avatar_url?: string | null;
   notes?: string | null;
+  nickname?: string | null;
+  birthday?: string | null;
+  company?: string | null;
+  job_title?: string | null;
+  website?: string | null;
+  google_resource_name?: string | null;
+  google_etag?: string | null;
+  google_synced_at?: string | null;
+  google_data?: Record<string, unknown> | null;
   source?: string;
   created_at: string;
 };
@@ -57,7 +66,19 @@ export const ContatosPage: React.FC = () => {
     email: contact.email || undefined,
     cpf: contact.cpf || undefined,
     address: contact.address || undefined,
+    addresses: Array.isArray((contact.google_data as any)?.addresses)
+      ? ((contact.google_data as any).addresses as Array<{ formattedValue?: string; streetAddress?: string; city?: string; region?: string; postalCode?: string; country?: string }>).map((address) => address.formattedValue || [address.streetAddress, address.city, address.region, address.postalCode, address.country].filter(Boolean).join(', ')).filter(Boolean)
+      : contact.address ? [contact.address] : undefined,
     otherPhone: contact.secondary_phone ? `+${contact.secondary_phone}` : undefined,
+    nickname: contact.nickname || undefined,
+    birthday: contact.birthday || undefined,
+    company: contact.company || undefined,
+    jobTitle: contact.job_title || undefined,
+    website: contact.website || undefined,
+    googleResourceName: contact.google_resource_name || undefined,
+    googleEtag: contact.google_etag || undefined,
+    googleSyncedAt: contact.google_synced_at || undefined,
+    googleData: contact.google_data || undefined,
     avatar: contact.avatar_url || undefined,
     notes: contact.notes || undefined,
     tags: [{ id: `source-${contact.id}`, name: contact.source === 'google' ? 'Google' : 'Hub', color: contact.source === 'google' ? '#34A853' : '#EEBB2C' }],

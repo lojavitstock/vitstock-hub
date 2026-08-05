@@ -33,7 +33,8 @@ import { ContactPhoto } from '../components/conversations/ContactPhoto';
 import { MessageTimeline } from '../components/conversations/MessageTimeline';
 import { MessageComposer } from '../components/conversations/MessageComposer';
 import { formatMessageTimestamp } from '../components/conversations/conversationFormatters';
-import { mergeConversationMessages, useConversationMessages } from '../hooks/useConversationMessages';
+import { useConversationMessages } from '../hooks/useConversationMessages';
+import { mergeConversationMessages } from '../utils/messageMerge';
 import { conversationNeedsResponse, useConversationInbox } from '../hooks/useConversationInbox';
 import { useContactPanel } from '../hooks/useContactPanel';
 
@@ -138,6 +139,9 @@ export const AtendimentoPage: React.FC = () => {
   const {
     messages,
     setMessages,
+    hasMoreMessages,
+    loadingOlderMessages,
+    loadOlderMessages,
     messagesContainerRef,
     scrollToBottom,
   } = useConversationMessages({
@@ -993,6 +997,9 @@ export const AtendimentoPage: React.FC = () => {
               activeConversation={activeConv}
               instanceName={instanceName}
               containerRef={messagesContainerRef}
+              hasMoreMessages={hasMoreMessages}
+              loadingOlderMessages={loadingOlderMessages}
+              onLoadOlder={() => { void loadOlderMessages(); }}
               onRetryMessage={(message) => { void retryFailedMessage(message); }}
             />
 
@@ -1070,7 +1077,7 @@ export const AtendimentoPage: React.FC = () => {
           <div className="flex-1 overflow-y-auto p-5 space-y-5">
             <div className="text-center space-y-2">
               <div className="flex justify-center"><ContactPhoto name={activeConv.contact.name} avatar={activeConv.contact.avatar} size="large" emphasized /></div>
-              <h4 className="font-extrabold text-slate-100">{businessProfile?.verifiedName || businessProfile?.name || activeConv.contact.name}</h4>
+              <h4 className="font-extrabold text-slate-100">{googleContactStatus === 'saved' && googleMatchedName ? googleMatchedName : businessProfile?.verifiedName || businessProfile?.name || activeConv.contact.name}</h4>
               <p className="text-xs text-amber-300 font-mono">{activeConv.contact.phone}</p>
               {googleContactStatus === 'checking' ? (
                 <span className="mx-auto mt-2 inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-[#2a343a] text-slate-300 text-xs font-bold"><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Verificando Google Contacts...</span>
@@ -1091,6 +1098,26 @@ export const AtendimentoPage: React.FC = () => {
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-400/10 border border-emerald-400/30 text-[10px] font-bold text-emerald-300"><Building2 className="w-3.5 h-3.5" /> Conta empresarial</span>
               )}
             </div>
+            {googleContactStatus === 'saved' && (
+              <div className="space-y-3 text-xs">
+                <div className="p-3 rounded-lg bg-[#20292f] border border-[#344047]">
+                  <span className="block text-slate-500 font-bold mb-2">Dados do Google Contacts</span>
+                  <div className="space-y-1.5 text-slate-200">
+                    {googleContactForm.otherPhones && <p><strong className="text-slate-400">Telefones:</strong> {googleContactForm.otherPhones}</p>}
+                    {(googleContactForm.email || googleContactForm.emails) && <p><strong className="text-slate-400">E-mails:</strong> {[googleContactForm.email, googleContactForm.emails].filter(Boolean).join(', ')}</p>}
+                    {googleContactForm.addresses && <p className="whitespace-pre-wrap"><strong className="text-slate-400">Endereços:</strong>{`\n${googleContactForm.addresses}`}</p>}
+                    {googleContactForm.birthday && <p><strong className="text-slate-400">Aniversário:</strong> {googleContactForm.birthday}</p>}
+                    {(googleContactForm.company || googleContactForm.jobTitle) && <p><strong className="text-slate-400">Profissional:</strong> {[googleContactForm.company, googleContactForm.jobTitle].filter(Boolean).join(' · ')}</p>}
+                    {googleContactForm.occupation && <p><strong className="text-slate-400">Ocupação:</strong> {googleContactForm.occupation}</p>}
+                    {googleContactForm.relations && <p className="whitespace-pre-wrap"><strong className="text-slate-400">Relações:</strong>{`\n${googleContactForm.relations}`}</p>}
+                    {googleContactForm.events && <p className="whitespace-pre-wrap"><strong className="text-slate-400">Datas:</strong>{`\n${googleContactForm.events}`}</p>}
+                    {googleContactForm.customFields && <p className="whitespace-pre-wrap"><strong className="text-slate-400">Campos personalizados:</strong>{`\n${googleContactForm.customFields}`}</p>}
+                    {googleContactForm.website && <a href={googleContactForm.website} target="_blank" rel="noopener noreferrer" className="block text-emerald-300 hover:text-emerald-200 truncate">{googleContactForm.website}</a>}
+                    {googleContactForm.notes && <p className="whitespace-pre-wrap"><strong className="text-slate-400">Observações:</strong>{`\n${googleContactForm.notes}`}</p>}
+                  </div>
+                </div>
+              </div>
+            )}
             {loadingBusinessProfile ? (
               <div className="flex items-center justify-center gap-2 text-xs text-slate-400 py-6"><RefreshCw className="w-4 h-4 animate-spin" /> Buscando perfil empresarial...</div>
             ) : businessProfile ? (
@@ -1109,8 +1136,8 @@ export const AtendimentoPage: React.FC = () => {
       )}
 
       {showGoogleContactForm && activeConv && (
-        <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
-          <form onSubmit={saveGoogleContactForm} className="w-full max-w-lg max-h-[92vh] overflow-y-auto rounded-2xl border border-[#46535a] bg-[#182126] shadow-2xl p-5 space-y-4">
+        <div className="absolute inset-y-0 right-0 z-[70] w-[340px] max-w-[90vw] bg-[#182126] border-l border-[#344047] shadow-2xl animate-fade-in">
+          <form onSubmit={saveGoogleContactForm} className="flex h-full flex-col gap-4 overflow-y-auto p-5">
             <div className="flex items-start justify-between gap-4 border-b border-[#344047] pb-3">
               <div>
                 <h3 className="text-base font-extrabold text-slate-100">{googleContactStatus === 'saved' ? 'Editar contato no Google' : 'Cadastrar contato no Google'}</h3>
@@ -1126,19 +1153,54 @@ export const AtendimentoPage: React.FC = () => {
                 <input required readOnly value={googleContactForm.phone} className="mt-1 w-full rounded-lg border border-[#46535a] bg-[#10171b] px-3 py-2.5 text-sm font-mono text-amber-300 outline-none" />
               </label>
               <label className="text-xs font-bold text-slate-300">Outro telefone
-                <input value={googleContactForm.otherPhone} onChange={(event) => setGoogleContactForm((current) => ({ ...current, otherPhone: event.target.value }))} placeholder="Ex.: +55 21 98888-7777" className="mt-1 w-full rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
+                <input value={googleContactForm.otherPhones} onChange={(event) => setGoogleContactForm((current) => ({ ...current, otherPhones: event.target.value }))} placeholder="Mais de um, separados por vírgula" className="mt-1 w-full rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
               </label>
               <label className="text-xs font-bold text-slate-300">E-mail
                 <input type="email" value={googleContactForm.email} onChange={(event) => setGoogleContactForm((current) => ({ ...current, email: event.target.value }))} placeholder="cliente@email.com" className="mt-1 w-full rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
               </label>
+              <label className="text-xs font-bold text-slate-300 sm:col-span-2">Outros e-mails
+                <input value={googleContactForm.emails} onChange={(event) => setGoogleContactForm((current) => ({ ...current, emails: event.target.value }))} placeholder="Separe os e-mails por vírgula" className="mt-1 w-full rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              </label>
               <label className="text-xs font-bold text-slate-300">CPF
                 <input value={googleContactForm.cpf} onChange={(event) => setGoogleContactForm((current) => ({ ...current, cpf: event.target.value }))} placeholder="000.000.000-00" className="mt-1 w-full rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
               </label>
-              <label className="text-xs font-bold text-slate-300 sm:col-span-2">Endereço
-                <textarea rows={3} value={googleContactForm.address} onChange={(event) => setGoogleContactForm((current) => ({ ...current, address: event.target.value }))} placeholder="Rua, número, bairro, cidade e estado" className="mt-1 w-full resize-y rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              <label className="text-xs font-bold text-slate-300 sm:col-span-2">Endereços (um por linha)
+                <textarea rows={3} value={googleContactForm.addresses} onChange={(event) => setGoogleContactForm((current) => ({ ...current, addresses: event.target.value, address: event.target.value.split(/\r?\n/)[0] || '' }))} placeholder="Rua, número, bairro, cidade e estado" className="mt-1 w-full resize-y rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
               </label>
             </div>
             <p className="text-[11px] text-slate-500">O CPF será salvo no campo personalizado do Google Contacts.</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="text-xs font-bold text-slate-300">Aniversário
+                <input value={googleContactForm.birthday} onChange={(event) => setGoogleContactForm((current) => ({ ...current, birthday: event.target.value }))} placeholder="AAAA-MM-DD ou DD/MM/AAAA" className="mt-1 w-full rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              </label>
+              <label className="text-xs font-bold text-slate-300">Apelido
+                <input value={googleContactForm.nickname} onChange={(event) => setGoogleContactForm((current) => ({ ...current, nickname: event.target.value }))} className="mt-1 w-full rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              </label>
+              <label className="text-xs font-bold text-slate-300">Empresa
+                <input value={googleContactForm.company} onChange={(event) => setGoogleContactForm((current) => ({ ...current, company: event.target.value }))} className="mt-1 w-full rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              </label>
+              <label className="text-xs font-bold text-slate-300">Cargo
+                <input value={googleContactForm.jobTitle} onChange={(event) => setGoogleContactForm((current) => ({ ...current, jobTitle: event.target.value }))} className="mt-1 w-full rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              </label>
+              <label className="text-xs font-bold text-slate-300">Ocupação
+                <input value={googleContactForm.occupation} onChange={(event) => setGoogleContactForm((current) => ({ ...current, occupation: event.target.value }))} className="mt-1 w-full rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              </label>
+              <label className="text-xs font-bold text-slate-300">Relações
+                <textarea rows={2} value={googleContactForm.relations} onChange={(event) => setGoogleContactForm((current) => ({ ...current, relations: event.target.value }))} placeholder="Ex.: cônjuge: Ana" className="mt-1 w-full resize-y rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              </label>
+              <label className="text-xs font-bold text-slate-300 sm:col-span-2">Datas importantes
+                <textarea rows={2} value={googleContactForm.events} onChange={(event) => setGoogleContactForm((current) => ({ ...current, events: event.target.value }))} placeholder="Ex.: aniversário: 25/12/1990" className="mt-1 w-full resize-y rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              </label>
+              <label className="text-xs font-bold text-slate-300 sm:col-span-2">Campos personalizados
+                <textarea rows={3} value={googleContactForm.customFields} onChange={(event) => setGoogleContactForm((current) => ({ ...current, customFields: event.target.value }))} placeholder="Uma linha por campo, no formato chave: valor" className="mt-1 w-full resize-y rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              </label>
+              <label className="text-xs font-bold text-slate-300 sm:col-span-2">Site
+                <input type="url" value={googleContactForm.website} onChange={(event) => setGoogleContactForm((current) => ({ ...current, website: event.target.value }))} placeholder="https://..." className="mt-1 w-full rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              </label>
+              <label className="text-xs font-bold text-slate-300 sm:col-span-2">Observações
+                <textarea rows={4} value={googleContactForm.notes} onChange={(event) => setGoogleContactForm((current) => ({ ...current, notes: event.target.value }))} className="mt-1 w-full resize-y rounded-lg border border-[#46535a] bg-[#20292f] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              </label>
+            </div>
             <div className="flex items-center justify-end gap-2 border-t border-[#344047] pt-4">
               <button type="button" onClick={() => setShowGoogleContactForm(false)} className="px-3 py-2 rounded-lg border border-[#46535a] text-xs font-bold text-slate-300 hover:bg-white/5">Cancelar</button>
               <button type="submit" disabled={savingGoogleContact || !googleContactForm.name.trim()} className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-400 text-zinc-950 text-xs font-extrabold hover:bg-amber-300 disabled:opacity-60"><Save className="w-4 h-4" /> {savingGoogleContact ? 'Salvando...' : 'Salvar contato'}</button>

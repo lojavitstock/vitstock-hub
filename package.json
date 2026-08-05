@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "server:dev": "npm --prefix server run dev",
     "server:build": "npm --prefix server run build",
+    "test": "node tests/run-tests.mjs tests/core.test.ts",
     "server:migrate": "npm --prefix server run migrate",
     "server:seed-admin": "npm --prefix server run seed:admin"
   },

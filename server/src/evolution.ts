@@ -1,9 +1,11 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { PoolClient } from 'pg';
 import { z } from 'zod';
 import { config } from './config.js';
 import { requireUser } from './auth.js';
 import { db } from './db.js';
+import { publishRealtimeEvent, registerRealtimeClient } from './realtime.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -12,6 +14,9 @@ const jidSchema = z.object({
   // atualizações seguintes usam o PostgreSQL e não ficam consultando a
   // Evolution a cada ciclo de atualização da tela.
   reconcile: z.boolean().optional(),
+  beforeTimestamp: z.coerce.number().int().positive().optional(),
+  afterTimestamp: z.coerce.number().int().positive().optional(),
+  limit: z.coerce.number().int().min(20).max(200).optional(),
 });
 const sendTextSchema = z.object({
   number: z.string().regex(/^\d{8,20}$/),
@@ -73,18 +78,14 @@ async function evolutionRequest(path: string, init?: RequestInit) {
   });
 }
 
-type EvolutionChatsSnapshot = { chats: any[]; contacts: any[]; expiresAt: number };
+type EvolutionChatsSnapshot = { chats: any[]; contacts: any[]; expiresAt: number; staleUntil: number };
 const evolutionChatsCache = new Map<string, EvolutionChatsSnapshot>();
 const evolutionChatsInFlight = new Map<string, Promise<{ chats: any[]; contacts: any[] }>>();
+const localInboxCache = new Map<string, { chats: any[]; expiresAt: number }>();
 
-async function fetchEvolutionChatsSnapshot(companyId: string) {
-  const cached = evolutionChatsCache.get(companyId);
-  if (cached && cached.expiresAt > Date.now()) {
-    return { chats: cached.chats, contacts: cached.contacts };
-  }
+async function refreshEvolutionChatsSnapshot(companyId: string) {
   const current = evolutionChatsInFlight.get(companyId);
   if (current) return current;
-
   const instance = encodeURIComponent(config.EVOLUTION_INSTANCE_NAME);
   const request = (async () => {
     const [chatsResponse, contactsResponse] = await Promise.all([
@@ -102,7 +103,11 @@ async function fetchEvolutionChatsSnapshot(companyId: string) {
       chats: Array.isArray(chats) ? chats : [],
       contacts: Array.isArray(contacts) ? contacts : [],
     };
-    evolutionChatsCache.set(companyId, { ...snapshot, expiresAt: Date.now() + 3_000 });
+    evolutionChatsCache.set(companyId, {
+      ...snapshot,
+      expiresAt: Date.now() + 3_000,
+      staleUntil: Date.now() + 30_000,
+    });
     return snapshot;
   })();
   evolutionChatsInFlight.set(companyId, request);
@@ -113,10 +118,111 @@ async function fetchEvolutionChatsSnapshot(companyId: string) {
   }
 }
 
+async function fetchEvolutionChatsSnapshot(companyId: string) {
+  const now = Date.now();
+  const cached = evolutionChatsCache.get(companyId);
+  if (cached && cached.expiresAt > now) {
+    return { chats: cached.chats, contacts: cached.contacts };
+  }
+
+  // Enquanto a Evolution responde, entregamos o último snapshot conhecido.
+  // Isso mantém o inbox utilizável mesmo quando o provedor demora vários segundos.
+  if (cached && cached.staleUntil > now) {
+    void refreshEvolutionChatsSnapshot(companyId).catch(() => undefined);
+    return { chats: cached.chats, contacts: cached.contacts };
+  }
+
+  return refreshEvolutionChatsSnapshot(companyId);
+}
+
+/**
+ * A Evolution é a fonte primária do inbox, mas o PostgreSQL é a fonte de
+ * verdade depois que uma mensagem chega pelo webhook. Quando o provedor fica
+ * oscilando, usamos o último estado persistido para que a lista continue
+ * navegável e nenhuma conversa desapareça da tela.
+ */
+async function loadLocalInboxChats(companyId: string) {
+  const result = await db.query<{
+    evolution_remote_jid: string;
+    unread_count: number;
+    last_message: string | null;
+    last_message_at: Date | string | null;
+    contact_name: string;
+    avatar_url: string | null;
+    message_id: string | null;
+    message_sender: string | null;
+    message_sent_at: Date | string | null;
+  }>(
+    `SELECT c.evolution_remote_jid,
+            c.unread_count,
+            c.last_message,
+            c.last_message_at,
+            ct.name AS contact_name,
+            ct.avatar_url,
+            latest.evolution_message_id AS message_id,
+            latest.sender AS message_sender,
+            latest.sent_at AS message_sent_at
+     FROM conversations c
+     JOIN contacts ct ON ct.id = c.contact_id
+     LEFT JOIN LATERAL (
+       SELECT m.evolution_message_id, m.sender, m.sent_at
+       FROM messages m
+       WHERE m.conversation_id = c.id
+         AND m.is_internal_note = false
+       ORDER BY m.sent_at DESC
+       LIMIT 1
+     ) latest ON true
+     WHERE c.company_id = $1
+     ORDER BY COALESCE(c.last_message_at, c.updated_at) DESC`,
+    [companyId],
+  );
+
+  return result.rows.map((row) => {
+    const dateValue = row.message_sent_at || row.last_message_at;
+    const timestamp = dateValue ? Math.floor(new Date(dateValue).getTime() / 1000) : 0;
+    const remoteJid = row.evolution_remote_jid;
+    return {
+      id: remoteJid,
+      remoteJid,
+      unreadCount: Number(row.unread_count) || 0,
+      updatedAt: dateValue ? new Date(dateValue).toISOString() : undefined,
+      pushName: row.contact_name,
+      profilePicUrl: row.avatar_url || undefined,
+      lastMessage: {
+        key: {
+          id: row.message_id || `local-${remoteJid}-${timestamp}`,
+          remoteJid,
+          fromMe: row.message_sender === 'attendant',
+        },
+        message: { conversation: row.last_message || '[Conversa iniciada]' },
+        messageTimestamp: timestamp,
+        pushName: row.contact_name,
+      },
+    };
+  });
+}
+
+async function fetchLocalInboxChats(companyId: string) {
+  const cached = localInboxCache.get(companyId);
+  if (cached && cached.expiresAt > Date.now()) return cached.chats;
+  const chats = await loadLocalInboxChats(companyId);
+  localInboxCache.set(companyId, { chats, expiresAt: Date.now() + 5_000 });
+  return chats;
+}
+
 async function forwardJson(response: Response, reply: FastifyReply) {
   const body = await response.json().catch(() => ({ error: 'Resposta inválida da Evolution API' }));
   if (!response.ok) return reply.code(502).send({ error: 'Evolution API indisponível' });
   return body;
+}
+
+async function forwardEvolutionRequest(path: string, reply: FastifyReply, init?: RequestInit) {
+  try {
+    return await forwardJson(await evolutionRequest(path, init), reply);
+  } catch (error) {
+    reply.request.log.warn({ err: error, path }, 'Evolution API não respondeu');
+    return reply.code(502).send({ error: 'Evolution API indisponível no momento' });
+  }
 }
 
 function assignmentJids(input: { remoteJid: string; phone?: string }) {
@@ -139,7 +245,13 @@ function providerContactName(value: any) {
 }
 
 function providerContactPhone(value: any) {
-  const rawJid = value?.remoteJid || value?.id || value?.key?.remoteJid || '';
+  const rawJid = value?.lastMessage?.key?.remoteJidAlt
+    || value?.key?.remoteJidAlt
+    || value?.remoteJidAlt
+    || value?.remoteJid
+    || value?.id
+    || value?.key?.remoteJid
+    || '';
   const digits = String(rawJid).split('@')[0]?.replace(/\D/g, '') || '';
   return digits.length >= 8 && digits.length <= 20 ? digits : '';
 }
@@ -452,31 +564,75 @@ function localMessageToProviderRecord(row: any) {
   };
 }
 
-async function persistProviderMessage(companyId: string, record: any, options: { incrementUnread: boolean; reopen: boolean; fallbackPhone?: string }) {
-  const local = providerRecordToLocalMessage(record, options.fallbackPhone);
-  if (!local.id || !local.remoteJid || local.remoteJid.endsWith('@g.us') || !local.phone) return false;
+async function findOrCreateConversation(
+  client: Pick<PoolClient, 'query'>,
+  input: {
+    companyId: string;
+    contactId: string;
+    remoteJid: string;
+    lastMessage: string;
+    lastMessageAt: Date;
+    reopenResolved: boolean;
+    assignedUserId?: string;
+  },
+) {
+  // A Evolution pode alternar entre o JID do telefone e um @lid para o mesmo
+  // contato. Primeiro reutilizamos uma conversa do contato e só criamos uma
+  // nova quando não existe nenhuma identidade local para aquele telefone.
+  const existing = await client.query<{ id: string }>(
+    `SELECT id
+     FROM conversations
+     WHERE company_id = $1
+       AND (evolution_remote_jid = $3 OR contact_id = $2)
+     ORDER BY CASE WHEN evolution_remote_jid = $3 THEN 0 ELSE 1 END,
+              updated_at DESC
+     LIMIT 1
+     FOR UPDATE`,
+    [input.companyId, input.contactId, input.remoteJid],
+  );
+  const existingId = existing.rows[0]?.id;
+  if (existingId) {
+    await client.query(
+      `UPDATE conversations
+       SET contact_id = $2,
+           last_message = CASE
+             WHEN $3 >= COALESCE(last_message_at, to_timestamp(0)) THEN $4
+             ELSE last_message
+           END,
+           last_message_at = CASE
+             WHEN $3 >= COALESCE(last_message_at, to_timestamp(0)) THEN $3
+             ELSE last_message_at
+           END,
+           status = CASE
+             WHEN $5 AND status = 'resolved' THEN 'open'
+             ELSE status
+           END,
+           updated_at = now()
+       WHERE id = $1`,
+      [existingId, input.contactId, input.lastMessageAt, input.lastMessage, input.reopenResolved],
+    );
+    return existingId;
+  }
 
-  const client = await db.connect();
-  try {
-    await client.query('BEGIN');
-    const contact = await client.query<{ id: string }>(
-      `INSERT INTO contacts (company_id, name, phone, avatar_url)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (company_id, phone) DO UPDATE SET
-         name = CASE
-           WHEN contacts.source = 'google' THEN contacts.name
-           WHEN contacts.name ~ '^\\+?[0-9 ]+$' AND EXCLUDED.name !~ '^\\+?[0-9 ]+$' THEN EXCLUDED.name
-           ELSE contacts.name
+  const created = input.assignedUserId
+    ? await client.query<{ id: string }>(
+      `INSERT INTO conversations
+        (company_id, contact_id, evolution_remote_jid, assigned_user_id, status, last_message, last_message_at)
+       VALUES ($1, $2, $3, $4, 'open', $5, $6)
+       ON CONFLICT (company_id, evolution_remote_jid) DO UPDATE SET
+         last_message = CASE
+           WHEN EXCLUDED.last_message_at >= COALESCE(conversations.last_message_at, to_timestamp(0)) THEN EXCLUDED.last_message
+           ELSE conversations.last_message
          END,
-         avatar_url = COALESCE(EXCLUDED.avatar_url, contacts.avatar_url),
+         last_message_at = CASE
+           WHEN EXCLUDED.last_message_at >= COALESCE(conversations.last_message_at, to_timestamp(0)) THEN EXCLUDED.last_message_at
+           ELSE conversations.last_message
+         END,
          updated_at = now()
        RETURNING id`,
-      [companyId, local.sender === 'contact' ? local.senderName : `+${local.phone}`, `+${local.phone}`, null],
-    );
-    const contactId = contact.rows[0]?.id;
-    if (!contactId) throw new Error('Contato não pôde ser preparado para a mensagem recebida');
-
-    const conversation = await client.query<{ id: string }>(
+      [input.companyId, input.contactId, input.remoteJid, input.assignedUserId, input.lastMessage, input.lastMessageAt],
+    )
+    : await client.query<{ id: string }>(
       `INSERT INTO conversations
         (company_id, contact_id, evolution_remote_jid, status, last_message, last_message_at)
        VALUES ($1, $2, $3, 'open', $4, $5)
@@ -496,38 +652,163 @@ async function persistProviderMessage(companyId: string, record: any, options: {
          END,
          updated_at = now()
        RETURNING id`,
-      [companyId, contactId, local.remoteJid, local.content, local.sentAt, options.reopen && local.sender === 'contact'],
+      [input.companyId, input.contactId, input.remoteJid, input.lastMessage, input.lastMessageAt, input.reopenResolved],
     );
-    const conversationId = conversation.rows[0]?.id;
+  const conversationId = created.rows[0]?.id;
+  if (!conversationId) throw new Error('Conversa não pôde ser preparada');
+  return conversationId;
+}
+
+async function persistProviderMessage(companyId: string, record: any, options: { incrementUnread: boolean; reopen: boolean; fallbackPhone?: string }) {
+  const local = providerRecordToLocalMessage(record, options.fallbackPhone);
+  if (!local.id || !local.remoteJid || local.remoteJid.endsWith('@g.us') || !local.phone) return false;
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const contact = await client.query<{ id: string }>(
+      `INSERT INTO contacts (company_id, name, phone, avatar_url)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (company_id, phone) DO UPDATE SET
+         name = CASE
+           WHEN contacts.source = 'google' THEN contacts.name
+           WHEN EXCLUDED.name !~ '^\\+?[0-9\\s().-]+$'
+             AND (contacts.name ~ '^\\+?[0-9\\s().-]+$' OR contacts.name IN ('Contato', 'WhatsApp Business', 'Você'))
+             THEN EXCLUDED.name
+           ELSE contacts.name
+         END,
+         avatar_url = COALESCE(EXCLUDED.avatar_url, contacts.avatar_url),
+         updated_at = now()
+       RETURNING id`,
+      [companyId, local.sender === 'contact' ? local.senderName : `+${local.phone}`, `+${local.phone}`, null],
+    );
+    const contactId = contact.rows[0]?.id;
+    if (!contactId) throw new Error('Contato não pôde ser preparado para a mensagem recebida');
+
+    const conversationId = await findOrCreateConversation(client, {
+      companyId,
+      contactId,
+      remoteJid: local.remoteJid,
+      lastMessage: local.content,
+      lastMessageAt: local.sentAt,
+      reopenResolved: options.reopen && local.sender === 'contact',
+    });
     if (!conversationId) throw new Error('Conversa não pôde ser preparada para a mensagem recebida');
 
-    const inserted = await client.query(
-      `INSERT INTO messages
-       (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_url, media_type, metadata, status, sent_at, is_internal_note)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false)
-       ON CONFLICT (company_id, evolution_message_id) DO UPDATE SET
-         metadata = COALESCE(messages.metadata, '{}'::jsonb) || EXCLUDED.metadata,
-         content = CASE
-           WHEN messages.content ILIKE '[mensagem%suportada]'
-             OR messages.content ILIKE '[mensagem%identificada]'
-           THEN EXCLUDED.content
-           ELSE messages.content
-         END,
-         media_url = COALESCE(messages.media_url, EXCLUDED.media_url),
-         media_type = COALESCE(messages.media_type, EXCLUDED.media_type)
-       WHERE messages.metadata IS DISTINCT FROM (COALESCE(messages.metadata, '{}'::jsonb) || EXCLUDED.metadata)
-          OR messages.content ILIKE '[mensagem%suportada]'
-          OR messages.content ILIKE '[mensagem%identificada]'
-          OR (messages.media_url IS NULL AND EXCLUDED.media_url IS NOT NULL)
-       RETURNING id`,
-      [companyId, conversationId, local.id, local.sender, local.senderName, local.content, local.mediaUrl || null, local.mediaType || null, JSON.stringify(local.metadata || {}), local.status, local.sentAt],
-    );
+    const messageParams = [
+      companyId,
+      conversationId,
+      local.id,
+      local.sender,
+      local.senderName,
+      local.content,
+      local.mediaUrl || null,
+      local.mediaType || null,
+      JSON.stringify(local.metadata || {}),
+      local.status,
+      local.sentAt,
+    ];
 
-    if (inserted.rowCount && options.incrementUnread && local.sender === 'contact') {
+    // O envio local é registrado antes da resposta da Evolution. Se o webhook
+    // chegar primeiro, vinculamos o ID do provedor à mensagem pendente em vez
+    // de criar uma segunda linha para o mesmo envio.
+    let linkedPendingMessage = false;
+    if (local.sender === 'attendant') {
+      const pending = await client.query<{ id: string }>(
+        `SELECT id
+         FROM messages
+         WHERE company_id = $1
+           AND conversation_id = $2
+           AND sender = 'attendant'
+           AND evolution_message_id IS NULL
+           AND is_internal_note = false
+           AND sent_at BETWEEN $11::timestamptz - interval '5 minutes'
+                           AND $11::timestamptz + interval '5 minutes'
+           AND (content = $6 OR media_type = $8)
+         ORDER BY abs(extract(epoch FROM (sent_at - $11::timestamptz))) ASC
+         LIMIT 1
+         FOR UPDATE`,
+        messageParams,
+      );
+      const pendingId = pending.rows[0]?.id;
+      if (pendingId) {
+        const linked = await client.query(
+          `UPDATE messages
+           SET evolution_message_id = $3,
+               metadata = COALESCE(metadata, '{}'::jsonb) || $9::jsonb,
+               content = CASE
+                 WHEN content ILIKE '[mensagem%suportada]'
+                   OR content ILIKE '[mensagem%identificada]'
+                 THEN $6
+                 ELSE content
+               END,
+               media_url = COALESCE(media_url, $7),
+               media_type = COALESCE(media_type, $8),
+               status = $10,
+               sent_at = $11
+           WHERE id = $12
+             AND evolution_message_id IS NULL`,
+          [...messageParams, pendingId],
+        );
+        linkedPendingMessage = Boolean(linked.rowCount);
+      }
+    }
+
+    let insertedNewMessage = false;
+    if (!linkedPendingMessage) {
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO messages
+         (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_url, media_type, metadata, status, sent_at, is_internal_note)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false)
+         ON CONFLICT (company_id, evolution_message_id) DO NOTHING
+         RETURNING id`,
+        messageParams,
+      );
+      insertedNewMessage = Boolean(inserted.rowCount);
+
+      // Reprocessamentos do webhook podem trazer metadados ou mídia que não
+      // existiam na primeira entrega. Atualizamos o registro sem tratá-lo como
+      // uma nova mensagem para fins de contagem de não lidas.
+      if (!insertedNewMessage) {
+        await client.query(
+          `UPDATE messages
+           SET metadata = COALESCE(messages.metadata, '{}'::jsonb) || $9::jsonb,
+               sender_name = CASE
+                 WHEN messages.sender = 'contact'
+                   AND ($5 IS NOT NULL AND $5 <> '')
+                 THEN $5
+                 ELSE messages.sender_name
+               END,
+               content = CASE
+                 WHEN messages.content ILIKE '[mensagem%suportada]'
+                   OR messages.content ILIKE '[mensagem%identificada]'
+                 THEN $6
+                 ELSE messages.content
+               END,
+               media_url = COALESCE(messages.media_url, $7),
+               media_type = COALESCE(messages.media_type, $8),
+               status = CASE
+                 WHEN messages.status IN ('failed', 'read') THEN messages.status
+                 WHEN $10 = 'failed' THEN 'failed'
+                 WHEN $10 = 'read' THEN 'read'
+                 WHEN $10 = 'delivered' THEN 'delivered'
+                 WHEN messages.status = 'pending' THEN $10
+                 ELSE messages.status
+               END,
+               sent_at = $11
+           WHERE company_id = $1
+             AND evolution_message_id = $3`,
+          messageParams,
+        );
+      }
+    }
+
+    if (insertedNewMessage && options.incrementUnread && local.sender === 'contact') {
       await client.query('UPDATE conversations SET unread_count = unread_count + 1, updated_at = now() WHERE id = $1', [conversationId]);
     }
     await client.query('COMMIT');
-    return Boolean(inserted.rowCount);
+    localInboxCache.delete(companyId);
+    return insertedNewMessage || linkedPendingMessage;
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -609,19 +890,15 @@ async function ensureOutboundMessage(input: {
   const contactId = contact.rows[0]?.id;
   if (!contactId) throw new Error('Contato não pôde ser preparado para o envio');
 
-  const conversation = await db.query<{ id: string }>(
-    `INSERT INTO conversations
-      (company_id, contact_id, evolution_remote_jid, assigned_user_id, status, last_message, last_message_at)
-     VALUES ($1, $2, $3, $4, 'open', $5, now())
-     ON CONFLICT (company_id, evolution_remote_jid) DO UPDATE SET
-       last_message = EXCLUDED.last_message,
-       last_message_at = EXCLUDED.last_message_at,
-       updated_at = now(),
-       status = CASE WHEN conversations.status = 'resolved' THEN 'open' ELSE conversations.status END
-     RETURNING id`,
-    [input.companyId, contactId, input.remoteJid, input.userId, input.content],
-  );
-  const conversationId = conversation.rows[0]?.id;
+  const conversationId = await findOrCreateConversation(db, {
+    companyId: input.companyId,
+    contactId,
+    remoteJid: input.remoteJid,
+    lastMessage: input.content,
+    lastMessageAt: new Date(),
+    reopenResolved: true,
+    assignedUserId: input.userId,
+  });
   if (!conversationId) throw new Error('Conversa não pôde ser preparada para o envio');
 
   const message = await db.query<{ id: string }>(
@@ -633,53 +910,134 @@ async function ensureOutboundMessage(input: {
   );
   const messageId = message.rows[0]?.id;
   if (!messageId) throw new Error('Mensagem não pôde ser registrada');
+  localInboxCache.delete(input.companyId);
   return { conversationId, messageId };
 }
 
 async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed', evolutionMessageId?: string) {
-  await db.query(
-    `UPDATE messages
-     SET status = $2,
-         evolution_message_id = COALESCE($3, evolution_message_id),
-         sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END
-     WHERE id = $1`,
-    [messageId, status, evolutionMessageId || null],
-  );
+  try {
+    await db.query(
+      `UPDATE messages
+       SET status = $2,
+           evolution_message_id = COALESCE($3, evolution_message_id),
+           sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END
+       WHERE id = $1`,
+      [messageId, status, evolutionMessageId || null],
+    );
+  } catch (error: any) {
+    // Se o webhook vinculou o ID alguns milissegundos antes, a restrição
+    // única pode bloquear esta atualização. Nesse caso, consolidamos o estado
+    // no registro do provedor e removemos somente a linha local pendente.
+    if (error?.code !== '23505' || !evolutionMessageId) throw error;
+    const providerMessage = await db.query<{ id: string }>(
+      `SELECT id
+       FROM messages
+       WHERE evolution_message_id = $1
+       LIMIT 1`,
+      [evolutionMessageId],
+    );
+    if (!providerMessage.rows[0]) throw error;
+    await db.query(
+      `UPDATE messages
+       SET status = CASE
+         WHEN status IN ('read', 'delivered') AND $2 = 'sent' THEN status
+         WHEN status = 'failed' AND $2 <> 'failed' THEN status
+         ELSE $2
+       END
+       WHERE id = $1`,
+      [providerMessage.rows[0].id, status],
+    );
+    await db.query(
+      `DELETE FROM messages
+       WHERE id = $1 AND evolution_message_id IS NULL`,
+      [messageId],
+    );
+  }
 }
 
 export async function registerEvolutionRoutes(app: FastifyInstance) {
+  app.get('/api/evolution/events', { preHandler: requireUser }, async (request, reply) => {
+    // EventSource não passa pelo ciclo normal de resposta do Fastify: o stream
+    // fica aberto e recebe somente eventos da empresa do usuário autenticado.
+    reply.hijack();
+    const origin = request.headers.origin;
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+      'Access-Control-Allow-Origin': origin === config.FRONTEND_URL ? origin : config.FRONTEND_URL,
+      'Access-Control-Allow-Credentials': 'true',
+    });
+    reply.raw.write(': connected\n\n');
+    registerRealtimeClient(request.user!.companyId, reply.raw);
+  });
+
   app.get('/api/evolution/status', { preHandler: requireUser }, async (_request, reply) => {
-    const response = await evolutionRequest(
+    return forwardEvolutionRequest(
       `/instance/connectionState/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+      reply,
     );
-    return forwardJson(response, reply);
   });
 
   app.get('/api/evolution/connect', { preHandler: requireUser }, async (_request, reply) => {
-    const response = await evolutionRequest(
+    return forwardEvolutionRequest(
       `/instance/connect/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+      reply,
     );
-    return forwardJson(response, reply);
   });
 
   app.post('/api/evolution/logout', { preHandler: requireUser }, async (_request, reply) => {
-    const response = await evolutionRequest(
+    return forwardEvolutionRequest(
       `/instance/logout/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+      reply,
       { method: 'DELETE', body: '{}' },
     );
-    return forwardJson(response, reply);
   });
 
   app.get('/api/evolution/chats', { preHandler: requireUser }, async (_request, reply) => {
     let snapshot: { chats: any[]; contacts: any[] };
+    let usingLocalInboxFallback = false;
     try {
       snapshot = await fetchEvolutionChatsSnapshot(_request.user!.companyId);
     } catch (error) {
       _request.log.warn({ err: error }, 'Evolution nÃ£o respondeu a consulta de conversas');
-      return reply.code(502).send({ error: 'NÃ£o foi possÃ­vel consultar as conversas' });
+      try {
+        snapshot = { chats: await fetchLocalInboxChats(_request.user!.companyId), contacts: [] };
+        usingLocalInboxFallback = true;
+      } catch (localError) {
+        _request.log.error({ err: localError }, 'NÃ£o foi possÃ­vel recuperar o inbox persistido');
+        return reply.code(503).send({ error: 'NÃ£o foi possível carregar as conversas agora' });
+      }
     }
-    const chatsData = snapshot.chats;
+    if (snapshot.chats.length === 0) {
+      try {
+        const localChats = await fetchLocalInboxChats(_request.user!.companyId);
+        if (localChats.length > 0) {
+          snapshot = { chats: localChats, contacts: snapshot.contacts };
+          usingLocalInboxFallback = true;
+        }
+      } catch (error) {
+        _request.log.warn({ err: error }, 'Inbox local indisponÃ­vel durante a resposta vazia da Evolution');
+      }
+    }
+    let chatsData = snapshot.chats;
     const contactsData = snapshot.contacts;
+    // O webhook pode chegar antes da próxima atualização da Evolution. Mesclamos
+    // o estado local recente sem substituir o snapshot do provedor.
+    try {
+      const localChats = await fetchLocalInboxChats(_request.user!.companyId);
+      const knownRemoteJids = new Set(chatsData.map((chat: any) => String(chat?.remoteJid || chat?.id || '')));
+      const knownPhones = new Set(chatsData.map((chat: any) => providerContactPhone(chat)).filter(Boolean));
+      const missingLocalChats = localChats.filter((chat: any) => {
+        const remoteJid = String(chat?.remoteJid || chat?.id || '');
+        const phone = providerContactPhone(chat);
+        return !knownRemoteJids.has(remoteJid) && !knownPhones.has(phone);
+      });
+      if (missingLocalChats.length > 0) chatsData = [...chatsData, ...missingLocalChats];
+    } catch (error) {
+      _request.log.warn({ err: error }, 'Não foi possível mesclar o inbox persistido');
+    }
     const providerNames = new Map<string, { phone: string; name: string; avatar_url: string | null }>();
     const rememberProviderContact = (value: any) => {
       const phone = providerContactPhone(value);
@@ -696,7 +1054,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       rememberProviderContact(chat);
       rememberProviderContact(chat?.lastMessage);
     });
-    if (providerNames.size > 0) {
+    if (!usingLocalInboxFallback && providerNames.size > 0) {
       try {
         await db.query(
           `INSERT INTO whatsapp_contact_names (company_id, phone, name, avatar_url)
@@ -712,11 +1070,16 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         _request.log.warn({ err: error }, 'Tabela de nomes do WhatsApp ainda não está disponível');
       }
     }
-    const [storedContacts, assignments, statuses, readStates] = await Promise.all([db.query<{
+    let storedContacts: { rows: Array<{ name: string; phone: string; source: string }> };
+    let assignments: { rows: Array<{ evolution_remote_jid: string; user_id: string; user_name: string }> };
+    let statuses: { rows: Array<{ evolution_remote_jid: string; status: 'open' | 'pending' | 'resolved'; updated_at: string }> };
+    let readStates: { rows: Array<{ evolution_remote_jid: string; last_read_message_timestamp: string }> };
+    try {
+      [storedContacts, assignments, statuses, readStates] = await Promise.all([db.query<{
       name: string;
       phone: string;
       source: string;
-    }>(
+      }>(
       `SELECT name, phone, source
        FROM contacts
        WHERE company_id = $1
@@ -749,7 +1112,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
        FROM conversation_read_states
        WHERE company_id = $1`,
       [_request.user!.companyId],
-    )]);
+      )]);
+    } catch (error) {
+      _request.log.error({ err: error }, 'Banco indisponível ao montar o inbox');
+      return reply.code(503).send({ error: 'Banco de dados temporariamente indisponível' });
+    }
     let whatsappNames: { rows: Array<{ phone: string; name: string; avatar_url: string | null }> } = { rows: [] };
     try {
       whatsappNames = await db.query(
@@ -813,6 +1180,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         [currentUser.companyId, jid, currentUser.id],
       );
     }
+    publishRealtimeEvent(currentUser.companyId, 'conversation.updated', {
+      remoteJid: parsed.data.remoteJid,
+      phone: parsed.data.phone || '',
+      assignedUserId: currentUser.id,
+      assignedUserName: currentUser.name,
+    });
     return { remoteJid: parsed.data.remoteJid, user: { id: currentUser.id, name: currentUser.name } };
   });
 
@@ -832,6 +1205,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       'DELETE FROM conversation_assignments WHERE company_id = $1 AND evolution_remote_jid = ANY($2::text[])',
       [currentUser.companyId, jids],
     );
+    publishRealtimeEvent(currentUser.companyId, 'conversation.updated', {
+      remoteJid: parsed.data.remoteJid,
+      phone: parsed.data.phone || '',
+      assignedUserId: null,
+      assignedUserName: null,
+    });
     return { released: true, remoteJid: parsed.data.remoteJid };
   });
 
@@ -851,6 +1230,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       );
     }
 
+    publishRealtimeEvent(request.user!.companyId, 'conversation.updated', {
+      remoteJid: parsed.data.remoteJid,
+      phone: parsed.data.phone || '',
+      status: parsed.data.status,
+    });
     return { remoteJid: parsed.data.remoteJid, status: parsed.data.status };
   });
 
@@ -886,6 +1270,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
          updated_at = now()`,
       [request.user!.companyId, parsed.data.remoteJid, parsed.data.messageTimestamp, request.user!.id],
     );
+
+    publishRealtimeEvent(request.user!.companyId, 'conversation.updated', {
+      remoteJid: parsed.data.remoteJid,
+      messageTimestamp: parsed.data.messageTimestamp,
+      readBy: request.user!.id,
+    });
 
     return { remoteJid: parsed.data.remoteJid, messageTimestamp: parsed.data.messageTimestamp, providerMarked };
   });
@@ -993,6 +1383,18 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const queryParams = contactIds.length > 0
       ? [request.user!.companyId, [...jids], contactIds]
       : [request.user!.companyId, [...jids]];
+    const pageSize = parsed.data.limit || 100;
+    const pageSizeParam = queryParams.length + 1;
+    const beforeParam = queryParams.length + 2;
+    const afterParam = queryParams.length + 3;
+    const pageQueryParams = [
+      ...queryParams,
+      pageSize,
+      parsed.data.beforeTimestamp || null,
+      parsed.data.afterTimestamp || null,
+    ];
+    const beforeFilter = `($${beforeParam}::numeric IS NULL OR m.sent_at < to_timestamp($${beforeParam}::numeric / 1000))`;
+    const afterFilter = `($${afterParam}::numeric IS NULL OR m.sent_at > to_timestamp($${afterParam}::numeric / 1000))`;
 
     const localMessages = await db.query(`
       SELECT m.id, m.evolution_message_id, m.sender, m.sender_name, m.content, m.media_url,
@@ -1001,13 +1403,21 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       JOIN conversations c ON c.id = m.conversation_id
       WHERE m.company_id = $1
         AND ${conversationFilter}
+        AND ${beforeFilter}
+        AND ${afterFilter}
         AND m.is_internal_note = false
-      ORDER BY m.sent_at ASC`, queryParams);
+      ORDER BY m.sent_at DESC
+      LIMIT $${pageSizeParam}`, pageQueryParams);
 
     // Depois que o webhook persiste a conversa, a leitura deixa de depender da Evolution.
     // A consulta externa serve apenas para uma reconciliação inicial do histórico antigo.
-    if (!parsed.data.reconcile && localMessages.rows.some((row: any) => row.sender === 'contact')) {
-      return { messages: { records: localMessages.rows.map(localMessageToProviderRecord) } };
+    if (!parsed.data.reconcile && (localMessages.rows.length > 0 || parsed.data.afterTimestamp)) {
+      return {
+        messages: {
+          records: localMessages.rows.map(localMessageToProviderRecord),
+          hasMore: parsed.data.afterTimestamp ? false : localMessages.rows.length >= pageSize,
+        },
+      };
     }
 
     const responses = await Promise.all([...jids].map((remoteJid) => evolutionRequest(
@@ -1019,7 +1429,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     )));
     const successfulResponses = responses.filter((response) => response.ok);
     if (successfulResponses.length === 0) {
-      return { messages: { records: localMessages.rows.map(localMessageToProviderRecord) } };
+      return {
+        messages: {
+          records: localMessages.rows.map(localMessageToProviderRecord),
+          hasMore: parsed.data.afterTimestamp ? false : localMessages.rows.length >= pageSize,
+        },
+      };
     }
 
     const recordsById = new Map<string, any>();
@@ -1052,14 +1467,31 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       JOIN conversations c ON c.id = m.conversation_id
       WHERE m.company_id = $1
         AND ${conversationFilter}
+        AND ${beforeFilter}
+        AND ${afterFilter}
         AND m.is_internal_note = false
-      ORDER BY m.sent_at ASC`, queryParams);
+      ORDER BY m.sent_at DESC
+      LIMIT $${pageSizeParam}`, pageQueryParams);
 
+    const localRecords = reconciledMessages.rows.map(localMessageToProviderRecord);
+    const mergedRecords = new Map<string, any>();
+    for (const record of recordsById.values()) {
+      const id = String(record?.key?.id || record?.id || '');
+      if (id) mergedRecords.set(id, record);
+    }
+    for (const record of localRecords) {
+      const id = String(record?.key?.id || (record as any)?.id || '');
+      if (id) mergedRecords.set(id, record);
+    }
+    const orderedRecords = Array.from(mergedRecords.values())
+      .sort((left, right) => Number(right?.messageTimestamp || 0) - Number(left?.messageTimestamp || 0))
+      .slice(0, pageSize);
     return {
       messages: {
-        records: reconciledMessages.rows.length > 0
-          ? reconciledMessages.rows.map(localMessageToProviderRecord)
-          : Array.from(recordsById.values()),
+        records: orderedRecords,
+        hasMore: parsed.data.afterTimestamp
+          ? false
+          : localMessages.rows.length >= pageSize || mergedRecords.size > pageSize,
       },
     };
   });
@@ -1112,6 +1544,13 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     const evolutionMessageId = body?.key?.id || body?.message?.key?.id || body?.data?.key?.id;
     await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
+    publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
+      remoteJid: canonicalRemoteJid,
+      phone: number,
+      messageId: typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId,
+      timestampMs: Date.now(),
+      fromMe: true,
+    });
 
     let dailyResponder: { id: string; name: string; date: string } | undefined;
     try {
@@ -1191,6 +1630,13 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     const evolutionMessageId = body?.key?.id || body?.message?.key?.id || body?.data?.key?.id;
     await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
+    publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
+      remoteJid: canonicalRemoteJid,
+      phone: number,
+      messageId: typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId,
+      timestampMs: Date.now(),
+      fromMe: true,
+    });
     let dailyResponder: { id: string; name: string; date: string } | undefined;
     try {
       dailyResponder = await recordDailyResponder(request.user!.companyId, number, request.user!);
@@ -1208,20 +1654,26 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.post('/api/evolution/media', { preHandler: requireUser }, async (request, reply) => {
     const parsed = mediaSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Mensagem de mídia inválida' });
-    const response = await evolutionRequest(
+    return forwardEvolutionRequest(
       `/chat/getBase64FromMediaMessage/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+      reply,
       { method: 'POST', body: JSON.stringify({ message: { key: parsed.data.messageKey }, convertToMp4: false }) },
     );
-    return forwardJson(response, reply);
   });
 
   app.post('/api/evolution/business-profile', { preHandler: requireUser }, async (request, reply) => {
     const parsed = phoneSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Número inválido' });
-    const response = await evolutionRequest(
-      `/chat/fetchBusinessProfile/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
-      { method: 'POST', body: JSON.stringify(parsed.data) },
-    );
+    let response: Response;
+    try {
+      response = await evolutionRequest(
+        `/chat/fetchBusinessProfile/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+        { method: 'POST', body: JSON.stringify(parsed.data) },
+      );
+    } catch (error) {
+      request.log.warn({ err: error }, 'Perfil empresarial não respondeu');
+      return reply.code(502).send({ error: 'Perfil empresarial indisponível no momento' });
+    }
     if (!response.ok) return reply.code(404).send({ error: 'Perfil empresarial não disponível' });
     const body: any = await response.json().catch(() => ({}));
     const profile = body?.data || body?.businessProfile || body;
@@ -1254,9 +1706,10 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const normalizedEvent = event.toLowerCase().replace(/_/g, '.');
     const isMessageEvent = normalizedEvent === 'messages.upsert' || normalizedEvent === 'messages.set';
     let persistedMessages = 0;
+    const company = await db.query<{ id: string }>('SELECT id FROM companies ORDER BY created_at LIMIT 1');
+    const companyId = company.rows[0]?.id;
 
     if (isMessageEvent) {
-      const company = await db.query<{ id: string }>('SELECT id FROM companies ORDER BY created_at LIMIT 1');
       const data = body?.data || body?.payload || body;
       const records = Array.isArray(data)
         ? data
@@ -1266,11 +1719,21 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
             ? data.records
             : [data];
 
-      if (company.rows[0]) {
+      if (companyId) {
         for (const record of records) {
           try {
-            if (await persistProviderMessage(company.rows[0].id, record, { incrementUnread: true, reopen: true })) {
+            if (await persistProviderMessage(companyId, record, { incrementUnread: true, reopen: true })) {
               persistedMessages += 1;
+            }
+            const remoteJid = providerRemoteJid(record);
+            if (remoteJid) {
+              publishRealtimeEvent(companyId, 'message.upsert', {
+                remoteJid,
+                phone: providerPhone(record),
+                messageId: providerMessageId(record),
+                timestampMs: providerMessageDate(record).getTime(),
+                fromMe: record?.key?.fromMe === true,
+              });
             }
           } catch (error) {
             request.log.warn({ err: error, event, messageId: providerMessageId(record) }, 'Falha ao persistir mensagem recebida no PostgreSQL');
@@ -1307,6 +1770,18 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         }
       } catch (error) {
         request.log.warn({ err: error, event, messageId: statusUpdate.messageId }, 'Falha ao atualizar status da mensagem');
+      }
+      try {
+        const statusData = body?.data || body?.payload || body;
+        const remoteJid = providerRemoteJid(statusData) || String(statusData?.key?.remoteJid || '').trim();
+        if (companyId) publishRealtimeEvent(companyId, 'message.status', {
+          remoteJid,
+          phone: providerPhone(statusData),
+          messageId: statusUpdate.messageId,
+          status: statusUpdate.status,
+        });
+      } catch (error) {
+        request.log.warn({ err: error, event, messageId: statusUpdate.messageId }, 'Falha ao publicar status em tempo real');
       }
     }
     request.log.info({ event, messageId: statusUpdate?.messageId, status: statusUpdate?.status, persistedMessages }, 'Evento Evolution recebido');

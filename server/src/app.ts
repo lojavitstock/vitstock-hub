@@ -50,11 +50,18 @@ export async function createApp() {
 
   app.setErrorHandler((error, request, reply) => {
     request.log.error({ err: error }, 'Erro não tratado');
-    const httpError = error as Error & { statusCode?: number };
-    const statusCode = httpError.statusCode && httpError.statusCode >= 400 && httpError.statusCode < 500
-      ? httpError.statusCode
-      : 500;
-    reply.code(statusCode).send({ error: statusCode === 500 ? 'Erro interno' : httpError.message });
+    const httpError = error as Error & { statusCode?: number; code?: string };
+    const databaseUnavailable = ['53300', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH'].includes(httpError.code || '')
+      || /timeout exceeded when trying to connect/i.test(httpError.message || '');
+    const statusCode = databaseUnavailable
+      ? 503
+      : httpError.statusCode && httpError.statusCode >= 400 && httpError.statusCode < 500
+        ? httpError.statusCode
+        : 500;
+    const message = databaseUnavailable
+      ? 'Banco de dados temporariamente indisponível'
+      : statusCode === 500 ? 'Erro interno' : httpError.message;
+    reply.code(statusCode).send({ error: message });
   });
 
   return app;
