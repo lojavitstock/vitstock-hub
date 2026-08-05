@@ -35,19 +35,13 @@ import { ContactPhoto } from '../components/conversations/ContactPhoto';
 import { MessageTimeline } from '../components/conversations/MessageTimeline';
 import { MessageComposer } from '../components/conversations/MessageComposer';
 import { formatMessageTimestamp } from '../components/conversations/conversationFormatters';
+import { mergeConversationMessages, useConversationMessages } from '../hooks/useConversationMessages';
 
 
 const conversationNeedsResponse = (conversation: Conversation) => (
   conversation.needsResponse
   ?? (conversation.status !== 'resolved' && !conversation.lastMessageFromMe && conversation.unreadCount > 0)
 );
-
-const mergeConversationMessages = (current: Message[], incoming: Message[]) => {
-  const byId = new Map<string, Message>();
-  current.forEach((message) => byId.set(message.id, message));
-  incoming.forEach((message) => byId.set(message.id, message));
-  return Array.from(byId.values()).sort((a, b) => (a.timestampMs || 0) - (b.timestampMs || 0));
-};
 
 const normalizeSearchText = (value: string) => value
   .toLocaleLowerCase()
@@ -115,8 +109,6 @@ export const AtendimentoPage: React.FC = () => {
   const [newChatMessage, setNewChatMessage] = useState('');
   const [startingNewChat, setStartingNewChat] = useState(false);
 
-  // Mensagens do chat ativo
-  const [messages, setMessages] = useState<Message[]>([]);
   const readOverridesRef = React.useRef(new Map<string, number>());
   const conversationsRef = React.useRef<Conversation[]>([]);
   const activeConvIdRef = React.useRef('');
@@ -153,48 +145,19 @@ export const AtendimentoPage: React.FC = () => {
     return () => clearInterval(interval);
   }, [isMock]);
 
-  const messagesContainerRef = React.useRef<HTMLDivElement>(null);
   const attachmentInputRef = React.useRef<HTMLInputElement>(null);
-
-  const scrollToBottom = () => {
-    const container = messagesContainerRef.current;
-    if (container) container.scrollTop = container.scrollHeight;
-  };
-
-  // Carregar mensagens quando trocar de conversa e manter sincronizado a cada 2 segundos
-  useEffect(() => {
-    if (!activeConvId || isMock) return;
-
-    let isSubscribed = true;
-    let isInitialFetch = true;
-    let shouldReconcile = true;
-    setMessages([]);
-
-    const fetchConvMessages = async () => {
-      const container = messagesContainerRef.current;
-      const distanceFromBottom = container
-        ? container.scrollHeight - container.scrollTop - container.clientHeight
-        : 0;
-      const shouldScroll = isInitialFetch || distanceFromBottom <= 120;
-      isInitialFetch = false;
-      const phone = conversationsRef.current.find((conversation) => conversation.id === activeConvId)?.contact.phone || activeConvId;
-      const reconcileThisFetch = shouldReconcile;
-      shouldReconcile = false;
-      const realMsgs = await EvolutionApiService.fetchConversationMessages(instanceName, activeConvId, phone, attendantLabel, reconcileThisFetch);
-      if (isSubscribed && realMsgs.length > 0) {
-        setMessages((previous) => mergeConversationMessages(previous, realMsgs));
-        if (shouldScroll) window.setTimeout(scrollToBottom, 0);
-      }
-    };
-
-    fetchConvMessages();
-
-    const interval = setInterval(fetchConvMessages, 2000);
-    return () => {
-      isSubscribed = false;
-      clearInterval(interval);
-    };
-  }, [activeConvId, attendantLabel, isMock, instanceName]);
+  const {
+    messages,
+    setMessages,
+    messagesContainerRef,
+    scrollToBottom,
+  } = useConversationMessages({
+    activeConversationId: activeConvId,
+    conversations,
+    instanceName,
+    attendantLabel,
+    isMock,
+  });
 
   // Rolar para a última mensagem automaticamente quando a conversa mudar ou chegar mensagem nova
   const loadChats = async (showLoading = true) => {
