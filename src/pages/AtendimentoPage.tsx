@@ -26,7 +26,6 @@ import {
 } from 'lucide-react';
 import { Conversation, Message } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
-import { apiRequest } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
 import { ConversationFilters } from '../components/conversations/ConversationFilters';
 import { ConversationList } from '../components/conversations/ConversationList';
@@ -36,27 +35,7 @@ import { MessageComposer } from '../components/conversations/MessageComposer';
 import { formatMessageTimestamp } from '../components/conversations/conversationFormatters';
 import { mergeConversationMessages, useConversationMessages } from '../hooks/useConversationMessages';
 import { conversationNeedsResponse, useConversationInbox } from '../hooks/useConversationInbox';
-
-
-const isPhoneOnlyName = (value?: string | null) => !value || /^\+?[\d\s().-]+$/.test(value.trim());
-
-const extractBusinessProfile = (profile: any) => {
-  const value = profile?.data || profile?.businessProfile || profile || {};
-  return {
-    ...value,
-    name: value.verifiedName || value.businessName || value.name || value.profileName || '',
-  };
-};
-
-type GoogleContactForm = {
-  name: string;
-  phone: string;
-  otherPhone: string;
-  email: string;
-  cpf: string;
-  address: string;
-  resourceName: string;
-};
+import { useContactPanel } from '../hooks/useContactPanel';
 
 
 export const AtendimentoPage: React.FC = () => {
@@ -73,18 +52,6 @@ export const AtendimentoPage: React.FC = () => {
   const [sendingMedia, setSendingMedia] = useState(false);
   const [isInternalNote, setIsInternalNote] = useState(false);
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
-  const [showContactInfo, setShowContactInfo] = useState(false);
-  const [businessProfile, setBusinessProfile] = useState<any | null>(null);
-  const [loadingBusinessProfile, setLoadingBusinessProfile] = useState(false);
-  const [savingGoogleContact, setSavingGoogleContact] = useState(false);
-  const [googleContactFeedback, setGoogleContactFeedback] = useState('');
-  const [googleContactStatus, setGoogleContactStatus] = useState<'checking' | 'saved' | 'not_saved' | 'unavailable'>('checking');
-  const [googleMatchedName, setGoogleMatchedName] = useState<string | null>(null);
-  const [showGoogleContactForm, setShowGoogleContactForm] = useState(false);
-  const [googleContactForm, setGoogleContactForm] = useState<GoogleContactForm>({
-    name: '', phone: '', otherPhone: '', email: '', cpf: '', address: '', resourceName: '',
-  });
-
   // Estado para Nova Conversa por Telefone
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [newChatNumber, setNewChatNumber] = useState('');
@@ -118,6 +85,27 @@ export const AtendimentoPage: React.FC = () => {
     isMock,
     userId: user?.id,
     userRole: user?.role,
+  });
+
+  const {
+    showContactInfo,
+    setShowContactInfo,
+    businessProfile,
+    loadingBusinessProfile,
+    savingGoogleContact,
+    googleContactFeedback,
+    googleContactStatus,
+    googleMatchedName,
+    showGoogleContactForm,
+    setShowGoogleContactForm,
+    googleContactForm,
+    setGoogleContactForm,
+    openGoogleContactForm,
+    saveGoogleContactForm,
+  } = useContactPanel({
+    activeConversation: activeConv,
+    isMock,
+    setConversations,
   });
 
   useEffect(() => {
@@ -193,7 +181,7 @@ export const AtendimentoPage: React.FC = () => {
   }; */
 
 
-  useEffect(() => {
+  /* useEffect(() => {
     if (!activeConv || isMock || !isPhoneOnlyName(activeConv.contact.name)) return;
     let mounted = true;
     EvolutionApiService.fetchBusinessProfile(activeConv.contact.phone).then((profile) => {
@@ -207,7 +195,7 @@ export const AtendimentoPage: React.FC = () => {
       } : conversation));
     });
     return () => { mounted = false; };
-  }, [activeConvId, isMock]);
+  }, [activeConvId, isMock]); */
 
   /* const markConversationAsRead = async (conversation: Conversation) => {
     setConversations((previous) => previous.map((item) => item.id === conversation.id ? { ...item, unreadCount: 0 } : item));
@@ -301,7 +289,7 @@ export const AtendimentoPage: React.FC = () => {
   };
 
   */
-  const saveContactToGoogle = async () => {
+  /* const saveContactToGoogle = async () => {
     if (!activeConv) return;
     setSavingGoogleContact(true);
     setGoogleContactFeedback('');
@@ -411,6 +399,7 @@ export const AtendimentoPage: React.FC = () => {
     return () => { mounted = false; setShowGoogleContactForm(false); };
   }, [showContactInfo, activeConvId]);
 
+  */
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputText.trim() || !activeConv || activeChatLocked) return;
