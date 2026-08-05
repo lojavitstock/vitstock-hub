@@ -114,6 +114,12 @@ export const useContactPanel = ({
         address: status.address || '',
         resourceName: status.resourceName || '',
       });
+      if (status.saved && status.name) {
+        setConversations((previous) => previous.map((conversation) => conversation.id === activeConversation.id ? {
+          ...conversation,
+          contact: { ...conversation.contact, name: status.name || conversation.contact.name },
+        } : conversation));
+      }
     }).catch(() => {
       if (!mounted) return;
       setGoogleContactStatus('unavailable');

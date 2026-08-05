@@ -46,11 +46,41 @@ function normalizePhone(value: string) {
   return value.replace(/\D/g, '');
 }
 
-function phoneVariants(value: string) {
+export function phoneVariants(value: string) {
   const digits = normalizePhone(value);
-  const variants = new Set([digits]);
-  if (digits.startsWith('55') && digits.length === 13) variants.add(`${digits.slice(0, 4)}${digits.slice(5)}`);
-  if (digits.startsWith('55') && digits.length === 12) variants.add(`${digits.slice(0, 4)}9${digits.slice(4)}`);
+  const variants = new Set<string>();
+  const add = (candidate: string) => {
+    if (candidate) variants.add(candidate);
+  };
+
+  add(digits);
+  if (digits.startsWith('0') && digits.length > 10) add(digits.slice(1));
+
+  // O Google pode retornar números brasileiros com ou sem o código 55.
+  if (digits.startsWith('55') && digits.length >= 12) {
+    const local = digits.slice(2);
+    add(local);
+    add(`55${local}`);
+    if (local.length === 11 && local[2] === '9') {
+      add(local.slice(0, 2) + local.slice(3));
+      add(`55${local.slice(0, 2)}${local.slice(3)}`);
+    }
+    if (local.length === 10) {
+      add(`${local.slice(0, 2)}9${local.slice(2)}`);
+      add(`55${local.slice(0, 2)}9${local.slice(2)}`);
+    }
+  } else if (digits.length === 11 || digits.length === 10) {
+    const local = digits;
+    add(`55${local}`);
+    if (local.length === 11 && local[2] === '9') {
+      add(local.slice(0, 2) + local.slice(3));
+      add(`55${local.slice(0, 2)}${local.slice(3)}`);
+    }
+    if (local.length === 10) {
+      add(`${local.slice(0, 2)}9${local.slice(2)}`);
+      add(`55${local.slice(0, 2)}9${local.slice(2)}`);
+    }
+  }
   return variants;
 }
 
