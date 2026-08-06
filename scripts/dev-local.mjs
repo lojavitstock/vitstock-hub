@@ -47,7 +47,7 @@ start('backend', ['run', 'server:dev'], {
   FRONTEND_URL: 'http://localhost:3000',
 });
 
-start('frontend', ['run', 'dev', '--', '--host', '127.0.0.1'], {
+start('frontend', ['run', 'dev:frontend', '--', '--host', '127.0.0.1'], {
   VITE_API_URL: 'http://localhost:3001',
   VITE_USE_MOCK_DATA: 'false',
 });
