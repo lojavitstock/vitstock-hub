@@ -32,6 +32,7 @@ const updateAttendantSchema = z.object({
   name: z.string().trim().min(2).max(120).optional(),
   email: z.string().trim().email().max(180).optional(),
   password: z.string().min(8).max(256).optional(),
+  role: z.enum(['attendant', 'admin']).optional(),
 }).refine((value) => Object.keys(value).length > 0, { message: 'Nenhuma alteração informada' });
 
 export async function loadUser(request: FastifyRequest) {
@@ -166,7 +167,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     return { changed: true };
   });
 
-  app.get('/api/team/attendants', { preHandler: requireUser }, async (request) => {
+  app.get('/api/team/attendants', { preHandler: requireAdmin }, async (request) => {
     const result = await db.query<{
       id: string;
       name: string;
@@ -232,6 +233,9 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     const memberId = String((request.params as { id?: string }).id || '').trim();
     if (!memberId) return reply.code(400).send({ error: 'Atendente inválido' });
     if (memberId === request.user!.id && parsed.data.active === false) return reply.code(400).send({ error: 'Você não pode desativar a própria conta' });
+    if (memberId === request.user!.id && parsed.data.role && parsed.data.role !== 'admin') {
+      return reply.code(400).send({ error: 'Você não pode remover seu próprio perfil de administrador' });
+    }
 
     const fields: string[] = [];
     const values: unknown[] = [];
@@ -243,6 +247,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     if (parsed.data.email !== undefined) addField('email', parsed.data.email.toLowerCase());
     if (parsed.data.active !== undefined) addField('active', parsed.data.active);
     if (parsed.data.password !== undefined) addField('password_hash', await hashPassword(parsed.data.password));
+    if (parsed.data.role !== undefined) addField('role', parsed.data.role);
     fields.push('updated_at = now()');
     values.push(memberId, request.user!.companyId);
 

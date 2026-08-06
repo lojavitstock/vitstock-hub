@@ -21,7 +21,7 @@ import {
 import { Conversation, Message } from '../../types';
 import { EvolutionApiService } from '../../services/evolutionApi';
 import { ContactPhoto } from './ContactPhoto';
-import { formatMessageTimestamp } from './conversationFormatters';
+import { formatMessageDay, formatMessageTimestamp } from './conversationFormatters';
 
 type MessageTimelineProps = {
   messages: Message[];
@@ -30,6 +30,8 @@ type MessageTimelineProps = {
   containerRef: React.RefObject<HTMLDivElement>;
   hasMoreMessages?: boolean;
   loadingOlderMessages?: boolean;
+  loadingMessages?: boolean;
+  historyExpanded?: boolean;
   onLoadOlder?: () => void;
   onRetryMessage: (message: Message) => void;
 };
@@ -260,9 +262,28 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
   return null;
 };
 
-export const MessageTimeline: React.FC<MessageTimelineProps> = ({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, onLoadOlder, onRetryMessage }) => (
-  <div ref={containerRef} style={{ overflowAnchor: 'none' }} className="chat-wallpaper flex-1 space-y-3 overflow-y-auto px-6 py-5">
-    {hasMoreMessages && onLoadOlder && (
+export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, onLoadOlder, onRetryMessage }) => {
+  let previousDay = '';
+  return (
+  <div ref={containerRef} style={{ overflowAnchor: 'none' }} className="chat-wallpaper relative flex-1 space-y-3 overflow-y-auto px-6 py-5 text-[15px]">
+    {loadingMessages && (
+      <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#152027]/85 backdrop-blur-[1px]">
+        <div className="flex flex-col items-center gap-3 rounded-2xl border border-amber-300/20 bg-[#20292f]/95 px-8 py-7 text-center shadow-2xl">
+          <RefreshCw className="h-7 w-7 animate-spin text-amber-300" />
+          <p className="text-sm font-bold text-slate-100">Carregando mensagens...</p>
+          <span className="text-xs text-slate-400">Buscando as mensagens mais recentes</span>
+          <span className="h-1.5 w-48 overflow-hidden rounded-full bg-slate-700"><span className="block h-full w-2/3 animate-pulse rounded-full bg-amber-400" /></span>
+        </div>
+      </div>
+    )}
+    {!loadingMessages && hasMoreMessages && !historyExpanded && onLoadOlder && (
+      <div className="flex min-h-[180px] items-center justify-center py-4">
+        <button type="button" onClick={onLoadOlder} disabled={loadingOlderMessages} className="rounded-full border border-amber-400/40 bg-amber-400/10 px-5 py-3 text-sm font-bold text-amber-200 shadow-lg transition-colors hover:bg-amber-400/20 disabled:cursor-wait disabled:opacity-60">
+          {loadingOlderMessages ? 'Carregando histórico...' : 'Carregar histórico anterior'}
+        </button>
+      </div>
+    )}
+    {historyExpanded && hasMoreMessages && onLoadOlder && (
       <div className="flex justify-center py-1">
         <button type="button" onClick={onLoadOlder} disabled={loadingOlderMessages} className="rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-1.5 text-[11px] font-bold text-amber-200 transition-colors hover:bg-amber-400/20 disabled:cursor-wait disabled:opacity-60">
           {loadingOlderMessages ? 'Carregando histórico...' : 'Carregar mensagens anteriores'}
@@ -271,22 +292,27 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({ messages, acti
     )}
     {messages.map((message) => {
       const isMe = message.sender === 'attendant';
+      const messageDay = formatMessageDay(message.timestampMs);
+      const showDay = Boolean(messageDay && messageDay !== previousDay);
+      previousDay = messageDay;
       if (message.isInternalNote) {
-        return <div key={message.id} className="my-2 flex justify-center"><div className="w-full max-w-xl rounded-lg border border-amber-400/40 bg-amber-400/10 p-3 text-xs text-amber-300"><div className="mb-1 flex items-center gap-1.5 font-bold text-amber-400"><Lock className="h-3.5 w-3.5" /><span>Nota Interna ({message.senderName})</span><span className="ml-auto text-[10px] opacity-70">{formatMessageTimestamp(message.timestampMs, message.timestamp)}</span></div><p>{message.content}</p><span className="mt-1 block text-[9px] font-semibold text-amber-400/70">Invisível para o cliente</span></div></div>;
+        return <React.Fragment key={message.id}>{showDay && <DaySeparator label={messageDay} />}<div className="my-2 flex justify-center"><div className="w-full max-w-xl rounded-lg border border-amber-400/40 bg-amber-400/10 p-3 text-sm text-amber-300"><div className="mb-1 flex items-center gap-1.5 font-bold text-amber-400"><Lock className="h-4 w-4" /><span>Nota Interna ({message.senderName})</span><span className="ml-auto text-xs opacity-70">{formatMessageTimestamp(message.timestampMs, message.timestamp)}</span></div><p>{message.content}</p><span className="mt-1 block text-[10px] font-semibold text-amber-400/70">Invisível para o cliente</span></div></div></React.Fragment>;
       }
 
       return (
-        <div key={message.id} className={`flex max-w-[72%] gap-2 ${isMe ? 'ml-auto flex-row-reverse' : ''}`}>
+        <React.Fragment key={message.id}>
+        {showDay && <DaySeparator label={messageDay} />}
+        <div className={`flex max-w-[78%] gap-2 ${isMe ? 'ml-auto flex-row-reverse' : ''}`}>
           {!isMe && <ContactPhoto name={activeConversation.contact.name} avatar={activeConversation.contact.avatar} size="small" />}
           <div>
-            <div className={`space-y-2 rounded-lg px-3 py-2.5 text-[13px] leading-relaxed shadow-sm ${isMe ? 'rounded-tr-none border border-amber-300/15 bg-[#5b4b20] font-medium text-[#fff8df]' : 'rounded-tl-none border border-white/5 bg-[#273238] text-slate-100'}`}>
-              {isMe && <p className="mb-1 text-[10px] font-bold text-amber-200/75">{message.senderName}</p>}
+            <div className={`space-y-2 rounded-lg px-3.5 py-3 text-[15px] leading-relaxed shadow-sm ${isMe ? 'rounded-tr-none border border-amber-300/15 bg-[#5b4b20] font-medium text-[#fff8df]' : 'rounded-tl-none border border-white/5 bg-[#273238] text-slate-100'}`}>
+              {isMe && <p className="mb-1 text-xs font-bold text-amber-200/75">{message.senderName}</p>}
               <MediaMessageContent message={message} instanceName={instanceName} />
               <SpecialMessageContent message={message} contactPhone={activeConversation.contact.phone} />
               <InteractiveMessageContent message={message} />
               {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap">{message.content}</p>}
             </div>
-            <div className={`mt-1 flex items-center gap-1 text-[10px] text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
+            <div className={`mt-1 flex items-center gap-1 text-xs text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
               <span>{formatMessageTimestamp(message.timestampMs, message.timestamp)}</span>
               {isMe && message.status === 'failed' && <span className="font-bold text-red-300">Falha no envio</span>}
               {isMe && message.status === 'pending' && <span className="font-semibold text-amber-300">Enviando...</span>}
@@ -295,7 +321,15 @@ export const MessageTimeline: React.FC<MessageTimelineProps> = ({ messages, acti
             </div>
           </div>
         </div>
+        </React.Fragment>
       );
     })}
+  </div>
+  );
+});
+
+const DaySeparator: React.FC<{ label: string }> = ({ label }) => (
+  <div className="flex justify-center py-2">
+    <span className="rounded-full border border-white/10 bg-[#273238]/90 px-4 py-1.5 text-xs font-bold text-slate-300 shadow-sm">{label}</span>
   </div>
 );

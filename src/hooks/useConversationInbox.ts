@@ -10,6 +10,13 @@ export const conversationNeedsResponse = (conversation: Conversation) => (
   ?? (conversation.status !== 'resolved' && !conversation.lastMessageFromMe && conversation.unreadCount > 0)
 );
 
+const UNANSWERED_ALERT_MS = 20 * 60 * 1000;
+
+export const conversationNeedsAttention = (conversation: Conversation, now = Date.now()) => (
+  conversationNeedsResponse(conversation)
+  && Boolean(conversation.lastMessageAt && now - conversation.lastMessageAt >= UNANSWERED_ALERT_MS)
+);
+
 const normalizeSearchText = (value: string) => value
   .toLocaleLowerCase()
   .normalize('NFD')
@@ -37,6 +44,7 @@ export const useConversationInbox = ({
   const [loadingChats, setLoadingChats] = useState(false);
   const [capturingChat, setCapturingChat] = useState(false);
   const [assignmentFeedback, setAssignmentFeedback] = useState('');
+  const [now, setNow] = useState(() => Date.now());
 
   const conversationsRef = useRef<Conversation[]>([]);
   const activeConversationIdRef = useRef('');
@@ -47,6 +55,11 @@ export const useConversationInbox = ({
   useEffect(() => {
     conversationsRef.current = conversations;
   }, [conversations]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
@@ -158,6 +171,8 @@ export const useConversationInbox = ({
     return [conversation.contact.name, conversation.contact.phone]
       .some((value) => normalizeSearchText(value).includes(normalizedConversationSearch));
   }), [conversations, filterTab, normalizedConversationSearch]);
+
+  const needsAttention = useCallback((conversation: Conversation) => conversationNeedsAttention(conversation, now), [now]);
 
   const markConversationAsRead = useCallback(async (conversation: Conversation) => {
     setConversations((previous) => previous.map((item) => item.id === conversation.id
@@ -291,5 +306,6 @@ export const useConversationInbox = ({
     captureActiveChat,
     releaseActiveChat,
     updateActiveChatStatus,
+    needsAttention,
   };
 };

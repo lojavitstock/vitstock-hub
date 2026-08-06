@@ -1483,6 +1483,22 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const beforeFilter = `($${beforeParam}::numeric IS NULL OR m.sent_at < to_timestamp($${beforeParam}::numeric / 1000))`;
     const afterFilter = `($${afterParam}::numeric IS NULL OR m.sent_at > to_timestamp($${afterParam}::numeric / 1000))`;
 
+    const hasOlderMessages = async () => {
+      if (!parsed.data.afterTimestamp) return false;
+      const older = await db.query(
+        `SELECT 1
+         FROM messages m
+         JOIN conversations c ON c.id = m.conversation_id
+         WHERE m.company_id = $1
+           AND ${conversationFilter}
+           AND m.sent_at <= to_timestamp($${afterParam}::numeric / 1000)
+           AND m.is_internal_note = false
+         LIMIT 1`,
+        [...queryParams, pageSize, null, parsed.data.afterTimestamp] as any[],
+      );
+      return older.rows.length > 0;
+    };
+
     const localMessages = await db.query(`
       SELECT m.id, m.evolution_message_id, m.sender, m.sender_name, m.content, m.media_url,
              m.media_type, m.metadata, m.status, m.sent_at, c.evolution_remote_jid
@@ -1502,7 +1518,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       return {
         messages: {
           records: localMessages.rows.map(localMessageToProviderRecord),
-          hasMore: parsed.data.afterTimestamp ? false : localMessages.rows.length >= pageSize,
+          hasMore: parsed.data.afterTimestamp ? await hasOlderMessages() : localMessages.rows.length >= pageSize,
         },
       };
     }
@@ -1519,7 +1535,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       return {
         messages: {
           records: localMessages.rows.map(localMessageToProviderRecord),
-          hasMore: parsed.data.afterTimestamp ? false : localMessages.rows.length >= pageSize,
+          hasMore: parsed.data.afterTimestamp ? await hasOlderMessages() : localMessages.rows.length >= pageSize,
         },
       };
     }
@@ -1577,7 +1593,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       messages: {
         records: orderedRecords,
         hasMore: parsed.data.afterTimestamp
-          ? false
+          ? await hasOlderMessages()
           : localMessages.rows.length >= pageSize || mergedRecords.size > pageSize,
       },
     };

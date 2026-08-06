@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import { 
   Search, 
@@ -81,6 +81,7 @@ export const AtendimentoPage: React.FC = () => {
     captureActiveChat,
     releaseActiveChat,
     updateActiveChatStatus,
+    needsAttention,
     rememberContactName,
   } = useConversationInbox({
     instanceName,
@@ -140,6 +141,8 @@ export const AtendimentoPage: React.FC = () => {
     messages,
     setMessages,
     hasMoreMessages,
+    loadingMessages,
+    historyExpanded,
     loadingOlderMessages,
     loadOlderMessages,
     messagesContainerRef,
@@ -582,7 +585,7 @@ export const AtendimentoPage: React.FC = () => {
     if (file) await handleAttachmentFile(file);
   };
 
-  const handleInputPaste = (event: React.ClipboardEvent<HTMLInputElement>) => {
+  const handleInputPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     if (!activeConv || activeChatLocked || isInternalNote || sendingMedia) return;
     const imageItem = Array.from(event.clipboardData.items).find((item) => item.kind === 'file' && item.type.startsWith('image/'));
     const file = imageItem?.getAsFile()
@@ -592,7 +595,7 @@ export const AtendimentoPage: React.FC = () => {
     void handleAttachmentFile(file);
   };
 
-  const retryFailedMessage = async (message: Message) => {
+  const retryFailedMessage = useCallback(async (message: Message) => {
     if (!activeConv || isMock || message.status !== 'failed' || message.isInternalNote) return;
 
     const retryText = message.content.trim();
@@ -623,7 +626,20 @@ export const AtendimentoPage: React.FC = () => {
       setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'failed' } : item));
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível reenviar a mensagem.');
     }
-  };
+  }, [activeConv, attendantName, instanceName, isMock, loadChats]);
+
+  const handleSelectConversation = useCallback((conversation: Conversation) => {
+    setActiveConvId(conversation.id);
+    void markConversationAsRead(conversation);
+  }, [markConversationAsRead, setActiveConvId]);
+
+  const handleLoadOlderMessages = useCallback(() => {
+    void loadOlderMessages();
+  }, [loadOlderMessages]);
+
+  const handleRetryMessage = useCallback((message: Message) => {
+    void retryFailedMessage(message);
+  }, [retryFailedMessage]);
 
   const handleStartNewChat = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -940,10 +956,8 @@ export const AtendimentoPage: React.FC = () => {
             visibleConversations={visibleConversations}
             activeConversationId={activeConvId}
             needsResponse={conversationNeedsResponse}
-            onSelectConversation={(conversation) => {
-              setActiveConvId(conversation.id);
-              void markConversationAsRead(conversation);
-            }}
+            needsAttention={needsAttention}
+            onSelectConversation={handleSelectConversation}
           />
         </div>
       </div>
@@ -1012,9 +1026,11 @@ export const AtendimentoPage: React.FC = () => {
               instanceName={instanceName}
               containerRef={messagesContainerRef}
               hasMoreMessages={hasMoreMessages}
+              loadingMessages={loadingMessages}
+              historyExpanded={historyExpanded}
               loadingOlderMessages={loadingOlderMessages}
-              onLoadOlder={() => { void loadOlderMessages(); }}
-              onRetryMessage={(message) => { void retryFailedMessage(message); }}
+              onLoadOlder={handleLoadOlderMessages}
+              onRetryMessage={handleRetryMessage}
             />
 
             <MessageComposer

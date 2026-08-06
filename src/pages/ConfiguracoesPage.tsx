@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Users, Zap, Layers, Plus, KeyRound, Loader2, QrCode, UserPlus, Power, Save, X } from 'lucide-react';
+import { Users, Zap, Layers, Plus, KeyRound, Loader2, QrCode, UserPlus, Power, Save, X, PencilLine } from 'lucide-react';
 import { Attendant } from '../types';
 import { apiRequest } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
@@ -8,6 +8,12 @@ import { mockAttendants } from '../services/mockData';
 import { ConexoesPage } from './ConexoesPage';
 
 type SettingsTab = 'attendants' | 'departments' | 'quickReplies' | 'security' | 'connections';
+type AttendantFormState = {
+  name: string;
+  email: string;
+  password: string;
+  role: 'attendant' | 'admin';
+};
 
 const isSettingsTab = (value: string | null): value is SettingsTab => (
   value === 'attendants'
@@ -28,7 +34,10 @@ export const ConfiguracoesPage: React.FC = () => {
   const [showAttendantForm, setShowAttendantForm] = useState(false);
   const [savingAttendant, setSavingAttendant] = useState(false);
   const [updatingAttendantId, setUpdatingAttendantId] = useState<string | null>(null);
-  const [attendantForm, setAttendantForm] = useState({ name: '', email: '', password: '', role: 'attendant' as 'attendant' | 'admin' });
+  const [editingAttendantId, setEditingAttendantId] = useState<string | null>(null);
+  const [savingEditedAttendant, setSavingEditedAttendant] = useState(false);
+  const [attendantForm, setAttendantForm] = useState<AttendantFormState>({ name: '', email: '', password: '', role: 'attendant' });
+  const [editingAttendantForm, setEditingAttendantForm] = useState<AttendantFormState>({ name: '', email: '', password: '', role: 'attendant' });
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -47,6 +56,10 @@ export const ConfiguracoesPage: React.FC = () => {
   };
 
   const loadAttendants = useCallback(async () => {
+    if (user?.role !== 'admin') {
+      setAttendants([]);
+      return;
+    }
     setTeamLoading(true);
     setTeamError('');
     if (import.meta.env.VITE_USE_MOCK_DATA === 'true') {
@@ -62,15 +75,34 @@ export const ConfiguracoesPage: React.FC = () => {
     } finally {
       setTeamLoading(false);
     }
-  }, []);
+  }, [user?.role]);
 
   useEffect(() => {
-    if (activeTab === 'attendants' && user) void loadAttendants();
+    if (activeTab === 'attendants' && user?.role === 'admin') void loadAttendants();
+    if (activeTab === 'attendants' && user?.role !== 'admin') setAttendants([]);
   }, [activeTab, loadAttendants, user]);
 
   const resetAttendantForm = () => {
     setAttendantForm({ name: '', email: '', password: '', role: 'attendant' });
     setShowAttendantForm(false);
+  };
+
+  const cancelEditAttendant = () => {
+    setEditingAttendantId(null);
+    setEditingAttendantForm({ name: '', email: '', password: '', role: 'attendant' });
+  };
+
+  const openEditAttendant = (attendant: Attendant) => {
+    setTeamError('');
+    setTeamFeedback('');
+    setShowAttendantForm(false);
+    setEditingAttendantId(attendant.id);
+    setEditingAttendantForm({
+      name: attendant.name,
+      email: attendant.email || '',
+      password: '',
+      role: attendant.role,
+    });
   };
 
   const handleCreateAttendant = async (event: React.FormEvent) => {
@@ -90,6 +122,37 @@ export const ConfiguracoesPage: React.FC = () => {
       setTeamError(error instanceof Error ? error.message : 'Não foi possível cadastrar o atendente.');
     } finally {
       setSavingAttendant(false);
+    }
+  };
+
+  const handleUpdateAttendant = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingAttendantId) return;
+    setTeamError('');
+    setTeamFeedback('');
+    setSavingEditedAttendant(true);
+    try {
+      const payload: Partial<AttendantFormState> = {
+        name: editingAttendantForm.name,
+        email: editingAttendantForm.email,
+        role: editingAttendantForm.role,
+      };
+      if (editingAttendantForm.password.trim()) payload.password = editingAttendantForm.password;
+      const response = await apiRequest<{ attendant: Attendant }>(`/api/team/attendants/${editingAttendantId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      });
+      setAttendants((current) => current.map((item) => (
+        item.id === editingAttendantId
+          ? { ...item, ...response.attendant, online: item.online }
+          : item
+      )));
+      setTeamFeedback(`${response.attendant.name} foi atualizado.`);
+      cancelEditAttendant();
+    } catch (error) {
+      setTeamError(error instanceof Error ? error.message : 'Nao foi possivel atualizar o atendente.');
+    } finally {
+      setSavingEditedAttendant(false);
     }
   };
 
@@ -228,7 +291,7 @@ export const ConfiguracoesPage: React.FC = () => {
               <p className="mt-1 text-sm text-zinc-400">Cadastre e controle quem pode acessar os atendimentos da empresa.</p>
             </div>
             {user?.role === 'admin' && (
-              <button type="button" onClick={() => { setTeamError(''); setTeamFeedback(''); setShowAttendantForm(true); }} className="btn-primary text-sm">
+              <button type="button" onClick={() => { setTeamError(''); setTeamFeedback(''); cancelEditAttendant(); setShowAttendantForm(true); }} className="btn-primary text-sm">
                 <UserPlus className="h-4 w-4" /> Novo atendente
               </button>
             )}
@@ -287,8 +350,10 @@ export const ConfiguracoesPage: React.FC = () => {
               attendants.map((attendant) => {
                 const fallbackAvatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(attendant.name)}&background=EEBB2C&color=000`;
                 const active = attendant.active !== false;
+                const isEditing = editingAttendantId === attendant.id;
                 return (
-                  <div key={attendant.id} className={`flex items-center justify-between gap-4 p-5 ${!active ? 'opacity-60' : ''}`}>
+                  <React.Fragment key={attendant.id}>
+                  <div className={`flex items-center justify-between gap-4 p-5 ${!active ? 'opacity-60' : ''}`}>
                     <div className="flex min-w-0 items-center gap-3">
                       <img src={attendant.avatar || fallbackAvatar} alt={attendant.name} className="h-12 w-12 rounded-full border border-amber-400/30 object-cover" onError={(event) => { event.currentTarget.src = fallbackAvatar; }} />
                       <div className="min-w-0">
@@ -302,12 +367,61 @@ export const ConfiguracoesPage: React.FC = () => {
                         {!active ? 'Desativado' : attendant.online ? 'Online' : 'Ativo'}
                       </span>
                       {user?.role === 'admin' && (
-                        <button type="button" onClick={() => void handleToggleAttendant(attendant)} disabled={updatingAttendantId === attendant.id || attendant.id === user.id} className={`rounded-lg border p-2 transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${active ? 'border-red-400/20 text-red-300 hover:bg-red-400/10' : 'border-emerald-400/20 text-emerald-300 hover:bg-emerald-400/10'}`} title={attendant.id === user.id ? 'Sua conta não pode ser desativada' : active ? 'Desativar atendente' : 'Reativar atendente'}>
-                          {updatingAttendantId === attendant.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Power className="h-4 w-4" />}
-                        </button>
+                        <>
+                          <button type="button" onClick={() => openEditAttendant(attendant)} disabled={savingEditedAttendant || updatingAttendantId === attendant.id} className="rounded-lg border border-amber-400/20 p-2 text-amber-300 transition-colors hover:bg-amber-400/10 disabled:cursor-not-allowed disabled:opacity-40" title="Editar atendente">
+                            <PencilLine className="h-4 w-4" />
+                          </button>
+                          <button type="button" onClick={() => void handleToggleAttendant(attendant)} disabled={updatingAttendantId === attendant.id || attendant.id === user.id} className={`rounded-lg border p-2 transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${active ? 'border-red-400/20 text-red-300 hover:bg-red-400/10' : 'border-emerald-400/20 text-emerald-300 hover:bg-emerald-400/10'}`} title={attendant.id === user.id ? 'Sua conta não pode ser desativada' : active ? 'Desativar atendente' : 'Reativar atendente'}>
+                            {updatingAttendantId === attendant.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Power className="h-4 w-4" />}
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>
+                  {isEditing && (
+                    <form onSubmit={handleUpdateAttendant} className="space-y-4 border-t border-amber-400/15 bg-amber-400/5 p-5">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <h4 className="text-base font-extrabold text-zinc-100">Editar atendente</h4>
+                          <p className="mt-1 text-sm text-zinc-400">Atualize nome, e-mail, perfil ou defina uma nova senha.</p>
+                        </div>
+                        <button type="button" onClick={cancelEditAttendant} className="rounded-lg p-2 text-zinc-400 hover:bg-white/5 hover:text-zinc-100" aria-label="Fechar edicao">
+                          <X className="h-5 w-5" />
+                        </button>
+                      </div>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <label className="block text-sm font-bold text-zinc-300">
+                          Nome completo
+                          <input required minLength={2} value={editingAttendantForm.name} onChange={(event) => setEditingAttendantForm((current) => ({ ...current, name: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 text-base text-zinc-100 outline-none focus:border-amber-400" />
+                        </label>
+                        <label className="block text-sm font-bold text-zinc-300">
+                          E-mail de acesso
+                          <input required type="email" value={editingAttendantForm.email} onChange={(event) => setEditingAttendantForm((current) => ({ ...current, email: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 text-base text-zinc-100 outline-none focus:border-amber-400" />
+                        </label>
+                        <label className="block text-sm font-bold text-zinc-300">
+                          Nova senha
+                          <input minLength={8} type="password" value={editingAttendantForm.password} onChange={(event) => setEditingAttendantForm((current) => ({ ...current, password: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 text-base text-zinc-100 outline-none focus:border-amber-400" placeholder="Deixe em branco para manter" />
+                        </label>
+                        <label className="block text-sm font-bold text-zinc-300">
+                          Perfil de acesso
+                          <select value={editingAttendantForm.role} onChange={(event) => setEditingAttendantForm((current) => ({ ...current, role: event.target.value as 'attendant' | 'admin' }))} disabled={attendant.id === user?.id} className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 text-base text-zinc-100 outline-none focus:border-amber-400 disabled:cursor-not-allowed disabled:opacity-60">
+                            <option value="attendant">Atendente</option>
+                            <option value="admin">Administrador</option>
+                          </select>
+                        </label>
+                      </div>
+                      <div className="flex justify-end gap-3 border-t border-amber-400/15 pt-4">
+                        <button type="button" onClick={cancelEditAttendant} className="rounded-lg border border-zinc-700 px-4 py-2 text-sm font-bold text-zinc-300 hover:bg-white/5">
+                          Cancelar
+                        </button>
+                        <button type="submit" disabled={savingEditedAttendant} className="btn-primary text-sm disabled:cursor-not-allowed disabled:opacity-60">
+                          {savingEditedAttendant ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                          {savingEditedAttendant ? 'Salvando...' : 'Salvar alteracoes'}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                  </React.Fragment>
                 );
               })
             )}

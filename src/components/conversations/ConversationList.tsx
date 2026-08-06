@@ -9,14 +9,17 @@ type ConversationListProps = {
   visibleConversations: Conversation[];
   activeConversationId: string;
   needsResponse: (conversation: Conversation) => boolean;
+  needsAttention: (conversation: Conversation) => boolean;
   onSelectConversation: (conversation: Conversation) => void;
 };
 
-export const ConversationList: React.FC<ConversationListProps> = ({
+export const ConversationList = React.memo<ConversationListProps>(
+  ({
   conversations,
   visibleConversations,
   activeConversationId,
   needsResponse,
+  needsAttention,
   onSelectConversation,
 }) => {
   if (conversations.length === 0) {
@@ -48,6 +51,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       {visibleConversations.map((conversation) => {
         const isSelected = conversation.id === activeConversationId;
         const shouldRespond = needsResponse(conversation);
+        const needsAttentionNow = needsAttention(conversation);
 
         return (
           <button
@@ -57,8 +61,10 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             title={`${conversation.contact.name} — ${conversation.lastMessage}`}
             aria-label={`Abrir conversa com ${conversation.contact.name}`}
             className={`relative flex min-h-[96px] w-full items-start gap-3 border-b border-[#273239] border-l-4 px-3.5 py-3 text-left transition-all duration-150 focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-300/80 ${
-              isSelected
-                ? 'border-l-amber-400 bg-[#2d3a40] shadow-[inset_3px_0_0_#EEBB2C]'
+              needsAttentionNow
+                ? 'animate-attention-pulse border-l-red-400 bg-red-950/30 shadow-[inset_3px_0_0_#ef4444] hover:bg-red-950/45'
+                : isSelected
+                  ? 'border-l-amber-400 bg-[#2d3a40] shadow-[inset_3px_0_0_#EEBB2C]'
                 : shouldRespond
                   ? 'border-l-emerald-400 bg-[#20343a] shadow-[inset_3px_0_0_#34d399] hover:bg-[#294147]'
                   : 'border-l-transparent hover:bg-[#222d33]'
@@ -69,7 +75,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
 
             <span className="min-w-0 flex-1">
               <span className="mb-1 flex items-start justify-between gap-2">
-                <span className={`truncate text-[13px] leading-5 ${shouldRespond ? 'font-extrabold text-white' : 'font-bold text-slate-100'}`}>
+                <span className={`truncate text-[14px] leading-5 ${needsAttentionNow || shouldRespond ? 'font-extrabold text-white' : 'font-bold text-slate-100'}`}>
                   {conversation.contact.name}
                 </span>
                 <span className="shrink-0 pt-0.5 text-[11px] font-semibold tabular-nums text-slate-400">
@@ -77,7 +83,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 </span>
               </span>
 
-              <span className={`mb-2 block truncate text-[12px] leading-5 ${shouldRespond ? 'font-bold text-slate-200' : 'text-slate-300'}`}>
+              <span className={`mb-2 block truncate text-[13px] leading-5 ${needsAttentionNow ? 'font-bold text-red-100' : shouldRespond ? 'font-bold text-slate-200' : 'text-slate-300'}`}>
                 {conversation.lastMessage}
               </span>
 
@@ -101,4 +107,4 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       })}
     </>
   );
-};
+});

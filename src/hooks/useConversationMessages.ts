@@ -12,6 +12,8 @@ type UseConversationMessagesOptions = {
   isMock: boolean;
 };
 
+const HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 export { mergeConversationMessages } from '../utils/messageMerge';
 
 export const useConversationMessages = ({
@@ -24,6 +26,8 @@ export const useConversationMessages = ({
   const [messages, setMessages] = useState<Message[]>([]);
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const [historyExpanded, setHistoryExpanded] = useState(false);
   const conversationsRef = useRef(conversations);
   const messagesRef = useRef<Message[]>([]);
   const latestTimestampRef = useRef<number | undefined>();
@@ -67,7 +71,10 @@ export const useConversationMessages = ({
   }, [activeConversationId]);
 
   useEffect(() => {
-    if (!activeConversationId || isMock) return;
+    if (!activeConversationId || isMock) {
+      setLoadingMessages(false);
+      return;
+    }
 
     let isSubscribed = true;
     let isInitialFetch = true;
@@ -77,10 +84,14 @@ export const useConversationMessages = ({
     messagesRef.current = [];
     latestTimestampRef.current = undefined;
     setHasMoreMessages(false);
+    setLoadingMessages(Boolean(activeConversationId));
+    setHistoryExpanded(false);
+    historyExpandedRef.current = false;
 
     const fetchConversationMessages = async () => {
       if (fetchInProgress) return;
       fetchInProgress = true;
+      const firstFetch = isInitialFetch;
       const container = messagesContainerRef.current;
       const distanceFromBottom = container
         ? container.scrollHeight - container.scrollTop - container.clientHeight
@@ -91,9 +102,11 @@ export const useConversationMessages = ({
       const conversation = conversationsRef.current.find((item) => item.id === activeConversationId);
       const phone = conversation?.contact.phone || activeConversationId;
       const reconcile = shouldReconcile;
-      const afterTimestamp = !reconcile && latestTimestampRef.current
-        ? Math.max(0, latestTimestampRef.current - 1000)
-        : undefined;
+      const afterTimestamp = reconcile
+        ? Math.max(0, Date.now() - HISTORY_WINDOW_MS)
+        : latestTimestampRef.current
+          ? Math.max(0, latestTimestampRef.current - 1000)
+          : undefined;
 
       try {
         const page = await EvolutionApiService.fetchConversationMessagesPage(
@@ -107,13 +120,20 @@ export const useConversationMessages = ({
         );
         shouldReconcile = false;
         if (!isSubscribed) return;
-        setHasMoreMessages(page.hasMore);
-        if (page.messages.length === 0) return;
+        const cutoff = Date.now() - HISTORY_WINDOW_MS;
+        const recentMessages = historyExpandedRef.current
+          ? page.messages
+          : page.messages.filter((message) => !message.timestampMs || message.timestampMs >= cutoff);
+        const hasHiddenHistory = !historyExpandedRef.current && page.messages.some(
+          (message) => Boolean(message.timestampMs && message.timestampMs < cutoff),
+        );
+        setHasMoreMessages(page.hasMore || hasHiddenHistory);
+        if (recentMessages.length === 0) return;
         latestTimestampRef.current = Math.max(
           latestTimestampRef.current || 0,
-          ...page.messages.map((message) => message.timestampMs || 0),
+          ...recentMessages.map((message) => message.timestampMs || 0),
         );
-        setMessages((previous) => mergeConversationMessages(previous, page.messages));
+        setMessages((previous) => mergeConversationMessages(previous, recentMessages));
         if (shouldScroll) window.setTimeout(() => {
           if (stickToBottomRef.current) scrollToBottom();
         }, 0);
@@ -121,6 +141,7 @@ export const useConversationMessages = ({
         // A temporary provider/network failure should not erase the messages already rendered.
       } finally {
         fetchInProgress = false;
+        if (firstFetch) setLoadingMessages(false);
       }
     };
 
@@ -152,11 +173,15 @@ export const useConversationMessages = ({
     };
   }, [activeConversationId, attendantLabel, instanceName, isMock, scrollToBottom]);
 
+  const historyExpandedRef = useRef(false);
+  useEffect(() => {
+    historyExpandedRef.current = historyExpanded;
+  }, [historyExpanded]);
+
   const loadingOlderRef = useRef(false);
   const loadOlderMessages = useCallback(async () => {
     if (!activeConversationId || isMock || !hasMoreMessages || loadingOlderRef.current) return;
-    const oldestTimestamp = messagesRef.current[0]?.timestampMs;
-    if (!oldestTimestamp) return;
+    const oldestTimestamp = messagesRef.current[0]?.timestampMs || Date.now();
     const conversation = conversationsRef.current.find((item) => item.id === activeConversationId);
     const phone = conversation?.contact.phone || activeConversationId;
     const container = messagesContainerRef.current;
@@ -164,6 +189,8 @@ export const useConversationMessages = ({
     const previousTop = container?.scrollTop || 0;
     loadingOlderRef.current = true;
     setLoadingOlderMessages(true);
+    setHistoryExpanded(true);
+    historyExpandedRef.current = true;
     try {
       const page = await EvolutionApiService.fetchConversationMessagesPage(
         instanceName,
@@ -193,6 +220,8 @@ export const useConversationMessages = ({
   return {
     messages,
     hasMoreMessages,
+    loadingMessages,
+    historyExpanded,
     loadingOlderMessages,
     loadOlderMessages,
     setMessages,
