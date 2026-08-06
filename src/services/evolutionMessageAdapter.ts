@@ -63,6 +63,8 @@ const messageText = (message: any, record: any = {}): string | undefined => {
     msg.videoMessage?.caption,
     msg.audioMessage?.caption,
     msg.documentMessage?.caption,
+    msg.documentMessage?.fileName,
+    msg.documentMessage?.title,
     interactive?.body?.text,
     interactive?.header?.text,
     interactive?.header?.title,

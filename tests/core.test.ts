@@ -104,3 +104,24 @@ test('canal realtime publica evento SSE somente enquanto o cliente está conecta
   publishRealtimeEvent('company-test', 'message.status', { messageId: 'provider-1', status: 'read' });
   assert.equal(raw.chunks.length, 1);
 });
+
+test('normaliza mensagem de imagem com legenda ou documento sem nome', () => {
+  const normalizedImage = normalizeEvolutionMessage({
+    key: { id: 'img-1', fromMe: false },
+    message: { imageMessage: { caption: 'Foto do produto', mimetype: 'image/jpeg' } },
+    messageTimestamp: 1_700_000_003,
+  }, 0, 'conversation-1', 'Atendente');
+
+  assert.equal(normalizedImage.mediaType, 'image');
+  assert.equal(normalizedImage.content, 'Foto do produto');
+
+  const normalizedDoc = normalizeEvolutionMessage({
+    key: { id: 'doc-1', fromMe: false },
+    message: { documentMessage: { mimetype: 'application/pdf', title: 'Contrato.pdf' } },
+    messageTimestamp: 1_700_000_004,
+  }, 0, 'conversation-1', 'Atendente');
+
+  assert.equal(normalizedDoc.mediaType, 'document');
+  assert.equal(normalizedDoc.content, 'Contrato.pdf');
+});
+
