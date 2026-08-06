@@ -16,8 +16,23 @@ export async function createApp() {
     bodyLimit: 2 * 1024 * 1024,
   });
 
+  const isAllowedOrigin = (origin: string | undefined): boolean => {
+    if (!origin) return true;
+    if (origin === config.FRONTEND_URL) return true;
+    if (config.NODE_ENV !== 'production') {
+      return /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+    }
+    return false;
+  };
+
   await app.register(cors, {
-    origin: config.FRONTEND_URL,
+    origin: (origin, cb) => {
+      if (!origin || isAllowedOrigin(origin)) {
+        cb(null, true);
+      } else {
+        cb(new Error('Origem não permitida por CORS'), false);
+      }
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   });
@@ -30,7 +45,7 @@ export async function createApp() {
     if (!changesState || !request.url.startsWith('/api/')) return;
 
     const origin = request.headers.origin;
-    if (origin && origin !== config.FRONTEND_URL) {
+    if (origin && !isAllowedOrigin(origin)) {
       return reply.code(403).send({ error: 'Origem não autorizada' });
     }
   });
@@ -53,14 +68,19 @@ export async function createApp() {
     const httpError = error as Error & { statusCode?: number; code?: string };
     const databaseUnavailable = ['53300', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH'].includes(httpError.code || '')
       || /timeout exceeded when trying to connect/i.test(httpError.message || '');
+    const isCorsError = /Origem não permitida por CORS|Origem não autorizada/i.test(httpError.message || '');
     const statusCode = databaseUnavailable
       ? 503
-      : httpError.statusCode && httpError.statusCode >= 400 && httpError.statusCode < 500
-        ? httpError.statusCode
-        : 500;
+      : isCorsError
+        ? 403
+        : httpError.statusCode && httpError.statusCode >= 400 && httpError.statusCode < 500
+          ? httpError.statusCode
+          : 500;
     const message = databaseUnavailable
       ? 'Banco de dados temporariamente indisponível'
-      : statusCode === 500 ? 'Erro interno' : httpError.message;
+      : isCorsError
+        ? 'Origem não autorizada'
+        : statusCode === 500 ? 'Erro interno' : httpError.message;
     reply.code(statusCode).send({ error: message });
   });
 

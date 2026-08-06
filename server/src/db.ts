@@ -8,9 +8,12 @@ const connectionTimeoutMillis = Number.isFinite(configuredConnectionTimeout)
   ? Math.max(3_000, Math.min(configuredConnectionTimeout, 20_000))
   : 8_000;
 
+const isRemoteDb = !config.DATABASE_URL.includes('localhost') && !config.DATABASE_URL.includes('127.0.0.1');
+const useSsl = isProduction || isRemoteDb || config.DATABASE_URL.includes('sslmode=');
+
 export const db = new pg.Pool({
   connectionString: config.DATABASE_URL,
-  ssl: isProduction ? { rejectUnauthorized: false } : undefined,
+  ssl: useSsl ? { rejectUnauthorized: false } : undefined,
   // O PostgreSQL Railway tem limite compartilhado de conexões; uma conexão
   // por processo evita que deploys sobrepostos esgotem o limite.
   // Permite as chamadas paralelas do inbox sem bloquear o pool em uma única conexão.
