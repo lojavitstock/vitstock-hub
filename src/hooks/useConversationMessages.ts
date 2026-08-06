@@ -80,6 +80,7 @@ export const useConversationMessages = ({
     let isInitialFetch = true;
     let shouldReconcile = true;
     let fetchInProgress = false;
+    let reconciliationInProgress = false;
     setMessages([]);
     messagesRef.current = [];
     latestTimestampRef.current = undefined;
@@ -87,6 +88,27 @@ export const useConversationMessages = ({
     setLoadingMessages(Boolean(activeConversationId));
     setHistoryExpanded(false);
     historyExpandedRef.current = false;
+
+    const applyMessagesPage = (page: { messages: Message[]; hasMore: boolean }, shouldScroll: boolean) => {
+      if (!isSubscribed) return;
+      const cutoff = Date.now() - HISTORY_WINDOW_MS;
+      const recentMessages = historyExpandedRef.current
+        ? page.messages
+        : page.messages.filter((message) => !message.timestampMs || message.timestampMs >= cutoff);
+      const hasHiddenHistory = !historyExpandedRef.current && page.messages.some(
+        (message) => Boolean(message.timestampMs && message.timestampMs < cutoff),
+      );
+      setHasMoreMessages(page.hasMore || hasHiddenHistory);
+      if (recentMessages.length === 0) return;
+      latestTimestampRef.current = Math.max(
+        latestTimestampRef.current || 0,
+        ...recentMessages.map((message) => message.timestampMs || 0),
+      );
+      setMessages((previous) => mergeConversationMessages(previous, recentMessages));
+      if (shouldScroll) window.setTimeout(() => {
+        if (stickToBottomRef.current) scrollToBottom();
+      }, 0);
+    };
 
     const fetchConversationMessages = async () => {
       if (fetchInProgress) return;
@@ -107,41 +129,53 @@ export const useConversationMessages = ({
         : latestTimestampRef.current
           ? Math.max(0, latestTimestampRef.current - 1000)
           : undefined;
+      let localMessagesAvailable = false;
 
       try {
+        // A leitura local é deliberadamente rápida. A reconciliação com a
+        // Evolution pode buscar centenas de mensagens e continua em segundo
+        // plano, sem bloquear a abertura da conversa.
         const page = await EvolutionApiService.fetchConversationMessagesPage(
           instanceName,
           activeConversationId,
           phone,
           attendantLabel,
-          reconcile,
+          false,
           undefined,
           afterTimestamp,
         );
         shouldReconcile = false;
         if (!isSubscribed) return;
-        const cutoff = Date.now() - HISTORY_WINDOW_MS;
-        const recentMessages = historyExpandedRef.current
-          ? page.messages
-          : page.messages.filter((message) => !message.timestampMs || message.timestampMs >= cutoff);
-        const hasHiddenHistory = !historyExpandedRef.current && page.messages.some(
-          (message) => Boolean(message.timestampMs && message.timestampMs < cutoff),
-        );
-        setHasMoreMessages(page.hasMore || hasHiddenHistory);
-        if (recentMessages.length === 0) return;
-        latestTimestampRef.current = Math.max(
-          latestTimestampRef.current || 0,
-          ...recentMessages.map((message) => message.timestampMs || 0),
-        );
-        setMessages((previous) => mergeConversationMessages(previous, recentMessages));
-        if (shouldScroll) window.setTimeout(() => {
-          if (stickToBottomRef.current) scrollToBottom();
-        }, 0);
+        localMessagesAvailable = page.messages.length > 0;
+        applyMessagesPage(page, shouldScroll);
+
+        if (reconcile && !reconciliationInProgress) {
+          reconciliationInProgress = true;
+          void EvolutionApiService.fetchConversationMessagesPage(
+            instanceName,
+            activeConversationId,
+            phone,
+            attendantLabel,
+            true,
+            undefined,
+            afterTimestamp,
+          )
+            .then((reconciledPage) => applyMessagesPage(reconciledPage, shouldScroll))
+            .catch(() => undefined)
+            .finally(() => {
+              reconciliationInProgress = false;
+              if (isSubscribed && firstFetch && !localMessagesAvailable) setLoadingMessages(false);
+            });
+        }
       } catch {
         // A temporary provider/network failure should not erase the messages already rendered.
+        if (firstFetch && isSubscribed) setLoadingMessages(false);
       } finally {
         fetchInProgress = false;
-        if (firstFetch) setLoadingMessages(false);
+        // When local messages exist, the loading state ends immediately. If
+        // the local cache is empty, keep it until the background reconciliation
+        // finishes so a genuinely new conversation still has clear feedback.
+        if (firstFetch && (!reconcile || localMessagesAvailable)) setLoadingMessages(false);
       }
     };
 

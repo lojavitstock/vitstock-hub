@@ -1527,7 +1527,10 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       `/chat/findMessages/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
       {
         method: 'POST',
-        body: JSON.stringify({ where: { key: { remoteJid } }, limit: 500 }),
+        // A reconciliação inicial não precisa baixar todo o histórico. O
+        // restante é carregado pelo botão de histórico, evitando uma espera
+        // longa ao abrir uma conversa sem cache local.
+        body: JSON.stringify({ where: { key: { remoteJid } }, limit: pageSize }),
       },
     )));
     const successfulResponses = responses.filter((response) => response.ok);
