@@ -6,6 +6,7 @@ import { ConversationFilter } from '../components/conversations/ConversationFilt
 import { phoneVariants } from '../utils/phone';
 import { reconcileConversations } from '../utils/conversationReconciliation';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
+import { reconcileRealtimeConversation } from '../utils/realtimeUpdates';
 
 export const conversationNeedsResponse = (conversation: Conversation) => (
   conversation.needsResponse
@@ -139,9 +140,24 @@ export const useConversationInbox = ({
     if (isMock) return undefined;
 
     const unsubscribe = EvolutionApiService.subscribeToRealtimeEvents((event) => {
-      if (event.type === 'message.upsert' || event.type === 'message.status' || event.type === 'conversation.updated') {
-        void loadChats(false);
+      // Statuses only affect the active timeline. The inbox has no message
+      // delivery state to render, so refetching the complete list is wasted.
+      if (event.type === 'message.status') return;
+      if (event.type !== 'message.upsert' && event.type !== 'conversation.updated') return;
+
+      const previousConversations = conversationsRef.current;
+      const reconciledConversations = reconcileRealtimeConversation(previousConversations, event);
+      if (reconciledConversations) {
+        if (reconciledConversations !== previousConversations) {
+          conversationsRef.current = reconciledConversations;
+          setConversations(reconciledConversations);
+        }
+        return;
       }
+
+      // Events without enough fields (or for a conversation not currently in
+      // the list) retain the existing polling/refetch safety net.
+      void loadChats(false);
     });
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') void loadChats(false);

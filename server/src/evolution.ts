@@ -597,6 +597,29 @@ function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
   };
 }
 
+function localMessageToRealtimeMessage(local: ReturnType<typeof providerRecordToLocalMessage>, conversationId: string) {
+  const timestampMs = local.sentAt.getTime();
+  return {
+    id: local.id,
+    conversationId,
+    sender: local.sender,
+    senderName: local.senderName,
+    content: local.content,
+    mediaUrl: local.mediaUrl,
+    mediaType: local.mediaType,
+    mediaDuration: local.mediaDuration,
+    interactiveTitle: local.interactiveTitle,
+    interactiveFooter: local.interactiveFooter,
+    interactiveButtons: local.interactiveButtons,
+    metadata: local.metadata,
+    rawKey: local.rawKey,
+    timestampMs,
+    timestamp: local.sentAt.toISOString(),
+    status: local.status,
+    isInternalNote: false,
+  };
+}
+
 function localMessageToProviderRecord(row: any) {
   const remoteJid = row.evolution_remote_jid;
   const id = row.evolution_message_id || row.id;
@@ -729,7 +752,7 @@ async function findOrCreateConversation(
 
 async function persistProviderMessage(companyId: string, record: any, options: { incrementUnread: boolean; reopen: boolean; fallbackPhone?: string }) {
   const local = providerRecordToLocalMessage(record, options.fallbackPhone);
-  if (!local.id || !local.remoteJid || local.remoteJid.endsWith('@g.us') || !local.phone) return false;
+  if (!local.id || !local.remoteJid || local.remoteJid.endsWith('@g.us') || !local.phone) return undefined;
 
   const client = await db.connect();
   try {
@@ -895,7 +918,10 @@ async function persistProviderMessage(companyId: string, record: any, options: {
     }
     await client.query('COMMIT');
     localInboxCache.delete(companyId);
-    return insertedNewMessage || linkedPendingMessage;
+    return {
+      persisted: insertedNewMessage || linkedPendingMessage,
+      message: localMessageToRealtimeMessage(local, conversationId),
+    };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -1650,12 +1676,26 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     const evolutionMessageId = body?.key?.id || body?.message?.key?.id || body?.data?.key?.id;
     await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
+    const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
+    const realtimeTimestampMs = Date.now();
     publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
       remoteJid: canonicalRemoteJid,
       phone: number,
-      messageId: typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId,
-      timestampMs: Date.now(),
+      messageId: realtimeMessageId,
+      timestampMs: realtimeTimestampMs,
       fromMe: true,
+      message: {
+        id: realtimeMessageId,
+        conversationId: localMessage.conversationId,
+        sender: 'attendant',
+        senderName: request.user!.name,
+        content: text,
+        rawKey: { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
+        timestampMs: realtimeTimestampMs,
+        timestamp: new Date(realtimeTimestampMs).toISOString(),
+        status: 'sent',
+        isInternalNote: false,
+      },
     });
 
     let dailyResponder: { id: string; name: string; date: string } | undefined;
@@ -1828,7 +1868,8 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       if (companyId) {
         for (const record of records) {
           try {
-            if (await persistProviderMessage(companyId, record, { incrementUnread: true, reopen: true })) {
+            const persisted = await persistProviderMessage(companyId, record, { incrementUnread: true, reopen: true });
+            if (persisted?.persisted) {
               persistedMessages += 1;
             }
             const remoteJid = providerRemoteJid(record);
@@ -1839,6 +1880,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
                 messageId: providerMessageId(record),
                 timestampMs: providerMessageDate(record).getTime(),
                 fromMe: record?.key?.fromMe === true,
+                ...(persisted?.message ? { message: persisted.message } : {}),
               });
             }
           } catch (error) {

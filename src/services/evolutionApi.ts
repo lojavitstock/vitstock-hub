@@ -4,6 +4,7 @@ import { evolutionMessagePreview, normalizeEvolutionMessage } from './evolutionM
 import { phoneVariants } from '../utils/phone';
 import { callMessageInfo } from '../utils/callMessage';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
+import type { RealtimeEventPayload } from '../utils/realtimeUpdates';
 
 const unwrapEvolutionMessage = (message: any) => {
   let current = message || {};
@@ -226,16 +227,7 @@ const apiFetch = (path: string, init?: RequestInit) => fetch(`${API_URL}${path}`
   },
 });
 
-export type EvolutionRealtimeEvent = {
-  type: string;
-  remoteJid?: string;
-  phone?: string;
-  messageId?: string;
-  timestampMs?: number;
-  fromMe?: boolean;
-  status?: string;
-  [key: string]: unknown;
-};
+export type EvolutionRealtimeEvent = RealtimeEventPayload;
 
 export class EvolutionApiService {
   private static lastKnownStatus: WhatsappInstance['status'] = 'connecting';

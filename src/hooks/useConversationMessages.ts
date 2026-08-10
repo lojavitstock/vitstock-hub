@@ -4,6 +4,7 @@ import { EvolutionApiService } from '../services/evolutionApi';
 import { phoneVariants } from '../utils/phone';
 import { mergeConversationMessages } from '../utils/messageMerge';
 import { createLatestRequestGuard } from '../utils/requestCoordinator';
+import { reconcileRealtimeMessages } from '../utils/realtimeUpdates';
 
 type UseConversationMessagesOptions = {
   activeConversationId: string;
@@ -202,8 +203,30 @@ export const useConversationMessages = ({
         .find((item) => item.id === activeConversationId)?.contact.phone.replace(/\D/g, '') || '';
       const samePhone = Boolean(eventPhone && conversationPhone
         && phoneVariants(eventPhone).some((variant) => phoneVariants(conversationPhone).includes(variant)));
-      if (eventRemoteJid !== activeConversationId && !samePhone) return;
-      void fetchConversationMessages();
+      const sameConversationFromPayload = event.message?.conversationId === activeConversationId;
+      if (eventRemoteJid !== activeConversationId && !samePhone && !sameConversationFromPayload) return;
+
+      const previousMessages = messagesRef.current;
+      const reconciledMessages = reconcileRealtimeMessages(previousMessages, activeConversationId, event);
+      if (reconciledMessages === null) {
+        // Keep the existing safety net for the current minimal upsert payload.
+        void fetchConversationMessages();
+        return;
+      }
+      if (reconciledMessages === previousMessages) return;
+
+      messagesRef.current = reconciledMessages;
+      const eventTimestamp = Number(event.message?.timestampMs ?? event.timestampMs ?? 0);
+      if (Number.isFinite(eventTimestamp) && eventTimestamp > 0) {
+        latestTimestampRef.current = Math.max(latestTimestampRef.current || 0, eventTimestamp);
+      }
+      setMessages((currentMessages) => {
+        if (currentMessages === previousMessages) return reconciledMessages;
+        return reconcileRealtimeMessages(currentMessages, activeConversationId, event) || currentMessages;
+      });
+      window.setTimeout(() => {
+        if (stickToBottomRef.current) scrollToBottom();
+      }, 0);
     });
 
     void fetchConversationMessages();

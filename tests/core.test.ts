@@ -8,6 +8,7 @@ import { normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapt
 import { callMessageInfo } from '../src/utils/callMessage';
 import { reconcileConversations } from '../src/utils/conversationReconciliation';
 import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../src/utils/requestCoordinator';
+import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
 import type { Conversation, Message } from '../src/types';
 
@@ -129,6 +130,116 @@ test('guard de requisição impede resposta antiga de ser aplicada', () => {
 
   assert.equal(guard.isLatest(older), false);
   assert.equal(guard.isLatest(newer), true);
+});
+
+test('SSE de nova mensagem completa atualiza o histórico sem refetch', () => {
+  const current = [message('a', 1000, 'anterior')];
+  const incoming = message('b', 2000, 'nova mensagem');
+  const updated = reconcileRealtimeMessages(current, 'conversation-1', {
+    type: 'message.upsert',
+    remoteJid: 'conversation-1',
+    message: incoming,
+  });
+
+  assert.ok(updated);
+  assert.notStrictEqual(updated, current);
+  assert.equal(updated?.[1]?.id, 'b');
+});
+
+test('SSE repetido não duplica nem recria a mensagem', () => {
+  const incoming = message('b', 2000, 'nova mensagem');
+  const current = [message('a', 1000, 'anterior'), incoming];
+  const updated = reconcileRealtimeMessages(current, 'conversation-1', {
+    type: 'message.upsert',
+    remoteJid: 'conversation-1',
+    message: { ...incoming },
+  });
+
+  assert.strictEqual(updated, current);
+});
+
+test('SSE de status altera somente a mensagem correspondente', () => {
+  const first = message('a', 1000, 'primeira');
+  const second = message('b', 2000, 'segunda');
+  const current = [first, second];
+  const updated = reconcileRealtimeMessages(current, 'conversation-1', {
+    type: 'message.status',
+    remoteJid: 'conversation-1',
+    messageId: 'b',
+    status: 'delivered',
+  });
+
+  assert.ok(updated);
+  assert.strictEqual(updated?.[0], first);
+  assert.notStrictEqual(updated?.[1], second);
+  assert.equal(updated?.[1]?.status, 'delivered');
+});
+
+test('SSE de upsert sem conteúdo solicita fallback em vez de inventar mensagem', () => {
+  const updated = reconcileRealtimeMessages([], 'conversation-1', {
+    type: 'message.upsert',
+    remoteJid: 'conversation-1',
+    messageId: 'provider-1',
+    timestampMs: 2000,
+  });
+
+  assert.equal(updated, null);
+});
+
+test('SSE e polling equivalente preservam a mesma identidade do histórico', () => {
+  const current = [message('a', 1000, 'anterior')];
+  const incoming = message('b', 2000, 'nova mensagem');
+  const eventResult = reconcileRealtimeMessages(current, 'conversation-1', {
+    type: 'message.upsert',
+    remoteJid: 'conversation-1',
+    message: incoming,
+  });
+  assert.ok(eventResult);
+  const pollingResult = mergeConversationMessages(eventResult || current, [{ ...incoming }]);
+
+  assert.strictEqual(pollingResult, eventResult);
+});
+
+test('SSE atualiza preview de conversa não aberta sem carregar histórico', () => {
+  const current = [conversation('conversation-1'), conversation('conversation-2')];
+  const incoming = { ...message('new-2', 1_800_000_000_000, 'atualização do cliente'), conversationId: 'conversation-2' };
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'message.upsert',
+    remoteJid: 'conversation-2',
+    message: incoming,
+  });
+
+  assert.ok(updated);
+  assert.equal(updated?.[0]?.id, 'conversation-2');
+  assert.equal(updated?.[0]?.lastMessage, 'atualização do cliente');
+  assert.equal(updated?.[0]?.unreadCount, 1);
+  assert.strictEqual(updated?.[1], current[0]);
+});
+
+test('conversation.updated reconcilia responsável, status e leitura sem refetch', () => {
+  const current = [conversation('conversation-1', { unreadCount: 2, lastMessageAt: 1_700_000_000_000 })];
+  const assigned = reconcileRealtimeConversation(current, {
+    type: 'conversation.updated',
+    remoteJid: 'conversation-1',
+    assignedUserId: 'user-1',
+    assignedUserName: 'Leonardo',
+  });
+  assert.equal(assigned?.[0]?.assignedAttendant?.name, 'Leonardo');
+
+  const resolved = reconcileRealtimeConversation(assigned || current, {
+    type: 'conversation.updated',
+    remoteJid: 'conversation-1',
+    status: 'resolved',
+  });
+  assert.equal(resolved?.[0]?.status, 'resolved');
+  assert.equal(resolved?.[0]?.needsResponse, false);
+
+  const read = reconcileRealtimeConversation(resolved || current, {
+    type: 'conversation.updated',
+    remoteJid: 'conversation-1',
+    messageTimestamp: 1_800_000_000_000,
+  });
+  assert.equal(read?.[0]?.unreadCount, 0);
 });
 
 test('phoneVariants cruza telefone brasileiro com e sem nono dígito', () => {
