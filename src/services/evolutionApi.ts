@@ -5,6 +5,7 @@ import { phoneVariants } from '../utils/phone';
 import { callMessageInfo } from '../utils/callMessage';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 import type { RealtimeEventPayload } from '../utils/realtimeUpdates';
+import { REALTIME_RECONNECTED_EVENT } from '../utils/realtimeConfig';
 
 const unwrapEvolutionMessage = (message: any) => {
   let current = message || {};
@@ -240,6 +241,8 @@ export class EvolutionApiService {
   private static realtimeSource: EventSource | null = null;
   private static realtimeListeners = new Set<(event: EvolutionRealtimeEvent) => void>();
   private static realtimeOnlineHandler: (() => void) | null = null;
+  private static realtimeHasConnected = false;
+  private static realtimeNeedsReconciliation = false;
 
   static subscribeToRealtimeEvents(listener: (event: EvolutionRealtimeEvent) => void) {
     if (USE_MOCK || typeof window === 'undefined' || typeof EventSource === 'undefined') return () => undefined;
@@ -266,6 +269,17 @@ export class EvolutionApiService {
       };
       source.addEventListener('evolution', handleMessage as EventListener);
       source.onmessage = handleMessage;
+      source.onopen = () => {
+        const shouldReconcile = this.realtimeHasConnected && this.realtimeNeedsReconciliation;
+        this.realtimeHasConnected = true;
+        this.realtimeNeedsReconciliation = false;
+        if (shouldReconcile) {
+          this.realtimeListeners.forEach((listener) => listener({ type: REALTIME_RECONNECTED_EVENT }));
+        }
+      };
+      source.onerror = () => {
+        this.realtimeNeedsReconciliation = true;
+      };
       this.realtimeSource = source;
       this.realtimeOnlineHandler = () => {
         if (this.realtimeSource?.readyState === EventSource.CLOSED) {

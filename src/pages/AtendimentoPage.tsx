@@ -33,7 +33,6 @@ import { ContactPhoto } from '../components/conversations/ContactPhoto';
 import { MessageTimeline } from '../components/conversations/MessageTimeline';
 import { MessageComposer, MessageComposerHandle } from '../components/conversations/MessageComposer';
 import { useConversationMessages } from '../hooks/useConversationMessages';
-import { mergeConversationMessages } from '../utils/messageMerge';
 import { conversationNeedsResponse, useConversationInbox } from '../hooks/useConversationInbox';
 import { useContactPanel } from '../hooks/useContactPanel';
 
@@ -467,12 +466,6 @@ export const AtendimentoPage: React.FC = () => {
         } : conversation));
       }
       
-      // Busca atualizada do backend imediatamente apos enviar
-      setTimeout(async () => {
-        const updatedMsgs = await EvolutionApiService.fetchConversationMessages(instanceName, activeConv.id, activeConv.contact.phone, attendantLabel, true);
-        if (updatedMsgs.length > 0) setMessages((previous) => mergeConversationMessages(previous, updatedMsgs));
-        loadChats(false);
-      }, 800);
       } catch (error) {
         setMessages((previous) => previous.map((message) => message.id === newMsg.id ? { ...message, status: 'failed' } : message));
         composerRef.current?.setText(newMsgText);
@@ -572,7 +565,6 @@ export const AtendimentoPage: React.FC = () => {
         lastMessageFromMe: true,
         needsResponse: false,
       } : conversation));
-      window.setTimeout(() => { void loadChats(false); }, 800);
     } catch (error) {
       setMessages((previous) => previous.map((message) => message.id === localMessage.id ? { ...message, status: 'failed' } : message));
       composerRef.current?.setText(caption);
@@ -624,12 +616,11 @@ export const AtendimentoPage: React.FC = () => {
           },
         } : conversation));
       }
-      window.setTimeout(() => { void loadChats(false); }, 800);
     } catch (error) {
       setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'failed' } : item));
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível reenviar a mensagem.');
     }
-  }, [activeConv, attendantName, instanceName, isMock, loadChats]);
+  }, [activeConv, attendantName, instanceName, isMock]);
 
   const handleSelectConversation = useCallback((conversation: Conversation) => {
     setActiveConvId(conversation.id);
@@ -707,7 +698,6 @@ export const AtendimentoPage: React.FC = () => {
     setNewChatName('');
     setNewChatMessage('');
     setStartingNewChat(false);
-    window.setTimeout(() => { void loadChats(false); }, 800);
   };
 
   return (

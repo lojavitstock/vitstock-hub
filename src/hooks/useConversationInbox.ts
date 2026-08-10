@@ -7,6 +7,7 @@ import { phoneVariants } from '../utils/phone';
 import { reconcileConversations } from '../utils/conversationReconciliation';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 import { reconcileRealtimeConversation } from '../utils/realtimeUpdates';
+import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../utils/realtimeConfig';
 
 export const conversationNeedsResponse = (conversation: Conversation) => (
   conversation.needsResponse
@@ -140,6 +141,10 @@ export const useConversationInbox = ({
     if (isMock) return undefined;
 
     const unsubscribe = EvolutionApiService.subscribeToRealtimeEvents((event) => {
+      if (event.type === REALTIME_RECONNECTED_EVENT) {
+        if (document.visibilityState === 'visible') void loadChats(false);
+        return;
+      }
       // Statuses only affect the active timeline. The inbox has no message
       // delivery state to render, so refetching the complete list is wasted.
       if (event.type === 'message.status') return;
@@ -161,7 +166,7 @@ export const useConversationInbox = ({
     });
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') void loadChats(false);
-    }, 15000);
+    }, REALTIME_SAFETY_INTERVAL_MS);
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') void loadChats(false);
     };

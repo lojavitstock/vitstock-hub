@@ -9,6 +9,7 @@ import { callMessageInfo } from '../src/utils/callMessage';
 import { reconcileConversations } from '../src/utils/conversationReconciliation';
 import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../src/utils/requestCoordinator';
 import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
+import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../src/utils/realtimeConfig';
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
 import type { Conversation, Message } from '../src/types';
 
@@ -240,6 +241,11 @@ test('conversation.updated reconcilia responsável, status e leitura sem refetch
     messageTimestamp: 1_800_000_000_000,
   });
   assert.equal(read?.[0]?.unreadCount, 0);
+});
+
+test('política realtime usa intervalo de segurança de cinco minutos e evento explícito de reconexão', () => {
+  assert.equal(REALTIME_SAFETY_INTERVAL_MS, 5 * 60 * 1000);
+  assert.equal(REALTIME_RECONNECTED_EVENT, 'realtime.reconnected');
 });
 
 test('phoneVariants cruza telefone brasileiro com e sem nono dígito', () => {

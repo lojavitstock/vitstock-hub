@@ -5,6 +5,7 @@ import { phoneVariants } from '../utils/phone';
 import { mergeConversationMessages } from '../utils/messageMerge';
 import { createLatestRequestGuard } from '../utils/requestCoordinator';
 import { reconcileRealtimeMessages } from '../utils/realtimeUpdates';
+import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../utils/realtimeConfig';
 
 type UseConversationMessagesOptions = {
   activeConversationId: string;
@@ -196,6 +197,10 @@ export const useConversationMessages = ({
     };
 
     const unsubscribe = EvolutionApiService.subscribeToRealtimeEvents((event) => {
+      if (event.type === REALTIME_RECONNECTED_EVENT) {
+        if (document.visibilityState === 'visible') void fetchConversationMessages();
+        return;
+      }
       if (event.type !== 'message.upsert' && event.type !== 'message.status') return;
       const eventRemoteJid = String(event.remoteJid || '');
       const eventPhone = String(event.phone || '').replace(/\D/g, '');
@@ -232,7 +237,7 @@ export const useConversationMessages = ({
     void fetchConversationMessages();
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') void fetchConversationMessages();
-    }, 15000);
+    }, REALTIME_SAFETY_INTERVAL_MS);
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') void fetchConversationMessages();
     };
