@@ -19,27 +19,30 @@ const FILTERS: Array<{ id: ConversationFilter; label: string; width: string }> =
   { id: 'resolved', label: 'Resolvidas', width: 'col-span-1' },
 ];
 
-const countForFilter = (
-  conversations: Conversation[],
-  filter: ConversationFilter,
-  needsResponse: (conversation: Conversation) => boolean,
-) => {
-  if (filter === 'all') return conversations.length;
-  if (filter === 'unread') return conversations.filter((conversation) => conversation.unreadCount > 0).length;
-  if (filter === 'unanswered') return conversations.filter(needsResponse).length;
-  if (filter === 'delivery') return conversations.filter((conversation) => conversation.status === 'pending').length;
-  return conversations.filter((conversation) => conversation.status === 'resolved').length;
-};
-
-export const ConversationFilters: React.FC<ConversationFiltersProps> = ({
+export const ConversationFilters = React.memo<ConversationFiltersProps>(({
   conversations,
   activeFilter,
   onFilterChange,
   needsResponse,
-}) => (
+}) => {
+  const counts = React.useMemo(() => conversations.reduce<Record<ConversationFilter, number>>((result, conversation) => {
+    if (conversation.unreadCount > 0) result.unread += 1;
+    if (needsResponse(conversation)) result.unanswered += 1;
+    if (conversation.status === 'pending') result.delivery += 1;
+    if (conversation.status === 'resolved') result.resolved += 1;
+    return result;
+  }, {
+    all: conversations.length,
+    unread: 0,
+    unanswered: 0,
+    delivery: 0,
+    resolved: 0,
+  }), [conversations, needsResponse]);
+
+  return (
   <div className="grid grid-cols-6 gap-1.5 rounded-xl border border-[#3a474e] bg-[#141d22] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.025),0_8px_24px_rgba(0,0,0,0.14)]">
     {FILTERS.map(({ id, label, width }) => {
-      const count = countForFilter(conversations, id, needsResponse);
+      const count = counts[id];
       const isActive = activeFilter === id;
       const isResolved = id === 'resolved';
 
@@ -77,4 +80,7 @@ export const ConversationFilters: React.FC<ConversationFiltersProps> = ({
       );
     })}
   </div>
-);
+  );
+});
+
+ConversationFilters.displayName = 'ConversationFilters';

@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useEffect } from 'react';
+import React, { useCallback, useRef, useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import { 
   Search, 
@@ -31,8 +31,7 @@ import { ConversationFilters } from '../components/conversations/ConversationFil
 import { ConversationList } from '../components/conversations/ConversationList';
 import { ContactPhoto } from '../components/conversations/ContactPhoto';
 import { MessageTimeline } from '../components/conversations/MessageTimeline';
-import { MessageComposer } from '../components/conversations/MessageComposer';
-import { formatMessageTimestamp } from '../components/conversations/conversationFormatters';
+import { MessageComposer, MessageComposerHandle } from '../components/conversations/MessageComposer';
 import { useConversationMessages } from '../hooks/useConversationMessages';
 import { mergeConversationMessages } from '../utils/messageMerge';
 import { conversationNeedsResponse, useConversationInbox } from '../hooks/useConversationInbox';
@@ -49,7 +48,11 @@ export const AtendimentoPage: React.FC = () => {
     : 'Atendente • Vitstock';
 
   const attendantName = user?.name || 'Atendente';
-  const [inputText, setInputText] = useState('');
+  const composerRef = useRef<MessageComposerHandle>(null);
+  const composerTextRef = useRef('');
+  const handleComposerTextChange = useCallback((value: string) => {
+    composerTextRef.current = value;
+  }, []);
   const [sendingMedia, setSendingMedia] = useState(false);
   const [isInternalNote, setIsInternalNote] = useState(false);
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
@@ -411,11 +414,11 @@ export const AtendimentoPage: React.FC = () => {
   */
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim() || !activeConv || activeChatLocked) return;
+    if (!composerTextRef.current.trim() || !activeConv || activeChatLocked) return;
 
-    const newMsgText = inputText.trim();
+    const newMsgText = composerTextRef.current.trim();
     const outboundText = `*${attendantName}*\n${newMsgText}`;
-    setInputText('');
+    composerRef.current?.clear();
 
     const newMsg: Message = {
       id: `msg-${Date.now()}`,
@@ -439,7 +442,7 @@ export const AtendimentoPage: React.FC = () => {
         setMessages((previous) => previous.map((message) => message.id === newMsg.id ? savedNote : message));
       } catch (error) {
         setMessages((previous) => previous.filter((message) => message.id !== newMsg.id));
-        setInputText(newMsgText);
+        composerRef.current?.setText(newMsgText);
         setAssignmentFeedback(error instanceof Error ? error.message : 'NÃ£o foi possÃ­vel salvar a nota interna.');
         return;
       }
@@ -472,7 +475,7 @@ export const AtendimentoPage: React.FC = () => {
       }, 800);
       } catch (error) {
         setMessages((previous) => previous.map((message) => message.id === newMsg.id ? { ...message, status: 'failed' } : message));
-        setInputText(newMsgText);
+        composerRef.current?.setText(newMsgText);
         setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar a mensagem.');
         return;
       }
@@ -509,7 +512,7 @@ export const AtendimentoPage: React.FC = () => {
 
     const mediatype: 'image' | 'video' | 'document' = isImage ? 'image' : isVideo ? 'video' : 'document';
     const label = mediatype === 'image' ? '[Imagem]' : mediatype === 'video' ? '[Vídeo]' : '[Documento]';
-    const caption = inputText.trim();
+    const caption = composerTextRef.current.trim();
     const dataUrl = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result));
@@ -536,7 +539,7 @@ export const AtendimentoPage: React.FC = () => {
     };
     setAssignmentFeedback('');
     setSendingMedia(true);
-    setInputText('');
+    composerRef.current?.clear();
     setMessages((previous) => [...previous, localMessage]);
     window.setTimeout(scrollToBottom, 0);
     try {
@@ -572,7 +575,7 @@ export const AtendimentoPage: React.FC = () => {
       window.setTimeout(() => { void loadChats(false); }, 800);
     } catch (error) {
       setMessages((previous) => previous.map((message) => message.id === localMessage.id ? { ...message, status: 'failed' } : message));
-      setInputText(caption);
+      composerRef.current?.setText(caption);
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar o anexo.');
     } finally {
       setSendingMedia(false);
@@ -705,11 +708,6 @@ export const AtendimentoPage: React.FC = () => {
     setNewChatMessage('');
     setStartingNewChat(false);
     window.setTimeout(() => { void loadChats(false); }, 800);
-  };
-
-  const insertQuickReply = (text: string) => {
-    setInputText(text);
-    setQuickReplyOpen(false);
   };
 
   return (
@@ -889,67 +887,6 @@ export const AtendimentoPage: React.FC = () => {
         </div>
 
         {/* Lista de Conversas com Scroll */}
-        <div className="hidden flex-1 overflow-y-auto divide-y divide-[#273239]">
-          {conversations.length === 0 ? (
-            <div className="p-8 text-center space-y-2">
-              <MessageSquare className="w-8 h-8 text-zinc-600 mx-auto" />
-              <p className="text-xs font-bold text-zinc-400">Nenhuma conversa encontrada</p>
-              <p className="text-[11px] text-zinc-500">Assim que um cliente enviar mensagem no seu WhatsApp, ela aparecerá aqui em tempo real.</p>
-            </div>
-           ) : visibleConversations.length === 0 ? (
-             <div className="p-8 text-center space-y-2">
-               <Search className="w-8 h-8 text-zinc-600 mx-auto" />
-               <p className="text-xs font-bold text-zinc-400">Nenhum atendimento corresponde à busca</p>
-               <p className="text-[11px] text-zinc-500">Tente outro nome ou número de telefone.</p>
-             </div>
-           ) : (
-             visibleConversations.map(conv => {
-                const isSelected = conv.id === activeConvId;
-                const needsResponse = conversationNeedsResponse(conv);
-                return (
-                  <div
-                    key={conv.id}
-                    onClick={() => {
-                      setActiveConvId(conv.id);
-                      void markConversationAsRead(conv);
-                    }}
-                    className={`p-3.5 cursor-pointer transition-colors relative flex items-start gap-3 ${
-                      isSelected ? 'bg-[#2b353b] border-l-4 border-amber-400' : needsResponse ? 'bg-[#24383d] border-l-4 border-emerald-400 hover:bg-[#2a4247]' : 'border-l-4 border-transparent hover:bg-[#222d33]'
-                    }`}
-                  >
-                    <div className="relative flex-shrink-0">
-                      <ContactPhoto name={conv.contact.name} avatar={conv.contact.avatar} />
-                    </div>
-
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between mb-1 gap-2">
-                        <p className={`text-xs truncate ${needsResponse ? 'font-extrabold text-white' : 'font-bold text-zinc-100'}`}>{conv.contact.name}</p>
-                        <span className="text-[10px] font-semibold text-zinc-500">{formatMessageTimestamp(conv.lastMessageAt, conv.lastMessageTimestamp)}</span>
-                      </div>
-
-                      <p className={`text-xs truncate mb-1.5 ${needsResponse ? 'font-bold text-slate-200' : 'text-zinc-400'}`}>{conv.lastMessage}</p>
-
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700">
-                          {conv.department}
-                        </span>
-                        {conv.contact.tags.map(tag => (
-                          <span 
-                            key={tag.id}
-                            className="text-[9px] font-bold px-1.5 py-0.5 rounded"
-                            style={{ backgroundColor: `${tag.color}20`, color: tag.color, border: `1px solid ${tag.color}40` }}
-                          >
-                            {tag.name}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })
-          )}
-        </div>
-
         <div className="min-h-0 flex-1 overflow-y-auto">
           <ConversationList
             conversations={conversations}
@@ -1034,7 +971,7 @@ export const AtendimentoPage: React.FC = () => {
             />
 
             <MessageComposer
-              inputText={inputText}
+              ref={composerRef}
               isInternalNote={isInternalNote}
               quickReplyOpen={quickReplyOpen}
               activeChatLocked={activeChatLocked}
@@ -1042,12 +979,11 @@ export const AtendimentoPage: React.FC = () => {
               sendingMedia={sendingMedia}
               attachmentInputRef={attachmentInputRef}
               onSubmit={handleSendMessage}
-              onInputChange={setInputText}
+              onTextChange={handleComposerTextChange}
               onToggleInternalNote={setIsInternalNote}
               onToggleQuickReply={() => setQuickReplyOpen((open) => !open)}
               onAttachmentChange={handleAttachmentChange}
               onInputPaste={handleInputPaste}
-              onInsertQuickReply={insertQuickReply}
             />
           </>
         ) : (
