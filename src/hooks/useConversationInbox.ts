@@ -4,6 +4,7 @@ import { EvolutionApiService } from '../services/evolutionApi';
 import { ChatStatus, Conversation } from '../types';
 import { ConversationFilter } from '../components/conversations/ConversationFilters';
 import { phoneVariants } from '../utils/phone';
+import { reconcileConversations } from '../utils/conversationReconciliation';
 
 export const conversationNeedsResponse = (conversation: Conversation) => (
   conversation.needsResponse
@@ -74,7 +75,12 @@ export const useConversationInbox = ({
 
     try {
       if (isMock) {
-        setConversations(mockConversations);
+        const previousConversations = conversationsRef.current;
+        const reconciledConversations = reconcileConversations(previousConversations, mockConversations);
+        if (reconciledConversations !== previousConversations) {
+          conversationsRef.current = reconciledConversations;
+          setConversations(reconciledConversations);
+        }
         setActiveConversationId((previousId) => (
           mockConversations.some((conversation) => conversation.id === previousId)
             ? previousId
@@ -108,7 +114,12 @@ export const useConversationInbox = ({
           : withNameOverride;
       });
 
-      setConversations(mergedChats);
+      const previousConversations = conversationsRef.current;
+      const reconciledConversations = reconcileConversations(previousConversations, mergedChats);
+      if (reconciledConversations !== previousConversations) {
+        conversationsRef.current = reconciledConversations;
+        setConversations(reconciledConversations);
+      }
       setActiveConversationId((previousId) => {
         if (mergedChats.some((conversation) => conversation.id === previousId)) return previousId;
         const replacement = previousActivePhone

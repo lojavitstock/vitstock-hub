@@ -6,8 +6,9 @@ import { phoneVariants } from '../src/utils/phone';
 import { mergeConversationMessages } from '../src/utils/messageMerge';
 import { normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
 import { callMessageInfo } from '../src/utils/callMessage';
+import { reconcileConversations } from '../src/utils/conversationReconciliation';
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
-import type { Message } from '../src/types';
+import type { Conversation, Message } from '../src/types';
 
 const message = (id: string, timestampMs: number, content: string, status: Message['status'] = 'sent'): Message => ({
   id,
@@ -17,6 +18,39 @@ const message = (id: string, timestampMs: number, content: string, status: Messa
   timestampMs,
   timestamp: new Date(timestampMs).toISOString(),
   status,
+});
+
+const conversation = (id: string, overrides: Partial<Conversation> = {}): Conversation => ({
+  id,
+  contact: {
+    id: `contact-${id}`,
+    name: `Contato ${id}`,
+    phone: `+55 21 99999-${id.padStart(4, '0')}`,
+    avatar: `/avatar-${id}.png`,
+    tags: [{ id: `tag-${id}`, name: 'Atendimento Geral', color: '#64748B' }],
+    createdAt: '2026-08-10',
+  },
+  lastMessage: `Mensagem ${id}`,
+  lastMessageTimestamp: '10:00',
+  lastMessageAt: 1_700_000_000,
+  lastMessageFromMe: false,
+  lastMessageKey: {
+    id: `message-${id}`,
+    remoteJid: `5521999999${id}@s.whatsapp.net`,
+    fromMe: false,
+  },
+  unreadCount: 0,
+  needsResponse: false,
+  status: 'open',
+  department: 'Atendimento Geral',
+  ...overrides,
+});
+
+const cloneConversation = (value: Conversation): Conversation => ({
+  ...value,
+  contact: { ...value.contact, tags: value.contact.tags.map((tag) => ({ ...tag })) },
+  lastMessageKey: value.lastMessageKey ? { ...value.lastMessageKey } : undefined,
+  assignedAttendant: value.assignedAttendant ? { ...value.assignedAttendant } : undefined,
 });
 
 test('phoneVariants cruza telefone brasileiro com e sem nono dígito', () => {
@@ -35,6 +69,75 @@ test('mergeConversationMessages substitui duplicata e preserva ordem', () => {
   assert.deepEqual(merged.map((item) => item.id), ['b', 'c', 'a']);
   assert.equal(merged.find((item) => item.id === 'a')?.content, 'atualizada');
   assert.equal(merged.find((item) => item.id === 'a')?.status, 'read');
+});
+
+test('reconcilia snapshot equivalente reutilizando array e objetos', () => {
+  const previous = [conversation('a'), conversation('b')];
+  const next = previous.map(cloneConversation);
+  const reconciled = reconcileConversations(previous, next);
+
+  assert.strictEqual(reconciled, previous);
+  assert.strictEqual(reconciled[0], previous[0]);
+  assert.strictEqual(reconciled[1], previous[1]);
+});
+
+test('reconcilia uma conversa alterada preservando as demais', () => {
+  const previous = [conversation('a'), conversation('b')];
+  const next = previous.map(cloneConversation);
+  next[1] = { ...next[1], lastMessage: 'Mensagem atualizada' };
+  const reconciled = reconcileConversations(previous, next);
+
+  assert.notStrictEqual(reconciled, previous);
+  assert.strictEqual(reconciled[0], previous[0]);
+  assert.notStrictEqual(reconciled[1], previous[1]);
+  assert.equal(reconciled[1].lastMessage, 'Mensagem atualizada');
+});
+
+test('reconcilia nova conversa preservando identidade dos itens antigos', () => {
+  const previous = [conversation('a'), conversation('b')];
+  const next = [...previous.map(cloneConversation), conversation('c')];
+  const reconciled = reconcileConversations(previous, next);
+
+  assert.notStrictEqual(reconciled, previous);
+  assert.strictEqual(reconciled[0], previous[0]);
+  assert.strictEqual(reconciled[1], previous[1]);
+  assert.equal(reconciled[2].id, 'c');
+});
+
+test('reconcilia conversa removida preservando identidade dos itens restantes', () => {
+  const previous = [conversation('a'), conversation('b'), conversation('c')];
+  const next = [cloneConversation(previous[0]), cloneConversation(previous[2])];
+  const reconciled = reconcileConversations(previous, next);
+
+  assert.notStrictEqual(reconciled, previous);
+  assert.strictEqual(reconciled[0], previous[0]);
+  assert.strictEqual(reconciled[1], previous[2]);
+  assert.deepEqual(reconciled.map((item) => item.id), ['a', 'c']);
+});
+
+test('reconcilia mudança de ordem sem recriar conversas equivalentes', () => {
+  const previous = [conversation('a'), conversation('b')];
+  const next = [cloneConversation(previous[1]), cloneConversation(previous[0])];
+  const reconciled = reconcileConversations(previous, next);
+
+  assert.notStrictEqual(reconciled, previous);
+  assert.deepEqual(reconciled.map((item) => item.id), ['b', 'a']);
+  assert.strictEqual(reconciled[0], previous[1]);
+  assert.strictEqual(reconciled[1], previous[0]);
+});
+
+test('substitui conversa quando um campo visual relevante muda', () => {
+  const previous = [conversation('a')];
+  const next = [cloneConversation(previous[0])];
+  next[0] = {
+    ...next[0],
+    contact: { ...next[0].contact, avatar: '/avatar-atualizado.png' },
+  };
+  const reconciled = reconcileConversations(previous, next);
+
+  assert.notStrictEqual(reconciled, previous);
+  assert.notStrictEqual(reconciled[0], previous[0]);
+  assert.equal(reconciled[0].contact.avatar, '/avatar-atualizado.png');
 });
 
 test('normaliza assinatura do atendente, áudio e mensagem interativa', () => {
