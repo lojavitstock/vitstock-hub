@@ -7,10 +7,17 @@ import { mergeConversationMessages } from '../src/utils/messageMerge';
 import { normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
 import { callMessageInfo } from '../src/utils/callMessage';
 import { reconcileConversations } from '../src/utils/conversationReconciliation';
+import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../src/utils/requestCoordinator';
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
 import type { Conversation, Message } from '../src/types';
 
-const message = (id: string, timestampMs: number, content: string, status: Message['status'] = 'sent'): Message => ({
+const message = (
+  id: string,
+  timestampMs: number,
+  content: string,
+  status: Message['status'] = 'sent',
+  overrides: Partial<Message> = {},
+): Message => ({
   id,
   conversationId: 'conversation-1',
   sender: 'contact',
@@ -18,6 +25,7 @@ const message = (id: string, timestampMs: number, content: string, status: Messa
   timestampMs,
   timestamp: new Date(timestampMs).toISOString(),
   status,
+  ...overrides,
 });
 
 const conversation = (id: string, overrides: Partial<Conversation> = {}): Conversation => ({
@@ -53,6 +61,76 @@ const cloneConversation = (value: Conversation): Conversation => ({
   assignedAttendant: value.assignedAttendant ? { ...value.assignedAttendant } : undefined,
 });
 
+test('coordenador de inbox compartilha duas solicitações simultâneas equivalentes', async () => {
+  const coordinator = createInFlightRequestCoordinator<string>();
+  let calls = 0;
+  let resolveRequest: (value: string) => void = () => undefined;
+  const request = () => {
+    calls += 1;
+    return new Promise<string>((resolve) => { resolveRequest = resolve; });
+  };
+
+  const first = coordinator.run('inbox', request);
+  const second = coordinator.run('inbox', request);
+  assert.strictEqual(first, second);
+  await Promise.resolve();
+  assert.equal(calls, 1);
+  resolveRequest('ok');
+  assert.equal(await first, 'ok');
+  assert.equal(calls, 1);
+});
+
+test('coordenador mantém solicitações de conversas diferentes independentes', async () => {
+  const coordinator = createInFlightRequestCoordinator<string>();
+  let calls = 0;
+  const request = (value: string) => async () => {
+    calls += 1;
+    return value;
+  };
+
+  const first = coordinator.run('messages:conversation-a', request('a'));
+  const second = coordinator.run('messages:conversation-b', request('b'));
+  assert.notStrictEqual(first, second);
+  assert.deepEqual(await Promise.all([first, second]), ['a', 'b']);
+  assert.equal(calls, 2);
+});
+
+test('coordenador permite nova solicitação depois da conclusão', async () => {
+  const coordinator = createInFlightRequestCoordinator<number>();
+  let calls = 0;
+  const request = async () => {
+    calls += 1;
+    return calls;
+  };
+
+  assert.equal(await coordinator.run('inbox', request), 1);
+  assert.equal(await coordinator.run('inbox', request), 2);
+  assert.equal(calls, 2);
+});
+
+test('reconciliação especial usa chave independente da busca comum', async () => {
+  const coordinator = createInFlightRequestCoordinator<string>();
+  let calls = 0;
+  const request = async (value: string) => {
+    calls += 1;
+    return value;
+  };
+
+  const common = coordinator.run('messages:conversation-a:common', () => request('common'));
+  const reconcile = coordinator.run('messages:conversation-a:reconcile', () => request('reconcile'));
+  assert.deepEqual(await Promise.all([common, reconcile]), ['common', 'reconcile']);
+  assert.equal(calls, 2);
+});
+
+test('guard de requisição impede resposta antiga de ser aplicada', () => {
+  const guard = createLatestRequestGuard();
+  const older = guard.begin();
+  const newer = guard.begin();
+
+  assert.equal(guard.isLatest(older), false);
+  assert.equal(guard.isLatest(newer), true);
+});
+
 test('phoneVariants cruza telefone brasileiro com e sem nono dígito', () => {
   const variants = phoneVariants('+55 (21) 98765-4321');
   assert.ok(variants.includes('5521987654321'));
@@ -69,6 +147,97 @@ test('mergeConversationMessages substitui duplicata e preserva ordem', () => {
   assert.deepEqual(merged.map((item) => item.id), ['b', 'c', 'a']);
   assert.equal(merged.find((item) => item.id === 'a')?.content, 'atualizada');
   assert.equal(merged.find((item) => item.id === 'a')?.status, 'read');
+});
+
+test('merge retorna o mesmo array para lote totalmente equivalente', () => {
+  const current = [message('a', 1000, 'primeira'), message('b', 2000, 'segunda')];
+  const incoming = current.map((item) => ({ ...item }));
+  const merged = mergeConversationMessages(current, incoming);
+
+  assert.strictEqual(merged, current);
+  assert.strictEqual(merged[0], current[0]);
+  assert.strictEqual(merged[1], current[1]);
+});
+
+test('merge faz append de mensagem nova preservando mensagens anteriores', () => {
+  const first = message('a', 1000, 'primeira');
+  const second = message('b', 2000, 'segunda');
+  const current = [first, second];
+  const merged = mergeConversationMessages(current, [message('c', 3000, 'terceira')]);
+
+  assert.notStrictEqual(merged, current);
+  assert.strictEqual(merged[0], first);
+  assert.strictEqual(merged[1], second);
+  assert.equal(merged[2]?.id, 'c');
+});
+
+test('merge preserva array quando o polling repete somente a última mensagem', () => {
+  const last = message('b', 2000, 'segunda');
+  const current = [message('a', 1000, 'primeira'), last];
+  const merged = mergeConversationMessages(current, [{ ...last }]);
+
+  assert.strictEqual(merged, current);
+});
+
+test('merge substitui somente a mensagem que mudou de status', () => {
+  const first = message('a', 1000, 'primeira');
+  const second = message('b', 2000, 'segunda');
+  const current = [first, second];
+  const merged = mergeConversationMessages(current, [message('b', 2000, 'segunda', 'delivered')]);
+
+  assert.notStrictEqual(merged, current);
+  assert.strictEqual(merged[0], first);
+  assert.notStrictEqual(merged[1], second);
+  assert.equal(merged[1]?.status, 'delivered');
+});
+
+test('merge insere mensagens antigas na paginação sem duplicar as atuais', () => {
+  const currentFirst = message('b', 2000, 'segunda');
+  const currentLast = message('c', 3000, 'terceira');
+  const merged = mergeConversationMessages(
+    [currentFirst, currentLast],
+    [message('a', 1000, 'primeira'), { ...currentFirst }],
+  );
+
+  assert.deepEqual(merged.map((item) => item.id), ['a', 'b', 'c']);
+  assert.strictEqual(merged[1], currentFirst);
+  assert.strictEqual(merged[2], currentLast);
+});
+
+test('merge elimina duplicatas do lote recebido usando a última versão', () => {
+  const current = [message('a', 1000, 'primeira')];
+  const merged = mergeConversationMessages(current, [
+    message('b', 2000, 'rascunho'),
+    message('b', 2000, 'versão final', 'sent'),
+  ]);
+
+  assert.deepEqual(merged.map((item) => item.id), ['a', 'b']);
+  assert.equal(merged[1]?.content, 'versão final');
+});
+
+test('merge ordena lote recebido fora de ordem cronológica', () => {
+  const merged = mergeConversationMessages([], [
+    message('c', 3000, 'terceira'),
+    message('a', 1000, 'primeira'),
+    message('b', 2000, 'segunda'),
+  ]);
+
+  assert.deepEqual(merged.map((item) => item.id), ['a', 'b', 'c']);
+});
+
+test('merge substitui somente mensagem com alteração real de metadado', () => {
+  const unchanged = message('a', 1000, 'primeira');
+  const changed = message('b', 2000, 'anúncio', 'sent', {
+    metadata: { trafficSource: 'FB_Ads', trafficTitle: 'Oferta antiga' },
+  });
+  const incomingChanged = message('b', 2000, 'anúncio', 'sent', {
+    metadata: { trafficSource: 'FB_Ads', trafficTitle: 'Oferta atualizada' },
+  });
+  const merged = mergeConversationMessages([unchanged, changed], [incomingChanged]);
+
+  assert.strictEqual(merged[0], unchanged);
+  assert.notStrictEqual(merged[1], changed);
+  assert.equal(merged[1]?.metadata?.trafficTitle, 'Oferta atualizada');
 });
 
 test('reconcilia snapshot equivalente reutilizando array e objetos', () => {

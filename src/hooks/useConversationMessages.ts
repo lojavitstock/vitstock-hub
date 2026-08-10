@@ -3,6 +3,7 @@ import { Conversation, Message } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { phoneVariants } from '../utils/phone';
 import { mergeConversationMessages } from '../utils/messageMerge';
+import { createLatestRequestGuard } from '../utils/requestCoordinator';
 
 type UseConversationMessagesOptions = {
   activeConversationId: string;
@@ -81,6 +82,7 @@ export const useConversationMessages = ({
     let shouldReconcile = true;
     let fetchInProgress = false;
     let reconciliationInProgress = false;
+    const requestGuard = createLatestRequestGuard();
     setMessages([]);
     messagesRef.current = [];
     latestTimestampRef.current = undefined;
@@ -89,8 +91,12 @@ export const useConversationMessages = ({
     setHistoryExpanded(false);
     historyExpandedRef.current = false;
 
-    const applyMessagesPage = (page: { messages: Message[]; hasMore: boolean }, shouldScroll: boolean) => {
-      if (!isSubscribed) return;
+    const applyMessagesPage = (
+      page: { messages: Message[]; hasMore: boolean },
+      shouldScroll: boolean,
+      requestId: number,
+    ) => {
+      if (!isSubscribed || !requestGuard.isLatest(requestId)) return;
       const cutoff = Date.now() - HISTORY_WINDOW_MS;
       const recentMessages = historyExpandedRef.current
         ? page.messages
@@ -104,7 +110,14 @@ export const useConversationMessages = ({
         latestTimestampRef.current || 0,
         ...recentMessages.map((message) => message.timestampMs || 0),
       );
-      setMessages((previous) => mergeConversationMessages(previous, recentMessages));
+      const previousMessages = messagesRef.current;
+      const reconciledMessages = mergeConversationMessages(previousMessages, recentMessages);
+      if (reconciledMessages !== previousMessages) {
+        messagesRef.current = reconciledMessages;
+        setMessages((currentMessages) => currentMessages === previousMessages
+          ? reconciledMessages
+          : mergeConversationMessages(currentMessages, recentMessages));
+      }
       if (shouldScroll) window.setTimeout(() => {
         if (stickToBottomRef.current) scrollToBottom();
       }, 0);
@@ -114,6 +127,7 @@ export const useConversationMessages = ({
       if (fetchInProgress) return;
       fetchInProgress = true;
       const firstFetch = isInitialFetch;
+      const requestId = requestGuard.begin();
       const container = messagesContainerRef.current;
       const distanceFromBottom = container
         ? container.scrollHeight - container.scrollTop - container.clientHeight
@@ -147,10 +161,11 @@ export const useConversationMessages = ({
         shouldReconcile = false;
         if (!isSubscribed) return;
         localMessagesAvailable = page.messages.length > 0;
-        applyMessagesPage(page, shouldScroll);
+        applyMessagesPage(page, shouldScroll, requestId);
 
         if (reconcile && !reconciliationInProgress) {
           reconciliationInProgress = true;
+          const reconciliationRequestId = requestGuard.begin();
           void EvolutionApiService.fetchConversationMessagesPage(
             instanceName,
             activeConversationId,
@@ -160,7 +175,7 @@ export const useConversationMessages = ({
             undefined,
             afterTimestamp,
           )
-            .then((reconciledPage) => applyMessagesPage(reconciledPage, shouldScroll))
+            .then((reconciledPage) => applyMessagesPage(reconciledPage, shouldScroll, reconciliationRequestId))
             .catch(() => undefined)
             .finally(() => {
               reconciliationInProgress = false;
@@ -236,7 +251,14 @@ export const useConversationMessages = ({
         undefined,
       );
       if (page.messages.length > 0) {
-        setMessages((previous) => mergeConversationMessages(previous, page.messages));
+        const previousMessages = messagesRef.current;
+        const reconciledMessages = mergeConversationMessages(previousMessages, page.messages);
+        if (reconciledMessages !== previousMessages) {
+          messagesRef.current = reconciledMessages;
+          setMessages((currentMessages) => currentMessages === previousMessages
+            ? reconciledMessages
+            : mergeConversationMessages(currentMessages, page.messages));
+        }
         window.requestAnimationFrame(() => {
           const nextContainer = messagesContainerRef.current;
           if (nextContainer) nextContainer.scrollTop = nextContainer.scrollHeight - previousHeight + previousTop;

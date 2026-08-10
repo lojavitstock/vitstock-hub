@@ -5,6 +5,7 @@ import { ChatStatus, Conversation } from '../types';
 import { ConversationFilter } from '../components/conversations/ConversationFilters';
 import { phoneVariants } from '../utils/phone';
 import { reconcileConversations } from '../utils/conversationReconciliation';
+import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 
 export const conversationNeedsResponse = (conversation: Conversation) => (
   conversation.needsResponse
@@ -51,7 +52,7 @@ export const useConversationInbox = ({
   const activeConversationIdRef = useRef('');
   const readOverridesRef = useRef(new Map<string, number>());
   const contactNameOverridesRef = useRef(new Map<string, string>());
-  const loadingChatsRef = useRef(false);
+  const inboxRequestsRef = useRef(createInFlightRequestCoordinator<void>());
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -66,11 +67,9 @@ export const useConversationInbox = ({
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
 
-  const loadChats = useCallback(async (showLoading = true) => {
+  const loadChats = useCallback((showLoading = true) => inboxRequestsRef.current.run('inbox', async () => {
     // A Evolution pode levar vários segundos para responder. Não iniciamos
     // outra sincronização enquanto a anterior ainda está em andamento.
-    if (loadingChatsRef.current) return;
-    loadingChatsRef.current = true;
     if (showLoading) setLoadingChats(true);
 
     try {
@@ -131,10 +130,9 @@ export const useConversationInbox = ({
       // Uma falha temporária não deve apagar a lista já renderizada.
       console.warn('[Atendimento] Não foi possível atualizar as conversas:', error);
     } finally {
-      loadingChatsRef.current = false;
       if (showLoading) setLoadingChats(false);
     }
-  }, [instanceName, isMock]);
+  }), [instanceName, isMock]);
 
   useEffect(() => {
     void loadChats();

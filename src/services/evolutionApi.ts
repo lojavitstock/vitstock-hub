@@ -3,6 +3,7 @@ import { mockInstances, mockConversations } from './mockData';
 import { evolutionMessagePreview, normalizeEvolutionMessage } from './evolutionMessageAdapter';
 import { phoneVariants } from '../utils/phone';
 import { callMessageInfo } from '../utils/callMessage';
+import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 
 const unwrapEvolutionMessage = (message: any) => {
   let current = message || {};
@@ -210,6 +211,10 @@ const extractEvolutionButtons = (message: any): NonNullable<Message['interactive
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 const USE_MOCK = import.meta.env.VITE_USE_MOCK_DATA === 'true';
 const API_TIMEOUT_MS = 30_000;
+const conversationMessageRequests = createInFlightRequestCoordinator<{
+  messages: Message[];
+  hasMore: boolean;
+}>();
 
 const apiFetch = (path: string, init?: RequestInit) => fetch(`${API_URL}${path}`, {
   ...init,
@@ -691,6 +696,38 @@ export class EvolutionApiService {
   }
 
   static async fetchConversationMessagesPage(
+    instanceName: string,
+    remoteJid: string,
+    phone: string,
+    attendantLabel = 'Atendente',
+    reconcile = false,
+    beforeTimestamp?: number,
+    afterTimestamp?: number,
+    limit = 100,
+  ) {
+    const requestKey = JSON.stringify({
+      instanceName,
+      remoteJid,
+      phone: phone.replace(/\D/g, ''),
+      attendantLabel,
+      reconcile,
+      beforeTimestamp: beforeTimestamp ?? null,
+      afterTimestamp: afterTimestamp ?? null,
+      limit,
+    });
+    return conversationMessageRequests.run(requestKey, () => this.fetchConversationMessagesPageUncoordinated(
+      instanceName,
+      remoteJid,
+      phone,
+      attendantLabel,
+      reconcile,
+      beforeTimestamp,
+      afterTimestamp,
+      limit,
+    ));
+  }
+
+  private static async fetchConversationMessagesPageUncoordinated(
     instanceName: string,
     remoteJid: string,
     phone: string,
