@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { config, isAllowedFrontendOrigin } from './config.js';
 import { requireUser } from './auth.js';
 import { db } from './db.js';
+import { buildHasOlderMessagesQuery } from './hasOlderMessagesQuery.js';
 import { publishRealtimeEvent, registerRealtimeClient } from './realtime.js';
 
 const jidSchema = z.object({
@@ -1513,18 +1514,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const afterFilter = `($${afterParam}::numeric IS NULL OR m.sent_at > to_timestamp($${afterParam}::numeric / 1000))`;
 
     const hasOlderMessages = async () => {
-      if (!parsed.data.afterTimestamp) return false;
-      const older = await db.query(
-        `SELECT 1
-         FROM messages m
-         JOIN conversations c ON c.id = m.conversation_id
-         WHERE m.company_id = $1
-           AND ${conversationFilter}
-           AND m.sent_at <= to_timestamp($${afterParam}::numeric / 1000)
-           AND m.is_internal_note = false
-         LIMIT 1`,
-        [...queryParams, pageSize, null, parsed.data.afterTimestamp] as any[],
-      );
+      const olderQuery = buildHasOlderMessagesQuery({
+        companyId: request.user!.companyId,
+        jids: [...jids],
+        contactIds,
+        afterTimestamp: parsed.data.afterTimestamp,
+      });
+      if (!olderQuery) return false;
+      const older = await db.query(olderQuery.text, olderQuery.values);
       return older.rows.length > 0;
     };
 
