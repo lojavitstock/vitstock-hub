@@ -54,6 +54,7 @@ export const AtendimentoPage: React.FC = () => {
   const composerRef = useRef<MessageComposerHandle>(null);
   const composerTextRef = useRef('');
   const activeConversationIdRef = useRef<string | null>(null);
+  const autoReadMarkersRef = useRef(new Map<string, string>());
   const handleComposerTextChange = useCallback((value: string) => {
     composerTextRef.current = value;
   }, []);
@@ -102,6 +103,14 @@ export const AtendimentoPage: React.FC = () => {
   useEffect(() => {
     activeConversationIdRef.current = activeConvId;
   }, [activeConvId]);
+
+  useEffect(() => {
+    if (!activeConv || activeConv.unreadCount <= 0) return;
+    const marker = activeConv.lastMessageKey?.id || String(activeConv.lastMessageAt || 'unknown');
+    if (autoReadMarkersRef.current.get(activeConv.id) === marker) return;
+    autoReadMarkersRef.current.set(activeConv.id, marker);
+    void markConversationAsRead(activeConv);
+  }, [activeConv, markConversationAsRead]);
 
   const {
     showContactInfo,
@@ -547,8 +556,8 @@ export const AtendimentoPage: React.FC = () => {
         lastMessage: `[Nota Interna]: ${newMsgText}`,
         lastMessageTimestamp: 'Agora',
         unreadCount: 0,
-        lastMessageFromMe: false,
-        needsResponse: false,
+        lastMessageFromMe: c.lastMessageFromMe,
+        needsResponse: c.needsResponse,
       } : c));
     }
   };

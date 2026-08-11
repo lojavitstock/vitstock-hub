@@ -10,6 +10,7 @@ import { reconcileConversations, reconcileConversationsMonotonic } from '../src/
 import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../src/utils/requestCoordinator';
 import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
 import { createMessageNotificationDeduper } from '../src/utils/messageNotification';
+import { conversationNeedsResponse } from '../src/utils/conversationState';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../src/utils/realtimeConfig';
 import {
   CONVERSATION_MESSAGE_CACHE_LIMIT,
@@ -181,6 +182,29 @@ test('deduplicador de notificacoes so aceita novas mensagens recebidas do client
   assert.equal(deduper.shouldNotify({ ...incoming }), false);
   assert.equal(deduper.shouldNotify({ ...incoming, id: 'notification-2', sender: 'attendant' }), false);
   assert.equal(deduper.shouldNotify({ ...incoming, id: 'notification-3', isInternalNote: true }), false);
+});
+
+test('não lida e não respondida permanecem estados independentes', () => {
+  assert.equal(conversationNeedsResponse(conversation('read-unanswered', {
+    unreadCount: 0,
+    needsResponse: true,
+    lastMessageFromMe: false,
+  })), true);
+  assert.equal(conversationNeedsResponse(conversation('read-answered', {
+    unreadCount: 3,
+    needsResponse: false,
+    lastMessageFromMe: false,
+  })), false);
+  assert.equal(conversationNeedsResponse(conversation('legacy-unanswered', {
+    unreadCount: 0,
+    needsResponse: undefined,
+    lastMessageFromMe: false,
+  })), true);
+  assert.equal(conversationNeedsResponse(conversation('legacy-answered', {
+    unreadCount: 3,
+    needsResponse: undefined,
+    lastMessageFromMe: true,
+  })), false);
 });
 
 test('SSE de nova mensagem completa atualiza o histórico sem refetch', () => {

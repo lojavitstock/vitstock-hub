@@ -52,6 +52,7 @@ export const ConversationList = React.memo<ConversationListProps>(
           key={conversation.id}
           conversation={conversation}
           isSelected={conversation.id === activeConversationId}
+          isUnread={conversation.unreadCount > 0}
           needsResponse={needsResponse(conversation)}
           needsAttention={needsAttention(conversation)}
           onSelect={onSelectConversation}

@@ -10,11 +10,9 @@ import { reconcileRealtimeConversation } from '../utils/realtimeUpdates';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../utils/realtimeConfig';
 import { createMessageNotificationDeduper } from '../utils/messageNotification';
 import { playNotificationSound } from '../utils/notificationSound';
+import { conversationNeedsResponse } from '../utils/conversationState';
 
-export const conversationNeedsResponse = (conversation: Conversation) => (
-  conversation.needsResponse
-  ?? (conversation.status !== 'resolved' && !conversation.lastMessageFromMe && conversation.unreadCount > 0)
-);
+export { conversationNeedsResponse } from '../utils/conversationState';
 
 const UNANSWERED_ALERT_MS = 20 * 60 * 1000;
 
@@ -264,9 +262,13 @@ export const useConversationInbox = ({
   const needsAttention = useCallback((conversation: Conversation) => conversationNeedsAttention(conversation, now), [now]);
 
   const markConversationAsRead = useCallback(async (conversation: Conversation) => {
-    setConversations((previous) => previous.map((item) => item.id === conversation.id
-      ? { ...item, unreadCount: 0 }
-      : item));
+    setConversations((previous) => {
+      const next = previous.map((item) => item.id === conversation.id
+        ? { ...item, unreadCount: 0 }
+        : item);
+      conversationsRef.current = next;
+      return next;
+    });
     if (!conversation.lastMessageAt) return;
 
     readOverridesRef.current.set(conversation.id, conversation.lastMessageAt);
@@ -345,7 +347,7 @@ export const useConversationInbox = ({
         ? false
         : conversation.lastMessageFromMe
           ? false
-          : conversation.needsResponse ?? conversation.unreadCount > 0,
+          : conversation.needsResponse ?? conversation.lastMessageFromMe === false,
     } : conversation));
     setAssignmentFeedback('');
 

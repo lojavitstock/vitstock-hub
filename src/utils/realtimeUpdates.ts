@@ -162,7 +162,7 @@ const updateConversationFromStatus = (
       ? false
       : next.lastMessageFromMe
         ? false
-        : next.needsResponse ?? next.unreadCount > 0;
+        : next.needsResponse ?? next.lastMessageFromMe === false;
     changed = changed
       || conversation.status !== event.status
       || next.needsResponse !== nextNeedsResponse;

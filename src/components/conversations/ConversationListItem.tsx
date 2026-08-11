@@ -6,6 +6,7 @@ import { formatMessageTimestamp } from './conversationFormatters';
 type ConversationListItemProps = {
   conversation: Conversation;
   isSelected: boolean;
+  isUnread: boolean;
   needsResponse: boolean;
   needsAttention: boolean;
   onSelect: (conversation: Conversation) => void;
@@ -33,6 +34,7 @@ const areVisibleFieldsEqual = (previous: Conversation, next: Conversation) => (
 export const ConversationListItem = React.memo<ConversationListItemProps>(({
   conversation,
   isSelected,
+  isUnread,
   needsResponse,
   needsAttention,
   onSelect,
@@ -52,15 +54,17 @@ export const ConversationListItem = React.memo<ConversationListItemProps>(({
             ? 'border-l-amber-400 bg-[#2d3a40] shadow-[inset_3px_0_0_#EEBB2C]'
             : needsResponse
               ? 'border-l-emerald-400 bg-[#20343a] shadow-[inset_3px_0_0_#34d399] hover:bg-[#294147]'
+              : isUnread
+                ? 'border-l-sky-400 bg-sky-950/20 shadow-[inset_3px_0_0_#38bdf8] hover:bg-sky-950/30'
               : 'border-l-transparent hover:bg-[#222d33]'
       }`}
       aria-current={isSelected ? 'true' : undefined}
     >
-      <ContactPhoto name={conversation.contact.name} avatar={conversation.contact.avatar} emphasized={isSelected || needsResponse} lazy />
+      <ContactPhoto name={conversation.contact.name} avatar={conversation.contact.avatar} emphasized={isSelected || needsResponse || isUnread} lazy />
 
       <span className="min-w-0 flex-1">
         <span className="mb-1 flex items-start justify-between gap-2">
-          <span className={`truncate text-[14px] leading-5 ${needsAttention || needsResponse ? 'font-extrabold text-white' : 'font-bold text-slate-100'}`}>
+          <span className={`truncate text-[14px] leading-5 ${needsAttention || needsResponse || isUnread ? 'font-extrabold text-white' : 'font-bold text-slate-100'}`}>
             {conversation.contact.name}
           </span>
           <span className="shrink-0 pt-0.5 text-[11px] font-semibold tabular-nums text-slate-400">
@@ -68,7 +72,7 @@ export const ConversationListItem = React.memo<ConversationListItemProps>(({
           </span>
         </span>
 
-        <span className={`mb-2 block truncate text-[13px] leading-5 ${needsAttention ? 'font-bold text-red-100' : needsResponse ? 'font-bold text-slate-200' : 'text-slate-300'}`}>
+        <span className={`mb-2 block truncate text-[13px] leading-5 ${needsAttention ? 'font-bold text-red-100' : needsResponse ? 'font-bold text-slate-200' : isUnread ? 'font-semibold text-sky-100' : 'text-slate-300'}`}>
           {conversation.lastMessage}
         </span>
 
@@ -76,6 +80,11 @@ export const ConversationListItem = React.memo<ConversationListItemProps>(({
           <span className="rounded-md border border-[#46535a] bg-[#263239] px-1.5 py-0.5 text-[10px] font-semibold leading-4 text-slate-300">
             {conversation.department}
           </span>
+          {isUnread && (
+            <span className="rounded-md border border-sky-300/30 bg-sky-300/10 px-1.5 py-0.5 text-[10px] font-bold leading-4 text-sky-200">
+              Não lida
+            </span>
+          )}
           {conversation.contact.tags.map((tag) => (
             <span
               key={tag.id}
@@ -91,6 +100,7 @@ export const ConversationListItem = React.memo<ConversationListItemProps>(({
   );
 }, (previous, next) => (
   previous.isSelected === next.isSelected
+  && previous.isUnread === next.isUnread
   && previous.needsResponse === next.needsResponse
   && previous.needsAttention === next.needsAttention
   && previous.onSelect === next.onSelect
