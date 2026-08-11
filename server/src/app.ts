@@ -51,8 +51,17 @@ export async function createApp() {
   await registerGoogleContactRoutes(app);
 
   app.setErrorHandler((error, request, reply) => {
-    request.log.error({ err: error }, 'Erro não tratado');
     const httpError = error as Error & { statusCode?: number; code?: string };
+    const route = request.routeOptions?.url || request.url.split('?')[0];
+    request.log.error({
+      errorName: httpError.name || 'Error',
+      errorMessage: httpError.message || String(error),
+      errorCode: httpError.code,
+      errorStack: httpError.stack,
+      requestId: request.id,
+      method: request.method,
+      route,
+    }, 'Erro não tratado');
     const databaseUnavailable = ['53300', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH'].includes(httpError.code || '')
       || /timeout exceeded when trying to connect/i.test(httpError.message || '');
     const statusCode = databaseUnavailable
