@@ -39,6 +39,7 @@ export const useConversationMessages = ({
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [backgroundRefreshing, setBackgroundRefreshing] = useState(false);
   const [historyExpanded, setHistoryExpanded] = useState(false);
+  const [newMessagesCount, setNewMessagesCount] = useState(0);
   const conversationsRef = useRef(conversations);
   const messagesRef = useRef<Message[]>([]);
   const messagesConversationIdRef = useRef('');
@@ -47,6 +48,7 @@ export const useConversationMessages = ({
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const historyExpandedRef = useRef(false);
+  const newMessagesCountRef = useRef(0);
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -65,20 +67,36 @@ export const useConversationMessages = ({
     });
   }, [activeConversationId, isMock, messages]);
 
+  const clearNewMessages = useCallback(() => {
+    if (newMessagesCountRef.current === 0) return;
+    newMessagesCountRef.current = 0;
+    setNewMessagesCount(0);
+  }, []);
+
+  const registerNewMessages = useCallback((count: number) => {
+    if (count <= 0 || stickToBottomRef.current) return;
+    const nextCount = newMessagesCountRef.current + count;
+    newMessagesCountRef.current = nextCount;
+    setNewMessagesCount(nextCount);
+  }, []);
+
   const scrollToBottom = useCallback(() => {
     const container = messagesContainerRef.current;
     if (container) {
       stickToBottomRef.current = true;
+      clearNewMessages();
       container.scrollTop = container.scrollHeight;
     }
-  }, []);
+  }, [clearNewMessages]);
 
   useEffect(() => {
     const container = messagesContainerRef.current;
     if (!container) return undefined;
     const handleScroll = () => {
       const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-      stickToBottomRef.current = distanceFromBottom <= 120;
+      const nearBottom = distanceFromBottom <= 120;
+      stickToBottomRef.current = nearBottom;
+      if (nearBottom) clearNewMessages();
     };
     container.addEventListener('scroll', handleScroll, { passive: true });
     const resizeObserver = typeof ResizeObserver !== 'undefined'
@@ -91,7 +109,7 @@ export const useConversationMessages = ({
       container.removeEventListener('scroll', handleScroll);
       resizeObserver?.disconnect();
     };
-  }, [activeConversationId]);
+  }, [activeConversationId, clearNewMessages]);
 
   useEffect(() => {
     if (!activeConversationId || isMock || connectionStatus !== 'connected') {
@@ -109,7 +127,12 @@ export const useConversationMessages = ({
     const requestGuard = createLatestRequestGuard();
     const cachedEntry = readConversationMessagesCache(messageCacheRef.current, activeConversationId);
     const hasCachedMessages = Boolean(cachedEntry);
+    const isConversationSwitch = messagesConversationIdRef.current !== activeConversationId;
     messagesConversationIdRef.current = activeConversationId;
+    if (isConversationSwitch) {
+      stickToBottomRef.current = true;
+      clearNewMessages();
+    }
     if (cachedEntry) {
       messagesRef.current = cachedEntry.messages;
       latestTimestampRef.current = cachedEntry.latestTimestamp;
@@ -132,6 +155,7 @@ export const useConversationMessages = ({
       page: { messages: Message[]; hasMore: boolean },
       shouldScroll: boolean,
       requestId: number,
+      trackIncoming = false,
     ) => {
       if (!isSubscribed || !requestGuard.isLatest(requestId)) return;
       const cutoff = Date.now() - HISTORY_WINDOW_MS;
@@ -144,6 +168,16 @@ export const useConversationMessages = ({
       const nextHasMoreMessages = page.hasMore || hasHiddenHistory;
       setHasMoreMessages(nextHasMoreMessages);
       const previousMessages = messagesRef.current;
+      const previousMessageIds = new Set(previousMessages.map((message) => message.id));
+      const incomingIds = trackIncoming
+        ? new Set(recentMessages
+          .filter((message) => (
+            message.sender === 'contact'
+            && !message.isInternalNote
+            && !previousMessageIds.has(message.id)
+          ))
+          .map((message) => message.id))
+        : new Set<string>();
       let reconciledMessages = previousMessages;
       if (recentMessages.length > 0) {
         latestTimestampRef.current = Math.max(
@@ -158,6 +192,7 @@ export const useConversationMessages = ({
             : mergeConversationMessages(currentMessages, recentMessages));
         }
       }
+      if (incomingIds.size > 0) registerNewMessages(incomingIds.size);
       writeConversationMessagesCache(messageCacheRef.current, activeConversationId, {
         messages: reconciledMessages,
         hasMoreMessages: nextHasMoreMessages,
@@ -179,7 +214,9 @@ export const useConversationMessages = ({
       const distanceFromBottom = container
         ? container.scrollHeight - container.scrollTop - container.clientHeight
         : 0;
-      const shouldScroll = !hasCachedMessages && (isInitialFetch || distanceFromBottom <= 120);
+      const shouldScroll = isInitialFetch
+        ? (isConversationSwitch || !hasCachedMessages || distanceFromBottom <= 120)
+        : distanceFromBottom <= 120;
       if (!hasCachedMessages) stickToBottomRef.current = shouldScroll;
       isInitialFetch = false;
       const conversation = conversationsRef.current.find((item) => item.id === activeConversationId);
@@ -208,7 +245,7 @@ export const useConversationMessages = ({
         shouldReconcile = false;
         if (!isSubscribed) return;
         localMessagesAvailable = page.messages.length > 0;
-        applyMessagesPage(page, shouldScroll, requestId);
+        applyMessagesPage(page, shouldScroll, requestId, !firstFetch);
 
         if (reconcile && !reconciliationInProgress) {
           reconciliationInProgress = true;
@@ -222,7 +259,7 @@ export const useConversationMessages = ({
             undefined,
             afterTimestamp,
           )
-            .then((reconciledPage) => applyMessagesPage(reconciledPage, shouldScroll, reconciliationRequestId))
+            .then((reconciledPage) => applyMessagesPage(reconciledPage, shouldScroll, reconciliationRequestId, false))
             .catch(() => undefined)
             .finally(() => {
               reconciliationInProgress = false;
@@ -315,9 +352,16 @@ export const useConversationMessages = ({
         if (currentMessages === previousMessages) return reconciledMessages;
         return reconcileRealtimeMessages(currentMessages, activeConversationId, event) || currentMessages;
       });
-      window.setTimeout(() => {
-        if (stickToBottomRef.current) scrollToBottom();
-      }, 0);
+      const incomingMessage = event.type === 'message.upsert'
+        && event.message?.sender === 'contact'
+        && !event.message?.isInternalNote;
+      if (incomingMessage && !stickToBottomRef.current) {
+        registerNewMessages(1);
+      } else {
+        window.setTimeout(() => {
+          if (stickToBottomRef.current) scrollToBottom();
+        }, 0);
+      }
     });
     let previousWhatsappStatus: 'connected' | 'connecting' | 'disconnected' = 'connecting';
     const handleWhatsAppStatus = (event: Event) => {
@@ -347,7 +391,7 @@ export const useConversationMessages = ({
       window.removeEventListener('vitstock:whatsapp-status', handleWhatsAppStatus);
       unsubscribe();
     };
-  }, [activeConversationId, attendantLabel, connectionStatus, instanceName, isMock, scrollToBottom]);
+  }, [activeConversationId, attendantLabel, connectionStatus, instanceName, isMock, registerNewMessages, scrollToBottom]);
 
   useEffect(() => {
     historyExpandedRef.current = historyExpanded;
@@ -452,5 +496,6 @@ export const useConversationMessages = ({
     setMessages,
     messagesContainerRef,
     scrollToBottom,
+    newMessagesCount,
   };
 };

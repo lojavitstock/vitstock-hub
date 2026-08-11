@@ -32,7 +32,9 @@ type MessageTimelineProps = {
   loadingOlderMessages?: boolean;
   loadingMessages?: boolean;
   historyExpanded?: boolean;
+  newMessagesCount?: number;
   onLoadOlder?: () => void;
+  onJumpToLatest?: () => void;
   onRetryMessage: (message: Message) => void;
 };
 
@@ -262,7 +264,7 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
   return null;
 };
 
-export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, onLoadOlder, onRetryMessage }) => {
+export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage }) => {
   let previousDay = '';
   return (
   <div ref={containerRef} style={{ overflowAnchor: 'none' }} className="chat-wallpaper relative flex-1 space-y-3 overflow-y-auto px-6 py-5 text-[15px]">
@@ -289,6 +291,15 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
           {loadingOlderMessages ? 'Carregando histórico...' : 'Carregar mensagens anteriores'}
         </button>
       </div>
+    )}
+    {newMessagesCount > 0 && onJumpToLatest && (
+      <button
+        type="button"
+        onClick={onJumpToLatest}
+        className="absolute bottom-5 right-6 z-20 rounded-full border border-emerald-300/40 bg-[#1f8f70] px-4 py-2 text-xs font-bold text-white shadow-lg transition-colors hover:bg-[#27a77f]"
+      >
+        ↓ {newMessagesCount} nova {newMessagesCount === 1 ? 'mensagem' : 'mensagens'}
+      </button>
     )}
     {messages.map((message) => {
       const isMe = message.sender === 'attendant';

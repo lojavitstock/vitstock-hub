@@ -54,6 +54,31 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
       onTextChange?.(value);
     },
   }), [onTextChange]);
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
+
+    if (event.ctrlKey) {
+      event.preventDefault();
+      const textarea = event.currentTarget;
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const nextValue = `${inputText.slice(0, start)}\n${inputText.slice(end)}`;
+      setInputText(nextValue);
+      onTextChange?.(nextValue);
+      window.requestAnimationFrame(() => {
+        textarea.selectionStart = start + 1;
+        textarea.selectionEnd = start + 1;
+      });
+      return;
+    }
+
+    if (event.shiftKey) return;
+    event.preventDefault();
+    if (!inputText.trim() || activeChatLocked || sendingMedia || (!isInternalNote && !whatsappConnected)) return;
+    event.currentTarget.form?.requestSubmit();
+  };
+
   return (
   <>
     {quickReplyOpen && (
@@ -101,7 +126,7 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
         <button type="button" onClick={() => attachmentInputRef.current?.click()} disabled={activeChatLocked || isInternalNote || sendingMedia || !whatsappConnected} title="Enviar imagem, vídeo ou documento" className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40">
           <Paperclip className="h-4 w-4" />
         </button>
-        <textarea rows={1} value={inputText} onChange={(event) => { setInputText(event.target.value); onTextChange?.(event.target.value); }} onPaste={onInputPaste} disabled={activeChatLocked || sendingMedia} placeholder={isInternalNote ? 'Digite uma nota interna para a equipe...' : 'Digite sua mensagem para o WhatsApp...'} title={!isInternalNote ? 'Cole uma imagem com Ctrl+V para enviar' : undefined} className={`max-h-32 min-h-12 flex-1 resize-y rounded-2xl border bg-[#2a343a] px-4 py-3 text-base leading-6 text-slate-100 placeholder-slate-400 transition-colors focus:outline-none ${isInternalNote ? 'border-amber-400/50 bg-amber-400/5 focus:border-amber-400' : 'border-transparent focus:border-amber-400/70'}`} />
+        <textarea rows={1} value={inputText} onChange={(event) => { setInputText(event.target.value); onTextChange?.(event.target.value); }} onKeyDown={handleKeyDown} onPaste={onInputPaste} disabled={activeChatLocked || sendingMedia} placeholder={isInternalNote ? 'Digite uma nota interna para a equipe...' : 'Digite sua mensagem para o WhatsApp...'} title={!isInternalNote ? 'Cole uma imagem com Ctrl+V para enviar' : undefined} className={`max-h-32 min-h-12 flex-1 resize-y rounded-2xl border bg-[#2a343a] px-4 py-3 text-base leading-6 text-slate-100 placeholder-slate-400 transition-colors focus:outline-none ${isInternalNote ? 'border-amber-400/50 bg-amber-400/5 focus:border-amber-400' : 'border-transparent focus:border-amber-400/70'}`} />
         <button type="submit" disabled={activeChatLocked || sendingMedia || (!isInternalNote && !whatsappConnected)} className={`flex items-center justify-center rounded-full p-3 font-bold transition-all ${isInternalNote ? 'bg-amber-500 text-zinc-950 hover:bg-amber-400' : 'bg-amber-400 text-zinc-950 shadow-[0_0_12px_rgba(238,187,44,0.3)] hover:bg-amber-300'} disabled:cursor-not-allowed disabled:opacity-40`}>
           <Send className="h-4 w-4" />
         </button>

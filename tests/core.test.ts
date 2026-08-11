@@ -9,6 +9,7 @@ import { callMessageInfo } from '../src/utils/callMessage';
 import { reconcileConversations, reconcileConversationsMonotonic } from '../src/utils/conversationReconciliation';
 import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../src/utils/requestCoordinator';
 import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
+import { createMessageNotificationDeduper } from '../src/utils/messageNotification';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../src/utils/realtimeConfig';
 import {
   CONVERSATION_MESSAGE_CACHE_LIMIT,
@@ -170,6 +171,16 @@ test('guard de requisição impede resposta antiga de ser aplicada', () => {
 
   assert.equal(guard.isLatest(older), false);
   assert.equal(guard.isLatest(newer), true);
+});
+
+test('deduplicador de notificacoes so aceita novas mensagens recebidas do cliente', () => {
+  const deduper = createMessageNotificationDeduper();
+  const incoming = message('notification-1', 2000, 'ola');
+
+  assert.equal(deduper.shouldNotify(incoming), true);
+  assert.equal(deduper.shouldNotify({ ...incoming }), false);
+  assert.equal(deduper.shouldNotify({ ...incoming, id: 'notification-2', sender: 'attendant' }), false);
+  assert.equal(deduper.shouldNotify({ ...incoming, id: 'notification-3', isInternalNote: true }), false);
 });
 
 test('SSE de nova mensagem completa atualiza o histórico sem refetch', () => {

@@ -188,6 +188,7 @@ export const AtendimentoPage: React.FC = () => {
     loadOlderMessages,
     messagesContainerRef,
     scrollToBottom,
+    newMessagesCount,
   } = useConversationMessages({
     activeConversationId: activeConvId,
     conversations,
@@ -1115,7 +1116,9 @@ export const AtendimentoPage: React.FC = () => {
               loadingMessages={loadingMessages}
               historyExpanded={historyExpanded}
               loadingOlderMessages={loadingOlderMessages}
+              newMessagesCount={newMessagesCount}
               onLoadOlder={handleLoadOlderMessages}
+              onJumpToLatest={scrollToBottom}
               onRetryMessage={handleRetryMessage}
             />
 

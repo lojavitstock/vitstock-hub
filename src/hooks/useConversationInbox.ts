@@ -8,6 +8,8 @@ import { reconcileConversations, reconcileConversationsMonotonic } from '../util
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 import { reconcileRealtimeConversation } from '../utils/realtimeUpdates';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../utils/realtimeConfig';
+import { createMessageNotificationDeduper } from '../utils/messageNotification';
+import { playNotificationSound } from '../utils/notificationSound';
 
 export const conversationNeedsResponse = (conversation: Conversation) => (
   conversation.needsResponse
@@ -69,6 +71,7 @@ export const useConversationInbox = ({
   const contactNameOverridesRef = useRef(new Map<string, string>());
   const inboxRequestsRef = useRef(createInFlightRequestCoordinator<void>());
   const whatsappStatusRef = useRef<'connected' | 'connecting' | 'disconnected'>('connecting');
+  const messageNotificationDeduperRef = useRef(createMessageNotificationDeduper());
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -179,6 +182,10 @@ export const useConversationInbox = ({
     if (isMock) return undefined;
 
     const unsubscribe = EvolutionApiService.subscribeToRealtimeEvents((event) => {
+      if (event.type === 'message.upsert'
+        && messageNotificationDeduperRef.current.shouldNotify(event.message)) {
+        playNotificationSound();
+      }
       if (event.type === REALTIME_RECONNECTED_EVENT) {
         if (document.visibilityState === 'visible') {
           void EvolutionApiService.getInstanceStatus(instanceName);
