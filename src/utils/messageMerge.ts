@@ -96,6 +96,27 @@ export const areMessagesEquivalent = (previous: Message, next: Message) => (
 
 const timestampOf = (message: Message) => message.timestampMs || 0;
 
+const comparableOutboundContent = (message: Message) => {
+  const content = message.content.trim();
+  if (message.sender !== 'attendant') return content;
+  // O backend envia o nome do atendente na primeira linha para a Evolution,
+  // enquanto a linha otimista já o exibe separadamente via senderName.
+  return content.replace(/^\*[^*\r\n]+\*\s*(?:\r?\n|$)/, '').trim();
+};
+
+const canReconcileOptimisticOutbound = (current: Message, incoming: Message) => {
+  if (current.sender !== 'attendant' || incoming.sender !== 'attendant') return false;
+  if (current.isInternalNote || incoming.isInternalNote) return false;
+  if (current.status !== 'pending' && current.status !== 'failed') return false;
+  if (current.rawKey || !incoming.rawKey) return false;
+  if (comparableOutboundContent(current) !== comparableOutboundContent(incoming)) return false;
+  if (current.mediaType !== incoming.mediaType) return false;
+  const currentTimestamp = timestampOf(current);
+  const incomingTimestamp = timestampOf(incoming);
+  return currentTimestamp > 0 && incomingTimestamp > 0
+    && Math.abs(currentTimestamp - incomingTimestamp) <= 5 * 60 * 1000;
+};
+
 const isChronological = (messages: Message[]) => messages.every((message, index) => (
   index === 0 || timestampOf(messages[index - 1]) <= timestampOf(message)
 ));
@@ -112,16 +133,40 @@ export const mergeConversationMessages = (current: Message[], incoming: Message[
   const incomingById = new Map<string, Message>();
   incoming.forEach((message) => incomingById.set(message.id, message));
 
+  // O webhook pode chegar antes da resposta do POST de envio. Nesse caso,
+  // correlacionamos o ID real do provedor com a mensagem otimista pendente
+  // para substituir uma única linha, em vez de criar uma duplicata visual.
+  const optimisticAliases = new Map<string, string>();
+  const aliasByOptimisticId = new Map<string, Message>();
+  const usedOptimisticIds = new Set<string>();
+  incomingById.forEach((message) => {
+    if (currentById.has(message.id)) return;
+    const candidate = current.find((item) => (
+      !usedOptimisticIds.has(item.id) && canReconcileOptimisticOutbound(item, message)
+    ));
+    if (!candidate) return;
+    optimisticAliases.set(message.id, candidate.id);
+    aliasByOptimisticId.set(candidate.id, message);
+    usedOptimisticIds.add(candidate.id);
+  });
+
   let hasChanges = false;
   const updatedCurrent = current.map((message) => {
     const next = incomingById.get(message.id);
+    const aliasedNext = aliasByOptimisticId.get(message.id);
+    if (aliasedNext) {
+      hasChanges = true;
+      return aliasedNext;
+    }
     if (!next) return message;
     if (areMessagesEquivalent(message, next)) return message;
     hasChanges = true;
     return next;
   });
 
-  const newMessages = Array.from(incomingById.values()).filter((message) => !currentById.has(message.id));
+  const newMessages = Array.from(incomingById.values()).filter((message) => (
+    !currentById.has(message.id) && !optimisticAliases.has(message.id)
+  ));
   if (newMessages.length > 0) hasChanges = true;
   if (!hasChanges) return current;
 

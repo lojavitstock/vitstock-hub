@@ -763,7 +763,7 @@ export class EvolutionApiService {
   /**
    * Enviar mensagem de texto diretamente via Evolution API no Railway
    */
-  static async sendTextMessage(instanceName: string, number: string, text: string, remoteJid?: string) {
+  static async sendTextMessage(instanceName: string, number: string, text: string, remoteJid?: string, clientMessageId?: string) {
     if (USE_MOCK) {
       console.log(`[MOCK EVOLUTION API] Enviar para ${number}: "${text}"`);
       return { status: 'SUCCESS', messageId: `msg-${Date.now()}` };
@@ -778,6 +778,7 @@ export class EvolutionApiService {
           number: cleanNumber,
           text,
           remoteJid,
+          clientMessageId,
         })
       });
 
@@ -981,6 +982,7 @@ export class EvolutionApiService {
     media: string;
     fileName?: string;
     caption?: string;
+    clientMessageId?: string;
   }) {
     if (USE_MOCK) {
       return { status: 'SUCCESS', message: { id: `media-${Date.now()}`, status: 'sent' } };
@@ -995,6 +997,7 @@ export class EvolutionApiService {
         media: input.media,
         fileName: input.fileName,
         caption: input.caption,
+        clientMessageId: input.clientMessageId,
       }),
     });
     const body = await response.json().catch(() => ({}));

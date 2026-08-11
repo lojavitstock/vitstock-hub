@@ -347,6 +347,22 @@ test('merge substitui somente a mensagem que mudou de status', () => {
   assert.equal(merged[1]?.status, 'delivered');
 });
 
+test('merge reconcilia mensagem otimista com o ID real do provedor sem duplicar', () => {
+  const optimistic = message('local-1', 1_700_000_000_000, 'Olá cliente', 'pending', {
+    sender: 'attendant',
+  });
+  const provider = message('provider-1', 1_700_000_001_000, '*Leonardo*\nOlá cliente', 'sent', {
+    sender: 'attendant',
+    senderName: 'Leonardo',
+    rawKey: { id: 'provider-1', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
+  });
+  const merged = mergeConversationMessages([optimistic], [provider]);
+
+  assert.deepEqual(merged.map((item) => item.id), ['provider-1']);
+  assert.notStrictEqual(merged[0], optimistic);
+  assert.equal(merged[0]?.status, 'sent');
+});
+
 test('merge insere mensagens antigas na paginação sem duplicar as atuais', () => {
   const currentFirst = message('b', 2000, 'segunda');
   const currentLast = message('c', 3000, 'terceira');

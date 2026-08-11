@@ -23,6 +23,7 @@ const sendTextSchema = z.object({
   number: z.string().regex(/^\d{8,20}$/),
   text: z.string().min(1).max(4096),
   remoteJid: z.string().min(3).max(128).optional(),
+  clientMessageId: z.string().trim().min(1).max(128).optional(),
 });
 const sendMediaSchema = z.object({
   number: z.string().regex(/^\d{8,20}$/),
@@ -32,6 +33,7 @@ const sendMediaSchema = z.object({
   media: z.string().min(1).max(14_000_000),
   fileName: z.string().max(180).optional(),
   caption: z.string().max(4096).optional(),
+  clientMessageId: z.string().trim().min(1).max(128).optional(),
 });
 const mediaSchema = z.object({ messageKey: z.record(z.string(), z.unknown()) });
 const phoneSchema = z.object({ number: z.string().regex(/^\d{8,20}$/) });
@@ -993,6 +995,7 @@ async function ensureOutboundMessage(input: {
   remoteJid: string;
   content: string;
   mediaType?: 'image' | 'video' | 'document';
+  clientMessageId?: string;
 }) {
   const contact = await db.query<{ id: string }>(
     `INSERT INTO contacts (company_id, name, phone)
@@ -1015,17 +1018,73 @@ async function ensureOutboundMessage(input: {
   });
   if (!conversationId) throw new Error('Conversa não pôde ser preparada para o envio');
 
+  if (input.clientMessageId) {
+    const existing = await db.query<{
+      id: string;
+      conversation_id: string;
+      evolution_message_id: string | null;
+      status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
+    }>(
+      `SELECT id, conversation_id, evolution_message_id, status
+       FROM messages
+       WHERE company_id = $1
+         AND metadata->>'clientMessageId' = $2
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [input.companyId, input.clientMessageId],
+    );
+    const previous = existing.rows[0];
+    if (previous) {
+      if (previous.status === 'failed') {
+        await db.query(
+          `UPDATE messages
+           SET status = 'pending', sent_at = now()
+           WHERE id = $1`,
+          [previous.id],
+        );
+        localInboxCache.delete(input.companyId);
+        return {
+          conversationId: previous.conversation_id,
+          messageId: previous.id,
+          evolutionMessageId: previous.evolution_message_id,
+          status: 'pending' as const,
+          deduplicated: false,
+        };
+      }
+      return {
+        conversationId: previous.conversation_id,
+        messageId: previous.id,
+        evolutionMessageId: previous.evolution_message_id,
+        status: previous.status,
+        deduplicated: true,
+      };
+    }
+  }
+
   const message = await db.query<{ id: string }>(
     `INSERT INTO messages
-      (company_id, conversation_id, sender, sender_name, content, media_type, status, is_internal_note)
-     VALUES ($1, $2, 'attendant', $3, $4, $5, 'pending', false)
+      (company_id, conversation_id, sender, sender_name, content, media_type, metadata, status, is_internal_note)
+     VALUES ($1, $2, 'attendant', $3, $4, $5, $6::jsonb, 'pending', false)
      RETURNING id`,
-    [input.companyId, conversationId, input.userName, input.content, input.mediaType || null],
+    [
+      input.companyId,
+      conversationId,
+      input.userName,
+      input.content,
+      input.mediaType || null,
+      JSON.stringify(input.clientMessageId ? { clientMessageId: input.clientMessageId } : {}),
+    ],
   );
   const messageId = message.rows[0]?.id;
   if (!messageId) throw new Error('Mensagem não pôde ser registrada');
   localInboxCache.delete(input.companyId);
-  return { conversationId, messageId };
+  return {
+    conversationId,
+    messageId,
+    evolutionMessageId: null,
+    status: 'pending' as const,
+    deduplicated: false,
+  };
 }
 
 async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed', evolutionMessageId?: string) {
@@ -1631,7 +1690,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.post('/api/evolution/messages/send', { preHandler: requireUser }, async (request, reply) => {
     const parsed = sendTextSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Mensagem inválida' });
-    const { number, text, remoteJid } = parsed.data;
+    const { number, text, remoteJid, clientMessageId } = parsed.data;
     const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
     const assigned = await db.query<{ assigned_user_id: string; user_name: string }>(
       `SELECT a.assigned_user_id, u.name AS user_name
@@ -1653,7 +1712,20 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       number,
       remoteJid: canonicalRemoteJid,
       content: text,
+      clientMessageId,
     });
+    if (localMessage.deduplicated) {
+      return {
+        remoteJid: canonicalRemoteJid,
+        message: {
+          id: localMessage.messageId,
+          evolutionMessageId: localMessage.evolutionMessageId || undefined,
+          status: localMessage.status,
+          senderName: request.user!.name,
+        },
+        deduplicated: true,
+      };
+    }
     let response: Response;
     let body: any;
     try {
@@ -1715,10 +1787,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.post('/api/evolution/messages/send-media', { preHandler: requireUser }, async (request, reply) => {
     const parsed = sendMediaSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Anexo inválido' });
-    const { number, text, remoteJid } = {
+    const { number, text, remoteJid, clientMessageId } = {
       number: parsed.data.number,
       text: parsed.data.caption?.trim() || `[${parsed.data.mediatype}]`,
       remoteJid: parsed.data.remoteJid,
+      clientMessageId: parsed.data.clientMessageId,
     };
     const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
     const assigned = await db.query<{ assigned_user_id: string; user_name: string }>(
@@ -1743,7 +1816,20 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       remoteJid: canonicalRemoteJid,
       content: text,
       mediaType: parsed.data.mediatype,
+      clientMessageId,
     });
+    if (localMessage.deduplicated) {
+      return {
+        remoteJid: canonicalRemoteJid,
+        message: {
+          id: localMessage.messageId,
+          evolutionMessageId: localMessage.evolutionMessageId || undefined,
+          status: localMessage.status,
+          senderName: request.user!.name,
+        },
+        deduplicated: true,
+      };
+    }
     let response: Response;
     let body: any;
     try {

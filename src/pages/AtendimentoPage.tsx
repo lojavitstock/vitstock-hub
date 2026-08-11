@@ -52,6 +52,7 @@ export const AtendimentoPage: React.FC = () => {
   const [whatsappStatus, setWhatsappStatus] = useState<WhatsappInstance['status']>('connecting');
   const composerRef = useRef<MessageComposerHandle>(null);
   const composerTextRef = useRef('');
+  const activeConversationIdRef = useRef<string | null>(null);
   const handleComposerTextChange = useCallback((value: string) => {
     composerTextRef.current = value;
   }, []);
@@ -95,6 +96,10 @@ export const AtendimentoPage: React.FC = () => {
     userId: user?.id,
     userRole: user?.role,
   });
+
+  useEffect(() => {
+    activeConversationIdRef.current = activeConvId;
+  }, [activeConvId]);
 
   const {
     showContactInfo,
@@ -457,7 +462,7 @@ export const AtendimentoPage: React.FC = () => {
     composerRef.current?.clear();
 
     const newMsg: Message = {
-      id: `msg-${Date.now()}`,
+      id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       conversationId: activeConv.id,
       sender: 'attendant',
       senderName: attendantName,
@@ -475,10 +480,14 @@ export const AtendimentoPage: React.FC = () => {
     if (isInternalNote && !isMock) {
       try {
         const savedNote = await EvolutionApiService.saveInternalNote(activeConv.id, activeConv.contact.phone, newMsgText);
-        setMessages((previous) => previous.map((message) => message.id === newMsg.id ? savedNote : message));
+        if (activeConversationIdRef.current === activeConv.id) {
+          setMessages((previous) => previous.map((message) => message.id === newMsg.id ? savedNote : message));
+        }
       } catch (error) {
-        setMessages((previous) => previous.filter((message) => message.id !== newMsg.id));
-        composerRef.current?.setText(newMsgText);
+        if (activeConversationIdRef.current === activeConv.id) {
+          setMessages((previous) => previous.filter((message) => message.id !== newMsg.id));
+          composerRef.current?.setText(newMsgText);
+        }
         setAssignmentFeedback(error instanceof Error ? error.message : 'NÃ£o foi possÃ­vel salvar a nota interna.');
         return;
       }
@@ -486,12 +495,14 @@ export const AtendimentoPage: React.FC = () => {
 
     if (!isInternalNote && !isMock) {
       try {
-      const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, outboundText, activeConv.id);
-      setMessages((previous) => previous.map((message) => message.id === newMsg.id ? {
-        ...message,
-        id: result?.message?.evolutionMessageId || result?.message?.id || message.id,
-        status: 'sent',
-      } : message));
+      const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, outboundText, activeConv.id, newMsg.id);
+      if (activeConversationIdRef.current === activeConv.id) {
+        setMessages((previous) => previous.map((message) => message.id === newMsg.id ? {
+          ...message,
+          id: result?.message?.evolutionMessageId || result?.message?.id || message.id,
+          status: result?.message?.status || result?.status || 'sent',
+        } : message));
+      }
       const dailyResponder = result?.dailyResponder;
       if (dailyResponder?.id && dailyResponder?.name) {
         setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
@@ -504,8 +515,10 @@ export const AtendimentoPage: React.FC = () => {
       }
       
       } catch (error) {
-        setMessages((previous) => previous.map((message) => message.id === newMsg.id ? { ...message, status: 'failed' } : message));
-        composerRef.current?.setText(newMsgText);
+        if (activeConversationIdRef.current === activeConv.id) {
+          setMessages((previous) => previous.map((message) => message.id === newMsg.id ? { ...message, status: 'failed' } : message));
+          composerRef.current?.setText(newMsgText);
+        }
         setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar a mensagem.');
         return;
       }
@@ -560,7 +573,7 @@ export const AtendimentoPage: React.FC = () => {
     const media = dataUrl.split(',')[1];
     if (!media) return;
     const localMessage: Message = {
-      id: `media-${Date.now()}`,
+      id: `media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       conversationId: activeConv.id,
       sender: 'attendant',
       senderName: attendantName,
@@ -586,12 +599,15 @@ export const AtendimentoPage: React.FC = () => {
         media,
         fileName: file.name,
         caption: caption || undefined,
+        clientMessageId: localMessage.id,
       });
-      setMessages((previous) => previous.map((message) => message.id === localMessage.id ? {
-        ...message,
-        id: result?.message?.evolutionMessageId || result?.message?.id || message.id,
-        status: 'sent',
-      } : message));
+      if (activeConversationIdRef.current === activeConv.id) {
+        setMessages((previous) => previous.map((message) => message.id === localMessage.id ? {
+          ...message,
+          id: result?.message?.evolutionMessageId || result?.message?.id || message.id,
+          status: result?.message?.status || result?.status || 'sent',
+        } : message));
+      }
       const dailyResponder = result?.dailyResponder;
       setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
         ...conversation,
@@ -607,8 +623,10 @@ export const AtendimentoPage: React.FC = () => {
         needsResponse: false,
       } : conversation));
     } catch (error) {
-      setMessages((previous) => previous.map((message) => message.id === localMessage.id ? { ...message, status: 'failed' } : message));
-      composerRef.current?.setText(caption);
+      if (activeConversationIdRef.current === activeConv.id) {
+        setMessages((previous) => previous.map((message) => message.id === localMessage.id ? { ...message, status: 'failed' } : message));
+        composerRef.current?.setText(caption);
+      }
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar o anexo.');
     } finally {
       setSendingMedia(false);
@@ -642,19 +660,43 @@ export const AtendimentoPage: React.FC = () => {
       return;
     }
 
+    const conversationId = activeConv.id;
     const retryText = message.content.trim();
-    if (!retryText) return;
-    const outboundText = `*${attendantName}*\n${retryText}`;
+    if (!retryText && !message.mediaUrl) return;
     setAssignmentFeedback('');
     setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'pending' } : item));
 
     try {
-      const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, outboundText, activeConv.id);
-      setMessages((previous) => previous.map((item) => item.id === message.id ? {
-        ...item,
-        id: result?.message?.evolutionMessageId || result?.message?.id || item.id,
-        status: 'sent',
-      } : item));
+      let result: any;
+      if ((message.mediaType === 'image' || message.mediaType === 'video' || message.mediaType === 'document')
+        && message.mediaUrl?.startsWith('data:')) {
+        const [dataHeader, media] = message.mediaUrl.split(',', 2);
+        if (!media) throw new Error('O anexo original não está disponível para nova tentativa.');
+        const mimetype = dataHeader.match(/^data:([^;]+)/)?.[1]
+          || (message.mediaType === 'image' ? 'image/jpeg' : message.mediaType === 'video' ? 'video/mp4' : 'application/pdf');
+        result = await EvolutionApiService.sendMediaMessage({
+          instanceName,
+          number: activeConv.contact.phone,
+          remoteJid: activeConv.id,
+          mediatype: message.mediaType,
+          mimetype,
+          media,
+          caption: retryText || undefined,
+          clientMessageId: message.id,
+        });
+      } else if (message.mediaType) {
+        throw new Error('O arquivo original não está disponível para nova tentativa.');
+      } else {
+        const outboundText = `*${attendantName}*\n${retryText}`;
+        result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, outboundText, activeConv.id, message.id);
+      }
+      if (activeConversationIdRef.current === conversationId) {
+        setMessages((previous) => previous.map((item) => item.id === message.id ? {
+          ...item,
+          id: result?.message?.evolutionMessageId || result?.message?.id || item.id,
+          status: result?.message?.status || result?.status || 'sent',
+        } : item));
+      }
       const dailyResponder = result?.dailyResponder;
       if (dailyResponder?.id && dailyResponder?.name) {
         setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
@@ -666,8 +708,10 @@ export const AtendimentoPage: React.FC = () => {
         } : conversation));
       }
     } catch (error) {
-      setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'failed' } : item));
-      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível reenviar a mensagem.');
+      if (activeConversationIdRef.current === conversationId) {
+        setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'failed' } : item));
+        setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível reenviar a mensagem.');
+      }
     }
   }, [activeConv, attendantName, instanceName, isMock, whatsappStatus]);
 
@@ -701,13 +745,14 @@ export const AtendimentoPage: React.FC = () => {
     const contactName = newChatName.trim() || `+${cleanNum}`;
     const messageText = newChatMessage.trim();
     const outboundText = `*${attendantName}*\n${messageText}`;
+    const clientMessageId = `new-chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     setStartingNewChat(true);
     setAssignmentFeedback('');
     let result: any = null;
     if (!isMock) {
       try {
-        result = await EvolutionApiService.sendTextMessage(instanceName, cleanNum, outboundText, jid);
+        result = await EvolutionApiService.sendTextMessage(instanceName, cleanNum, outboundText, jid, clientMessageId);
       } catch (error) {
         setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível iniciar a conversa.');
         setStartingNewChat(false);
@@ -737,14 +782,14 @@ export const AtendimentoPage: React.FC = () => {
     setConversations(prev => [newConv, ...prev]);
     setActiveConvId(jid);
     setMessages([{
-      id: result?.message?.id || `new-chat-${Date.now()}`,
+      id: result?.message?.evolutionMessageId || result?.message?.id || clientMessageId,
       conversationId: jid,
       sender: 'attendant',
       senderName: attendantName,
       content: messageText,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       timestampMs: Date.now(),
-      status: 'sent',
+      status: result?.message?.status || result?.status || 'sent',
     }]);
     setShowNewChatModal(false);
     setNewChatNumber('');

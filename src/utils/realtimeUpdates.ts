@@ -201,10 +201,8 @@ export const reconcileRealtimeMessages = (
   if (event.type === 'message.upsert') {
     const message = event.message;
     if (!message?.id || (message.conversationId && message.conversationId !== activeConversationId)) return null;
-    // A server-side outbound event can race the optimistic Composer update;
-    // if its provider id is not present yet, let the existing fetch reconcile
-    // the alias instead of creating a second visible message.
-    if (message.sender === 'attendant' && !current.some((item) => item.id === message.id)) return null;
+    // mergeConversationMessages correlates a provider ID that arrives before
+    // the POST response with the matching optimistic outbound message.
     return mergeConversationMessages(current, [message]);
   }
 
