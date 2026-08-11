@@ -36,6 +36,17 @@ type UseConversationInboxOptions = {
   userRole?: string;
 };
 
+type ConversationActivityPatch = {
+  lastMessage: string;
+  lastMessageTimestamp: string;
+  lastMessageAt: number;
+  lastMessageFromMe: boolean;
+  lastMessageKey?: Conversation['lastMessageKey'];
+  unreadCount?: number;
+  needsResponse?: boolean;
+  moveToFront?: boolean;
+};
+
 export const useConversationInbox = ({
   instanceName,
   isMock,
@@ -102,11 +113,13 @@ export const useConversationInbox = ({
         return;
       }
 
-      const previousActiveConversation = conversationsRef.current.find(
+      const previousConversations = conversationsRef.current;
+      const previousActiveConversation = previousConversations.find(
         (conversation) => conversation.id === activeConversationIdRef.current,
       );
       const previousActivePhone = previousActiveConversation?.contact.phone.replace(/\D/g, '');
       const mergedChats = realChats.map((conversation) => {
+        const previousConversation = previousConversations.find((item) => item.id === conversation.id);
         const locallyReadAt = readOverridesRef.current.get(conversation.id);
         const phone = conversation.contact.phone.replace(/\D/g, '');
         const savedName = phoneVariants(phone)
@@ -115,12 +128,29 @@ export const useConversationInbox = ({
         const withNameOverride = savedName && isPhoneOnlyName(conversation.contact.name)
           ? { ...conversation, contact: { ...conversation.contact, name: savedName } }
           : conversation;
-        return locallyReadAt && conversation.lastMessageAt && conversation.lastMessageAt <= locallyReadAt
+        const withReadOverride = locallyReadAt && conversation.lastMessageAt && conversation.lastMessageAt <= locallyReadAt
           ? { ...withNameOverride, unreadCount: 0 }
           : withNameOverride;
+        if (previousConversation?.lastMessageAt
+          && (!withReadOverride.lastMessageAt
+            || previousConversation.lastMessageAt > withReadOverride.lastMessageAt)) {
+          // Um snapshot antigo pode chegar depois de uma mensagem otimista ou
+          // de um evento SSE. Preserve somente a atividade mais nova local;
+          // os demais campos continuam vindo do backend.
+          return {
+            ...withReadOverride,
+            lastMessage: previousConversation.lastMessage,
+            lastMessageTimestamp: previousConversation.lastMessageTimestamp,
+            lastMessageAt: previousConversation.lastMessageAt,
+            lastMessageFromMe: previousConversation.lastMessageFromMe,
+            lastMessageKey: previousConversation.lastMessageKey,
+            unreadCount: previousConversation.unreadCount,
+            needsResponse: previousConversation.needsResponse,
+          };
+        }
+        return withReadOverride;
       });
 
-      const previousConversations = conversationsRef.current;
       const reconciledConversations = reconcileConversations(previousConversations, mergedChats);
       if (reconciledConversations !== previousConversations) {
         conversationsRef.current = reconciledConversations;
@@ -141,6 +171,26 @@ export const useConversationInbox = ({
     }
     });
   }, [connectionStatus, instanceName, isMock]);
+
+  const updateConversationActivity = useCallback((conversationId: string, activity: ConversationActivityPatch) => {
+    const previous = conversationsRef.current;
+    const index = previous.findIndex((conversation) => conversation.id === conversationId);
+    if (index < 0) return;
+
+    const { moveToFront, ...conversationFields } = activity;
+    const nextConversation = { ...previous[index], ...conversationFields };
+    const next = previous.slice();
+    next[index] = nextConversation;
+    if (moveToFront && index > 0) {
+      next.splice(index, 1);
+      next.unshift(nextConversation);
+    }
+
+    const reconciled = reconcileConversations(previous, next);
+    if (reconciled === previous) return;
+    conversationsRef.current = reconciled;
+    setConversations(reconciled);
+  }, []);
 
   useEffect(() => {
     if (!isMock && connectionStatus !== 'connected') return undefined;
@@ -349,6 +399,7 @@ export const useConversationInbox = ({
     visibleConversations,
     loadingChats,
     loadChats,
+    updateConversationActivity,
     markConversationAsRead,
     rememberContactName,
     capturingChat,

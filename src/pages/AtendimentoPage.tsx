@@ -33,6 +33,7 @@ import { ConversationList } from '../components/conversations/ConversationList';
 import { ContactPhoto } from '../components/conversations/ContactPhoto';
 import { MessageTimeline } from '../components/conversations/MessageTimeline';
 import { MessageComposer, MessageComposerHandle } from '../components/conversations/MessageComposer';
+import { formatMessageTimestamp } from '../components/conversations/conversationFormatters';
 import { useConversationMessages } from '../hooks/useConversationMessages';
 import { conversationNeedsResponse, useConversationInbox } from '../hooks/useConversationInbox';
 import { useContactPanel } from '../hooks/useContactPanel';
@@ -80,6 +81,7 @@ export const AtendimentoPage: React.FC = () => {
     visibleConversations,
     loadingChats,
     loadChats,
+    updateConversationActivity,
     markConversationAsRead,
     capturingChat,
     assignmentFeedback,
@@ -476,6 +478,19 @@ export const AtendimentoPage: React.FC = () => {
     setMessages(prev => [...prev, newMsg]);
     window.setTimeout(scrollToBottom, 0);
 
+    if (!isInternalNote) {
+      updateConversationActivity(activeConv.id, {
+        lastMessage: newMsgText,
+        lastMessageTimestamp: formatMessageTimestamp(newMsg.timestampMs, 'Agora'),
+        lastMessageAt: newMsg.timestampMs || Date.now(),
+        lastMessageFromMe: true,
+        lastMessageKey: { id: newMsg.id, remoteJid: activeConv.id, fromMe: true },
+        unreadCount: 0,
+        needsResponse: false,
+        moveToFront: true,
+      });
+    }
+
     // Se NÃO for nota interna e NÃO for mock, envia mensagem real no WhatsApp via Evolution API!
     if (isInternalNote && !isMock) {
       try {
@@ -525,14 +540,16 @@ export const AtendimentoPage: React.FC = () => {
     }
 
     // Atualiza última mensagem na lista lateral
-    setConversations(prev => prev.map(c => c.id === activeConv.id ? {
-      ...c,
-      lastMessage: isInternalNote ? `[Nota Interna]: ${newMsgText}` : newMsgText,
-      lastMessageTimestamp: 'Agora',
-      unreadCount: 0,
-      lastMessageFromMe: !isInternalNote,
-      needsResponse: false,
-    } : c));
+    if (isInternalNote) {
+      setConversations(prev => prev.map(c => c.id === activeConv.id ? {
+        ...c,
+        lastMessage: `[Nota Interna]: ${newMsgText}`,
+        lastMessageTimestamp: 'Agora',
+        unreadCount: 0,
+        lastMessageFromMe: false,
+        needsResponse: false,
+      } : c));
+    }
   };
 
   const handleAttachmentFile = async (file: File) => {
@@ -589,6 +606,16 @@ export const AtendimentoPage: React.FC = () => {
     composerRef.current?.clear();
     setMessages((previous) => [...previous, localMessage]);
     window.setTimeout(scrollToBottom, 0);
+    updateConversationActivity(activeConv.id, {
+      lastMessage: caption || label,
+      lastMessageTimestamp: formatMessageTimestamp(localMessage.timestampMs, 'Agora'),
+      lastMessageAt: localMessage.timestampMs || Date.now(),
+      lastMessageFromMe: true,
+      lastMessageKey: { id: localMessage.id, remoteJid: activeConv.id, fromMe: true },
+      unreadCount: 0,
+      needsResponse: false,
+      moveToFront: true,
+    });
     try {
       const result = await EvolutionApiService.sendMediaMessage({
         instanceName,
@@ -609,7 +636,7 @@ export const AtendimentoPage: React.FC = () => {
         } : message));
       }
       const dailyResponder = result?.dailyResponder;
-      setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
+      if (dailyResponder?.id && dailyResponder?.name) setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
         ...conversation,
         contact: dailyResponder?.id && dailyResponder?.name
           ? {
@@ -617,10 +644,6 @@ export const AtendimentoPage: React.FC = () => {
               tags: [{ id: `daily-responder-${dailyResponder.id}`, name: `👤 ${dailyResponder.name}`, color: '#A78BFA' }],
             }
           : conversation.contact,
-        lastMessage: caption || label,
-        lastMessageTimestamp: 'Agora',
-        lastMessageFromMe: true,
-        needsResponse: false,
       } : conversation));
     } catch (error) {
       if (activeConversationIdRef.current === activeConv.id) {
@@ -665,6 +688,17 @@ export const AtendimentoPage: React.FC = () => {
     if (!retryText && !message.mediaUrl) return;
     setAssignmentFeedback('');
     setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'pending' } : item));
+    const retryTimestampMs = Date.now();
+    updateConversationActivity(activeConv.id, {
+      lastMessage: message.content || (message.mediaType ? `[${message.mediaType}]` : retryText),
+      lastMessageTimestamp: formatMessageTimestamp(retryTimestampMs, 'Agora'),
+      lastMessageAt: retryTimestampMs,
+      lastMessageFromMe: true,
+      lastMessageKey: { id: message.id, remoteJid: activeConv.id, fromMe: true },
+      unreadCount: 0,
+      needsResponse: false,
+      moveToFront: true,
+    });
 
     try {
       let result: any;
@@ -713,7 +747,7 @@ export const AtendimentoPage: React.FC = () => {
         setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível reenviar a mensagem.');
       }
     }
-  }, [activeConv, attendantName, instanceName, isMock, whatsappStatus]);
+  }, [activeConv, attendantName, instanceName, isMock, updateConversationActivity, whatsappStatus]);
 
   const handleSelectConversation = useCallback((conversation: Conversation) => {
     setActiveConvId(conversation.id);

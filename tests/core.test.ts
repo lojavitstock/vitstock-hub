@@ -256,6 +256,56 @@ test('SSE atualiza preview de conversa não aberta sem carregar histórico', () 
   assert.strictEqual(updated?.[1], current[0]);
 });
 
+test('SSE antigo não regride o preview nem a posição da conversa', () => {
+  const latest = conversation('conversation-1', {
+    lastMessage: 'mensagem nova',
+    lastMessageAt: 1_800_000_000_000,
+    lastMessageFromMe: true,
+  });
+  const other = conversation('conversation-2');
+  const current = [latest, other];
+  const stale = reconcileRealtimeConversation(current, {
+    type: 'message.upsert',
+    remoteJid: 'conversation-1',
+    message: {
+      ...message('old-message', 1_700_000_000_000, 'mensagem antiga'),
+      conversationId: 'conversation-1',
+    },
+  });
+
+  assert.strictEqual(stale, current);
+  assert.equal(stale?.[0]?.lastMessage, 'mensagem nova');
+  assert.strictEqual(stale?.[1], other);
+});
+
+test('SSE de status não altera preview nem ordenação do inbox', () => {
+  const current = [conversation('conversation-1'), conversation('conversation-2')];
+  const unchanged = reconcileRealtimeConversation(current, {
+    type: 'message.status',
+    remoteJid: 'conversation-2',
+    messageId: 'message-2',
+    status: 'delivered',
+  });
+
+  assert.strictEqual(unchanged, null);
+});
+
+test('SSE de mídia sem legenda usa resumo do tipo no preview', () => {
+  const current = [conversation('conversation-1')];
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'message.upsert',
+    remoteJid: 'conversation-1',
+    message: {
+      ...message('image-1', 1_800_000_000_000, '', 'sent', {
+        conversationId: 'conversation-1',
+        mediaType: 'image',
+      }),
+    },
+  });
+
+  assert.equal(updated?.[0]?.lastMessage, '[Imagem]');
+});
+
 test('conversation.updated reconcilia responsável, status e leitura sem refetch', () => {
   const current = [conversation('conversation-1', { unreadCount: 2, lastMessageAt: 1_700_000_000_000 })];
   const assigned = reconcileRealtimeConversation(current, {

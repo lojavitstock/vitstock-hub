@@ -54,6 +54,15 @@ const formatMessageTime = (timestampMs?: number, fallback?: string) => (
     : fallback || 'Agora'
 );
 
+const mediaPreview = (mediaType?: Message['mediaType']) => {
+  if (mediaType === 'image') return '[Imagem]';
+  if (mediaType === 'audio') return '[Mensagem de áudio]';
+  if (mediaType === 'video') return '[Vídeo]';
+  if (mediaType === 'document') return '[Documento]';
+  if (mediaType === 'sticker') return '[Figurinha]';
+  return '';
+};
+
 const messageKeyForConversation = (message: Message, event: RealtimeEventPayload, conversation: Conversation) => {
   const rawKey = message.rawKey;
   if (rawKey && typeof rawKey === 'object' && typeof rawKey.id === 'string') return rawKey;
@@ -82,7 +91,7 @@ const updateConversationFromMessage = (
     : conversation.unreadCount;
   const next: Conversation = {
     ...conversation,
-    lastMessage: message.content || (message.mediaType ? `[${message.mediaType}]` : conversation.lastMessage),
+    lastMessage: message.content || mediaPreview(message.mediaType) || conversation.lastMessage,
     lastMessageTimestamp: formatMessageTime(timestampMs, message.timestamp),
     lastMessageAt: timestampMs || conversation.lastMessageAt,
     lastMessageFromMe: !isIncoming,
