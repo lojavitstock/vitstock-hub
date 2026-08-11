@@ -10,6 +10,11 @@ import { reconcileConversations } from '../src/utils/conversationReconciliation'
 import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../src/utils/requestCoordinator';
 import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../src/utils/realtimeConfig';
+import {
+  CONVERSATION_MESSAGE_CACHE_LIMIT,
+  readConversationMessagesCache,
+  writeConversationMessagesCache,
+} from '../src/utils/conversationMessagesCache';
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
 import {
   config,
@@ -526,4 +531,85 @@ test('canal realtime publica evento SSE somente enquanto o cliente está conecta
   cleanup();
   publishRealtimeEvent('company-test', 'message.status', { messageId: 'provider-1', status: 'read' });
   assert.equal(raw.chunks.length, 1);
+});
+
+test('cache de mensagens restaura A imediatamente depois de alternar para B', () => {
+  const cache = new Map();
+  const messagesA = [message('a-1', 1_700_000_000, 'A')];
+  const messagesB = [message('b-1', 1_700_000_001, 'B')];
+  writeConversationMessagesCache(cache, 'conversation-a', {
+    messages: messagesA,
+    hasMoreMessages: true,
+    historyExpanded: true,
+  });
+  writeConversationMessagesCache(cache, 'conversation-b', {
+    messages: messagesB,
+    hasMoreMessages: false,
+    historyExpanded: false,
+  });
+
+  const restored = readConversationMessagesCache(cache, 'conversation-a');
+  assert.strictEqual(restored?.messages, messagesA);
+  assert.equal(restored?.hasMoreMessages, true);
+  assert.equal(restored?.historyExpanded, true);
+});
+
+test('cache preserva a reconciliação incremental e atualiza uma conversa fechada via realtime', () => {
+  const cache = new Map();
+  const existing = message('a-1', 1_700_000_000, 'A');
+  writeConversationMessagesCache(cache, 'conversation-a', {
+    messages: [existing],
+    hasMoreMessages: true,
+    historyExpanded: true,
+  });
+  const cached = readConversationMessagesCache(cache, 'conversation-a');
+  const nextMessage = message('a-2', 1_700_000_001, 'Nova mensagem', 'sent', {
+    conversationId: 'conversation-a',
+  });
+  const reconciled = reconcileRealtimeMessages(
+    cached?.messages || [],
+    'conversation-a',
+    { type: 'message.upsert', message: nextMessage },
+  );
+  assert.ok(reconciled);
+  writeConversationMessagesCache(cache, 'conversation-a', {
+    ...cached!,
+    messages: reconciled,
+  });
+  const updated = readConversationMessagesCache(cache, 'conversation-a');
+  assert.strictEqual(updated?.messages[0], existing);
+  assert.strictEqual(updated?.messages[1], nextMessage);
+});
+
+test('cache limitado descarta as conversas menos recentemente acessadas', () => {
+  const cache = new Map();
+  for (let index = 0; index < CONVERSATION_MESSAGE_CACHE_LIMIT + 1; index += 1) {
+    writeConversationMessagesCache(cache, `conversation-${index}`, {
+      messages: [],
+      hasMoreMessages: false,
+      historyExpanded: false,
+    });
+  }
+  assert.equal(cache.size, CONVERSATION_MESSAGE_CACHE_LIMIT);
+  assert.equal(cache.has('conversation-0'), false);
+  assert.equal(cache.has(`conversation-${CONVERSATION_MESSAGE_CACHE_LIMIT}`), true);
+});
+
+test('cache preserva paginação e histórico carregado ao trocar de conversa', () => {
+  const cache = new Map();
+  const current = [message('current', 1_700_000_100, 'Atual')];
+  const older = message('older', 1_700_000_000, 'Histórico antigo');
+  writeConversationMessagesCache(cache, 'conversation-a', {
+    messages: [older, ...current],
+    hasMoreMessages: false,
+    historyExpanded: true,
+  });
+  writeConversationMessagesCache(cache, 'conversation-b', {
+    messages: [message('b-1', 1_700_000_200, 'B')],
+    hasMoreMessages: false,
+    historyExpanded: false,
+  });
+  const restored = readConversationMessagesCache(cache, 'conversation-a');
+  assert.deepEqual(restored?.messages.map((item) => item.id), ['older', 'current']);
+  assert.equal(restored?.historyExpanded, true);
 });

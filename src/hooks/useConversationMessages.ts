@@ -6,6 +6,11 @@ import { mergeConversationMessages } from '../utils/messageMerge';
 import { createLatestRequestGuard } from '../utils/requestCoordinator';
 import { reconcileRealtimeMessages } from '../utils/realtimeUpdates';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../utils/realtimeConfig';
+import {
+  readConversationMessagesCache,
+  type ConversationMessagesCacheEntry,
+  writeConversationMessagesCache,
+} from '../utils/conversationMessagesCache';
 
 type UseConversationMessagesOptions = {
   activeConversationId: string;
@@ -30,12 +35,16 @@ export const useConversationMessages = ({
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [backgroundRefreshing, setBackgroundRefreshing] = useState(false);
   const [historyExpanded, setHistoryExpanded] = useState(false);
   const conversationsRef = useRef(conversations);
   const messagesRef = useRef<Message[]>([]);
+  const messagesConversationIdRef = useRef('');
+  const messageCacheRef = useRef(new Map<string, ConversationMessagesCacheEntry>());
   const latestTimestampRef = useRef<number | undefined>();
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const historyExpandedRef = useRef(false);
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -43,7 +52,16 @@ export const useConversationMessages = ({
 
   useEffect(() => {
     messagesRef.current = messages;
-  }, [messages]);
+    if (!activeConversationId || isMock || messagesConversationIdRef.current !== activeConversationId) return;
+    const cached = messageCacheRef.current.get(activeConversationId);
+    if (!cached) return;
+    writeConversationMessagesCache(messageCacheRef.current, activeConversationId, {
+      messages,
+      hasMoreMessages: cached?.hasMoreMessages ?? false,
+      historyExpanded: cached?.historyExpanded ?? historyExpandedRef.current,
+      latestTimestamp: cached?.latestTimestamp ?? latestTimestampRef.current,
+    });
+  }, [activeConversationId, isMock, messages]);
 
   const scrollToBottom = useCallback(() => {
     const container = messagesContainerRef.current;
@@ -75,7 +93,9 @@ export const useConversationMessages = ({
 
   useEffect(() => {
     if (!activeConversationId || isMock) {
+      messagesConversationIdRef.current = '';
       setLoadingMessages(false);
+      setBackgroundRefreshing(false);
       return;
     }
 
@@ -85,13 +105,26 @@ export const useConversationMessages = ({
     let fetchInProgress = false;
     let reconciliationInProgress = false;
     const requestGuard = createLatestRequestGuard();
-    setMessages([]);
-    messagesRef.current = [];
-    latestTimestampRef.current = undefined;
-    setHasMoreMessages(false);
-    setLoadingMessages(Boolean(activeConversationId));
-    setHistoryExpanded(false);
-    historyExpandedRef.current = false;
+    const cachedEntry = readConversationMessagesCache(messageCacheRef.current, activeConversationId);
+    const hasCachedMessages = Boolean(cachedEntry);
+    messagesConversationIdRef.current = activeConversationId;
+    if (cachedEntry) {
+      messagesRef.current = cachedEntry.messages;
+      latestTimestampRef.current = cachedEntry.latestTimestamp;
+      historyExpandedRef.current = cachedEntry.historyExpanded;
+      setMessages(cachedEntry.messages);
+      setHasMoreMessages(cachedEntry.hasMoreMessages);
+      setHistoryExpanded(cachedEntry.historyExpanded);
+    } else {
+      setMessages([]);
+      messagesRef.current = [];
+      latestTimestampRef.current = undefined;
+      setHasMoreMessages(false);
+      historyExpandedRef.current = false;
+      setHistoryExpanded(false);
+    }
+    setLoadingMessages(!hasCachedMessages);
+    setBackgroundRefreshing(hasCachedMessages);
 
     const applyMessagesPage = (
       page: { messages: Message[]; hasMore: boolean },
@@ -106,20 +139,30 @@ export const useConversationMessages = ({
       const hasHiddenHistory = !historyExpandedRef.current && page.messages.some(
         (message) => Boolean(message.timestampMs && message.timestampMs < cutoff),
       );
-      setHasMoreMessages(page.hasMore || hasHiddenHistory);
-      if (recentMessages.length === 0) return;
-      latestTimestampRef.current = Math.max(
-        latestTimestampRef.current || 0,
-        ...recentMessages.map((message) => message.timestampMs || 0),
-      );
+      const nextHasMoreMessages = page.hasMore || hasHiddenHistory;
+      setHasMoreMessages(nextHasMoreMessages);
       const previousMessages = messagesRef.current;
-      const reconciledMessages = mergeConversationMessages(previousMessages, recentMessages);
-      if (reconciledMessages !== previousMessages) {
-        messagesRef.current = reconciledMessages;
-        setMessages((currentMessages) => currentMessages === previousMessages
-          ? reconciledMessages
-          : mergeConversationMessages(currentMessages, recentMessages));
+      let reconciledMessages = previousMessages;
+      if (recentMessages.length > 0) {
+        latestTimestampRef.current = Math.max(
+          latestTimestampRef.current || 0,
+          ...recentMessages.map((message) => message.timestampMs || 0),
+        );
+        reconciledMessages = mergeConversationMessages(previousMessages, recentMessages);
+        if (reconciledMessages !== previousMessages) {
+          messagesRef.current = reconciledMessages;
+          setMessages((currentMessages) => currentMessages === previousMessages
+            ? reconciledMessages
+            : mergeConversationMessages(currentMessages, recentMessages));
+        }
       }
+      writeConversationMessagesCache(messageCacheRef.current, activeConversationId, {
+        messages: reconciledMessages,
+        hasMoreMessages: nextHasMoreMessages,
+        historyExpanded: historyExpandedRef.current,
+        latestTimestamp: latestTimestampRef.current,
+      });
+      if (recentMessages.length === 0) return;
       if (shouldScroll) window.setTimeout(() => {
         if (stickToBottomRef.current) scrollToBottom();
       }, 0);
@@ -134,8 +177,8 @@ export const useConversationMessages = ({
       const distanceFromBottom = container
         ? container.scrollHeight - container.scrollTop - container.clientHeight
         : 0;
-      const shouldScroll = isInitialFetch || distanceFromBottom <= 120;
-      stickToBottomRef.current = shouldScroll;
+      const shouldScroll = !hasCachedMessages && (isInitialFetch || distanceFromBottom <= 120);
+      if (!hasCachedMessages) stickToBottomRef.current = shouldScroll;
       isInitialFetch = false;
       const conversation = conversationsRef.current.find((item) => item.id === activeConversationId);
       const phone = conversation?.contact.phone || activeConversationId;
@@ -181,18 +224,23 @@ export const useConversationMessages = ({
             .catch(() => undefined)
             .finally(() => {
               reconciliationInProgress = false;
+              if (isSubscribed && firstFetch && hasCachedMessages) setBackgroundRefreshing(false);
               if (isSubscribed && firstFetch && !localMessagesAvailable) setLoadingMessages(false);
             });
         }
       } catch {
         // A temporary provider/network failure should not erase the messages already rendered.
-        if (firstFetch && isSubscribed) setLoadingMessages(false);
+        if (firstFetch && isSubscribed) {
+          setLoadingMessages(false);
+          setBackgroundRefreshing(false);
+        }
       } finally {
         fetchInProgress = false;
         // When local messages exist, the loading state ends immediately. If
         // the local cache is empty, keep it until the background reconciliation
         // finishes so a genuinely new conversation still has clear feedback.
         if (firstFetch && (!reconcile || localMessagesAvailable)) setLoadingMessages(false);
+        if (firstFetch && hasCachedMessages && !reconciliationInProgress) setBackgroundRefreshing(false);
       }
     };
 
@@ -204,12 +252,37 @@ export const useConversationMessages = ({
       if (event.type !== 'message.upsert' && event.type !== 'message.status') return;
       const eventRemoteJid = String(event.remoteJid || '');
       const eventPhone = String(event.phone || '').replace(/\D/g, '');
-      const conversationPhone = conversationsRef.current
-        .find((item) => item.id === activeConversationId)?.contact.phone.replace(/\D/g, '') || '';
-      const samePhone = Boolean(eventPhone && conversationPhone
-        && phoneVariants(eventPhone).some((variant) => phoneVariants(conversationPhone).includes(variant)));
-      const sameConversationFromPayload = event.message?.conversationId === activeConversationId;
-      if (eventRemoteJid !== activeConversationId && !samePhone && !sameConversationFromPayload) return;
+      const matchingConversation = conversationsRef.current.find((item) => {
+        const conversationPhone = item.contact.phone.replace(/\D/g, '');
+        const samePhone = Boolean(eventPhone && conversationPhone
+          && phoneVariants(eventPhone).some((variant) => phoneVariants(conversationPhone).includes(variant)));
+        return item.id === eventRemoteJid
+          || item.id === event.message?.conversationId
+          || samePhone;
+      });
+      const eventConversationId = matchingConversation?.id
+        || (eventRemoteJid && messageCacheRef.current.has(eventRemoteJid) ? eventRemoteJid : undefined);
+      const isActiveConversation = eventConversationId === activeConversationId
+        || eventRemoteJid === activeConversationId
+        || event.message?.conversationId === activeConversationId;
+
+      if (!isActiveConversation && eventConversationId) {
+        const cachedEntry = readConversationMessagesCache(messageCacheRef.current, eventConversationId);
+        if (!cachedEntry) return;
+        const reconciledCachedMessages = reconcileRealtimeMessages(cachedEntry.messages, eventConversationId, event);
+        if (reconciledCachedMessages === null || reconciledCachedMessages === cachedEntry.messages) return;
+        const eventTimestamp = Number(event.message?.timestampMs ?? event.timestampMs ?? 0);
+        writeConversationMessagesCache(messageCacheRef.current, eventConversationId, {
+          ...cachedEntry,
+          messages: reconciledCachedMessages,
+          latestTimestamp: Number.isFinite(eventTimestamp) && eventTimestamp > 0
+            ? Math.max(cachedEntry.latestTimestamp || 0, eventTimestamp)
+            : cachedEntry.latestTimestamp,
+        });
+        return;
+      }
+
+      if (!isActiveConversation) return;
 
       const previousMessages = messagesRef.current;
       const reconciledMessages = reconcileRealtimeMessages(previousMessages, activeConversationId, event);
@@ -225,6 +298,13 @@ export const useConversationMessages = ({
       if (Number.isFinite(eventTimestamp) && eventTimestamp > 0) {
         latestTimestampRef.current = Math.max(latestTimestampRef.current || 0, eventTimestamp);
       }
+      const cachedEntry = messageCacheRef.current.get(activeConversationId);
+      writeConversationMessagesCache(messageCacheRef.current, activeConversationId, {
+        messages: reconciledMessages,
+        hasMoreMessages: cachedEntry?.hasMoreMessages ?? false,
+        historyExpanded: cachedEntry?.historyExpanded ?? historyExpandedRef.current,
+        latestTimestamp: latestTimestampRef.current,
+      });
       setMessages((currentMessages) => {
         if (currentMessages === previousMessages) return reconciledMessages;
         return reconcileRealtimeMessages(currentMessages, activeConversationId, event) || currentMessages;
@@ -250,10 +330,16 @@ export const useConversationMessages = ({
     };
   }, [activeConversationId, attendantLabel, instanceName, isMock, scrollToBottom]);
 
-  const historyExpandedRef = useRef(false);
   useEffect(() => {
     historyExpandedRef.current = historyExpanded;
-  }, [historyExpanded]);
+    if (!activeConversationId || isMock || messagesConversationIdRef.current !== activeConversationId) return;
+    const cached = messageCacheRef.current.get(activeConversationId);
+    if (!cached) return;
+    writeConversationMessagesCache(messageCacheRef.current, activeConversationId, {
+      ...cached,
+      historyExpanded,
+    });
+  }, [activeConversationId, historyExpanded, isMock]);
 
   const loadingOlderRef = useRef(false);
   const loadOlderMessages = useCallback(async () => {
@@ -278,9 +364,11 @@ export const useConversationMessages = ({
         oldestTimestamp,
         undefined,
       );
+      const previousMessages = messagesRef.current;
+      let nextMessages = previousMessages;
       if (page.messages.length > 0) {
-        const previousMessages = messagesRef.current;
         const reconciledMessages = mergeConversationMessages(previousMessages, page.messages);
+        nextMessages = reconciledMessages;
         if (reconciledMessages !== previousMessages) {
           messagesRef.current = reconciledMessages;
           setMessages((currentMessages) => currentMessages === previousMessages
@@ -293,6 +381,12 @@ export const useConversationMessages = ({
         });
       }
       setHasMoreMessages(page.hasMore);
+      writeConversationMessagesCache(messageCacheRef.current, activeConversationId, {
+        messages: nextMessages,
+        hasMoreMessages: page.hasMore,
+        historyExpanded: true,
+        latestTimestamp: latestTimestampRef.current,
+      });
     } catch {
       // O histórico atual permanece visível quando a página anterior falhar.
     } finally {
@@ -301,12 +395,40 @@ export const useConversationMessages = ({
     }
   }, [activeConversationId, attendantLabel, hasMoreMessages, instanceName, isMock]);
 
+  const cachedActiveEntry = activeConversationId
+    ? messageCacheRef.current.get(activeConversationId)
+    : undefined;
+  const activeStateMatchesSelection = !isMock && messagesConversationIdRef.current === activeConversationId;
+  const visibleMessages = isMock || activeStateMatchesSelection
+    ? messages
+    : cachedActiveEntry?.messages || [];
+  const visibleHasMoreMessages = activeStateMatchesSelection
+    ? hasMoreMessages
+    : cachedActiveEntry?.hasMoreMessages || false;
+  const visibleHistoryExpanded = activeStateMatchesSelection
+    ? historyExpanded
+    : cachedActiveEntry?.historyExpanded || false;
+  const visibleLoadingMessages = isMock
+    ? false
+    : activeStateMatchesSelection
+    ? loadingMessages
+    : !cachedActiveEntry;
+  const visibleBackgroundRefreshing = isMock
+    ? false
+    : activeStateMatchesSelection
+    ? backgroundRefreshing
+    : Boolean(cachedActiveEntry);
+  const visibleLoadingOlderMessages = activeStateMatchesSelection
+    ? loadingOlderMessages
+    : false;
+
   return {
-    messages,
-    hasMoreMessages,
-    loadingMessages,
-    historyExpanded,
-    loadingOlderMessages,
+    messages: visibleMessages,
+    hasMoreMessages: visibleHasMoreMessages,
+    loadingMessages: visibleLoadingMessages,
+    backgroundRefreshing: visibleBackgroundRefreshing,
+    historyExpanded: visibleHistoryExpanded,
+    loadingOlderMessages: visibleLoadingOlderMessages,
     loadOlderMessages,
     setMessages,
     messagesContainerRef,
