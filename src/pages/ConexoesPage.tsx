@@ -10,47 +10,116 @@ type ConexoesPageProps = {
 const CONNECTING_GRACE_MS = 15_000;
 const QR_REFRESH_INTERVAL_MS = 30_000;
 
+type ConnectionUiMode = 'connected' | 'auto-reconnecting' | 'waiting-for-qr' | 'requesting-qr' | 'error';
+
+type PairingMemory = {
+  active: boolean;
+  qrCode: string | null;
+  qrUpdatedAt: number | null;
+};
+
+// Mantém somente o contexto temporário de pareamento durante a navegação SPA.
+// Não é persistência permanente e é resetado assim que a Evolution informa `open`.
+const pairingMemory: PairingMemory = { active: false, qrCode: null, qrUpdatedAt: null };
+let sharedQrRequest: Promise<string | null> | null = null;
+
+const rememberPairing = () => {
+  pairingMemory.active = true;
+};
+
+const resetPairingMemory = () => {
+  pairingMemory.active = false;
+  pairingMemory.qrCode = null;
+  pairingMemory.qrUpdatedAt = null;
+};
+
+const isRememberedQrStale = () => (
+  !pairingMemory.qrCode
+  || !pairingMemory.qrUpdatedAt
+  || Date.now() - pairingMemory.qrUpdatedAt >= QR_REFRESH_INTERVAL_MS
+);
+
 export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) => {
   const instanceName = 'vitstock_atendimento';
   const isMock = import.meta.env.VITE_USE_MOCK_DATA === 'true';
+  const initialUiMode: ConnectionUiMode = pairingMemory.active
+    ? (pairingMemory.qrCode ? 'waiting-for-qr' : 'requesting-qr')
+    : 'requesting-qr';
 
   const [instance, setInstance] = useState<WhatsappInstance>({
     id: 'inst-main',
     name: instanceName,
     status: 'disconnected'
   });
-  const [qrCodeBase64, setQrCodeBase64] = useState<string | null>(null);
+  const [qrCodeBase64, setQrCodeBase64] = useState<string | null>(pairingMemory.qrCode);
   const [loading, setLoading] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
-  const qrCodeRef = useRef<string | null>(null);
-  const qrRequestRef = useRef<Promise<string | null> | null>(null);
+  const [uiMode, setUiMode] = useState<ConnectionUiMode>(initialUiMode);
+  const qrCodeRef = useRef<string | null>(pairingMemory.qrCode);
   const mountedRef = useRef(true);
   const connectionStatusRef = useRef<WhatsappInstance['status']>('disconnected');
   const connectingTimerRef = useRef<number | null>(null);
   const qrRefreshTimerRef = useRef<number | null>(null);
 
+  const setUiModeSafe = useCallback((mode: ConnectionUiMode) => {
+    if (mountedRef.current) setUiMode(mode);
+  }, []);
+
   const updateQrCode = useCallback((value: string | null) => {
     qrCodeRef.current = value;
+    if (value) {
+      rememberPairing();
+      pairingMemory.qrCode = value;
+      pairingMemory.qrUpdatedAt = Date.now();
+    } else {
+      pairingMemory.qrCode = null;
+      pairingMemory.qrUpdatedAt = null;
+    }
     if (mountedRef.current) setQrCodeBase64(value);
   }, []);
 
   const requestQrCode = useCallback(async (force = false) => {
     if (isMock) return null;
-    if (qrRequestRef.current) return qrRequestRef.current;
-    if (!force && qrCodeRef.current) return qrCodeRef.current;
+    rememberPairing();
+    setUiModeSafe('requesting-qr');
+
+    const knownQr = qrCodeRef.current || pairingMemory.qrCode;
+    if (sharedQrRequest) {
+      return sharedQrRequest.then((qr) => {
+        if (qr && mountedRef.current && connectionStatusRef.current !== 'connected') {
+          updateQrCode(qr);
+          setUiModeSafe('waiting-for-qr');
+          setConnectionError(null);
+        }
+        return qr;
+      });
+    }
+    if (!force && knownQr && !isRememberedQrStale()) {
+      if (!qrCodeRef.current) updateQrCode(knownQr);
+      setUiModeSafe('waiting-for-qr');
+      return knownQr;
+    }
 
     const request = EvolutionApiService.getConnectQrCode(instanceName)
       .then((qr) => {
-        if (qr && mountedRef.current && connectionStatusRef.current !== 'connected') updateQrCode(qr);
+        if (qr && connectionStatusRef.current !== 'connected') {
+          pairingMemory.qrCode = qr;
+          pairingMemory.qrUpdatedAt = Date.now();
+          if (mountedRef.current) {
+            updateQrCode(qr);
+            setUiModeSafe('waiting-for-qr');
+            setConnectionError(null);
+          }
+        }
         return qr;
       })
       .finally(() => {
-        qrRequestRef.current = null;
+        sharedQrRequest = null;
       });
-    qrRequestRef.current = request;
+    sharedQrRequest = request;
     return request;
-  }, [instanceName, isMock, updateQrCode]);
+  }, [instanceName, isMock, setUiModeSafe, updateQrCode]);
 
   const clearReconnectTimers = useCallback(() => {
     if (connectingTimerRef.current !== null) {
@@ -98,35 +167,53 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
     if (status === 'connected') {
       clearReconnectTimers();
       updateQrCode(null);
+      resetPairingMemory();
+      setUiModeSafe('connected');
       setConnectionError(null);
       return;
     }
 
     if (status !== 'connecting') clearConnectingTimer();
 
-    if (status === 'connecting' && !forceQr) {
-      if (qrCodeRef.current) scheduleQrRefresh();
-      else scheduleConnectingFallback();
+    const knownQr = qrCodeRef.current || pairingMemory.qrCode;
+    const pairingActive = pairingMemory.active || Boolean(knownQr);
+
+    if (status === 'connecting' && !forceQr && !pairingActive) {
+      setUiModeSafe('auto-reconnecting');
+      scheduleConnectingFallback();
       return;
     }
 
-    if (!forceQr && qrCodeRef.current) {
+    if (status === 'connecting' && !forceQr && pairingActive && knownQr && !isRememberedQrStale()) {
+      rememberPairing();
+      if (!qrCodeRef.current) updateQrCode(knownQr);
+      setUiModeSafe('waiting-for-qr');
       scheduleQrRefresh();
       return;
     }
 
+    rememberPairing();
+    setUiModeSafe('requesting-qr');
     void requestQrCode(forceQr).then((qr) => {
       if (!mountedRef.current || connectionStatusRef.current === 'connected') return;
       if (!qr && !qrCodeRef.current) {
+        setUiModeSafe('error');
         setConnectionError('A Evolution API ainda não entregou o QR Code. O sistema tentará novamente automaticamente.');
       }
       scheduleQrRefresh();
     });
-  }, [clearConnectingTimer, clearReconnectTimers, requestQrCode, scheduleConnectingFallback, scheduleQrRefresh, updateQrCode]);
+  }, [clearConnectingTimer, clearReconnectTimers, requestQrCode, scheduleConnectingFallback, scheduleQrRefresh, setUiModeSafe, updateQrCode]);
 
   // A consulta de status e a busca do QR Code são automáticas; o botão acima é apenas fallback.
   useEffect(() => {
     mountedRef.current = true;
+    if (pairingMemory.active) {
+      if (pairingMemory.qrCode) {
+        qrCodeRef.current = pairingMemory.qrCode;
+        setQrCodeBase64(pairingMemory.qrCode);
+      }
+      setUiModeSafe(pairingMemory.qrCode ? 'waiting-for-qr' : 'requesting-qr');
+    }
     void fetchStatus();
 
     const interval = window.setInterval(() => { void fetchStatus(false); }, 30000);
@@ -144,7 +231,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
       clearReconnectTimers();
       window.removeEventListener('vitstock:whatsapp-status', handleSharedStatus);
     };
-  }, [clearReconnectTimers, ensureReconnectPath]);
+  }, [clearReconnectTimers, ensureReconnectPath, setUiModeSafe]);
 
   const fetchStatus = async (showLoading = true, forceQr = false) => {
     if (showLoading) setLoading(true);
@@ -155,6 +242,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
       ensureReconnectPath(statusData.status, forceQr);
     } catch (error) {
       if (mountedRef.current) {
+        setUiModeSafe('error');
         setConnectionError(error instanceof Error ? error.message : 'Não foi possível consultar o status do WhatsApp.');
       }
     } finally {
@@ -172,6 +260,8 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
 
     setDisconnecting(true);
     setConnectionError(null);
+    rememberPairing();
+    setUiModeSafe('requesting-qr');
     updateQrCode(null);
 
     try {
@@ -182,7 +272,9 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
       const qr = await requestQrCode(true);
       if (qr) {
         updateQrCode(qr);
+        setUiModeSafe('waiting-for-qr');
       } else {
+        setUiModeSafe('error');
         setConnectionError('A sessão foi desconectada, mas a Evolution API ainda não entregou o QR Code. Use “Verificar novamente” para tentar novamente.');
       }
       scheduleQrRefresh();
@@ -195,6 +287,9 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
   };
 
   const visibleStatus = instance.status;
+  const isConnected = uiMode === 'connected';
+  const isAutoReconnecting = uiMode === 'auto-reconnecting';
+  const isPairingError = uiMode === 'error';
 
   return (
     <div className={`${embedded ? 'w-full' : 'flex-1 h-full'} overflow-y-auto bg-zinc-950 ${embedded ? 'p-0' : 'p-6'} font-overpass`}>
@@ -204,13 +299,17 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-extrabold text-zinc-100">
             Gestão de Conexões WhatsApp (Evolution API)
-            {visibleStatus === 'connected' ? (
+            {isConnected ? (
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-bold">
                 WhatsApp Conectado em Tempo Real
               </span>
-            ) : visibleStatus === 'connecting' ? (
+            ) : isAutoReconnecting ? (
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-400/10 text-amber-300 border border-amber-400/30 font-bold animate-pulse">
                 Reconectando
+              </span>
+            ) : isPairingError ? (
+              <span className="text-xs px-2.5 py-0.5 rounded-full bg-red-500/10 text-red-300 border border-red-500/30 font-bold">
+                Erro na reconexão
               </span>
             ) : (
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-400/10 text-amber-400 border border-amber-400/30 font-bold animate-pulse">
@@ -252,20 +351,22 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
 
             <div className="flex items-center gap-2">
               <span className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-2 ${
-                visibleStatus === 'connected'
+                isConnected
                   ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 shadow-[0_0_12px_rgba(16,185,129,0.2)]' 
-                  : visibleStatus === 'connecting'
+                  : isAutoReconnecting
                     ? 'bg-amber-400/10 text-amber-300 border border-amber-400/30'
-                    : 'bg-red-500/10 text-red-300 border border-red-500/30'
+                    : isPairingError
+                      ? 'bg-red-500/10 text-red-300 border border-red-500/30'
+                      : 'bg-amber-400/10 text-amber-300 border border-amber-400/30'
               }`}>
-                <span className={`w-2.5 h-2.5 rounded-full ${visibleStatus === 'connected' ? 'bg-emerald-500 animate-pulse' : visibleStatus === 'connecting' ? 'bg-amber-400 animate-pulse' : 'bg-red-500'}`} />
-                {visibleStatus === 'connected' ? 'ONLINE (Conectado)' : visibleStatus === 'connecting' ? 'Reconectando sessão' : 'Aguardando novo QR Code'}
+                <span className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse' : isPairingError ? 'bg-red-500' : 'bg-amber-400 animate-pulse'}`} />
+                {isConnected ? 'ONLINE (Conectado)' : isAutoReconnecting ? 'Reconectando sessão' : uiMode === 'error' ? 'Falha ao obter QR Code' : 'Aguardando novo QR Code'}
               </span>
             </div>
           </div>
 
           {/* Se estiver CONECTADO */}
-          {visibleStatus === 'connected' ? (
+          {isConnected ? (
             <div className="p-6 rounded-xl bg-emerald-500/5 border border-emerald-500/20 text-center space-y-3 animate-fade-in">
               <div className="w-12 h-12 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto border border-emerald-500/40">
                 <CheckCircle className="w-6 h-6" />
@@ -284,7 +385,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
                 {disconnecting ? 'Desconectando...' : 'Desconectar e gerar novo QR Code'}
               </button>
             </div>
-          ) : visibleStatus === 'connecting' && !qrCodeBase64 ? (
+          ) : isAutoReconnecting ? (
             <div className="p-8 rounded-xl bg-amber-400/5 border border-amber-400/20 text-center space-y-3 animate-fade-in">
               <RefreshCw className="w-8 h-8 text-amber-300 animate-spin mx-auto" />
               <h4 className="text-sm font-bold text-amber-200">Restabelecendo a sessão do WhatsApp</h4>
