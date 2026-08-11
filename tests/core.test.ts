@@ -6,7 +6,7 @@ import { phoneVariants } from '../src/utils/phone';
 import { mergeConversationMessages } from '../src/utils/messageMerge';
 import { normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
 import { callMessageInfo } from '../src/utils/callMessage';
-import { reconcileConversations } from '../src/utils/conversationReconciliation';
+import { reconcileConversations, reconcileConversationsMonotonic } from '../src/utils/conversationReconciliation';
 import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../src/utils/requestCoordinator';
 import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../src/utils/realtimeConfig';
@@ -278,6 +278,35 @@ test('SSE antigo não regride o preview nem a posição da conversa', () => {
   assert.strictEqual(stale?.[1], other);
 });
 
+test('SSE equivalente confirma o ID do provedor sem mover a conversa novamente', () => {
+  const other = conversation('conversation-2');
+  const active = conversation('conversation-1', {
+    lastMessage: 'Olá cliente',
+    lastMessageAt: 1_800_000_000_000,
+    lastMessageFromMe: true,
+    lastMessageKey: { id: 'local-1', remoteJid: 'conversation-1', fromMe: true },
+  });
+  const current = [other, active];
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'message.upsert',
+    remoteJid: 'conversation-1',
+    message: {
+      ...message('provider-1', 1_799_999_999_000, '*Leonardo*\nOlá cliente', 'sent', {
+        conversationId: 'conversation-1',
+        sender: 'attendant',
+        senderName: 'Leonardo',
+        rawKey: { id: 'provider-1', remoteJid: 'conversation-1', fromMe: true },
+      }),
+    },
+  });
+
+  assert.ok(updated);
+  assert.equal(updated?.[1]?.lastMessage, 'Olá cliente');
+  assert.equal(updated?.[1]?.lastMessageAt, active.lastMessageAt);
+  assert.equal(updated?.[1]?.lastMessageKey?.id, 'provider-1');
+  assert.equal(updated?.[1]?.id, 'conversation-1');
+});
+
 test('SSE de status não altera preview nem ordenação do inbox', () => {
   const current = [conversation('conversation-1'), conversation('conversation-2')];
   const unchanged = reconcileRealtimeConversation(current, {
@@ -470,6 +499,55 @@ test('reconcilia snapshot equivalente reutilizando array e objetos', () => {
   assert.strictEqual(reconciled, previous);
   assert.strictEqual(reconciled[0], previous[0]);
   assert.strictEqual(reconciled[1], previous[1]);
+});
+
+test('reconcilia inbox monotonicamente e mantém atividade otimista no topo', () => {
+  const previous = [
+    conversation('a', { lastMessage: 'T2 local', lastMessageAt: 1_800_000_000_000, lastMessageFromMe: true }),
+    conversation('b', { lastMessageAt: 1_700_000_000_000 }),
+  ];
+  const staleSnapshot = [
+    cloneConversation(previous[1]),
+    { ...cloneConversation(previous[0]), lastMessage: 'T1 antigo', lastMessageAt: 1_700_000_000_000 },
+  ];
+  const reconciled = reconcileConversationsMonotonic(previous, staleSnapshot);
+
+  assert.equal(reconciled[0]?.lastMessage, 'T2 local');
+  assert.equal(reconciled[0]?.lastMessageAt, 1_800_000_000_000);
+  assert.equal(reconciled[0]?.id, 'a');
+  assert.strictEqual(reconciled[1], previous[1]);
+});
+
+test('reconcilia inbox monotonicamente e aceita atividade T3 mais nova', () => {
+  const previous = [conversation('a', { lastMessage: 'T2 local', lastMessageAt: 1_800_000_000_000 })];
+  const newerSnapshot = [{
+    ...cloneConversation(previous[0]),
+    lastMessage: 'T3 do servidor',
+    lastMessageAt: 1_900_000_000_000,
+  }];
+  const reconciled = reconcileConversationsMonotonic(previous, newerSnapshot);
+
+  assert.equal(reconciled[0]?.lastMessage, 'T3 do servidor');
+  assert.equal(reconciled[0]?.lastMessageAt, 1_900_000_000_000);
+  assert.notStrictEqual(reconciled[0], previous[0]);
+});
+
+test('reconcilia atividade local quando o JID muda mas o telefone permanece', () => {
+  const previous = [conversation('lid-1', {
+    contact: { ...conversation('lid-1').contact, phone: '+55 21 99999-1234' },
+    lastMessage: 'T2 local',
+    lastMessageAt: 1_800_000_000_000,
+  })];
+  const snapshot = [conversation('phone-1', {
+    contact: { ...conversation('phone-1').contact, phone: '+55 21 99999-1234' },
+    lastMessage: 'T1 antigo',
+    lastMessageAt: 1_700_000_000_000,
+  })];
+  const reconciled = reconcileConversationsMonotonic(previous, snapshot);
+
+  assert.equal(reconciled[0]?.id, 'phone-1');
+  assert.equal(reconciled[0]?.lastMessage, 'T2 local');
+  assert.equal(reconciled[0]?.lastMessageAt, 1_800_000_000_000);
 });
 
 test('reconcilia uma conversa alterada preservando as demais', () => {

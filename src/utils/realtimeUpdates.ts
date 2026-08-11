@@ -63,6 +63,10 @@ const mediaPreview = (mediaType?: Message['mediaType']) => {
   return '';
 };
 
+const comparableMessagePreview = (message: Message) => (
+  message.content.trim().replace(/^\*[^*\r\n]+\*\s*(?:\r?\n|$)/, '').trim()
+);
+
 const messageKeyForConversation = (message: Message, event: RealtimeEventPayload, conversation: Conversation) => {
   const rawKey = message.rawKey;
   if (rawKey && typeof rawKey === 'object' && typeof rawKey.id === 'string') return rawKey;
@@ -81,10 +85,22 @@ const updateConversationFromMessage = (
   if (!message?.id || (message.conversationId && message.conversationId !== conversation.id)) return null;
 
   const timestampMs = Number(message.timestampMs ?? event.timestampMs ?? 0);
-  if (conversation.lastMessageAt && timestampMs > 0 && timestampMs < conversation.lastMessageAt) return conversation;
+  const isIncoming = message.sender === 'contact';
+  const isSameActivity = conversation.lastMessageFromMe === !isIncoming
+    && comparableMessagePreview(message) === conversation.lastMessage.trim();
+  const isOlderActivity = Boolean(conversation.lastMessageAt && timestampMs > 0 && timestampMs < conversation.lastMessageAt);
+  if (isOlderActivity && !isSameActivity) return conversation;
+
+  // A provider event can use a second-based timestamp while the optimistic
+  // item uses milliseconds. Confirm its key without regressing the activity
+  // timestamp, preview, unread state or list position.
+  if (isOlderActivity && isSameActivity) {
+    const nextKey = messageKeyForConversation(message, event, conversation);
+    if (conversation.lastMessageKey?.id === nextKey.id) return conversation;
+    return { ...conversation, lastMessageKey: nextKey };
+  }
 
   const isSameMessage = conversation.lastMessageKey?.id === message.id;
-  const isIncoming = message.sender === 'contact';
   const nextStatus = conversation.status === 'resolved' && isIncoming ? 'open' : conversation.status;
   const nextUnreadCount = isIncoming && !isSameMessage
     ? conversation.unreadCount + 1
@@ -190,7 +206,10 @@ export const reconcileRealtimeConversation = (
   next[index] = updated;
   // Evolution returns chats with the most recent activity first. Keep that
   // observable ordering when an incremental message arrives.
-  if (event.type === 'message.upsert' && index > 0) {
+  const eventTimestamp = Number(event.message?.timestampMs ?? event.timestampMs ?? 0);
+  const shouldReorder = event.type === 'message.upsert'
+    && (!current.lastMessageAt || eventTimestamp >= current.lastMessageAt);
+  if (shouldReorder && index > 0) {
     next.splice(index, 1);
     next.unshift(updated);
   }

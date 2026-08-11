@@ -4,7 +4,7 @@ import { EvolutionApiService } from '../services/evolutionApi';
 import { ChatStatus, Conversation, WhatsappInstance } from '../types';
 import { ConversationFilter } from '../components/conversations/ConversationFilters';
 import { phoneVariants } from '../utils/phone';
-import { reconcileConversations } from '../utils/conversationReconciliation';
+import { reconcileConversations, reconcileConversationsMonotonic } from '../utils/conversationReconciliation';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 import { reconcileRealtimeConversation } from '../utils/realtimeUpdates';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../utils/realtimeConfig';
@@ -119,7 +119,6 @@ export const useConversationInbox = ({
       );
       const previousActivePhone = previousActiveConversation?.contact.phone.replace(/\D/g, '');
       const mergedChats = realChats.map((conversation) => {
-        const previousConversation = previousConversations.find((item) => item.id === conversation.id);
         const locallyReadAt = readOverridesRef.current.get(conversation.id);
         const phone = conversation.contact.phone.replace(/\D/g, '');
         const savedName = phoneVariants(phone)
@@ -128,30 +127,12 @@ export const useConversationInbox = ({
         const withNameOverride = savedName && isPhoneOnlyName(conversation.contact.name)
           ? { ...conversation, contact: { ...conversation.contact, name: savedName } }
           : conversation;
-        const withReadOverride = locallyReadAt && conversation.lastMessageAt && conversation.lastMessageAt <= locallyReadAt
+        return locallyReadAt && conversation.lastMessageAt && conversation.lastMessageAt <= locallyReadAt
           ? { ...withNameOverride, unreadCount: 0 }
           : withNameOverride;
-        if (previousConversation?.lastMessageAt
-          && (!withReadOverride.lastMessageAt
-            || previousConversation.lastMessageAt > withReadOverride.lastMessageAt)) {
-          // Um snapshot antigo pode chegar depois de uma mensagem otimista ou
-          // de um evento SSE. Preserve somente a atividade mais nova local;
-          // os demais campos continuam vindo do backend.
-          return {
-            ...withReadOverride,
-            lastMessage: previousConversation.lastMessage,
-            lastMessageTimestamp: previousConversation.lastMessageTimestamp,
-            lastMessageAt: previousConversation.lastMessageAt,
-            lastMessageFromMe: previousConversation.lastMessageFromMe,
-            lastMessageKey: previousConversation.lastMessageKey,
-            unreadCount: previousConversation.unreadCount,
-            needsResponse: previousConversation.needsResponse,
-          };
-        }
-        return withReadOverride;
       });
 
-      const reconciledConversations = reconcileConversations(previousConversations, mergedChats);
+      const reconciledConversations = reconcileConversationsMonotonic(previousConversations, mergedChats);
       if (reconciledConversations !== previousConversations) {
         conversationsRef.current = reconciledConversations;
         setConversations(reconciledConversations);

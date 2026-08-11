@@ -1,4 +1,5 @@
 import { Conversation, Tag } from '../types';
+import { phoneVariants } from './phone';
 
 const areTagsEqual = (previous: Tag[], next: Tag[]) => (
   previous.length === next.length
@@ -96,4 +97,68 @@ export const reconcileConversations = (
   });
 
   return changed ? reconciled : previous;
+};
+
+const activityTimestamp = (conversation: Conversation) => conversation.lastMessageAt || 0;
+
+const preserveNewerActivity = (previous: Conversation, next: Conversation) => {
+  if (activityTimestamp(previous) <= activityTimestamp(next)) return { conversation: next, preserved: false };
+
+  return {
+    conversation: {
+      ...next,
+      lastMessage: previous.lastMessage,
+      lastMessageTimestamp: previous.lastMessageTimestamp,
+      lastMessageAt: previous.lastMessageAt,
+      lastMessageFromMe: previous.lastMessageFromMe,
+      lastMessageKey: previous.lastMessageKey,
+      unreadCount: previous.unreadCount,
+      needsResponse: previous.needsResponse,
+    },
+    preserved: true,
+  };
+};
+
+/**
+ * Reconciles an inbox snapshot without allowing an older activity snapshot to
+ * replace a newer local/SSE activity. Phone matching covers @lid and
+ * @s.whatsapp.net representations of the same contact.
+ */
+export const reconcileConversationsMonotonic = (
+  previous: Conversation[],
+  next: Conversation[],
+): Conversation[] => {
+  if (previous.length === 0 || next.length === 0) return reconcileConversations(previous, next);
+
+  const previousById = new Map(previous.map((conversation) => [conversation.id, conversation]));
+  const previousByPhone = new Map<string, Conversation>();
+  previous.forEach((conversation) => {
+    const phone = conversation.contact.phone.replace(/\D/g, '');
+    phoneVariants(phone).forEach((variant) => {
+      if (variant && !previousByPhone.has(variant)) previousByPhone.set(variant, conversation);
+    });
+  });
+
+  const locallyNewerIds = new Set<string>();
+  const protectedSnapshot = next.map((conversation) => {
+    const phone = conversation.contact.phone.replace(/\D/g, '');
+    const previousConversation = previousById.get(conversation.id)
+      || phoneVariants(phone).map((variant) => previousByPhone.get(variant)).find(Boolean);
+    if (!previousConversation) return conversation;
+
+    const protectedActivity = preserveNewerActivity(previousConversation, conversation);
+    if (protectedActivity.preserved) locallyNewerIds.add(conversation.id);
+    return protectedActivity.conversation;
+  });
+
+  if (locallyNewerIds.size === 0) return reconcileConversations(previous, protectedSnapshot);
+
+  const orderedSnapshot = protectedSnapshot
+    .map((conversation, index) => ({ conversation, index }))
+    .sort((left, right) => (
+      activityTimestamp(right.conversation) - activityTimestamp(left.conversation)
+      || left.index - right.index
+    ))
+    .map(({ conversation }) => conversation);
+  return reconcileConversations(previous, orderedSnapshot);
 };
