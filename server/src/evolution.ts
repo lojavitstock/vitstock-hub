@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
-import { config } from './config.js';
+import { config, isAllowedFrontendOrigin } from './config.js';
 import { requireUser } from './auth.js';
 import { db } from './db.js';
 import { publishRealtimeEvent, registerRealtimeClient } from './realtime.js';
@@ -1072,14 +1072,17 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.get('/api/evolution/events', { preHandler: requireUser }, async (request, reply) => {
     // EventSource não passa pelo ciclo normal de resposta do Fastify: o stream
     // fica aberto e recebe somente eventos da empresa do usuário autenticado.
-    reply.hijack();
     const origin = request.headers.origin;
+    if (origin && !isAllowedFrontendOrigin(origin)) {
+      return reply.code(403).send({ error: 'Origem nÃ£o autorizada' });
+    }
+    reply.hijack();
     reply.raw.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
-      'Access-Control-Allow-Origin': origin === config.FRONTEND_URL ? origin : config.FRONTEND_URL,
+      'Access-Control-Allow-Origin': origin || config.FRONTEND_URL,
       'Access-Control-Allow-Credentials': 'true',
     });
     reply.raw.write(': connected\n\n');

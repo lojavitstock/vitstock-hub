@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
-import { config } from './config.js';
+import { config, isAllowedFrontendOrigin } from './config.js';
 import { db } from './db.js';
 import { loadUser, registerAuthRoutes } from './auth.js';
 import { registerEvolutionRoutes } from './evolution.js';
@@ -17,7 +17,9 @@ export async function createApp() {
   });
 
   await app.register(cors, {
-    origin: config.FRONTEND_URL,
+    origin: (origin, callback) => {
+      callback(null, !origin || isAllowedFrontendOrigin(origin));
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   });
@@ -30,7 +32,7 @@ export async function createApp() {
     if (!changesState || !request.url.startsWith('/api/')) return;
 
     const origin = request.headers.origin;
-    if (origin && origin !== config.FRONTEND_URL) {
+    if (origin && !isAllowedFrontendOrigin(origin)) {
       return reply.code(403).send({ error: 'Origem não autorizada' });
     }
   });

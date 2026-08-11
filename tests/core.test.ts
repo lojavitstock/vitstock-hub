@@ -11,6 +11,11 @@ import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../s
 import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../src/utils/realtimeConfig';
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
+import {
+  config,
+  isAllowedFrontendOrigin,
+  parseFrontendOrigins,
+} from '../server/src/config';
 import type { Conversation, Message } from '../src/types';
 
 const message = (
@@ -61,6 +66,35 @@ const cloneConversation = (value: Conversation): Conversation => ({
   contact: { ...value.contact, tags: value.contact.tags.map((tag) => ({ ...tag })) },
   lastMessageKey: value.lastMessageKey ? { ...value.lastMessageKey } : undefined,
   assignedAttendant: value.assignedAttendant ? { ...value.assignedAttendant } : undefined,
+});
+
+test('origem frontend principal Ã© permitida', () => {
+  assert.equal(isAllowedFrontendOrigin(config.FRONTEND_URL), true);
+});
+
+test('origens adicionais normalizadas sÃ£o permitidas', () => {
+  const additional = parseFrontendOrigins(
+    ' https://preview.example.com/ , , https://staging.example.com ',
+  );
+  const allowedOrigins = new Set([config.FRONTEND_URL, ...additional]);
+
+  assert.equal(isAllowedFrontendOrigin('https://preview.example.com', allowedOrigins), true);
+  assert.equal(isAllowedFrontendOrigin('https://staging.example.com/', allowedOrigins), true);
+});
+
+test('origem desconhecida e domÃ­nio parecido sÃ£o rejeitados', () => {
+  const allowedOrigins = new Set([config.FRONTEND_URL, 'https://preview.example.com']);
+
+  assert.equal(isAllowedFrontendOrigin('https://unknown.example.com', allowedOrigins), false);
+  assert.equal(isAllowedFrontendOrigin('https://preview.example.com.evil.test', allowedOrigins), false);
+  assert.equal(isAllowedFrontendOrigin('https://evil-preview.example.com', allowedOrigins), false);
+});
+
+test('curingas nunca sÃ£o aceitos', () => {
+  const allowedOrigins = new Set(parseFrontendOrigins('*.vercel.app, https://preview.example.com'));
+
+  assert.equal(isAllowedFrontendOrigin('*.vercel.app', allowedOrigins), false);
+  assert.equal(isAllowedFrontendOrigin('https://qualquer.vercel.app', allowedOrigins), false);
 });
 
 test('coordenador de inbox compartilha duas solicitações simultâneas equivalentes', async () => {
