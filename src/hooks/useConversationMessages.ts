@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Conversation, Message } from '../types';
+import { Conversation, Message, WhatsappInstance } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { phoneVariants } from '../utils/phone';
 import { mergeConversationMessages } from '../utils/messageMerge';
@@ -18,6 +18,7 @@ type UseConversationMessagesOptions = {
   instanceName: string;
   attendantLabel: string;
   isMock: boolean;
+  connectionStatus: WhatsappInstance['status'];
 };
 
 const HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -30,6 +31,7 @@ export const useConversationMessages = ({
   instanceName,
   attendantLabel,
   isMock,
+  connectionStatus,
 }: UseConversationMessagesOptions) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
@@ -92,7 +94,7 @@ export const useConversationMessages = ({
   }, [activeConversationId]);
 
   useEffect(() => {
-    if (!activeConversationId || isMock) {
+    if (!activeConversationId || isMock || connectionStatus !== 'connected') {
       messagesConversationIdRef.current = '';
       setLoadingMessages(false);
       setBackgroundRefreshing(false);
@@ -246,7 +248,11 @@ export const useConversationMessages = ({
 
     const unsubscribe = EvolutionApiService.subscribeToRealtimeEvents((event) => {
       if (event.type === REALTIME_RECONNECTED_EVENT) {
-        if (document.visibilityState === 'visible') void fetchConversationMessages();
+        if (document.visibilityState === 'visible') {
+          void EvolutionApiService.getInstanceStatus(instanceName);
+          shouldReconcile = true;
+          void fetchConversationMessages();
+        }
         return;
       }
       if (event.type !== 'message.upsert' && event.type !== 'message.status') return;
@@ -313,6 +319,18 @@ export const useConversationMessages = ({
         if (stickToBottomRef.current) scrollToBottom();
       }, 0);
     });
+    let previousWhatsappStatus: 'connected' | 'connecting' | 'disconnected' = 'connecting';
+    const handleWhatsAppStatus = (event: Event) => {
+      const status = (event as CustomEvent<'connected' | 'connecting' | 'disconnected'>).detail;
+      if (status !== 'connected' && status !== 'connecting' && status !== 'disconnected') return;
+      const wasConnected = previousWhatsappStatus === 'connected';
+      previousWhatsappStatus = status;
+      if (status === 'connected' && !wasConnected && document.visibilityState === 'visible') {
+        shouldReconcile = true;
+        void fetchConversationMessages();
+      }
+    };
+    window.addEventListener('vitstock:whatsapp-status', handleWhatsAppStatus);
 
     void fetchConversationMessages();
     const interval = window.setInterval(() => {
@@ -326,9 +344,10 @@ export const useConversationMessages = ({
       isSubscribed = false;
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('vitstock:whatsapp-status', handleWhatsAppStatus);
       unsubscribe();
     };
-  }, [activeConversationId, attendantLabel, instanceName, isMock, scrollToBottom]);
+  }, [activeConversationId, attendantLabel, connectionStatus, instanceName, isMock, scrollToBottom]);
 
   useEffect(() => {
     historyExpandedRef.current = historyExpanded;

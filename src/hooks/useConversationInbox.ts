@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { mockConversations } from '../services/mockData';
 import { EvolutionApiService } from '../services/evolutionApi';
-import { ChatStatus, Conversation } from '../types';
+import { ChatStatus, Conversation, WhatsappInstance } from '../types';
 import { ConversationFilter } from '../components/conversations/ConversationFilters';
 import { phoneVariants } from '../utils/phone';
 import { reconcileConversations } from '../utils/conversationReconciliation';
@@ -31,6 +31,7 @@ const isPhoneOnlyName = (value?: string | null) => !value || /^\+?[\d\s().-]+$/.
 type UseConversationInboxOptions = {
   instanceName: string;
   isMock: boolean;
+  connectionStatus: WhatsappInstance['status'];
   userId?: string;
   userRole?: string;
 };
@@ -38,6 +39,7 @@ type UseConversationInboxOptions = {
 export const useConversationInbox = ({
   instanceName,
   isMock,
+  connectionStatus,
   userId,
   userRole,
 }: UseConversationInboxOptions) => {
@@ -55,6 +57,7 @@ export const useConversationInbox = ({
   const readOverridesRef = useRef(new Map<string, number>());
   const contactNameOverridesRef = useRef(new Map<string, string>());
   const inboxRequestsRef = useRef(createInFlightRequestCoordinator<void>());
+  const whatsappStatusRef = useRef<'connected' | 'connecting' | 'disconnected'>('connecting');
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -69,7 +72,9 @@ export const useConversationInbox = ({
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
 
-  const loadChats = useCallback((showLoading = true) => inboxRequestsRef.current.run('inbox', async () => {
+  const loadChats = useCallback((showLoading = true) => {
+    if (!isMock && connectionStatus !== 'connected') return Promise.resolve();
+    return inboxRequestsRef.current.run('inbox', async () => {
     // A Evolution pode levar vários segundos para responder. Não iniciamos
     // outra sincronização enquanto a anterior ainda está em andamento.
     if (showLoading) setLoadingChats(true);
@@ -134,15 +139,20 @@ export const useConversationInbox = ({
     } finally {
       if (showLoading) setLoadingChats(false);
     }
-  }), [instanceName, isMock]);
+    });
+  }, [connectionStatus, instanceName, isMock]);
 
   useEffect(() => {
+    if (!isMock && connectionStatus !== 'connected') return undefined;
     void loadChats();
     if (isMock) return undefined;
 
     const unsubscribe = EvolutionApiService.subscribeToRealtimeEvents((event) => {
       if (event.type === REALTIME_RECONNECTED_EVENT) {
-        if (document.visibilityState === 'visible') void loadChats(false);
+        if (document.visibilityState === 'visible') {
+          void EvolutionApiService.getInstanceStatus(instanceName);
+          void loadChats(false);
+        }
         return;
       }
       // Statuses only affect the active timeline. The inbox has no message
@@ -164,6 +174,16 @@ export const useConversationInbox = ({
       // the list) retain the existing polling/refetch safety net.
       void loadChats(false);
     });
+    const handleWhatsAppStatus = (event: Event) => {
+      const status = (event as CustomEvent<'connected' | 'connecting' | 'disconnected'>).detail;
+      if (status !== 'connected' && status !== 'connecting' && status !== 'disconnected') return;
+      const previousStatus = whatsappStatusRef.current;
+      whatsappStatusRef.current = status;
+      if (status === 'connected' && previousStatus !== 'connected' && document.visibilityState === 'visible') {
+        void loadChats(false);
+      }
+    };
+    window.addEventListener('vitstock:whatsapp-status', handleWhatsAppStatus);
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') void loadChats(false);
     }, REALTIME_SAFETY_INTERVAL_MS);
@@ -174,9 +194,10 @@ export const useConversationInbox = ({
     return () => {
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('vitstock:whatsapp-status', handleWhatsAppStatus);
       unsubscribe();
     };
-  }, [isMock, loadChats]);
+  }, [connectionStatus, isMock, loadChats]);
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === activeConversationId),

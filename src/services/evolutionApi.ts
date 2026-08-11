@@ -354,10 +354,11 @@ export class EvolutionApiService {
       };
     } catch (err) {
       console.warn('Evolution API indisponível ou em criação:', err);
+      this.publishStatus('disconnected');
       return {
         id: instanceName,
         name: instanceName,
-        status: this.lastKnownStatus
+        status: 'disconnected'
       };
     }
   }

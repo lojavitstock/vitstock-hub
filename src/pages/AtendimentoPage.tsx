@@ -1,5 +1,5 @@
 import React, { useCallback, useRef, useState, useEffect } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { 
   Search, 
   Send, 
@@ -13,6 +13,7 @@ import {
   Zap, 
   Kanban,
   RefreshCw,
+  WifiOff,
   MessageSquare,
   Plus,
   Phone,
@@ -24,7 +25,7 @@ import {
   Globe,
   Archive,
 } from 'lucide-react';
-import { Conversation, Message } from '../types';
+import { Conversation, Message, WhatsappInstance } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { useAuth } from '../auth/AuthContext';
 import { ConversationFilters } from '../components/conversations/ConversationFilters';
@@ -41,12 +42,14 @@ export const AtendimentoPage: React.FC = () => {
   const instanceName = 'vitstock_atendimento';
   const isMock = import.meta.env.VITE_USE_MOCK_DATA === 'true';
   const location = useLocation();
+  const navigate = useNavigate();
   const { user } = useAuth();
   const attendantLabel = user
     ? `${user.name} • ${user.companyName || 'Vitstock'}`
     : 'Atendente • Vitstock';
 
   const attendantName = user?.name || 'Atendente';
+  const [whatsappStatus, setWhatsappStatus] = useState<WhatsappInstance['status']>('connecting');
   const composerRef = useRef<MessageComposerHandle>(null);
   const composerTextRef = useRef('');
   const handleComposerTextChange = useCallback((value: string) => {
@@ -88,6 +91,7 @@ export const AtendimentoPage: React.FC = () => {
   } = useConversationInbox({
     instanceName,
     isMock,
+    connectionStatus: whatsappStatus,
     userId: user?.id,
     userRole: user?.role,
   });
@@ -113,6 +117,34 @@ export const AtendimentoPage: React.FC = () => {
     setConversations,
     rememberContactName,
   });
+
+  useEffect(() => {
+    let mounted = true;
+    const syncStatus = (event: Event) => {
+      const status = (event as CustomEvent<WhatsappInstance['status']>).detail;
+      if (status === 'connected' || status === 'connecting' || status === 'disconnected') {
+        setWhatsappStatus(status);
+      }
+    };
+    const refreshStatus = () => {
+      void EvolutionApiService.getInstanceStatus(instanceName)
+        .then((status) => {
+          if (mounted) setWhatsappStatus(status.status);
+        })
+        .catch(() => undefined);
+    };
+    window.addEventListener('vitstock:whatsapp-status', syncStatus);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') refreshStatus();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    refreshStatus();
+    return () => {
+      mounted = false;
+      window.removeEventListener('vitstock:whatsapp-status', syncStatus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [instanceName]);
 
   useEffect(() => {
     const state = location.state as { startChat?: { phone?: string; name?: string } } | null;
@@ -155,6 +187,7 @@ export const AtendimentoPage: React.FC = () => {
     instanceName,
     attendantLabel,
     isMock,
+    connectionStatus: whatsappStatus,
   });
 
   // Rolar para a última mensagem automaticamente quando a conversa mudar ou chegar mensagem nova
@@ -414,6 +447,10 @@ export const AtendimentoPage: React.FC = () => {
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!composerTextRef.current.trim() || !activeConv || activeChatLocked) return;
+    if (!isInternalNote && !isMock && whatsappStatus !== 'connected') {
+      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de enviar mensagens.');
+      return;
+    }
 
     const newMsgText = composerTextRef.current.trim();
     const outboundText = `*${attendantName}*\n${newMsgText}`;
@@ -487,6 +524,10 @@ export const AtendimentoPage: React.FC = () => {
 
   const handleAttachmentFile = async (file: File) => {
     if (!file || !activeConv || activeChatLocked || isInternalNote || sendingMedia) return;
+    if (!isMock && whatsappStatus !== 'connected') {
+      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de enviar anexos.');
+      return;
+    }
     if (file.size > 10 * 1024 * 1024) {
       setAssignmentFeedback('O anexo deve ter no máximo 10 MB.');
       return;
@@ -582,6 +623,10 @@ export const AtendimentoPage: React.FC = () => {
 
   const handleInputPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     if (!activeConv || activeChatLocked || isInternalNote || sendingMedia) return;
+    if (!isMock && whatsappStatus !== 'connected') {
+      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de enviar imagens.');
+      return;
+    }
     const imageItem = Array.from(event.clipboardData.items).find((item) => item.kind === 'file' && item.type.startsWith('image/'));
     const file = imageItem?.getAsFile()
       || Array.from(event.clipboardData.files).find((candidate) => candidate.type.startsWith('image/'));
@@ -592,6 +637,10 @@ export const AtendimentoPage: React.FC = () => {
 
   const retryFailedMessage = useCallback(async (message: Message) => {
     if (!activeConv || isMock || message.status !== 'failed' || message.isInternalNote) return;
+    if (whatsappStatus !== 'connected') {
+      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de tentar novamente.');
+      return;
+    }
 
     const retryText = message.content.trim();
     if (!retryText) return;
@@ -620,7 +669,7 @@ export const AtendimentoPage: React.FC = () => {
       setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'failed' } : item));
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível reenviar a mensagem.');
     }
-  }, [activeConv, attendantName, instanceName, isMock]);
+  }, [activeConv, attendantName, instanceName, isMock, whatsappStatus]);
 
   const handleSelectConversation = useCallback((conversation: Conversation) => {
     setActiveConvId(conversation.id);
@@ -638,6 +687,10 @@ export const AtendimentoPage: React.FC = () => {
   const handleStartNewChat = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newChatNumber.trim() || !newChatMessage.trim() || startingNewChat) return;
+    if (!isMock && whatsappStatus !== 'connected') {
+      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de iniciar uma conversa.');
+      return;
+    }
 
     const cleanNum = newChatNumber.replace(/\D/g, '');
     if (cleanNum.length < 8) {
@@ -700,11 +753,12 @@ export const AtendimentoPage: React.FC = () => {
     setStartingNewChat(false);
   };
 
+  const whatsappConnected = whatsappStatus === 'connected';
   return (
     <div className="flex h-full w-full bg-[#11181d] overflow-hidden text-slate-100 font-overpass relative">
       
       {/* Modal para Nova Conversa Directa */}
-      {showNewChatModal && (
+      {whatsappConnected && showNewChatModal && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
           <div className="bg-[#121215] border border-zinc-800 rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl">
             <h2 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
@@ -777,6 +831,7 @@ export const AtendimentoPage: React.FC = () => {
             <div className="flex items-center gap-1.5">
               <button 
                 onClick={() => setShowNewChatModal(true)}
+                disabled={!whatsappConnected}
                 className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-400 text-zinc-950 shadow-[0_4px_12px_rgba(238,187,44,0.2)] transition-colors hover:bg-amber-300"
                 title="Nova Conversa"
               >
@@ -784,6 +839,7 @@ export const AtendimentoPage: React.FC = () => {
               </button>
               <button 
                 onClick={() => loadChats(true)} 
+                disabled={!whatsappConnected}
                 className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#46535a] bg-[#2a343a] text-slate-300 transition-colors hover:border-amber-300/50 hover:text-amber-300"
                 title="Sincronizar Mensagens"
               >
@@ -792,6 +848,7 @@ export const AtendimentoPage: React.FC = () => {
             </div>
           </div>
 
+          {whatsappConnected ? <>
           {/* Campo de Busca */}
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
@@ -874,24 +931,50 @@ export const AtendimentoPage: React.FC = () => {
             onFilterChange={setFilterTab}
             needsResponse={conversationNeedsResponse}
           />
+          </> : (
+            <div className="flex flex-col items-center gap-3 rounded-xl border border-red-400/25 bg-red-400/10 px-4 py-6 text-center">
+              {whatsappStatus === 'connecting' ? (
+                <RefreshCw className="h-7 w-7 animate-spin text-amber-300" aria-hidden="true" />
+              ) : (
+                <WifiOff className="h-7 w-7 text-red-300" aria-hidden="true" />
+              )}
+              <div>
+                <p className="text-sm font-bold text-slate-100">
+                  {whatsappStatus === 'connecting' ? 'Reconectando ao WhatsApp...' : 'WhatsApp desconectado'}
+                </p>
+                <p className="mt-1 text-xs leading-5 text-slate-300/80">
+                  {whatsappStatus === 'connecting'
+                    ? 'A caixa de entrada ficará disponível assim que a conexão for restabelecida.'
+                    : 'Reconecte sua conta para voltar a receber e enviar mensagens.'}
+                </p>
+              </div>
+              {whatsappStatus === 'disconnected' && (
+                <button type="button" onClick={() => navigate('/configuracoes?tab=connections')} className="rounded-lg border border-amber-300/40 bg-amber-300 px-3 py-2 text-xs font-bold text-zinc-950 hover:bg-amber-200">
+                  Reconectar WhatsApp
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Lista de Conversas com Scroll */}
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <ConversationList
-            conversations={conversations}
-            visibleConversations={visibleConversations}
-            activeConversationId={activeConvId}
-            needsResponse={conversationNeedsResponse}
-            needsAttention={needsAttention}
-            onSelectConversation={handleSelectConversation}
-          />
+          {whatsappConnected && (
+            <ConversationList
+              conversations={conversations}
+              visibleConversations={visibleConversations}
+              activeConversationId={activeConvId}
+              needsResponse={conversationNeedsResponse}
+              needsAttention={needsAttention}
+              onSelectConversation={handleSelectConversation}
+            />
+          )}
         </div>
       </div>
 
       {/* Coluna 2: Chat Principal (Bate-Papo Central) */}
       <div className="flex-1 flex flex-col bg-[#152027] overflow-hidden">
-        {activeConv ? (
+        {whatsappConnected && activeConv ? (
           <>
             {/* Cabeçalho do Chat */}
             <div className="h-16 px-5 border-b border-[#344047] bg-[#20292f] flex items-center justify-between flex-shrink-0">
@@ -900,9 +983,6 @@ export const AtendimentoPage: React.FC = () => {
                 <div>
                   <h2 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
                     {activeConv.contact.name}
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-semibold">
-                      WhatsApp Conectado
-                    </span>
                   </h2>
                   <p className="text-xs text-zinc-400 font-mono">{activeConv.contact.phone}</p>
                 </div>
@@ -965,6 +1045,7 @@ export const AtendimentoPage: React.FC = () => {
               isInternalNote={isInternalNote}
               quickReplyOpen={quickReplyOpen}
               activeChatLocked={activeChatLocked}
+              whatsappConnected={whatsappConnected}
               assignedAttendantName={activeConv.assignedAttendant?.name}
               sendingMedia={sendingMedia}
               attachmentInputRef={attachmentInputRef}
@@ -976,10 +1057,31 @@ export const AtendimentoPage: React.FC = () => {
               onInputPaste={handleInputPaste}
             />
           </>
+        ) : !whatsappConnected ? (
+          <div className="flex flex-1 flex-col items-center justify-center px-8 text-center text-zinc-500">
+            {whatsappStatus === 'connecting' ? (
+              <RefreshCw className="mb-4 h-12 w-12 animate-spin text-amber-300" aria-hidden="true" />
+            ) : (
+              <WifiOff className="mb-4 h-12 w-12 text-red-300" aria-hidden="true" />
+            )}
+            <h3 className="text-lg font-bold text-zinc-100">
+              {whatsappStatus === 'connecting' ? 'Reconectando ao WhatsApp...' : 'WhatsApp desconectado'}
+            </h3>
+            <p className="mt-2 max-w-md text-sm leading-6 text-zinc-400">
+              {whatsappStatus === 'connecting'
+                ? 'O Atendimento está aguardando a conexão ser restabelecida.'
+                : 'O Atendimento está offline. Reconecte sua conta para voltar a receber e enviar mensagens.'}
+            </p>
+            {whatsappStatus === 'disconnected' && (
+              <button type="button" onClick={() => navigate('/configuracoes?tab=connections')} className="mt-5 rounded-lg border border-amber-300/40 bg-amber-300 px-4 py-2.5 text-sm font-bold text-zinc-950 transition-colors hover:bg-amber-200">
+                Reconectar WhatsApp
+              </button>
+            )}
+          </div>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center text-center p-8 text-zinc-500">
             <MessageSquare className="w-12 h-12 mb-3 text-zinc-700 animate-pulse" />
-            <h3 className="text-sm font-bold text-zinc-300 mb-1">Seu WhatsApp está 100% Conectado!</h3>
+            <h3 className="text-sm font-bold text-zinc-300 mb-1">Seu WhatsApp está conectado.</h3>
             <p className="text-xs max-w-sm text-zinc-500">
               As mensagens enviadas para o seu número aparecerão aqui automaticamente.
             </p>
@@ -988,7 +1090,7 @@ export const AtendimentoPage: React.FC = () => {
       </div>
 
       {/* Coluna 3: Ficha CRM */}
-      {activeConv && (
+      {whatsappConnected && activeConv && (
         <div className="hidden 2xl:flex w-64 border-l border-[#344047] bg-[#182126] p-5 flex-col justify-between flex-shrink-0 overflow-y-auto">
           <div>
             <div className="text-center pb-5 border-b border-zinc-800/80">
@@ -1025,7 +1127,7 @@ export const AtendimentoPage: React.FC = () => {
         </div>
       )}
 
-      {showContactInfo && activeConv && (
+      {whatsappConnected && showContactInfo && activeConv && (
         <div className="absolute inset-y-0 right-0 z-40 w-[340px] max-w-[90vw] bg-[#182126] border-l border-[#344047] shadow-2xl flex flex-col animate-fade-in">
           <div className="h-16 px-4 border-b border-[#344047] bg-[#20292f] flex items-center justify-between">
             <h3 className="font-extrabold text-sm text-slate-100">Informações do contato</h3>
@@ -1092,7 +1194,7 @@ export const AtendimentoPage: React.FC = () => {
         </div>
       )}
 
-      {showGoogleContactForm && activeConv && (
+      {whatsappConnected && showGoogleContactForm && activeConv && (
         <div className="absolute inset-y-0 right-0 z-[70] w-[340px] max-w-[90vw] bg-[#182126] border-l border-[#344047] shadow-2xl animate-fade-in">
           <form onSubmit={saveGoogleContactForm} className="flex h-full flex-col gap-4 overflow-y-auto p-5">
             <div className="flex items-start justify-between gap-4 border-b border-[#344047] pb-3">
