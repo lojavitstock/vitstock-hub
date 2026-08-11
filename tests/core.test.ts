@@ -267,6 +267,50 @@ test('SSE atualiza preview de conversa não aberta sem carregar histórico', () 
   assert.strictEqual(updated?.[1], current[0]);
 });
 
+test('SSE recebido com conversationId interno ainda atualiza JID @lid', () => {
+  const lid = '164794086760597@lid';
+  const current = [conversation(lid, {
+    contact: {
+      ...conversation(lid).contact,
+      phone: '+5521997402785',
+    },
+  })];
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'message.upsert',
+    remoteJid: lid,
+    phone: '5521997402785',
+    message: {
+      ...message('lid-message', 1_800_000_000_000, 'mensagem recebida'),
+      conversationId: 'conversation-row-uuid',
+    },
+  });
+
+  assert.equal(updated?.[0]?.lastMessage, 'mensagem recebida');
+  assert.equal(updated?.[0]?.unreadCount, 1);
+  assert.equal(updated?.[0]?.id, lid);
+});
+
+test('SSE recebido com JID canônico usa telefone quando o identificador interno diverge', () => {
+  const current = [conversation('5521997402785@s.whatsapp.net', {
+    contact: {
+      ...conversation('5521997402785@s.whatsapp.net').contact,
+      phone: '+5521997402785',
+    },
+  })];
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'message.upsert',
+    remoteJid: '5521997402785@lid',
+    phone: '5521997402785',
+    message: {
+      ...message('canonical-message', 1_800_000_000_000, 'mensagem canônica'),
+      conversationId: 'conversation-row-uuid',
+    },
+  });
+
+  assert.equal(updated?.[0]?.lastMessage, 'mensagem canônica');
+  assert.equal(updated?.[0]?.unreadCount, 1);
+});
+
 test('SSE antigo não regride o preview nem a posição da conversa', () => {
   const latest = conversation('conversation-1', {
     lastMessage: 'mensagem nova',

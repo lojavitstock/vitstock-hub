@@ -23,8 +23,14 @@ const hasOwn = (value: object, key: string) => Object.prototype.hasOwnProperty.c
 const normalizePhone = (value?: string) => String(value || '').replace(/\D/g, '');
 
 const eventMatchesConversation = (conversation: Conversation, event: RealtimeEventPayload) => {
-  if (event.message?.conversationId && event.message.conversationId === conversation.id) return true;
-  if (event.remoteJid && event.remoteJid === conversation.id) return true;
+  const messageRawKey = event.message?.rawKey;
+  const eventConversationIds = [
+    event.message?.conversationId,
+    event.remoteJid,
+    typeof messageRawKey === 'object' && messageRawKey ? messageRawKey.remoteJid : undefined,
+    typeof messageRawKey === 'object' && messageRawKey ? messageRawKey.remoteJidAlt : undefined,
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+  if (eventConversationIds.includes(conversation.id)) return true;
 
   const eventPhone = normalizePhone(event.phone);
   const conversationPhone = normalizePhone(conversation.contact.phone);
@@ -82,7 +88,7 @@ const updateConversationFromMessage = (
   event: RealtimeEventPayload,
 ): Conversation | null => {
   const message = event.message;
-  if (!message?.id || (message.conversationId && message.conversationId !== conversation.id)) return null;
+  if (!message?.id || !eventMatchesConversation(conversation, event)) return null;
 
   const timestampMs = Number(message.timestampMs ?? event.timestampMs ?? 0);
   const isIncoming = message.sender === 'contact';
