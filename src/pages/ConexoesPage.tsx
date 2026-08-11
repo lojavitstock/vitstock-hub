@@ -7,6 +7,9 @@ type ConexoesPageProps = {
   embedded?: boolean;
 };
 
+const CONNECTING_GRACE_MS = 15_000;
+const QR_REFRESH_INTERVAL_MS = 30_000;
+
 export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) => {
   const instanceName = 'vitstock_atendimento';
   const isMock = import.meta.env.VITE_USE_MOCK_DATA === 'true';
@@ -23,6 +26,9 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
   const qrCodeRef = useRef<string | null>(null);
   const qrRequestRef = useRef<Promise<string | null> | null>(null);
   const mountedRef = useRef(true);
+  const connectionStatusRef = useRef<WhatsappInstance['status']>('disconnected');
+  const connectingTimerRef = useRef<number | null>(null);
+  const qrRefreshTimerRef = useRef<number | null>(null);
 
   const updateQrCode = useCallback((value: string | null) => {
     qrCodeRef.current = value;
@@ -36,7 +42,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
 
     const request = EvolutionApiService.getConnectQrCode(instanceName)
       .then((qr) => {
-        if (qr && mountedRef.current) updateQrCode(qr);
+        if (qr && mountedRef.current && connectionStatusRef.current !== 'connected') updateQrCode(qr);
         return qr;
       })
       .finally(() => {
@@ -45,6 +51,78 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
     qrRequestRef.current = request;
     return request;
   }, [instanceName, isMock, updateQrCode]);
+
+  const clearReconnectTimers = useCallback(() => {
+    if (connectingTimerRef.current !== null) {
+      window.clearTimeout(connectingTimerRef.current);
+      connectingTimerRef.current = null;
+    }
+    if (qrRefreshTimerRef.current !== null) {
+      window.clearTimeout(qrRefreshTimerRef.current);
+      qrRefreshTimerRef.current = null;
+    }
+  }, []);
+
+  const clearConnectingTimer = useCallback(() => {
+    if (connectingTimerRef.current !== null) {
+      window.clearTimeout(connectingTimerRef.current);
+      connectingTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleQrRefresh = useCallback(() => {
+    clearConnectingTimer();
+    if (qrRefreshTimerRef.current !== null || connectionStatusRef.current === 'connected') return;
+    qrRefreshTimerRef.current = window.setTimeout(() => {
+      qrRefreshTimerRef.current = null;
+      if (!mountedRef.current || connectionStatusRef.current === 'connected') return;
+      void requestQrCode(true).finally(() => {
+        if (mountedRef.current && connectionStatusRef.current !== 'connected') scheduleQrRefresh();
+      });
+    }, QR_REFRESH_INTERVAL_MS);
+  }, [clearConnectingTimer, requestQrCode]);
+
+  const scheduleConnectingFallback = useCallback(() => {
+    if (connectingTimerRef.current !== null || connectionStatusRef.current !== 'connecting') return;
+    connectingTimerRef.current = window.setTimeout(() => {
+      connectingTimerRef.current = null;
+      if (!mountedRef.current || connectionStatusRef.current !== 'connecting') return;
+      void requestQrCode(true).finally(() => {
+        if (mountedRef.current && connectionStatusRef.current !== 'connected') scheduleQrRefresh();
+      });
+    }, CONNECTING_GRACE_MS);
+  }, [requestQrCode, scheduleQrRefresh]);
+
+  const ensureReconnectPath = useCallback((status: WhatsappInstance['status'], forceQr = false) => {
+    connectionStatusRef.current = status;
+    if (status === 'connected') {
+      clearReconnectTimers();
+      updateQrCode(null);
+      setConnectionError(null);
+      return;
+    }
+
+    if (status !== 'connecting') clearConnectingTimer();
+
+    if (status === 'connecting' && !forceQr) {
+      if (qrCodeRef.current) scheduleQrRefresh();
+      else scheduleConnectingFallback();
+      return;
+    }
+
+    if (!forceQr && qrCodeRef.current) {
+      scheduleQrRefresh();
+      return;
+    }
+
+    void requestQrCode(forceQr).then((qr) => {
+      if (!mountedRef.current || connectionStatusRef.current === 'connected') return;
+      if (!qr && !qrCodeRef.current) {
+        setConnectionError('A Evolution API ainda não entregou o QR Code. O sistema tentará novamente automaticamente.');
+      }
+      scheduleQrRefresh();
+    });
+  }, [clearConnectingTimer, clearReconnectTimers, requestQrCode, scheduleConnectingFallback, scheduleQrRefresh, updateQrCode]);
 
   // A consulta de status e a busca do QR Code são automáticas; o botão acima é apenas fallback.
   useEffect(() => {
@@ -56,21 +134,17 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
       const status = (event as CustomEvent<WhatsappInstance['status']>).detail;
       if (status !== 'connected' && status !== 'connecting' && status !== 'disconnected') return;
       setInstance((previous) => ({ ...previous, status }));
-      if (status === 'connected' || status === 'connecting') {
-        updateQrCode(null);
-        if (status === 'connected') setConnectionError(null);
-      } else {
-        void requestQrCode();
-      }
+      ensureReconnectPath(status);
     };
     window.addEventListener('vitstock:whatsapp-status', handleSharedStatus);
 
     return () => {
       mountedRef.current = false;
       window.clearInterval(interval);
+      clearReconnectTimers();
       window.removeEventListener('vitstock:whatsapp-status', handleSharedStatus);
     };
-  }, []);
+  }, [clearReconnectTimers, ensureReconnectPath]);
 
   const fetchStatus = async (showLoading = true, forceQr = false) => {
     if (showLoading) setLoading(true);
@@ -78,14 +152,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
       const statusData = await EvolutionApiService.getInstanceStatus(instanceName);
       if (!mountedRef.current) return;
       setInstance(statusData);
-      if (statusData.status === 'connected' || statusData.status === 'connecting') {
-        updateQrCode(null);
-      } else {
-        const qr = await requestQrCode(forceQr);
-        if (mountedRef.current && !qr && !qrCodeRef.current) {
-          setConnectionError('A Evolution API ainda não entregou o QR Code. Use "Verificar novamente" para tentar novamente.');
-        }
-      }
+      ensureReconnectPath(statusData.status, forceQr);
     } catch (error) {
       if (mountedRef.current) {
         setConnectionError(error instanceof Error ? error.message : 'Não foi possível consultar o status do WhatsApp.');
@@ -110,6 +177,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
     try {
       await EvolutionApiService.logoutInstance(instanceName);
       setInstance(prev => ({ ...prev, status: 'disconnected', phone: '' }));
+      connectionStatusRef.current = 'disconnected';
 
       const qr = await requestQrCode(true);
       if (qr) {
@@ -117,6 +185,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
       } else {
         setConnectionError('A sessão foi desconectada, mas a Evolution API ainda não entregou o QR Code. Use “Verificar novamente” para tentar novamente.');
       }
+      scheduleQrRefresh();
     } catch (error) {
       setConnectionError(error instanceof Error ? error.message : 'Não foi possível desconectar o WhatsApp.');
       await fetchStatus(false);
@@ -215,7 +284,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
                 {disconnecting ? 'Desconectando...' : 'Desconectar e gerar novo QR Code'}
               </button>
             </div>
-          ) : visibleStatus === 'connecting' ? (
+          ) : visibleStatus === 'connecting' && !qrCodeBase64 ? (
             <div className="p-8 rounded-xl bg-amber-400/5 border border-amber-400/20 text-center space-y-3 animate-fade-in">
               <RefreshCw className="w-8 h-8 text-amber-300 animate-spin mx-auto" />
               <h4 className="text-sm font-bold text-amber-200">Restabelecendo a sessão do WhatsApp</h4>
@@ -231,7 +300,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
               </button>
             </div>
           ) : (
-            /* Se estiver DESCONECTADO (exibir QR Code) */
+            /* Sem conexão aberta: exibir o QR Code enquanto a reconexão é concluída */
             <div className="p-8 rounded-xl bg-zinc-900 border border-amber-400/30 text-center space-y-4 animate-fade-in">
               <h4 className="text-sm font-bold text-zinc-100">Escaneie o QR Code abaixo no seu celular</h4>
               
