@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { LogOut, QrCode, RefreshCw, Smartphone, ShieldCheck, CheckCircle } from 'lucide-react';
 import { WhatsappInstance } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
@@ -19,50 +19,85 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
   const [qrCodeBase64, setQrCodeBase64] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
-  const [showManualQr, setShowManualQr] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const qrCodeRef = useRef<string | null>(null);
+  const qrRequestRef = useRef<Promise<string | null> | null>(null);
+  const mountedRef = useRef(true);
 
-  // Consulta somente o estado. O QR Code nunca é regenerado automaticamente.
-  useEffect(() => {
-    fetchStatus();
-
-    const interval = setInterval(() => fetchStatus(false), 30000);
-
-    return () => clearInterval(interval);
+  const updateQrCode = useCallback((value: string | null) => {
+    qrCodeRef.current = value;
+    if (mountedRef.current) setQrCodeBase64(value);
   }, []);
 
-  const fetchStatus = async (showLoading = true) => {
-    if (showLoading) setLoading(true);
-    const statusData = await EvolutionApiService.getInstanceStatus(instanceName);
-    setInstance(statusData);
-    if (statusData.status === 'connected') setShowManualQr(false);
+  const requestQrCode = useCallback(async (force = false) => {
+    if (isMock) return null;
+    if (qrRequestRef.current) return qrRequestRef.current;
+    if (!force && qrCodeRef.current) return qrCodeRef.current;
 
-    if (showLoading) setLoading(false);
+    const request = EvolutionApiService.getConnectQrCode(instanceName)
+      .then((qr) => {
+        if (qr && mountedRef.current) updateQrCode(qr);
+        return qr;
+      })
+      .finally(() => {
+        qrRequestRef.current = null;
+      });
+    qrRequestRef.current = request;
+    return request;
+  }, [instanceName, isMock, updateQrCode]);
+
+  // A consulta de status e a busca do QR Code são automáticas; o botão acima é apenas fallback.
+  useEffect(() => {
+    mountedRef.current = true;
+    void fetchStatus();
+
+    const interval = window.setInterval(() => { void fetchStatus(false); }, 30000);
+    const handleSharedStatus = (event: Event) => {
+      const status = (event as CustomEvent<WhatsappInstance['status']>).detail;
+      if (status !== 'connected' && status !== 'connecting' && status !== 'disconnected') return;
+      setInstance((previous) => ({ ...previous, status }));
+      if (status === 'connected' || status === 'connecting') {
+        updateQrCode(null);
+        if (status === 'connected') setConnectionError(null);
+      } else {
+        void requestQrCode();
+      }
+    };
+    window.addEventListener('vitstock:whatsapp-status', handleSharedStatus);
+
+    return () => {
+      mountedRef.current = false;
+      window.clearInterval(interval);
+      window.removeEventListener('vitstock:whatsapp-status', handleSharedStatus);
+    };
+  }, []);
+
+  const fetchStatus = async (showLoading = true, forceQr = false) => {
+    if (showLoading) setLoading(true);
+    try {
+      const statusData = await EvolutionApiService.getInstanceStatus(instanceName);
+      if (!mountedRef.current) return;
+      setInstance(statusData);
+      if (statusData.status === 'connected' || statusData.status === 'connecting') {
+        updateQrCode(null);
+      } else {
+        const qr = await requestQrCode(forceQr);
+        if (mountedRef.current && !qr && !qrCodeRef.current) {
+          setConnectionError('A Evolution API ainda não entregou o QR Code. Use "Verificar novamente" para tentar novamente.');
+        }
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setConnectionError(error instanceof Error ? error.message : 'Não foi possível consultar o status do WhatsApp.');
+      }
+    } finally {
+      if (showLoading && mountedRef.current) setLoading(false);
+    }
   };
 
   const handleConnectOrRefresh = async () => {
     setConnectionError(null);
-    setLoading(true);
-    if (isMock) {
-      setTimeout(() => {
-        setLoading(false);
-        setShowManualQr(false);
-        setInstance(prev => ({ ...prev, status: 'connected' }));
-      }, 1000);
-      return;
-    }
-
-    const statusData = await EvolutionApiService.getInstanceStatus(instanceName);
-    setInstance(statusData);
-
-    if (statusData.status === 'disconnected') {
-      setShowManualQr(true);
-      const qr = await EvolutionApiService.getConnectQrCode(instanceName);
-      if (qr) {
-        setQrCodeBase64(qr);
-      }
-    }
-    setLoading(false);
+    await fetchStatus(true, true);
   };
 
   const handleDisconnect = async () => {
@@ -70,21 +105,19 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
 
     setDisconnecting(true);
     setConnectionError(null);
-    setQrCodeBase64(null);
-    setShowManualQr(true);
+    updateQrCode(null);
 
     try {
       await EvolutionApiService.logoutInstance(instanceName);
       setInstance(prev => ({ ...prev, status: 'disconnected', phone: '' }));
 
-      const qr = await EvolutionApiService.getConnectQrCode(instanceName);
+      const qr = await requestQrCode(true);
       if (qr) {
-        setQrCodeBase64(qr);
+        updateQrCode(qr);
       } else {
-        setConnectionError('A sessão foi desconectada, mas a Evolution API ainda não entregou o QR Code. Clique em “Reverificar Status” para tentar novamente.');
+        setConnectionError('A sessão foi desconectada, mas a Evolution API ainda não entregou o QR Code. Use “Verificar novamente” para tentar novamente.');
       }
     } catch (error) {
-      setShowManualQr(false);
       setConnectionError(error instanceof Error ? error.message : 'Não foi possível desconectar o WhatsApp.');
       await fetchStatus(false);
     } finally {
@@ -92,8 +125,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
     }
   };
 
-  const showQr = showManualQr || instance.status === 'disconnected';
-  const visibleStatus = showQr ? 'disconnected' : instance.status;
+  const visibleStatus = instance.status;
 
   return (
     <div className={`${embedded ? 'w-full' : 'flex-1 h-full'} overflow-y-auto bg-zinc-950 ${embedded ? 'p-0' : 'p-6'} font-overpass`}>
@@ -128,7 +160,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
         className="btn-primary text-sm"
         >
           <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> 
-          {loading ? 'Verificando...' : 'Reverificar Status'}
+          {loading ? 'Verificando...' : 'Verificar novamente'}
         </button>
       </div>
 
@@ -251,13 +283,6 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
               <ShieldCheck className="w-4 h-4 text-amber-400" /> Sincronização em Tempo Real Ativa (Sem F5)
             </span>
             
-            <button 
-              onClick={handleConnectOrRefresh}
-              className="px-4 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-amber-400 hover:border-amber-400/40 text-xs font-bold transition-all flex items-center gap-2"
-            >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> 
-              Atualizar Status
-            </button>
           </div>
 
         </div>
