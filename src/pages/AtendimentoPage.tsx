@@ -197,6 +197,7 @@ export const AtendimentoPage: React.FC = () => {
     loadOlderMessages,
     messagesContainerRef,
     scrollToBottom,
+    captureScrollState,
     newMessagesCount,
   } = useConversationMessages({
     activeConversationId: activeConvId,
@@ -760,9 +761,10 @@ export const AtendimentoPage: React.FC = () => {
   }, [activeConv, attendantName, instanceName, isMock, updateConversationActivity, whatsappStatus]);
 
   const handleSelectConversation = useCallback((conversation: Conversation) => {
+    captureScrollState(activeConvId);
     setActiveConvId(conversation.id);
     void markConversationAsRead(conversation);
-  }, [markConversationAsRead, setActiveConvId]);
+  }, [activeConvId, captureScrollState, markConversationAsRead, setActiveConvId]);
 
   const handleLoadOlderMessages = useCallback(() => {
     void loadOlderMessages();
@@ -824,6 +826,7 @@ export const AtendimentoPage: React.FC = () => {
     };
 
     setConversations(prev => [newConv, ...prev]);
+    captureScrollState(activeConvId);
     setActiveConvId(jid);
     setMessages([{
       id: result?.message?.evolutionMessageId || result?.message?.id || clientMessageId,

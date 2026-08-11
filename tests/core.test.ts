@@ -11,6 +11,7 @@ import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../s
 import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
 import { createMessageNotificationDeduper } from '../src/utils/messageNotification';
 import { conversationNeedsResponse } from '../src/utils/conversationState';
+import { getNewIncomingMessageIds } from '../src/utils/messageActivity';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../src/utils/realtimeConfig';
 import {
   CONVERSATION_MESSAGE_CACHE_LIMIT,
@@ -73,6 +74,20 @@ const cloneConversation = (value: Conversation): Conversation => ({
   contact: { ...value.contact, tags: value.contact.tags.map((tag) => ({ ...tag })) },
   lastMessageKey: value.lastMessageKey ? { ...value.lastMessageKey } : undefined,
   assignedAttendant: value.assignedAttendant ? { ...value.assignedAttendant } : undefined,
+});
+
+test('indicador de novas mensagens ignora polling equivalente, saídas e histórico antigo', () => {
+  const previous = [message('known', 200, 'já recebida')];
+  const incoming = [
+    message('known', 200, 'já recebida'),
+    message('outgoing', 250, 'enviada', 'sent', { sender: 'attendant' }),
+    message('old-history', 100, 'histórico antigo'),
+    message('new-1', 300, 'nova mensagem'),
+    message('new-1', 300, 'nova mensagem'),
+  ];
+
+  assert.deepEqual(getNewIncomingMessageIds(previous, incoming, true), ['new-1']);
+  assert.deepEqual(getNewIncomingMessageIds(previous, incoming, false), []);
 });
 
 test('origem frontend principal Ã© permitida', () => {

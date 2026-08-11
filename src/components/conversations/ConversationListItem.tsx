@@ -55,7 +55,7 @@ export const ConversationListItem = React.memo<ConversationListItemProps>(({
             : needsResponse
               ? 'border-l-emerald-400 bg-[#20343a] shadow-[inset_3px_0_0_#34d399] hover:bg-[#294147]'
               : isUnread
-                ? 'border-l-sky-400 bg-sky-950/20 shadow-[inset_3px_0_0_#38bdf8] hover:bg-sky-950/30'
+                ? 'border-l-emerald-400 bg-[#20343a] shadow-[inset_3px_0_0_#34d399] hover:bg-[#294147]'
               : 'border-l-transparent hover:bg-[#222d33]'
       }`}
       aria-current={isSelected ? 'true' : undefined}
@@ -80,9 +80,9 @@ export const ConversationListItem = React.memo<ConversationListItemProps>(({
           <span className="rounded-md border border-[#46535a] bg-[#263239] px-1.5 py-0.5 text-[10px] font-semibold leading-4 text-slate-300">
             {conversation.department}
           </span>
-          {isUnread && (
-            <span className="rounded-md border border-sky-300/30 bg-sky-300/10 px-1.5 py-0.5 text-[10px] font-bold leading-4 text-sky-200">
-              Não lida
+          {needsResponse && (
+            <span className="rounded-md border border-emerald-300/25 bg-emerald-300/10 px-1.5 py-0.5 text-[10px] font-bold leading-4 text-emerald-200">
+              Não Respondido
             </span>
           )}
           {conversation.contact.tags.map((tag) => (
