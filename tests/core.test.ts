@@ -782,6 +782,93 @@ test('normaliza chamadas do WhatsApp como ligação perdida ou realizada', () =>
   assert.equal(normalized.metadata?.systemLabel, 'Ligação de voz perdida');
 });
 
+test('associa contexto de anúncio somente à mensagem que o carrega', () => {
+  const adMessage = normalizeEvolutionMessage({
+    key: { id: 'ad-1', fromMe: false },
+    message: {
+      extendedTextMessage: {
+        text: 'Olá, vim pelo anúncio',
+        contextInfo: {
+          conversionSource: 'FB_Ads',
+          externalAdReply: { title: 'Oferta real', sourceUrl: 'https://example.com/oferta' },
+        },
+      },
+    },
+    messageTimestamp: 1_700_000_003,
+  }, 0, 'conversation-1', 'Atendente');
+  const commonMessage = normalizeEvolutionMessage({
+    key: { id: 'common-1', fromMe: false },
+    // Evolution can put a chat snapshot context on the record. It must not
+    // become metadata for this ordinary message.
+    contextInfo: {
+      conversionSource: 'FB_Ads',
+      externalAdReply: { title: 'Contexto da conversa', sourceUrl: 'https://example.com/context' },
+    },
+    metadata: {
+      trafficSource: 'FB_Ads',
+      trafficTitle: 'Metadata de outro contexto',
+      trafficUrl: 'https://example.com/metadata',
+    },
+    message: { conversation: 'Mensagem comum' },
+    messageTimestamp: 1_700_000_004,
+  }, 1, 'conversation-1', 'Atendente');
+
+  assert.equal(adMessage.metadata?.trafficSource, 'FB_Ads');
+  assert.equal(adMessage.metadata?.trafficTitle, 'Oferta real');
+  assert.equal(commonMessage.metadata?.trafficSource, undefined);
+  assert.equal(commonMessage.metadata?.trafficTitle, undefined);
+  assert.equal(commonMessage.metadata?.trafficUrl, undefined);
+});
+
+test('não herda metadata de anúncio entre mensagens durante o merge', () => {
+  const adMessage = message('ad-1', 1_700, 'Mensagem de anúncio', 'read', {
+    metadata: { trafficSource: 'FB_Ads', trafficTitle: 'Oferta real' },
+  });
+  const commonMessage = message('common-1', 1_701, 'Mensagem comum');
+  const merged = mergeConversationMessages([adMessage], [commonMessage]);
+
+  assert.equal(merged[0]?.metadata?.trafficSource, 'FB_Ads');
+  assert.equal(merged[1]?.metadata?.trafficSource, undefined);
+  assert.equal(merged[1]?.metadata?.trafficTitle, undefined);
+});
+
+test('preserva cada contexto de anúncio persistido no escopo da própria mensagem', () => {
+  const firstAd = normalizeEvolutionMessage({
+    key: { id: 'stored-ad-1', fromMe: false },
+    metadataScope: 'persisted_message',
+    metadata: { trafficSource: 'FB_Ads', trafficTitle: 'Oferta A', trafficUrl: 'https://example.com/a' },
+    message: { conversation: 'Primeiro anúncio' },
+    messageTimestamp: 1_700_000_005,
+  }, 0, 'conversation-1', 'Atendente');
+  const secondAd = normalizeEvolutionMessage({
+    key: { id: 'stored-ad-2', fromMe: false },
+    metadataScope: 'persisted_message',
+    metadata: { trafficSource: 'Instagram', trafficTitle: 'Oferta B', trafficUrl: 'https://example.com/b' },
+    message: { conversation: 'Segundo anúncio' },
+    messageTimestamp: 1_700_000_006,
+  }, 1, 'conversation-1', 'Atendente');
+
+  assert.equal(firstAd.metadata?.trafficTitle, 'Oferta A');
+  assert.equal(secondAd.metadata?.trafficTitle, 'Oferta B');
+  assert.equal(firstAd.metadata?.trafficUrl, 'https://example.com/a');
+  assert.equal(secondAd.metadata?.trafficUrl, 'https://example.com/b');
+});
+
+test('merge posterior sem metadata não copia anúncio da mensagem anterior', () => {
+  const existingAd = message('ad-1', 1_700, 'Mensagem de anúncio', 'read', {
+    metadata: { trafficSource: 'FB_Ads', trafficTitle: 'Oferta real' },
+  });
+  const existingCommon = message('common-1', 1_701, 'Mensagem comum');
+  const current = [existingAd, existingCommon];
+  const merged = mergeConversationMessages(
+    current,
+    [{ ...existingCommon }],
+  );
+
+  assert.strictEqual(merged, current);
+  assert.equal(merged[1]?.metadata?.trafficSource, undefined);
+});
+
 class FakeResponse extends EventEmitter {
   writableEnded = false;
   destroyed = false;

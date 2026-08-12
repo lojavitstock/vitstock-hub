@@ -396,16 +396,16 @@ function providerInteractiveButtons(message: any) {
 
 function providerMessageMetadata(record: any, message: any, fromMe: boolean) {
   const type = providerMessageType(record, message);
-  const context = record?.contextInfo
-    || message?.contextInfo
+  // `record.contextInfo` may be supplied by Evolution as context for the chat
+  // snapshot. It is not proof that the individual message came from an ad.
+  // Traffic metadata must be derived only from the message payload itself.
+  const context = message?.contextInfo
     || message?.extendedTextMessage?.contextInfo
     || message?.imageMessage?.contextInfo
     || message?.videoMessage?.contextInfo
     || message?.documentMessage?.contextInfo
     || {};
-  const externalAd = record?.contextInfo?.externalAdReply
-    || message?.extendedTextMessage?.contextInfo?.externalAdReply
-    || message?.contextInfo?.externalAdReply;
+  const externalAd = context?.externalAdReply;
   const contact = message?.contactMessage;
   const location = message?.locationMessage;
   const reaction = message?.reactionMessage;
@@ -417,10 +417,16 @@ function providerMessageMetadata(record: any, message: any, fromMe: boolean) {
   // A referência de anúncio pertence somente à mensagem recebida que iniciou
   // a conversa. Mensagens enviadas pela loja podem carregar o mesmo
   // contextInfo do WhatsApp, mas não devem herdar a etiqueta do anúncio.
-  if (!fromMe) {
+  const hasMessageBoundAdContext = Boolean(
+    externalAd
+    || context?.ctwaSignals
+    || context?.conversionData
+    || context?.conversion_data,
+  );
+  if (!fromMe && hasMessageBoundAdContext) {
     const trafficSource = context?.conversionSource
       || context?.conversion_source
-      || (context?.ctwaSignals || context?.conversionData || context?.conversion_data ? 'FB_Ads' : undefined);
+      || 'FB_Ads';
     if (typeof trafficSource === 'string' && trafficSource.trim()) metadata.trafficSource = trafficSource.trim();
     const trafficTitle = externalAd?.title || externalAd?.sourceApp || externalAd?.mediaType;
     const trafficUrl = externalAd?.sourceUrl || externalAd?.sourceURL;
@@ -652,6 +658,7 @@ function localMessageToProviderRecord(row: any) {
     messageTimestamp: timestamp,
     status: row.status,
     metadata,
+    metadataScope: 'persisted_message',
     interactiveTitle: row.interactive_title || metadata.interactiveTitle,
     interactiveFooter: row.interactive_footer || metadata.interactiveFooter,
     interactiveButtons: row.interactive_buttons || metadata.interactiveButtons,
@@ -829,7 +836,10 @@ async function persistProviderMessage(companyId: string, record: any, options: {
         const linked = await client.query(
           `UPDATE messages
            SET evolution_message_id = $1,
-               metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
+               metadata = (
+                 COALESCE(metadata, '{}'::jsonb)
+                 - 'trafficSource' - 'trafficTitle' - 'trafficUrl'
+               ) || $2::jsonb,
                content = CASE
                   WHEN content ILIKE '[mensagem%suportada]'
                     OR content ILIKE '[mensagem%identificada]'
@@ -875,7 +885,10 @@ async function persistProviderMessage(companyId: string, record: any, options: {
       if (!insertedNewMessage) {
         await client.query(
           `UPDATE messages
-            SET metadata = COALESCE(messages.metadata, '{}'::jsonb) || $1::jsonb,
+            SET metadata = (
+                  COALESCE(messages.metadata, '{}'::jsonb)
+                  - 'trafficSource' - 'trafficTitle' - 'trafficUrl'
+                ) || $1::jsonb,
                 sender_name = CASE
                   WHEN messages.sender = 'contact'
                     AND COALESCE($2::text, '') <> ''

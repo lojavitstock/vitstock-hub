@@ -8,6 +8,7 @@ type ProviderRecord = {
   messageType?: string;
   contextInfo?: any;
   metadata?: Message['metadata'];
+  metadataScope?: 'persisted_message';
   messageTimestamp?: number | string;
   pushName?: string;
   status?: unknown;
@@ -114,25 +115,40 @@ export const evolutionMessagePreview = (record: any): string | undefined => (
 
 const messageMetadata = (record: ProviderRecord, message: any): Message['metadata'] => {
   const msg = unwrapMessage(message);
-  const context = record.contextInfo
-    || msg.contextInfo
+  // The record-level context can describe the chat snapshot. An ad card is
+  // valid only when its evidence is attached to this message payload.
+  const context = msg.contextInfo
     || msg.extendedTextMessage?.contextInfo
     || msg.imageMessage?.contextInfo
     || msg.videoMessage?.contextInfo
     || msg.documentMessage?.contextInfo
     || {};
   const metadata: NonNullable<Message['metadata']> = { ...(record.metadata || {}) };
+  // Metadata returned from the local PostgreSQL representation was already
+  // derived by the backend per message. Raw Evolution records must derive ad
+  // fields only from their own message payload below.
+  if (record.metadataScope !== 'persisted_message') {
+    delete metadata.trafficSource;
+    delete metadata.trafficTitle;
+    delete metadata.trafficUrl;
+  }
   const fromMe = record.key?.fromMe === true;
   const callInfo = callMessageInfo(record, msg, String(record.messageType || metadata.providerType || ''), fromMe);
-  if (!fromMe) {
-    const externalAd = context?.externalAdReply || msg.extendedTextMessage?.contextInfo?.externalAdReply;
+  const externalAd = context?.externalAdReply;
+  const hasMessageBoundAdContext = Boolean(
+    externalAd
+    || context?.ctwaSignals
+    || context?.conversionData
+    || context?.conversion_data,
+  );
+  if (!fromMe && hasMessageBoundAdContext) {
     const trafficSource = context?.conversionSource
       || context?.conversion_source
-      || (context?.ctwaSignals || context?.conversionData || context?.conversion_data ? 'FB_Ads' : undefined);
+      || 'FB_Ads';
     if (!metadata.trafficSource && typeof trafficSource === 'string' && trafficSource.trim()) metadata.trafficSource = trafficSource.trim();
     if (!metadata.trafficTitle && typeof externalAd?.title === 'string' && externalAd.title.trim()) metadata.trafficTitle = externalAd.title.trim();
     if (!metadata.trafficUrl && typeof (externalAd?.sourceUrl || externalAd?.sourceURL) === 'string') metadata.trafficUrl = externalAd.sourceUrl || externalAd.sourceURL;
-  } else {
+  } else if (fromMe) {
     delete metadata.trafficSource;
     delete metadata.trafficTitle;
     delete metadata.trafficUrl;
