@@ -101,6 +101,36 @@ export const areMessagesEquivalent = (previous: Message, next: Message) => (
 
 const timestampOf = (message: Message) => message.timestampMs || 0;
 
+const hubClientMessageId = (message: Message) => (
+  message.metadata?.sentByHub === true
+  && typeof message.metadata.clientMessageId === 'string'
+  && message.metadata.clientMessageId.trim().length > 0
+    ? message.metadata.clientMessageId
+    : undefined
+);
+
+const preserveHubAttribution = (current: Message, incoming: Message): Message => {
+  if (current.metadata?.sentByHub !== true || incoming.metadata?.sentByHub === true) return incoming;
+
+  // A provider snapshot can confirm the same Evolution id without carrying
+  // Hub-only metadata. The existing item is the persisted proof of authorship,
+  // so retain it instead of reclassifying a Hub send as WhatsApp Web.
+  const metadata = {
+    ...(incoming.metadata || {}),
+    sentByHub: true,
+    sentByUserId: current.metadata.sentByUserId,
+    sentByUserName: current.metadata.sentByUserName,
+    ...(hubClientMessageId(current) ? { clientMessageId: hubClientMessageId(current) } : {}),
+  };
+  delete metadata.sentOutsideHub;
+  return {
+    ...incoming,
+    senderName: current.senderName,
+    content: current.content,
+    metadata,
+  };
+};
+
 const isChronological = (messages: Message[]) => messages.every((message, index) => (
   index === 0 || timestampOf(messages[index - 1]) <= timestampOf(message)
 ));
@@ -114,6 +144,13 @@ export const mergeConversationMessages = (current: Message[], incoming: Message[
   if (incoming.length === 0) return current;
 
   const currentById = new Map(current.map((message) => [message.id, message]));
+  const currentByClientMessageId = new Map<string, Message>();
+  current.forEach((message) => {
+    const clientMessageId = hubClientMessageId(message);
+    if (clientMessageId && !currentByClientMessageId.has(clientMessageId)) {
+      currentByClientMessageId.set(clientMessageId, message);
+    }
+  });
   const incomingById = new Map<string, Message>();
   incoming.forEach((message) => incomingById.set(message.id, message));
 
@@ -125,10 +162,10 @@ export const mergeConversationMessages = (current: Message[], incoming: Message[
   const optimisticIdsToRemove = new Set<string>();
   const usedOptimisticIds = new Set<string>();
   incomingById.forEach((message) => {
-    const clientMessageId = message.metadata?.sentByHub === true
-      ? message.metadata.clientMessageId
+    const clientMessageId = hubClientMessageId(message);
+    const candidate = clientMessageId
+      ? currentById.get(clientMessageId) || currentByClientMessageId.get(clientMessageId)
       : undefined;
-    const candidate = clientMessageId ? currentById.get(clientMessageId) : undefined;
     if (!candidate) return;
     if (candidate.sender !== 'attendant' || candidate.isInternalNote || usedOptimisticIds.has(candidate.id)) return;
     optimisticAliases.set(message.id, candidate.id);
@@ -150,9 +187,10 @@ export const mergeConversationMessages = (current: Message[], incoming: Message[
       return [aliasedNext];
     }
     if (!next) return [message];
-    if (areMessagesEquivalent(message, next)) return [message];
+    const nextWithAttribution = preserveHubAttribution(message, next);
+    if (areMessagesEquivalent(message, nextWithAttribution)) return [message];
     hasChanges = true;
-    return [next];
+    return [nextWithAttribution];
   });
 
   const newMessages = Array.from(incomingById.values()).filter((message) => (

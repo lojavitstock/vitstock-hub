@@ -694,11 +694,11 @@ function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
   };
 }
 
-function localMessageToRealtimeMessage(local: ReturnType<typeof providerRecordToLocalMessage>, conversationId: string) {
+function localMessageToRealtimeMessage(local: ReturnType<typeof providerRecordToLocalMessage>) {
   const timestampMs = local.sentAt.getTime();
   return {
     id: local.id,
-    conversationId,
+    conversationId: local.remoteJid,
     sender: local.sender,
     senderName: local.senderName,
     content: local.content,
@@ -982,7 +982,7 @@ async function persistProviderMessage(companyId: string, record: any, options: {
     localInboxCache.delete(companyId);
     return {
       persisted: insertedNewMessage,
-      message: localMessageToRealtimeMessage(local, conversationId),
+      message: localMessageToRealtimeMessage(local),
     };
   } catch (error) {
     await client.query('ROLLBACK');
@@ -1879,7 +1879,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       fromMe: true,
       message: {
         id: realtimeMessageId,
-        conversationId: localMessage.conversationId,
+        conversationId: canonicalRemoteJid,
         sender: 'attendant',
         senderName: request.user!.name,
         content: text,
@@ -2004,7 +2004,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       fromMe: true,
       message: {
         id: realtimeMessageId,
-        conversationId: localMessage.conversationId,
+        conversationId: canonicalRemoteJid,
         sender: 'attendant',
         senderName: request.user!.name,
         content: text,

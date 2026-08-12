@@ -496,10 +496,11 @@ export const AtendimentoPage: React.FC = () => {
 
     const newMsgText = composerTextRef.current.trim();
     const outboundText = `*${attendantName}*\n${newMsgText}`;
+    const clientMessageId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     composerRef.current?.clear();
 
     const newMsg: Message = {
-      id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: clientMessageId,
       conversationId: activeConv.id,
       sender: 'attendant',
       senderName: attendantName,
@@ -511,6 +512,7 @@ export const AtendimentoPage: React.FC = () => {
         sentByHub: true,
         sentByUserId: user?.id,
         sentByUserName: attendantName,
+        clientMessageId,
       },
       isInternalNote
     };
@@ -634,8 +636,9 @@ export const AtendimentoPage: React.FC = () => {
     if (!dataUrl) return;
     const media = dataUrl.split(',')[1];
     if (!media) return;
+    const clientMessageId = `media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const localMessage: Message = {
-      id: `media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: clientMessageId,
       conversationId: activeConv.id,
       sender: 'attendant',
       senderName: attendantName,
@@ -649,6 +652,7 @@ export const AtendimentoPage: React.FC = () => {
         sentByHub: true,
         sentByUserId: user?.id,
         sentByUserName: attendantName,
+        clientMessageId,
       },
     };
     setAssignmentFeedback('');
@@ -788,6 +792,9 @@ export const AtendimentoPage: React.FC = () => {
           ...item,
           id: result?.message?.evolutionMessageId || result?.message?.id || item.id,
           status: result?.message?.status || result?.status || 'sent',
+          metadata: item.metadata?.sentByHub === true
+            ? { ...item.metadata, clientMessageId: item.metadata.clientMessageId || message.id }
+            : item.metadata,
         } : item));
       }
       const dailyResponder = result?.dailyResponder;
@@ -889,6 +896,7 @@ export const AtendimentoPage: React.FC = () => {
         sentByHub: true,
         sentByUserId: user?.id,
         sentByUserName: attendantName,
+        clientMessageId,
       },
     }]);
     setShowNewChatModal(false);

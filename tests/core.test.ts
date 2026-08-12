@@ -921,6 +921,112 @@ test('confirmação do Hub reconcilia o envio otimista sem perder autoria', () =
   assert.equal(merged[0]?.metadata?.sentOutsideHub, undefined);
 });
 
+test('confirmação posterior reutiliza clientMessageId após a resposta trocar o ID otimista', () => {
+  const optimistic = message('provider-response-1', 1_700, 'Olá cliente', 'sent', {
+    sender: 'attendant',
+    senderName: 'Henrique',
+    metadata: {
+      sentByHub: true,
+      sentByUserId: 'user-henrique',
+      sentByUserName: 'Henrique',
+      clientMessageId: 'local-henrique-1',
+    },
+  });
+  const confirmed = message('provider-webhook-1', 1_701, 'Olá cliente', 'sent', {
+    sender: 'attendant',
+    senderName: 'Henrique',
+    metadata: {
+      sentByHub: true,
+      sentByUserId: 'user-henrique',
+      sentByUserName: 'Henrique',
+      clientMessageId: 'local-henrique-1',
+    },
+    rawKey: { id: 'provider-webhook-1', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
+  });
+
+  const merged = mergeConversationMessages([optimistic], [confirmed]);
+
+  assert.deepEqual(merged.map((item) => item.id), ['provider-webhook-1']);
+  assert.equal(merged[0]?.senderName, 'Henrique');
+  assert.equal(merged[0]?.metadata?.sentByHub, true);
+  assert.equal(merged[0]?.metadata?.sentByUserId, 'user-henrique');
+});
+
+test('snapshot externo com o mesmo ID não remove autoria interna já confirmada', () => {
+  const persistedHubMessage = message('provider-hub-persisted', 1_700, 'Olá cliente', 'sent', {
+    sender: 'attendant',
+    senderName: 'Henrique',
+    metadata: {
+      sentByHub: true,
+      sentByUserId: 'user-henrique',
+      sentByUserName: 'Henrique',
+      clientMessageId: 'local-henrique-persisted',
+    },
+  });
+  const providerSnapshot = message('provider-hub-persisted', 1_700, '*Henrique*\nOlá cliente', 'delivered', {
+    sender: 'attendant',
+    metadata: { sentOutsideHub: true },
+    rawKey: { id: 'provider-hub-persisted', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
+  });
+
+  const merged = mergeConversationMessages([persistedHubMessage], [providerSnapshot]);
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0]?.senderName, 'Henrique');
+  assert.equal(merged[0]?.metadata?.sentByHub, true);
+  assert.equal(merged[0]?.metadata?.sentOutsideHub, undefined);
+  assert.equal(merged[0]?.metadata?.clientMessageId, 'local-henrique-persisted');
+  assert.equal(merged[0]?.status, 'delivered');
+});
+
+test('autoria explícita permanece correta para atendentes distintos', () => {
+  const agentA = message('local-a', 1_700, 'Mensagem A', 'pending', {
+    sender: 'attendant',
+    senderName: 'Leonardo',
+    metadata: { sentByHub: true, sentByUserId: 'user-a', sentByUserName: 'Leonardo', clientMessageId: 'local-a' },
+  });
+  const agentB = message('local-b', 1_701, 'Mensagem B', 'pending', {
+    sender: 'attendant',
+    senderName: 'Henrique',
+    metadata: { sentByHub: true, sentByUserId: 'user-b', sentByUserName: 'Henrique', clientMessageId: 'local-b' },
+  });
+  const confirmations = [
+    message('provider-a', 1_702, 'Mensagem A', 'sent', {
+      sender: 'attendant', senderName: 'Leonardo',
+      metadata: { sentByHub: true, sentByUserId: 'user-a', sentByUserName: 'Leonardo', clientMessageId: 'local-a' },
+    }),
+    message('provider-b', 1_703, 'Mensagem B', 'sent', {
+      sender: 'attendant', senderName: 'Henrique',
+      metadata: { sentByHub: true, sentByUserId: 'user-b', sentByUserName: 'Henrique', clientMessageId: 'local-b' },
+    }),
+  ];
+
+  const merged = mergeConversationMessages([agentA, agentB], confirmations);
+
+  assert.deepEqual(merged.map((item) => item.senderName), ['Leonardo', 'Henrique']);
+  assert.deepEqual(merged.map((item) => item.metadata?.sentByUserId), ['user-a', 'user-b']);
+});
+
+test('registro persistido do Hub mantém autoria após recarregar a conversa', () => {
+  const reloaded = normalizeEvolutionMessage({
+    key: { id: 'provider-reload-henrique', fromMe: true },
+    metadataScope: 'persisted_message',
+    metadata: {
+      sentByHub: true,
+      sentByUserId: 'user-henrique',
+      sentByUserName: 'Henrique',
+      clientMessageId: 'local-reload-henrique',
+    },
+    message: { conversation: '*Henrique*\nMensagem do atendimento' },
+    messageTimestamp: 1_700_000_100,
+  }, 0, 'conversation-1', 'Atendente');
+
+  assert.equal(reloaded.senderName, 'Henrique');
+  assert.equal(reloaded.content, 'Mensagem do atendimento');
+  assert.equal(reloaded.metadata?.sentByHub, true);
+  assert.equal(reloaded.metadata?.sentOutsideHub, undefined);
+});
+
 test('mensagem externa parecida não é correlacionada com envio otimista sem ID explícito', () => {
   const optimistic = message('local-hub-2', 1_700, 'Mesmo texto', 'pending', {
     sender: 'attendant',
