@@ -119,6 +119,14 @@ const preserveNewerActivity = (previous: Conversation, next: Conversation) => {
   };
 };
 
+const sameConversationActivity = (previous: Conversation, next: Conversation) => (
+  activityTimestamp(previous) === activityTimestamp(next)
+  && previous.lastMessageFromMe === next.lastMessageFromMe
+  && (previous.lastMessageKey?.id && next.lastMessageKey?.id
+    ? previous.lastMessageKey.id === next.lastMessageKey.id
+    : previous.lastMessage === next.lastMessage)
+);
+
 /**
  * Reconciles an inbox snapshot without allowing an older activity snapshot to
  * replace a newer local/SSE activity. Phone matching covers @lid and
@@ -148,7 +156,18 @@ export const reconcileConversationsMonotonic = (
 
     const protectedActivity = preserveNewerActivity(previousConversation, conversation);
     if (protectedActivity.preserved) locallyNewerIds.add(conversation.id);
-    return protectedActivity.conversation;
+    const nextConversation = protectedActivity.conversation;
+    // Reading is a local state transition that can arrive before the next
+    // inbox snapshot. A duplicate snapshot for the same activity must not
+    // restore the unread highlight that was already cleared on screen.
+    if (
+      previousConversation.unreadCount === 0
+      && conversation.unreadCount > 0
+      && sameConversationActivity(previousConversation, conversation)
+    ) {
+      return { ...nextConversation, unreadCount: 0 };
+    }
+    return nextConversation;
   });
 
   if (locallyNewerIds.size === 0) return reconcileConversations(previous, protectedSnapshot);

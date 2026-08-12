@@ -24,7 +24,11 @@ export const getNewIncomingMessageIds = (
     // A page can contain older history while a cached conversation is open.
     // Only messages at/after the latest known activity are eligible for the
     // live indicator; the merge still keeps those historical messages.
-    if (latestKnownTimestamp > 0 && (message.timestampMs || 0) < latestKnownTimestamp) return;
+    if (
+      latestKnownTimestamp > 0
+      && message.timestampMs
+      && message.timestampMs < latestKnownTimestamp
+    ) return;
     newIds.add(message.id);
   });
 

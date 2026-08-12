@@ -90,6 +90,13 @@ test('indicador de novas mensagens ignora polling equivalente, saídas e histór
   assert.deepEqual(getNewIncomingMessageIds(previous, incoming, false), []);
 });
 
+test('indicador aceita mensagem nova sem timestamp do provedor', () => {
+  const previous = [message('known', 200, 'já recebida')];
+  const incoming = [message('new-without-time', 0, 'nova mensagem')];
+
+  assert.deepEqual(getNewIncomingMessageIds(previous, incoming, true), ['new-without-time']);
+});
+
 test('origem frontend principal Ã© permitida', () => {
   assert.equal(isAllowedFrontendOrigin(config.FRONTEND_URL), true);
 });
@@ -610,6 +617,24 @@ test('reconcilia inbox monotonicamente e mantém atividade otimista no topo', ()
   assert.equal(reconciled[0]?.lastMessageAt, 1_800_000_000_000);
   assert.equal(reconciled[0]?.id, 'a');
   assert.strictEqual(reconciled[1], previous[1]);
+});
+
+test('reconcilia snapshot duplicado sem restaurar unread já visualizado', () => {
+  const previous = [conversation('a', {
+    unreadCount: 0,
+    needsResponse: true,
+    lastMessage: 'Mensagem recebida',
+    lastMessageAt: 1_800_000_000_000,
+    lastMessageFromMe: false,
+  })];
+  const staleReadSnapshot = [{
+    ...cloneConversation(previous[0]),
+    unreadCount: 3,
+  }];
+
+  const reconciled = reconcileConversationsMonotonic(previous, staleReadSnapshot);
+  assert.equal(reconciled[0]?.unreadCount, 0);
+  assert.equal(reconciled[0]?.needsResponse, true);
 });
 
 test('reconcilia inbox monotonicamente e aceita atividade T3 mais nova', () => {

@@ -50,17 +50,15 @@ export const ConversationListItem = React.memo<ConversationListItemProps>(({
       className={`relative flex min-h-[96px] w-full items-start gap-3 border-b border-[#273239] border-l-4 px-3.5 py-3 text-left transition-all duration-150 focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-300/80 ${
         needsAttention
           ? 'animate-attention-pulse border-l-red-400 bg-red-950/30 shadow-[inset_3px_0_0_#ef4444] hover:bg-red-950/45'
-          : isSelected
-            ? 'border-l-amber-400 bg-[#2d3a40] shadow-[inset_3px_0_0_#EEBB2C]'
-            : needsResponse
-              ? 'border-l-emerald-400 bg-[#20343a] shadow-[inset_3px_0_0_#34d399] hover:bg-[#294147]'
-              : isUnread
+            : isSelected
+              ? 'border-l-amber-400 bg-[#2d3a40] shadow-[inset_3px_0_0_#EEBB2C]'
+            : isUnread
                 ? 'border-l-emerald-400 bg-[#20343a] shadow-[inset_3px_0_0_#34d399] hover:bg-[#294147]'
               : 'border-l-transparent hover:bg-[#222d33]'
       }`}
       aria-current={isSelected ? 'true' : undefined}
     >
-      <ContactPhoto name={conversation.contact.name} avatar={conversation.contact.avatar} emphasized={isSelected || needsResponse || isUnread} lazy />
+      <ContactPhoto name={conversation.contact.name} avatar={conversation.contact.avatar} emphasized={isSelected || needsAttention || isUnread} lazy />
 
       <span className="min-w-0 flex-1">
         <span className="mb-1 flex items-start justify-between gap-2">

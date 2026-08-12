@@ -119,8 +119,12 @@ export const useConversationMessages = ({
     setNewMessagesCount(0);
   }, []);
 
-  const registerNewMessages = useCallback((count: number) => {
-    if (count <= 0 || stickToBottomRef.current) return;
+  const registerNewMessages = useCallback((conversationId: string, count: number, stickyAtArrival = stickToBottomRef.current) => {
+    if (
+      count <= 0
+      || stickyAtArrival
+      || messagesConversationIdRef.current !== conversationId
+    ) return;
     const nextCount = newMessagesCountRef.current + count;
     newMessagesCountRef.current = nextCount;
     setNewMessagesCount(nextCount);
@@ -239,6 +243,7 @@ export const useConversationMessages = ({
       const nextHasMoreMessages = page.hasMore || hasHiddenHistory;
       setHasMoreMessages(nextHasMoreMessages);
       const previousMessages = messagesRef.current;
+      const stickyAtArrival = stickToBottomRef.current;
       const incomingIds = new Set(getNewIncomingMessageIds(previousMessages, recentMessages, trackIncoming));
       let reconciledMessages = previousMessages;
       if (recentMessages.length > 0) {
@@ -254,7 +259,7 @@ export const useConversationMessages = ({
             : mergeConversationMessages(currentMessages, recentMessages));
         }
       }
-      if (incomingIds.size > 0) registerNewMessages(incomingIds.size);
+      if (incomingIds.size > 0) registerNewMessages(activeConversationId, incomingIds.size, stickyAtArrival);
       writeConversationMessagesCache(messageCacheRef.current, activeConversationId, {
         messages: reconciledMessages,
         hasMoreMessages: nextHasMoreMessages,
@@ -391,6 +396,7 @@ export const useConversationMessages = ({
       if (!isActiveConversation) return;
 
       const previousMessages = messagesRef.current;
+      const stickyAtArrival = stickToBottomRef.current;
       const reconciledMessages = reconcileRealtimeMessages(previousMessages, activeConversationId, event);
       if (reconciledMessages === null) {
         // Keep the existing safety net for the current minimal upsert payload.
@@ -418,8 +424,8 @@ export const useConversationMessages = ({
       const incomingMessage = event.type === 'message.upsert'
         && event.message?.sender === 'contact'
         && !event.message?.isInternalNote;
-      if (incomingMessage && !stickToBottomRef.current) {
-        registerNewMessages(1);
+      if (incomingMessage && !stickyAtArrival) {
+        registerNewMessages(activeConversationId, 1, stickyAtArrival);
       } else {
         window.setTimeout(() => {
           if (
