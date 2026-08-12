@@ -25,9 +25,11 @@ import {
 import { Conversation, Message } from '../../types';
 import { EvolutionApiService } from '../../services/evolutionApi';
 import { ContactPhoto } from './ContactPhoto';
+import { MediaViewer } from './MediaViewer';
 import { formatMessageDay, formatMessageTimestamp } from './conversationFormatters';
 import { quotedMediaLabel, quotedMessageExcerpt } from '../../utils/quotedMessage';
 import { getDocumentPresentation } from '../../utils/documentMedia';
+import { mediaViewerItemFrom, type MediaViewerItem } from '../../utils/mediaViewer';
 
 type MessageTimelineProps = {
   messages: Message[];
@@ -232,48 +234,62 @@ const DocumentMessageContent: React.FC<{
   loading: boolean;
   canLoadSource: boolean;
   onLoadSource: () => void;
-}> = ({ message, source, loading, canLoadSource, onLoadSource }) => {
-  const [showPreview, setShowPreview] = useState(false);
-  const [previewFailed, setPreviewFailed] = useState(false);
-  const document = getDocumentPresentation(message);
-  const Icon = document.kind === 'pdf'
+  onOpenViewer: (item: MediaViewerItem, trigger: HTMLElement) => void;
+}> = ({ message, source, loading, canLoadSource, onLoadSource, onOpenViewer }) => {
+  const [openRequested, setOpenRequested] = useState(false);
+  const presentation = getDocumentPresentation(message);
+  const Icon = presentation.kind === 'pdf'
     ? FileText
-    : document.kind === 'spreadsheet'
+    : presentation.kind === 'spreadsheet'
       ? FileSpreadsheet
-      : document.kind === 'archive'
+      : presentation.kind === 'archive'
         ? FileArchive
-        : document.kind === 'word' || document.kind === 'text'
+        : presentation.kind === 'word' || presentation.kind === 'text'
           ? FileText
           : File;
 
-  const openPreview = () => {
-    setShowPreview(true);
-    if (!source && !loading && canLoadSource) onLoadSource();
+  useEffect(() => {
+    if (!openRequested || !source) return;
+    const item = mediaViewerItemFrom(message, source);
+    if (item) onOpenViewer(item, document.activeElement as HTMLElement);
+    setOpenRequested(false);
+  }, [message, onOpenViewer, openRequested, source]);
+
+  const openPreview = (trigger: HTMLElement) => {
+    const item = mediaViewerItemFrom(message, source);
+    if (item) {
+      onOpenViewer(item, trigger);
+      return;
+    }
+    if (!loading && canLoadSource) {
+      setOpenRequested(true);
+      onLoadSource();
+    }
   };
 
   return (
     <div className="my-1 w-[320px] max-w-[58vw] overflow-hidden rounded-xl border border-white/10 bg-black/25 shadow-inner">
       <button
         type="button"
-        onClick={document.kind === 'pdf' ? openPreview : undefined}
-        className={`flex w-full items-center gap-3 p-3 text-left ${document.kind === 'pdf' ? 'transition-colors hover:bg-white/5' : ''}`}
-        title={document.kind === 'pdf' ? 'Visualizar PDF' : undefined}
+        onClick={presentation.kind === 'pdf' ? (event) => openPreview(event.currentTarget) : undefined}
+        className={`flex w-full items-center gap-3 p-3 text-left ${presentation.kind === 'pdf' ? 'transition-colors hover:bg-white/5' : ''}`}
+        title={presentation.kind === 'pdf' ? 'Visualizar PDF' : undefined}
       >
-        <span className={`flex h-11 w-10 flex-shrink-0 items-center justify-center rounded-lg ${document.kind === 'pdf' ? 'bg-red-500/15 text-red-300' : 'bg-amber-400/10 text-amber-300'}`}>
+        <span className={`flex h-11 w-10 flex-shrink-0 items-center justify-center rounded-lg ${presentation.kind === 'pdf' ? 'bg-red-500/15 text-red-300' : 'bg-amber-400/10 text-amber-300'}`}>
           <Icon className="h-5 w-5" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-xs font-bold text-slate-100">{document.fileName}</span>
+          <span className="block truncate text-xs font-bold text-slate-100">{presentation.fileName}</span>
           <span className="mt-0.5 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-            {document.extension}{document.formattedSize ? ` · ${document.formattedSize}` : ''}
+            {presentation.extension}{presentation.formattedSize ? ` · ${presentation.formattedSize}` : ''}
           </span>
         </span>
-        {document.kind === 'pdf' && <span className="text-[10px] font-bold text-amber-300">Visualizar</span>}
+        {presentation.kind === 'pdf' && <span className="text-[10px] font-bold text-amber-300">Visualizar</span>}
       </button>
       <div className="flex items-center justify-between border-t border-white/10 px-3 py-2">
-        <span className="text-[10px] text-slate-500">{document.mimeType || 'Documento'}</span>
+        <span className="text-[10px] text-slate-500">{presentation.mimeType || 'Documento'}</span>
         {source ? (
-          <a href={source} download={document.fileName} className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-bold text-amber-300 transition-colors hover:bg-white/5 hover:text-amber-200">
+          <a href={source} download={presentation.fileName} className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-bold text-amber-300 transition-colors hover:bg-white/5 hover:text-amber-200">
             <Download className="h-3.5 w-3.5" /> Baixar
           </a>
         ) : canLoadSource ? (
@@ -285,28 +301,15 @@ const DocumentMessageContent: React.FC<{
           <span className="text-[11px] font-semibold text-slate-500">Arquivo indisponível</span>
         )}
       </div>
-      {showPreview && document.kind === 'pdf' && (
-        <div className="border-t border-white/10 bg-zinc-950/40 p-2.5">
-          {source && !previewFailed ? (
-            <iframe
-              title={`Prévia de ${document.fileName}`}
-              src={source}
-              className="h-56 w-full rounded-lg border border-white/10 bg-white"
-              loading="lazy"
-              onError={() => setPreviewFailed(true)}
-            />
-          ) : loading ? (
-            <div className="flex h-24 items-center justify-center gap-2 text-[11px] font-semibold text-slate-400"><RefreshCw className="h-3.5 w-3.5 animate-spin text-amber-300" /> Carregando prévia...</div>
-          ) : (
-            <div className="flex h-24 items-center justify-center text-center text-[11px] text-slate-400">Prévia indisponível. Você ainda pode baixar o arquivo.</div>
-          )}
-        </div>
-      )}
     </div>
   );
 };
 
-const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> = ({ message, instanceName }) => {
+const MediaMessageContent: React.FC<{
+  message: Message;
+  instanceName: string;
+  onOpenViewer: (item: MediaViewerItem, trigger: HTMLElement) => void;
+}> = ({ message, instanceName, onOpenViewer }) => {
   const isMedia = ['image', 'audio', 'video', 'document', 'sticker'].includes(message.mediaType || '');
   if (!isMedia) return null;
 
@@ -319,7 +322,6 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
   const [documentSourceRequested, setDocumentSourceRequested] = useState(!isDocument);
   const shouldLoadMedia = !isDocument || documentSourceRequested;
   const [loadingMedia, setLoadingMedia] = useState(shouldLoadMedia && !isDataUri(message.mediaUrl) && !!message.rawKey);
-  const [showModal, setShowModal] = useState(false);
 
   useEffect(() => {
     if (!shouldLoadMedia || !message.rawKey || src) return;
@@ -334,7 +336,7 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
   }, [instanceName, message.id, message.rawKey, shouldLoadMedia, src]);
 
   if (message.mediaType === 'document') {
-    return <DocumentMessageContent message={message} source={src} loading={loadingMedia} canLoadSource={Boolean(message.rawKey)} onLoadSource={() => setDocumentSourceRequested(true)} />;
+    return <DocumentMessageContent message={message} source={src} loading={loadingMedia} canLoadSource={Boolean(message.rawKey)} onLoadSource={() => setDocumentSourceRequested(true)} onOpenViewer={onOpenViewer} />;
   }
 
   if (loadingMedia) {
@@ -352,28 +354,20 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
 
     return (
       <>
-        <div className="group relative mb-2 max-w-xs overflow-hidden rounded-xl border border-black/20 shadow-xl">
-          <img src={finalImageSrc} alt="Imagem WhatsApp" className="max-h-72 w-full cursor-pointer rounded-lg object-cover transition-all hover:opacity-90" onClick={() => setShowModal(true)} />
+        <button type="button" onClick={(event) => {
+          const item = mediaViewerItemFrom(message, finalImageSrc);
+          if (item) onOpenViewer(item, event.currentTarget);
+        }} className="group relative mb-2 block max-w-xs overflow-hidden rounded-xl border border-black/20 text-left shadow-xl">
+          <img src={finalImageSrc} alt="Imagem WhatsApp" className="max-h-72 w-full cursor-pointer rounded-lg object-cover transition-all hover:opacity-90" />
           <div className="absolute bottom-2 right-2 rounded bg-black/60 px-2 py-1 text-[10px] font-bold text-white opacity-0 backdrop-blur-md transition-opacity group-hover:opacity-100">Clique para ampliar</div>
-        </div>
-        {showModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4 backdrop-blur-md" onClick={() => setShowModal(false)}>
-            <div className="relative flex max-h-[90vh] w-full max-w-4xl flex-col items-center justify-center" onClick={(event) => event.stopPropagation()}>
-              <div className="absolute -top-12 right-0 flex items-center gap-3">
-                <a href={finalImageSrc} download="imagem-whatsapp.jpg" className="flex items-center gap-1 rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-bold text-zinc-950 transition-colors hover:bg-amber-300">Download HD</a>
-                <button type="button" onClick={() => setShowModal(false)} className="flex h-8 w-8 items-center justify-center rounded-full border border-zinc-700 bg-zinc-800 font-bold text-zinc-200 hover:text-white">×</button>
-              </div>
-              <img src={finalImageSrc} alt="Imagem ampliada" className="max-h-[85vh] max-w-full rounded-xl border border-zinc-800 object-contain shadow-2xl" />
-            </div>
-          </div>
-        )}
+        </button>
       </>
     );
   }
 
   if (message.mediaType === 'audio' && src) return <AudioMessagePlayer src={src} durationHint={message.mediaDuration} />;
   if (message.mediaType === 'video' && src) {
-    return <div className="max-w-sm overflow-hidden rounded-xl border border-white/10 bg-black/30 shadow-xl"><video src={src} controls preload="metadata" className="max-h-80 w-full bg-black object-contain" aria-label="Vídeo recebido no WhatsApp" /><a href={src} download="video-whatsapp.mp4" className="block px-3 py-2 text-center text-[11px] font-bold text-amber-300 hover:bg-white/5">Baixar vídeo</a></div>;
+    return <div className="max-w-sm overflow-hidden rounded-xl border border-white/10 bg-black/30 shadow-xl"><video src={src} controls preload="metadata" className="max-h-80 w-full bg-black object-contain" aria-label="Vídeo recebido no WhatsApp" /><div className="flex items-center justify-between px-3 py-2"><button type="button" onClick={(event) => { const item = mediaViewerItemFrom(message, src); if (item) onOpenViewer(item, event.currentTarget); }} className="text-[11px] font-bold text-amber-300 hover:text-amber-200">Abrir visualizador</button><a href={src} download="video-whatsapp.mp4" className="text-[11px] font-bold text-amber-300 hover:text-amber-200">Baixar vídeo</a></div></div>;
   }
   if (message.mediaType === 'sticker') return src ? <img src={src} alt="Figurinha do WhatsApp" className="h-40 w-40 object-contain drop-shadow-lg" /> : <div className="text-[11px] text-slate-400">Figurinha indisponível</div>;
   if (message.mediaType === 'audio') return <div className="w-[310px] max-w-[58vw] rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-[11px] text-slate-400">Áudio indisponível para reprodução</div>;
@@ -384,7 +378,9 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
 export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage, onReplyMessage }) => {
   const shouldShowIndicator = newMessagesCount > 0 && Boolean(onJumpToLatest);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const [viewerItem, setViewerItem] = useState<MediaViewerItem | null>(null);
   const highlightTimeoutRef = React.useRef<number | undefined>();
+  const viewerTriggerRef = React.useRef<HTMLElement | null>(null);
 
   useEffect(() => () => {
     if (highlightTimeoutRef.current) window.clearTimeout(highlightTimeoutRef.current);
@@ -400,6 +396,16 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
     if (highlightTimeoutRef.current) window.clearTimeout(highlightTimeoutRef.current);
     highlightTimeoutRef.current = window.setTimeout(() => setHighlightedMessageId(null), 1_600);
   };
+
+  const openMediaViewer = React.useCallback((item: MediaViewerItem, trigger: HTMLElement) => {
+    viewerTriggerRef.current = trigger;
+    setViewerItem(item);
+  }, []);
+
+  const closeMediaViewer = React.useCallback(() => {
+    setViewerItem(null);
+    window.requestAnimationFrame(() => viewerTriggerRef.current?.focus());
+  }, []);
 
   let previousDay = '';
   return (
@@ -447,7 +453,7 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
             <div className={`space-y-2 rounded-lg px-3.5 py-3 text-[15px] leading-relaxed shadow-sm ${isMe ? 'rounded-tr-none border border-amber-300/15 bg-[#5b4b20] font-medium text-[#fff8df]' : 'rounded-tl-none border border-white/5 bg-[#273238] text-slate-100'}`}>
               {isMe && <p className="mb-1 text-xs font-bold text-amber-200/75">{message.metadata?.sentOutsideHub ? 'Enviado fora do Vitstock Hub' : message.senderName}</p>}
               <QuotedMessageBlock message={message} onOpenOriginal={openQuotedMessage} />
-              <MediaMessageContent message={message} instanceName={instanceName} />
+              <MediaMessageContent message={message} instanceName={instanceName} onOpenViewer={openMediaViewer} />
               <SpecialMessageContent message={message} contactPhone={activeConversation.contact.phone} />
               <InteractiveMessageContent message={message} />
               {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap">{message.content}</p>}
@@ -468,6 +474,7 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
       );
     })}
   </div>
+  {viewerItem && <MediaViewer item={viewerItem} onClose={closeMediaViewer} />}
   {shouldShowIndicator && onJumpToLatest && (
     <button
       type="button"

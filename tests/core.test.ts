@@ -22,6 +22,7 @@ import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/real
 import { formatHubOutboundText, removeHubAgentPrefix } from '../server/src/outboundMessage';
 import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
+import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
 import {
   acquireConversationLease,
   canAcquireConversationLease,
@@ -1525,6 +1526,31 @@ test('adapter preserva metadados de documento recebidos para SSE e polling', () 
     mimeType: 'application/pdf',
     fileSize: 2048,
   });
+});
+
+test('viewer unificado escolhe imagem, PDF e vídeo sem abrir formatos Office', () => {
+  const image = message('viewer-image', 1_705, '[Imagem]', 'read', { mediaType: 'image' });
+  const pdf = message('viewer-pdf', 1_706, '[Documento]', 'read', {
+    mediaType: 'document',
+    metadata: { document: { fileName: 'laudo.pdf', mimeType: 'application/pdf' } },
+  });
+  const video = message('viewer-video', 1_707, '[Vídeo]', 'read', { mediaType: 'video' });
+  const office = message('viewer-office', 1_708, '[Documento]', 'read', {
+    mediaType: 'document',
+    metadata: { document: { fileName: 'planilha.xlsx' } },
+  });
+
+  assert.equal(mediaViewerItemFrom(image, 'data:image/jpeg;base64,AA==')?.type, 'image');
+  assert.equal(mediaViewerItemFrom(pdf, 'data:application/pdf;base64,JVBERi0=')?.type, 'pdf');
+  assert.equal(mediaViewerItemFrom(video, 'data:video/mp4;base64,AA==')?.type, 'video');
+  assert.equal(mediaViewerItemFrom(office, 'data:application/octet-stream;base64,AA=='), undefined);
+  assert.equal(mediaViewerItemFrom(pdf, null), undefined);
+});
+
+test('viewer unificado fecha somente com Escape', () => {
+  assert.equal(isMediaViewerCloseKey('Escape'), true);
+  assert.equal(isMediaViewerCloseKey('Enter'), false);
+  assert.equal(isMediaViewerCloseKey('v'), false);
 });
 
 test('snapshot posterior sem reply não remove a referência persistida do envio interno', () => {
