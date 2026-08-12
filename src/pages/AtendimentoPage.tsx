@@ -37,6 +37,7 @@ import { formatMessageTimestamp } from '../components/conversations/conversation
 import { useConversationMessages } from '../hooks/useConversationMessages';
 import { conversationNeedsResponse, useConversationInbox } from '../hooks/useConversationInbox';
 import { useContactPanel } from '../hooks/useContactPanel';
+import { toQuotedMessage } from '../utils/quotedMessage';
 
 
 export const AtendimentoPage: React.FC = () => {
@@ -61,6 +62,7 @@ export const AtendimentoPage: React.FC = () => {
   const [sendingMedia, setSendingMedia] = useState(false);
   const [isInternalNote, setIsInternalNote] = useState(false);
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
+  const [replyTo, setReplyTo] = useState<Message | null>(null);
   // Estado para Nova Conversa por Telefone
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [newChatNumber, setNewChatNumber] = useState('');
@@ -104,6 +106,7 @@ export const AtendimentoPage: React.FC = () => {
 
   useEffect(() => {
     activeConversationIdRef.current = activeConvId;
+    setReplyTo(null);
   }, [activeConvId]);
 
   useEffect(() => {
@@ -482,6 +485,13 @@ export const AtendimentoPage: React.FC = () => {
     }));
   };
 
+  const handleReplyMessage = useCallback((message: Message) => {
+    if (message.isInternalNote) return;
+    setReplyTo(message);
+    setIsInternalNote(false);
+    setQuickReplyOpen(false);
+  }, []);
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!composerTextRef.current.trim() || !activeConv) return;
@@ -495,6 +505,7 @@ export const AtendimentoPage: React.FC = () => {
     }
 
     const newMsgText = composerTextRef.current.trim();
+    const quotedMessage = !isInternalNote && replyTo ? toQuotedMessage(replyTo) : undefined;
     const clientMessageId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     composerRef.current?.clear();
 
@@ -512,6 +523,7 @@ export const AtendimentoPage: React.FC = () => {
         sentByUserId: user?.id,
         sentByUserName: attendantName,
         clientMessageId,
+        ...(quotedMessage ? { quotedMessage } : {}),
       },
       isInternalNote
     };
@@ -539,6 +551,7 @@ export const AtendimentoPage: React.FC = () => {
         if (activeConversationIdRef.current === activeConv.id) {
           setMessages((previous) => previous.map((message) => message.id === newMsg.id ? savedNote : message));
         }
+        setReplyTo(null);
       } catch (error) {
         if (activeConversationIdRef.current === activeConv.id) {
           setMessages((previous) => previous.filter((message) => message.id !== newMsg.id));
@@ -551,7 +564,7 @@ export const AtendimentoPage: React.FC = () => {
 
     if (!isInternalNote && !isMock) {
       try {
-      const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, newMsgText, activeConv.id, newMsg.id);
+      const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, newMsgText, activeConv.id, newMsg.id, quotedMessage);
       if (activeConversationIdRef.current === activeConv.id) {
         setMessages((previous) => previous.map((message) => message.id === newMsg.id ? {
           ...message,
@@ -569,6 +582,7 @@ export const AtendimentoPage: React.FC = () => {
           },
         } : conversation));
       }
+      setReplyTo(null);
       
       } catch (error) {
         if (activeConversationIdRef.current === activeConv.id) {
@@ -582,6 +596,8 @@ export const AtendimentoPage: React.FC = () => {
     }
 
     // Atualiza última mensagem na lista lateral
+    if (isMock) setReplyTo(null);
+
     if (isInternalNote) {
       setConversations(prev => prev.map(c => c.id === activeConv.id ? {
         ...c,
@@ -623,6 +639,7 @@ export const AtendimentoPage: React.FC = () => {
     const mediatype: 'image' | 'video' | 'document' = isImage ? 'image' : isVideo ? 'video' : 'document';
     const label = mediatype === 'image' ? '[Imagem]' : mediatype === 'video' ? '[Vídeo]' : '[Documento]';
     const caption = composerTextRef.current.trim();
+    const quotedMessage = replyTo ? toQuotedMessage(replyTo) : undefined;
     const dataUrl = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result));
@@ -652,6 +669,7 @@ export const AtendimentoPage: React.FC = () => {
         sentByUserId: user?.id,
         sentByUserName: attendantName,
         clientMessageId,
+        ...(quotedMessage ? { quotedMessage } : {}),
       },
     };
     setAssignmentFeedback('');
@@ -680,6 +698,7 @@ export const AtendimentoPage: React.FC = () => {
         fileName: file.name,
         caption: caption || undefined,
         clientMessageId: localMessage.id,
+        quotedMessage,
       });
       if (activeConversationIdRef.current === activeConv.id) {
         setMessages((previous) => previous.map((message) => message.id === localMessage.id ? {
@@ -698,6 +717,7 @@ export const AtendimentoPage: React.FC = () => {
             }
           : conversation.contact,
       } : conversation));
+      setReplyTo(null);
     } catch (error) {
       if (activeConversationIdRef.current === activeConv.id) {
         setMessages((previous) => previous.map((message) => message.id === localMessage.id ? { ...message, status: 'failed' } : message));
@@ -779,11 +799,12 @@ export const AtendimentoPage: React.FC = () => {
           media,
           caption: retryText || undefined,
           clientMessageId: message.id,
+          quotedMessage: message.metadata?.quotedMessage,
         });
       } else if (message.mediaType) {
         throw new Error('O arquivo original não está disponível para nova tentativa.');
       } else {
-        result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, retryText, activeConv.id, message.id);
+        result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, retryText, activeConv.id, message.id, message.metadata?.quotedMessage);
       }
       if (activeConversationIdRef.current === conversationId) {
         setMessages((previous) => previous.map((item) => item.id === message.id ? {
@@ -1190,6 +1211,7 @@ export const AtendimentoPage: React.FC = () => {
               onLoadOlder={handleLoadOlderMessages}
               onJumpToLatest={scrollToBottom}
               onRetryMessage={handleRetryMessage}
+              onReplyMessage={handleReplyMessage}
             />
 
             <MessageComposer
@@ -1209,6 +1231,8 @@ export const AtendimentoPage: React.FC = () => {
               onToggleQuickReply={() => setQuickReplyOpen((open) => !open)}
               onAttachmentChange={handleAttachmentChange}
               onInputPaste={handleInputPaste}
+              replyTo={replyTo}
+              onCancelReply={() => setReplyTo(null)}
             />
           </>
         ) : !whatsappConnected ? (

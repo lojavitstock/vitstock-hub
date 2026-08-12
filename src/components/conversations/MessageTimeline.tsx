@@ -16,12 +16,14 @@ import {
   Play,
   Paperclip,
   RefreshCw,
+  Reply,
   UserRound,
 } from 'lucide-react';
 import { Conversation, Message } from '../../types';
 import { EvolutionApiService } from '../../services/evolutionApi';
 import { ContactPhoto } from './ContactPhoto';
 import { formatMessageDay, formatMessageTimestamp } from './conversationFormatters';
+import { quotedMediaLabel, quotedMessageExcerpt } from '../../utils/quotedMessage';
 
 type MessageTimelineProps = {
   messages: Message[];
@@ -36,6 +38,7 @@ type MessageTimelineProps = {
   onLoadOlder?: () => void;
   onJumpToLatest?: () => void;
   onRetryMessage: (message: Message) => void;
+  onReplyMessage: (message: Message) => void;
 };
 
 const formatAudioTime = (seconds: number) => {
@@ -51,6 +54,29 @@ const isMediaPlaceholder = (message: Message) => {
   if (message.mediaType === 'document') return content === '[documento]' || content === '[document]';
   if (message.mediaType === 'audio') return content === '[mensagem de áudio]' || content === '[audio]';
   return message.mediaType === 'sticker' && (content === '[figurinha]' || content === '[sticker]' || !content);
+};
+
+const QuotedMessageBlock: React.FC<{
+  message: Message;
+  onOpenOriginal: (messageId: string) => void;
+}> = ({ message, onOpenOriginal }) => {
+  const quoted = message.metadata?.quotedMessage;
+  if (!quoted) return null;
+  const mediaLabel = quotedMediaLabel(quoted.mediaType);
+  const excerpt = quotedMessageExcerpt(quoted);
+  const hasOnlyMediaPlaceholder = /^\[(imagem|image|vídeo|video|documento|document|mensagem de áudio|audio|figurinha|sticker)\]$/i.test(quoted.content?.trim() || '');
+
+  return (
+    <button
+      type="button"
+      onClick={() => onOpenOriginal(quoted.messageId)}
+      className="mb-2 block w-full border-l-2 border-emerald-300/70 bg-black/15 px-2.5 py-2 text-left transition-colors hover:bg-black/25"
+      title="Ir para a mensagem citada"
+    >
+      <span className="block truncate text-xs font-bold text-emerald-200">{quoted.authorName || 'Mensagem citada'}</span>
+      <span className="mt-0.5 block truncate text-xs text-slate-200/80">{mediaLabel ? `${mediaLabel}${quoted.content && !hasOnlyMediaPlaceholder ? ` · ${quoted.content}` : ''}` : excerpt}</span>
+    </button>
+  );
 };
 
 const InteractiveMessageContent: React.FC<{ message: Message }> = ({ message }) => {
@@ -264,8 +290,25 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
   return null;
 };
 
-export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage }) => {
+export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage, onReplyMessage }) => {
   const shouldShowIndicator = newMessagesCount > 0 && Boolean(onJumpToLatest);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const highlightTimeoutRef = React.useRef<number | undefined>();
+
+  useEffect(() => () => {
+    if (highlightTimeoutRef.current) window.clearTimeout(highlightTimeoutRef.current);
+  }, []);
+
+  const openQuotedMessage = (messageId: string) => {
+    const container = containerRef.current;
+    const target = Array.from(container?.querySelectorAll<HTMLElement>('[data-message-id]') || [])
+      .find((element) => element.dataset.messageId === messageId);
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightedMessageId(messageId);
+    if (highlightTimeoutRef.current) window.clearTimeout(highlightTimeoutRef.current);
+    highlightTimeoutRef.current = window.setTimeout(() => setHighlightedMessageId(null), 1_600);
+  };
 
   let previousDay = '';
   return (
@@ -307,17 +350,21 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
       return (
         <React.Fragment key={message.id}>
         {showDay && <DaySeparator label={messageDay} />}
-        <div className={`flex max-w-[78%] gap-2 ${isMe ? 'ml-auto flex-row-reverse' : ''}`}>
+        <div data-message-id={message.id} className={`flex max-w-[78%] gap-2 rounded-xl transition-shadow ${highlightedMessageId === message.id ? 'ring-2 ring-emerald-300/80 ring-offset-2 ring-offset-[#152027]' : ''} ${isMe ? 'ml-auto flex-row-reverse' : ''}`}>
           {!isMe && <ContactPhoto name={activeConversation.contact.name} avatar={activeConversation.contact.avatar} size="small" />}
           <div>
             <div className={`space-y-2 rounded-lg px-3.5 py-3 text-[15px] leading-relaxed shadow-sm ${isMe ? 'rounded-tr-none border border-amber-300/15 bg-[#5b4b20] font-medium text-[#fff8df]' : 'rounded-tl-none border border-white/5 bg-[#273238] text-slate-100'}`}>
               {isMe && <p className="mb-1 text-xs font-bold text-amber-200/75">{message.metadata?.sentOutsideHub ? 'Enviado fora do Vitstock Hub' : message.senderName}</p>}
+              <QuotedMessageBlock message={message} onOpenOriginal={openQuotedMessage} />
               <MediaMessageContent message={message} instanceName={instanceName} />
               <SpecialMessageContent message={message} contactPhone={activeConversation.contact.phone} />
               <InteractiveMessageContent message={message} />
               {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap">{message.content}</p>}
             </div>
             <div className={`mt-1 flex items-center gap-1 text-xs text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
+              <button type="button" onClick={() => onReplyMessage(message)} className="mr-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-semibold text-zinc-500 transition-colors hover:bg-white/5 hover:text-amber-200" title="Responder esta mensagem">
+                <Reply className="h-3.5 w-3.5" /> Responder
+              </button>
               <span>{formatMessageTimestamp(message.timestampMs, message.timestamp)}</span>
               {isMe && message.status === 'failed' && <span className="font-bold text-red-300">Falha no envio</span>}
               {isMe && message.status === 'pending' && <span className="font-semibold text-amber-300">Enviando...</span>}

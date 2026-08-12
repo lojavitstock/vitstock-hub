@@ -36,6 +36,22 @@ const areContactCardsEqual = (
   && Boolean(previous) === Boolean(next)
 );
 
+const areQuotedMessagesEqual = (
+  previous?: NonNullable<Message['metadata']>['quotedMessage'],
+  next?: NonNullable<Message['metadata']>['quotedMessage'],
+) => (
+  previous?.messageId === next?.messageId
+  && previous?.authorName === next?.authorName
+  && previous?.sender === next?.sender
+  && previous?.content === next?.content
+  && previous?.mediaType === next?.mediaType
+  && previous?.key?.id === next?.key?.id
+  && previous?.key?.remoteJid === next?.key?.remoteJid
+  && previous?.key?.fromMe === next?.key?.fromMe
+  && previous?.key?.participant === next?.key?.participant
+  && Boolean(previous) === Boolean(next)
+);
+
 const areMetadataEqual = (
   previous?: Message['metadata'],
   next?: Message['metadata'],
@@ -51,6 +67,7 @@ const areMetadataEqual = (
     && previous.sentByUserName === next.sentByUserName
     && previous.sentOutsideHub === next.sentOutsideHub
     && previous.clientMessageId === next.clientMessageId
+    && areQuotedMessagesEqual(previous.quotedMessage, next.quotedMessage)
     && previous.reaction === next.reaction
     && previous.systemLabel === next.systemLabel
     && previous.forwarded === next.forwarded
@@ -121,6 +138,9 @@ const preserveHubAttribution = (current: Message, incoming: Message): Message =>
     sentByUserId: current.metadata.sentByUserId,
     sentByUserName: current.metadata.sentByUserName,
     ...(hubClientMessageId(current) ? { clientMessageId: hubClientMessageId(current) } : {}),
+    ...(current.metadata.quotedMessage && !incoming.metadata?.quotedMessage
+      ? { quotedMessage: current.metadata.quotedMessage }
+      : {}),
   };
   delete metadata.sentOutsideHub;
   return {

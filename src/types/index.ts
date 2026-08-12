@@ -69,6 +69,19 @@ export interface Message {
     sentByUserName?: string;
     sentOutsideHub?: boolean;
     clientMessageId?: string;
+    quotedMessage?: {
+      messageId: string;
+      authorName?: string;
+      sender?: 'contact' | 'attendant' | 'system';
+      content?: string;
+      mediaType?: 'image' | 'audio' | 'video' | 'document' | 'sticker';
+      key?: {
+        id: string;
+        remoteJid?: string;
+        fromMe?: boolean;
+        participant?: string;
+      };
+    };
     location?: {
       latitude: number;
       longitude: number;

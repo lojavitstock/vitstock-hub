@@ -26,6 +26,19 @@ const sendTextSchema = z.object({
   text: z.string().min(1).max(4096),
   remoteJid: z.string().min(3).max(128).optional(),
   clientMessageId: z.string().trim().min(1).max(128).optional(),
+  quotedMessage: z.object({
+    messageId: z.string().trim().min(1).max(256),
+    authorName: z.string().trim().min(1).max(200).optional(),
+    sender: z.enum(['contact', 'attendant', 'system']).optional(),
+    content: z.string().max(4096).optional(),
+    mediaType: z.enum(['image', 'audio', 'video', 'document', 'sticker']).optional(),
+    key: z.object({
+      id: z.string().trim().min(1).max(256),
+      remoteJid: z.string().trim().min(3).max(128).optional(),
+      fromMe: z.boolean().optional(),
+      participant: z.string().trim().min(3).max(128).optional(),
+    }).optional(),
+  }).optional(),
 });
 const sendMediaSchema = z.object({
   number: z.string().regex(/^\d{8,20}$/),
@@ -36,6 +49,7 @@ const sendMediaSchema = z.object({
   fileName: z.string().max(180).optional(),
   caption: z.string().max(4096).optional(),
   clientMessageId: z.string().trim().min(1).max(128).optional(),
+  quotedMessage: sendTextSchema.shape.quotedMessage,
 });
 const mediaSchema = z.object({ messageKey: z.record(z.string(), z.unknown()) });
 const phoneSchema = z.object({ number: z.string().regex(/^\d{8,20}$/) });
@@ -374,6 +388,71 @@ function firstProviderText(...values: unknown[]) {
   return values.find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim();
 }
 
+type QuotedMessage = NonNullable<z.infer<typeof sendTextSchema>['quotedMessage']>;
+
+function quotedMessageFromContext(context: any): QuotedMessage | undefined {
+  const messageId = firstProviderText(context?.stanzaId, context?.stanzaID, context?.quotedMessage?.key?.id);
+  if (!messageId) return undefined;
+
+  const quoted = unwrapProviderMessage(context?.quotedMessage || {});
+  const mediaType = quoted?.imageMessage ? 'image'
+    : quoted?.videoMessage ? 'video'
+      : quoted?.audioMessage ? 'audio'
+        : quoted?.documentMessage ? 'document'
+          : quoted?.stickerMessage ? 'sticker'
+            : undefined;
+  const content = firstProviderText(
+    quoted?.conversation,
+    quoted?.extendedTextMessage?.text,
+    quoted?.imageMessage?.caption,
+    quoted?.videoMessage?.caption,
+    quoted?.documentMessage?.caption,
+  );
+  const participant = firstProviderText(context?.participant, context?.participantPn, context?.quotedParticipant);
+
+  return {
+    messageId,
+    ...(content ? { content } : {}),
+    ...(mediaType ? { mediaType } : {}),
+    key: {
+      id: messageId,
+      ...(participant ? { participant } : {}),
+    },
+  };
+}
+
+function normalizedQuotedMessage(quoted: QuotedMessage | undefined, fallbackRemoteJid: string): QuotedMessage | undefined {
+  if (!quoted) return undefined;
+  const messageId = quoted.key?.id || quoted.messageId;
+  if (!messageId) return undefined;
+  return {
+    messageId,
+    ...(quoted.authorName ? { authorName: quoted.authorName } : {}),
+    ...(quoted.sender ? { sender: quoted.sender } : {}),
+    ...(quoted.content ? { content: quoted.content } : {}),
+    ...(quoted.mediaType ? { mediaType: quoted.mediaType } : {}),
+    key: {
+      id: messageId,
+      remoteJid: quoted.key?.remoteJid || fallbackRemoteJid,
+      ...(typeof quoted.key?.fromMe === 'boolean' ? { fromMe: quoted.key.fromMe } : {}),
+      ...(quoted.key?.participant ? { participant: quoted.key.participant } : {}),
+    },
+  };
+}
+
+function evolutionQuotedPayload(quoted: QuotedMessage | undefined, fallbackRemoteJid: string) {
+  const normalized = normalizedQuotedMessage(quoted, fallbackRemoteJid);
+  if (!normalized) return undefined;
+  return {
+    key: {
+      id: normalized.key!.id,
+      remoteJid: normalized.key!.remoteJid,
+      fromMe: normalized.key!.fromMe,
+      ...(normalized.key!.participant ? { participant: normalized.key!.participant } : {}),
+    },
+  };
+}
+
 function providerMessageType(record: any, message: any) {
   const explicit = String(record?.messageType || '').trim();
   if (explicit) return explicit;
@@ -499,6 +578,8 @@ function providerMessageMetadata(record: any, message: any, fromMe: boolean) {
   const call = message?.callLogMessage || message?.call || message?.offerMessage;
   const callInfo = providerCallInfo(record, message, type, fromMe);
   const metadata: Record<string, any> = { providerType: type };
+  const quotedMessage = quotedMessageFromContext(context);
+  if (quotedMessage) metadata.quotedMessage = quotedMessage;
 
   // A referência de anúncio pertence somente à mensagem recebida que iniciou
   // a conversa. Mensagens enviadas pela loja podem carregar o mesmo
@@ -754,6 +835,54 @@ function localMessageToProviderRecord(row: any) {
   };
 }
 
+async function hydrateQuotedMessageMetadata(
+  client: Pick<PoolClient, 'query'>,
+  companyId: string,
+  metadata: Record<string, any>,
+  fallbackRemoteJid: string,
+) {
+  const quoted = normalizedQuotedMessage(metadata?.quotedMessage, fallbackRemoteJid);
+  if (!quoted) return metadata;
+
+  const original = await client.query<{
+    evolution_message_id: string | null;
+    sender: 'contact' | 'attendant' | 'system';
+    sender_name: string | null;
+    content: string;
+    media_type: QuotedMessage['mediaType'] | null;
+    evolution_remote_jid: string;
+  }>(
+    `SELECT m.evolution_message_id, m.sender, m.sender_name, m.content, m.media_type, c.evolution_remote_jid
+     FROM messages m
+     INNER JOIN conversations c ON c.id = m.conversation_id
+     WHERE m.company_id = $1
+       AND (m.evolution_message_id = $2 OR m.id::text = $2)
+     ORDER BY m.sent_at DESC
+     LIMIT 1`,
+    [companyId, quoted.messageId],
+  );
+  const row = original.rows[0];
+  if (!row) return { ...metadata, quotedMessage: quoted };
+
+  return {
+    ...metadata,
+    quotedMessage: {
+      ...quoted,
+      messageId: row.evolution_message_id || quoted.messageId,
+      authorName: row.sender_name || (row.sender === 'contact' ? 'Contato' : 'Enviado fora do Vitstock Hub'),
+      sender: row.sender,
+      content: row.content,
+      mediaType: row.media_type || undefined,
+      key: {
+        ...quoted.key,
+        id: row.evolution_message_id || quoted.messageId,
+        remoteJid: row.evolution_remote_jid || quoted.key?.remoteJid,
+        fromMe: row.sender === 'attendant',
+      },
+    },
+  };
+}
+
 async function findOrCreateConversation(
   client: Pick<PoolClient, 'query'>,
   input: {
@@ -856,6 +985,7 @@ async function persistProviderMessage(companyId: string, record: any, options: {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+    local.metadata = await hydrateQuotedMessageMetadata(client, companyId, local.metadata || {}, local.remoteJid);
     const contact = await client.query<{ id: string }>(
       `INSERT INTO contacts (company_id, name, phone, avatar_url)
        VALUES ($1, $2, $3, $4)
@@ -1059,7 +1189,9 @@ async function ensureOutboundMessage(input: {
   content: string;
   mediaType?: 'image' | 'video' | 'document';
   clientMessageId?: string;
+  quotedMessage?: QuotedMessage;
 }) {
+  const quotedMessage = normalizedQuotedMessage(input.quotedMessage, input.remoteJid);
   const contact = await db.query<{ id: string }>(
     `INSERT INTO contacts (company_id, name, phone)
      VALUES ($1, $2, $3)
@@ -1140,6 +1272,9 @@ async function ensureOutboundMessage(input: {
         sentByHub: true,
         sentByUserId: input.userId,
         sentByUserName: input.userName,
+        ...(quotedMessage
+          ? { quotedMessage }
+          : {}),
       }),
     ],
   );
@@ -1810,8 +1945,10 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.post('/api/evolution/messages/send', { preHandler: requireUser }, async (request, reply) => {
     const parsed = sendTextSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Mensagem inválida' });
-    const { number, text, remoteJid, clientMessageId } = parsed.data;
+    const { number, text, remoteJid, clientMessageId, quotedMessage } = parsed.data;
     const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
+    const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
+    const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
     const leaseAcquisition = await acquireOutboundLease({
       companyId: request.user!.companyId,
       user: request.user!,
@@ -1838,6 +1975,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       remoteJid: canonicalRemoteJid,
       content: text,
       clientMessageId,
+      quotedMessage: normalizedQuote,
     });
     if (localMessage.deduplicated) {
       return {
@@ -1863,6 +2001,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
           text: formatHubOutboundText(request.user!.name, text),
           delay: 1200,
           linkPreview: true,
+          ...(evolutionQuote
+            ? { quoted: evolutionQuote }
+            : {}),
         }),
       },
       );
@@ -1897,6 +2038,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
           sentByUserId: request.user!.id,
           sentByUserName: request.user!.name,
           ...(clientMessageId ? { clientMessageId } : {}),
+          ...(normalizedQuote
+            ? { quotedMessage: normalizedQuote }
+            : {}),
         },
         rawKey: { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
         timestampMs: realtimeTimestampMs,
@@ -1924,13 +2068,16 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.post('/api/evolution/messages/send-media', { preHandler: requireUser }, async (request, reply) => {
     const parsed = sendMediaSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Anexo inválido' });
-    const { number, text, remoteJid, clientMessageId } = {
+    const { number, text, remoteJid, clientMessageId, quotedMessage } = {
       number: parsed.data.number,
       text: parsed.data.caption?.trim() || `[${parsed.data.mediatype}]`,
       remoteJid: parsed.data.remoteJid,
       clientMessageId: parsed.data.clientMessageId,
+      quotedMessage: parsed.data.quotedMessage,
     };
     const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
+    const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
+    const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
     const leaseAcquisition = await acquireOutboundLease({
       companyId: request.user!.companyId,
       user: request.user!,
@@ -1958,6 +2105,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       content: text,
       mediaType: parsed.data.mediatype,
       clientMessageId,
+      quotedMessage: normalizedQuote,
     });
     if (localMessage.deduplicated) {
       return {
@@ -1988,6 +2136,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
             media: parsed.data.media,
             fileName: parsed.data.fileName,
             caption,
+            ...(evolutionQuote
+              ? { quoted: evolutionQuote }
+              : {}),
           }),
         },
       );
@@ -2023,6 +2174,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
           sentByUserId: request.user!.id,
           sentByUserName: request.user!.name,
           ...(clientMessageId ? { clientMessageId } : {}),
+          ...(normalizedQuote
+            ? { quotedMessage: normalizedQuote }
+            : {}),
         },
         rawKey: { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
         timestampMs: realtimeTimestampMs,

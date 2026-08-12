@@ -113,6 +113,30 @@ export const evolutionMessagePreview = (record: any): string | undefined => (
   messageText(record?.message || record, record)
 );
 
+const quotedMessageFromContext = (context: any): NonNullable<NonNullable<Message['metadata']>['quotedMessage']> | undefined => {
+  const messageId = firstText(context?.stanzaId, context?.stanzaID, context?.quotedMessage?.key?.id);
+  if (!messageId) return undefined;
+
+  const quoted = unwrapMessage(context?.quotedMessage || {});
+  const mediaType = quoted.imageMessage ? 'image'
+    : quoted.videoMessage ? 'video'
+      : quoted.audioMessage ? 'audio'
+        : quoted.documentMessage ? 'document'
+          : quoted.stickerMessage ? 'sticker'
+            : undefined;
+  const participant = firstText(context?.participant, context?.participantPn, context?.quotedParticipant);
+
+  return {
+    messageId,
+    content: messageText(quoted),
+    mediaType,
+    key: {
+      id: messageId,
+      ...(participant ? { participant } : {}),
+    },
+  };
+};
+
 const messageMetadata = (record: ProviderRecord, message: any): Message['metadata'] => {
   const msg = unwrapMessage(message);
   // The record-level context can describe the chat snapshot. An ad card is
@@ -131,6 +155,11 @@ const messageMetadata = (record: ProviderRecord, message: any): Message['metadat
     delete metadata.trafficSource;
     delete metadata.trafficTitle;
     delete metadata.trafficUrl;
+    delete metadata.quotedMessage;
+  }
+  if (!metadata.quotedMessage) {
+    const quotedMessage = quotedMessageFromContext(context);
+    if (quotedMessage) metadata.quotedMessage = quotedMessage;
   }
   const fromMe = record.key?.fromMe === true;
   const callInfo = callMessageInfo(record, msg, String(record.messageType || metadata.providerType || ''), fromMe);

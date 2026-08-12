@@ -6,6 +6,7 @@ import { callMessageInfo } from '../utils/callMessage';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 import type { RealtimeEventPayload } from '../utils/realtimeUpdates';
 import { REALTIME_RECONNECTED_EVENT } from '../utils/realtimeConfig';
+import type { QuotedMessage } from '../utils/quotedMessage';
 
 const unwrapEvolutionMessage = (message: any) => {
   let current = message || {};
@@ -798,7 +799,7 @@ export class EvolutionApiService {
   /**
    * Enviar mensagem de texto diretamente via Evolution API no Railway
    */
-  static async sendTextMessage(instanceName: string, number: string, text: string, remoteJid?: string, clientMessageId?: string) {
+  static async sendTextMessage(instanceName: string, number: string, text: string, remoteJid?: string, clientMessageId?: string, quotedMessage?: QuotedMessage) {
     if (USE_MOCK) {
       console.log(`[MOCK EVOLUTION API] Enviar para ${number}: "${text}"`);
       return { status: 'SUCCESS', messageId: `msg-${Date.now()}` };
@@ -814,6 +815,7 @@ export class EvolutionApiService {
           text,
           remoteJid,
           clientMessageId,
+          quotedMessage,
         })
       });
 
@@ -1018,6 +1020,7 @@ export class EvolutionApiService {
     fileName?: string;
     caption?: string;
     clientMessageId?: string;
+    quotedMessage?: QuotedMessage;
   }) {
     if (USE_MOCK) {
       return { status: 'SUCCESS', message: { id: `media-${Date.now()}`, status: 'sent' } };
@@ -1033,6 +1036,7 @@ export class EvolutionApiService {
         fileName: input.fileName,
         caption: input.caption,
         clientMessageId: input.clientMessageId,
+        quotedMessage: input.quotedMessage,
       }),
     });
     const body = await response.json().catch(() => ({}));

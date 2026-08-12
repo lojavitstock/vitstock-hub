@@ -20,6 +20,7 @@ import {
 } from '../src/utils/conversationMessagesCache';
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
 import { formatHubOutboundText, removeHubAgentPrefix } from '../server/src/outboundMessage';
+import { toQuotedMessage } from '../src/utils/quotedMessage';
 import {
   acquireConversationLease,
   canAcquireConversationLease,
@@ -1356,4 +1357,108 @@ test('cache preserva paginação e histórico carregado ao trocar de conversa', 
   const restored = readConversationMessagesCache(cache, 'conversation-a');
   assert.deepEqual(restored?.messages.map((item) => item.id), ['older', 'current']);
   assert.equal(restored?.historyExpanded, true);
+});
+
+test('resposta de atendente mantém referência explícita no estado otimista e na confirmação', () => {
+  const original = message('customer-original', 1_700, 'Valores', 'read', {
+    senderName: 'Daya',
+    rawKey: { id: 'customer-original', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+  });
+  const quotedMessage = toQuotedMessage(original);
+  const optimistic = message('client-reply-1', 1_701, 'Temos sim', 'pending', {
+    sender: 'attendant',
+    senderName: 'Henrique',
+    metadata: { sentByHub: true, sentByUserId: 'user-henrique', sentByUserName: 'Henrique', clientMessageId: 'client-reply-1', quotedMessage },
+  });
+  const confirmed = message('evolution-reply-1', 1_701, 'Temos sim', 'sent', {
+    sender: 'attendant',
+    senderName: 'Henrique',
+    metadata: { sentByHub: true, sentByUserId: 'user-henrique', sentByUserName: 'Henrique', clientMessageId: 'client-reply-1', quotedMessage },
+  });
+
+  const merged = mergeConversationMessages([original, optimistic], [confirmed]);
+  assert.deepEqual(merged.map((item) => item.id), ['customer-original', 'evolution-reply-1']);
+  assert.equal(merged[1]?.metadata?.quotedMessage?.messageId, 'customer-original');
+  assert.equal(merged[1]?.metadata?.quotedMessage?.authorName, 'Daya');
+  assert.equal(merged[1]?.senderName, 'Henrique');
+});
+
+test('normaliza resposta recebida somente a partir do contextInfo da própria mensagem', () => {
+  const reply = normalizeEvolutionMessage({
+    key: { id: 'reply-from-customer', fromMe: false },
+    pushName: 'Cliente',
+    message: {
+      extendedTextMessage: {
+        text: 'Manda aí',
+        contextInfo: {
+          stanzaId: 'hub-original',
+          participant: '5521999999999@s.whatsapp.net',
+          quotedMessage: { conversation: 'Temos sim' },
+        },
+      },
+    },
+    messageTimestamp: 1_700_000_200,
+  }, 0, 'conversation-1', 'Atendente');
+  const common = normalizeEvolutionMessage({
+    key: { id: 'common-after-reply', fromMe: false },
+    pushName: 'Cliente',
+    contextInfo: { stanzaId: 'hub-original', quotedMessage: { conversation: 'Não pode vazar' } },
+    metadata: { quotedMessage: { messageId: 'hub-original', content: 'Também não pode vazar' } },
+    message: { conversation: 'Mensagem comum' },
+    messageTimestamp: 1_700_000_201,
+  }, 1, 'conversation-1', 'Atendente');
+
+  assert.equal(reply.metadata?.quotedMessage?.messageId, 'hub-original');
+  assert.equal(reply.metadata?.quotedMessage?.content, 'Temos sim');
+  assert.equal(common.metadata?.quotedMessage, undefined);
+});
+
+test('respostas a mídia preservam uma prévia compacta sem carregar a mídia original', () => {
+  const image = message('image-original', 1_700, '[Imagem]', 'read', {
+    senderName: 'Cliente',
+    mediaType: 'image',
+    rawKey: { id: 'image-original', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+  });
+  const document = message('document-original', 1_701, '[Documento]', 'read', {
+    senderName: 'Cliente',
+    mediaType: 'document',
+    rawKey: { id: 'document-original', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+  });
+  assert.equal(toQuotedMessage(image).mediaType, 'image');
+  assert.equal(toQuotedMessage(document).mediaType, 'document');
+});
+
+test('snapshot posterior sem reply não remove a referência persistida do envio interno', () => {
+  const quotedMessage = {
+    messageId: 'source', authorName: 'Leonardo', sender: 'attendant' as const, content: 'Original',
+    key: { id: 'source', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
+  };
+  const current = message('hub-reply-persisted', 1_700, 'Resposta', 'sent', {
+    sender: 'attendant', senderName: 'Henrique',
+    metadata: { sentByHub: true, sentByUserId: 'user-henrique', sentByUserName: 'Henrique', clientMessageId: 'local-reply', quotedMessage },
+  });
+  const providerSnapshot = message('hub-reply-persisted', 1_700, '*Henrique*\nResposta', 'delivered', {
+    sender: 'attendant', metadata: { sentOutsideHub: true },
+  });
+  const merged = mergeConversationMessages([current], [providerSnapshot]);
+  assert.equal(merged[0]?.metadata?.quotedMessage?.messageId, 'source');
+  assert.equal(merged[0]?.metadata?.sentByHub, true);
+  assert.equal(merged[0]?.content, 'Resposta');
+});
+
+test('mensagem citada sem original carregada mantém a referência sem criar mensagem artificial', () => {
+  const reply = message('reply-with-unloaded-source', 1_700, 'Resposta', 'read', {
+    metadata: { quotedMessage: { messageId: 'older-not-loaded', authorName: 'Contato', content: 'Histórico antigo' } },
+  });
+  const merged = mergeConversationMessages([], [reply]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0]?.metadata?.quotedMessage?.messageId, 'older-not-loaded');
+});
+
+test('mensagens comuns não são tratadas como resposta apenas por terem conteúdo parecido', () => {
+  const ordinary = message('ordinary', 1_700, 'Valores');
+  const sameText = message('same-text', 1_701, 'Valores');
+  const merged = mergeConversationMessages([ordinary], [sameText]);
+  assert.equal(merged[0]?.metadata?.quotedMessage, undefined);
+  assert.equal(merged[1]?.metadata?.quotedMessage, undefined);
 });

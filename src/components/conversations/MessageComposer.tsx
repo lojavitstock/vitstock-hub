@@ -1,5 +1,7 @@
 import React, { forwardRef, useImperativeHandle, useState } from 'react';
-import { Paperclip, Send, Zap } from 'lucide-react';
+import { Paperclip, Reply, Send, X, Zap } from 'lucide-react';
+import { Message } from '../../types';
+import { quotedMediaLabel, toQuotedMessage } from '../../utils/quotedMessage';
 
 type MessageComposerProps = {
   isInternalNote: boolean;
@@ -17,6 +19,8 @@ type MessageComposerProps = {
   onToggleQuickReply: () => void;
   onAttachmentChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onInputPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => void;
+  replyTo?: Message | null;
+  onCancelReply?: () => void;
 };
 
 export type MessageComposerHandle = {
@@ -47,7 +51,10 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   onToggleQuickReply,
   onAttachmentChange,
   onInputPaste,
+  replyTo,
+  onCancelReply,
   } = props;
+  const replyPreview = replyTo ? toQuotedMessage(replyTo) : undefined;
   useImperativeHandle(ref, () => ({
     clear: () => {
       setInputText('');
@@ -102,6 +109,18 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
     )}
 
     <form onSubmit={onSubmit} className="border-t border-[#344047] bg-[#20292f] p-4">
+      {replyPreview && !isInternalNote && (
+        <div className="mb-3 flex items-start gap-2 rounded-lg border-l-2 border-emerald-300 bg-[#28343a] px-3 py-2 text-left shadow-sm">
+          <Reply className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-bold text-emerald-200">Respondendo a {replyPreview.authorName || 'mensagem'}</p>
+            <p className="truncate text-xs text-slate-300">{quotedMediaLabel(replyPreview.mediaType) || replyPreview.content || 'Mensagem'}</p>
+          </div>
+          <button type="button" onClick={onCancelReply} className="rounded p-1 text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100" title="Cancelar resposta">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
       {activeChatLocked && (
         <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-violet-300/20 bg-violet-300/10 px-3 py-2 text-xs font-semibold text-violet-200">
           <span>Atendimento em andamento por {leaseOwnerName || 'outro atendente'}.</span>
