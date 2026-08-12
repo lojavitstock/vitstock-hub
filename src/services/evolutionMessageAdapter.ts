@@ -138,6 +138,21 @@ const quotedMessageFromContext = (context: any): NonNullable<NonNullable<Message
   };
 };
 
+const documentMetadataFromMessage = (message: any): NonNullable<Message['metadata']>['document'] | undefined => {
+  const document = message?.documentMessage;
+  if (!document) return undefined;
+  const fileName = firstText(document.fileName, document.file_name, document.title);
+  const mimeType = firstText(document.mimetype, document.mimeType);
+  const rawSize = Number(document.fileLength ?? document.fileSize ?? document.file_length);
+  const fileSize = Number.isFinite(rawSize) && rawSize >= 0 ? Math.floor(rawSize) : undefined;
+  if (!fileName && !mimeType && fileSize === undefined) return undefined;
+  return {
+    ...(fileName ? { fileName } : {}),
+    ...(mimeType ? { mimeType } : {}),
+    ...(fileSize !== undefined ? { fileSize } : {}),
+  };
+};
+
 const messageMetadata = (record: ProviderRecord, message: any): Message['metadata'] => {
   const msg = unwrapMessage(message);
   // The record-level context can describe the chat snapshot. An ad card is
@@ -167,6 +182,10 @@ const messageMetadata = (record: ProviderRecord, message: any): Message['metadat
   if (!metadata.quotedMessage) {
     const quotedMessage = quotedMessageFromContext(context);
     if (quotedMessage) metadata.quotedMessage = quotedMessage;
+  }
+  if (!metadata.document) {
+    const document = documentMetadataFromMessage(msg);
+    if (document) metadata.document = document;
   }
   const fromMe = record.key?.fromMe === true;
   const callInfo = callMessageInfo(record, msg, String(record.messageType || metadata.providerType || ''), fromMe);

@@ -669,6 +669,9 @@ export const AtendimentoPage: React.FC = () => {
         sentByUserId: user?.id,
         sentByUserName: attendantName,
         clientMessageId,
+        ...(mediatype === 'document'
+          ? { document: { fileName: file.name, mimeType: file.type || undefined, fileSize: file.size } }
+          : {}),
         ...(quotedMessage ? { quotedMessage } : {}),
       },
     };

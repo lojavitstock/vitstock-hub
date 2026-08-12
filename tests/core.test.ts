@@ -21,6 +21,7 @@ import {
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
 import { formatHubOutboundText, removeHubAgentPrefix } from '../server/src/outboundMessage';
 import { toQuotedMessage } from '../src/utils/quotedMessage';
+import { getDocumentPresentation } from '../src/utils/documentMedia';
 import {
   acquireConversationLease,
   canAcquireConversationLease,
@@ -1462,6 +1463,68 @@ test('respostas a mídia preservam uma prévia compacta sem carregar a mídia or
   });
   assert.equal(toQuotedMessage(image).mediaType, 'image');
   assert.equal(toQuotedMessage(document).mediaType, 'document');
+});
+
+test('documentos preservam nome, tipo e tamanho para o card da timeline', () => {
+  const pdf = message('document-pdf', 1_702, '[Documento]', 'read', {
+    mediaType: 'document',
+    mediaUrl: 'data:application/pdf;base64,JVBERi0=',
+    metadata: { document: { fileName: 'orcamento-agosto.pdf', mimeType: 'application/pdf', fileSize: 1_572_864 } },
+  });
+  const presentation = getDocumentPresentation(pdf);
+
+  assert.equal(presentation.fileName, 'orcamento-agosto.pdf');
+  assert.equal(presentation.extension, 'PDF');
+  assert.equal(presentation.kind, 'pdf');
+  assert.equal(presentation.formattedSize, '1.5 MB');
+});
+
+test('documentos sem preview e formatos desconhecidos mantêm fallback seguro', () => {
+  const document = message('document-unknown', 1_703, '[Documento]', 'read', {
+    mediaType: 'document',
+    mediaUrl: 'https://media.example.invalid/expired',
+    metadata: { document: { fileName: 'comprovante.bin' } },
+  });
+  const presentation = getDocumentPresentation(document);
+
+  assert.equal(presentation.fileName, 'comprovante.bin');
+  assert.equal(presentation.extension, 'BIN');
+  assert.equal(presentation.kind, 'file');
+  assert.equal(presentation.formattedSize, undefined);
+});
+
+test('documentos Office usam metadados sem tentar renderizar conteúdo como PDF', () => {
+  const document = message('document-docx', 1_704, '[Documento]', 'read', {
+    mediaType: 'document',
+    metadata: { document: { fileName: 'proposta.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', fileSize: 12_288 } },
+  });
+  const presentation = getDocumentPresentation(document);
+
+  assert.equal(presentation.kind, 'word');
+  assert.equal(presentation.extension, 'DOCX');
+  assert.equal(presentation.formattedSize, '12 KB');
+});
+
+test('adapter preserva metadados de documento recebidos para SSE e polling', () => {
+  const normalized = normalizeEvolutionMessage({
+    key: { id: 'incoming-pdf', fromMe: false },
+    pushName: 'Cliente',
+    message: {
+      documentMessage: {
+        fileName: 'laudo.pdf',
+        mimetype: 'application/pdf',
+        fileLength: '2048',
+      },
+    },
+    messageTimestamp: 1_700_000_210,
+  }, 0, 'conversation-1', 'Atendente');
+  const merged = mergeConversationMessages([], [normalized]);
+
+  assert.deepEqual(merged[0]?.metadata?.document, {
+    fileName: 'laudo.pdf',
+    mimeType: 'application/pdf',
+    fileSize: 2048,
+  });
 });
 
 test('snapshot posterior sem reply não remove a referência persistida do envio interno', () => {

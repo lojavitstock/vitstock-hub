@@ -588,6 +588,8 @@ function providerMessageMetadata(record: any, message: any, fromMe: boolean) {
   const call = message?.callLogMessage || message?.call || message?.offerMessage;
   const callInfo = providerCallInfo(record, message, type, fromMe);
   const metadata: Record<string, any> = { providerType: type };
+  const document = providerDocumentMetadata(message);
+  if (document) metadata.document = document;
   const quotedMessage = quotedMessageFromContext(context);
   if (quotedMessage) metadata.quotedMessage = quotedMessage;
 
@@ -728,6 +730,21 @@ function providerMessageMedia(record: any) {
   return { type: found.type, url };
 }
 
+function providerDocumentMetadata(message: any) {
+  const document = message?.documentMessage;
+  if (!document) return undefined;
+  const fileName = firstProviderText(document.fileName, document.file_name, document.title);
+  const mimeType = firstProviderText(document.mimetype, document.mimeType);
+  const rawSize = Number(document.fileLength ?? document.fileSize ?? document.file_length);
+  const fileSize = Number.isFinite(rawSize) && rawSize >= 0 ? Math.floor(rawSize) : undefined;
+  if (!fileName && !mimeType && fileSize === undefined) return undefined;
+  return {
+    ...(fileName ? { fileName } : {}),
+    ...(mimeType ? { mimeType } : {}),
+    ...(fileSize !== undefined ? { fileSize } : {}),
+  };
+}
+
 function providerRemoteJid(record: any) {
   return String(record?.key?.remoteJid || record?.remoteJid || '').trim();
 }
@@ -828,7 +845,15 @@ function localMessageToProviderRecord(row: any) {
       : row.media_type === 'video'
         ? { videoMessage: { url: row.media_url || undefined, caption: row.content } }
         : row.media_type === 'document'
-          ? { documentMessage: { url: row.media_url || undefined, caption: row.content } }
+          ? {
+              documentMessage: {
+                url: row.media_url || undefined,
+                caption: row.content,
+                fileName: metadata.document?.fileName,
+                mimetype: metadata.document?.mimeType,
+                fileLength: metadata.document?.fileSize,
+              },
+            }
           : row.media_type === 'sticker'
             ? { stickerMessage: { url: row.media_url || undefined } }
             : { conversation: row.content };
@@ -1199,6 +1224,7 @@ async function ensureOutboundMessage(input: {
   remoteJid: string;
   content: string;
   mediaType?: 'image' | 'video' | 'document';
+  document?: { fileName?: string; mimeType?: string; fileSize?: number };
   clientMessageId?: string;
   quotedMessage?: QuotedMessage;
 }) {
@@ -1283,6 +1309,7 @@ async function ensureOutboundMessage(input: {
         sentByHub: true,
         sentByUserId: input.userId,
         sentByUserName: input.userName,
+        ...(input.document ? { document: input.document } : {}),
         ...(quotedMessage
           ? { quotedMessage }
           : {}),
@@ -2115,6 +2142,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       remoteJid: canonicalRemoteJid,
       content: text,
       mediaType: parsed.data.mediatype,
+      document: parsed.data.mediatype === 'document'
+        ? { fileName: parsed.data.fileName, mimeType: parsed.data.mimetype }
+        : undefined,
       clientMessageId,
       quotedMessage: normalizedQuote,
     });
@@ -2184,6 +2214,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
           sentByHub: true,
           sentByUserId: request.user!.id,
           sentByUserName: request.user!.name,
+          ...(parsed.data.mediatype === 'document'
+            ? { document: { fileName: parsed.data.fileName, mimeType: parsed.data.mimetype } }
+            : {}),
           ...(clientMessageId ? { clientMessageId } : {}),
           ...(normalizedQuote
             ? { quotedMessage: normalizedQuote }

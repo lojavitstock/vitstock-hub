@@ -82,6 +82,11 @@ export interface Message {
         participant?: string;
       };
     };
+    document?: {
+      fileName?: string;
+      mimeType?: string;
+      fileSize?: number;
+    };
     location?: {
       latitude: number;
       longitude: number;

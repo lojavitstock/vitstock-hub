@@ -4,6 +4,10 @@ import {
   Copy,
   Download,
   ExternalLink,
+  File,
+  FileArchive,
+  FileSpreadsheet,
+  FileText,
   Image as ImageIcon,
   Lock,
   MapPin,
@@ -14,7 +18,6 @@ import {
   PhoneMissed,
   PhoneOutgoing,
   Play,
-  Paperclip,
   RefreshCw,
   Reply,
   UserRound,
@@ -24,6 +27,7 @@ import { EvolutionApiService } from '../../services/evolutionApi';
 import { ContactPhoto } from './ContactPhoto';
 import { formatMessageDay, formatMessageTimestamp } from './conversationFormatters';
 import { quotedMediaLabel, quotedMessageExcerpt } from '../../utils/quotedMessage';
+import { getDocumentPresentation } from '../../utils/documentMedia';
 
 type MessageTimelineProps = {
   messages: Message[];
@@ -222,17 +226,103 @@ const AudioMessagePlayer: React.FC<{ src: string; durationHint?: number }> = ({ 
   );
 };
 
+const DocumentMessageContent: React.FC<{
+  message: Message;
+  source: string | null;
+  loading: boolean;
+  canLoadSource: boolean;
+  onLoadSource: () => void;
+}> = ({ message, source, loading, canLoadSource, onLoadSource }) => {
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewFailed, setPreviewFailed] = useState(false);
+  const document = getDocumentPresentation(message);
+  const Icon = document.kind === 'pdf'
+    ? FileText
+    : document.kind === 'spreadsheet'
+      ? FileSpreadsheet
+      : document.kind === 'archive'
+        ? FileArchive
+        : document.kind === 'word' || document.kind === 'text'
+          ? FileText
+          : File;
+
+  const openPreview = () => {
+    setShowPreview(true);
+    if (!source && !loading && canLoadSource) onLoadSource();
+  };
+
+  return (
+    <div className="my-1 w-[320px] max-w-[58vw] overflow-hidden rounded-xl border border-white/10 bg-black/25 shadow-inner">
+      <button
+        type="button"
+        onClick={document.kind === 'pdf' ? openPreview : undefined}
+        className={`flex w-full items-center gap-3 p-3 text-left ${document.kind === 'pdf' ? 'transition-colors hover:bg-white/5' : ''}`}
+        title={document.kind === 'pdf' ? 'Visualizar PDF' : undefined}
+      >
+        <span className={`flex h-11 w-10 flex-shrink-0 items-center justify-center rounded-lg ${document.kind === 'pdf' ? 'bg-red-500/15 text-red-300' : 'bg-amber-400/10 text-amber-300'}`}>
+          <Icon className="h-5 w-5" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-xs font-bold text-slate-100">{document.fileName}</span>
+          <span className="mt-0.5 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+            {document.extension}{document.formattedSize ? ` · ${document.formattedSize}` : ''}
+          </span>
+        </span>
+        {document.kind === 'pdf' && <span className="text-[10px] font-bold text-amber-300">Visualizar</span>}
+      </button>
+      <div className="flex items-center justify-between border-t border-white/10 px-3 py-2">
+        <span className="text-[10px] text-slate-500">{document.mimeType || 'Documento'}</span>
+        {source ? (
+          <a href={source} download={document.fileName} className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-bold text-amber-300 transition-colors hover:bg-white/5 hover:text-amber-200">
+            <Download className="h-3.5 w-3.5" /> Baixar
+          </a>
+        ) : canLoadSource ? (
+          <button type="button" onClick={onLoadSource} disabled={loading} className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-bold text-amber-300 transition-colors hover:bg-white/5 hover:text-amber-200 disabled:cursor-wait disabled:text-slate-400">
+            {loading ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+            {loading ? 'Preparando...' : 'Baixar'}
+          </button>
+        ) : (
+          <span className="text-[11px] font-semibold text-slate-500">Arquivo indisponível</span>
+        )}
+      </div>
+      {showPreview && document.kind === 'pdf' && (
+        <div className="border-t border-white/10 bg-zinc-950/40 p-2.5">
+          {source && !previewFailed ? (
+            <iframe
+              title={`Prévia de ${document.fileName}`}
+              src={source}
+              className="h-56 w-full rounded-lg border border-white/10 bg-white"
+              loading="lazy"
+              onError={() => setPreviewFailed(true)}
+            />
+          ) : loading ? (
+            <div className="flex h-24 items-center justify-center gap-2 text-[11px] font-semibold text-slate-400"><RefreshCw className="h-3.5 w-3.5 animate-spin text-amber-300" /> Carregando prévia...</div>
+          ) : (
+            <div className="flex h-24 items-center justify-center text-center text-[11px] text-slate-400">Prévia indisponível. Você ainda pode baixar o arquivo.</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> = ({ message, instanceName }) => {
   const isMedia = ['image', 'audio', 'video', 'document', 'sticker'].includes(message.mediaType || '');
   if (!isMedia) return null;
 
   const isDataUri = (url?: string | null) => !!url && url.startsWith('data:');
-  const [src, setSrc] = useState<string | null>(isDataUri(message.mediaUrl) ? message.mediaUrl! : null);
-  const [loadingMedia, setLoadingMedia] = useState(!isDataUri(message.mediaUrl) && !!message.rawKey);
+  const isDocument = message.mediaType === 'document';
+  const isReusableDocumentUrl = isDocument
+    && !message.rawKey
+    && /^https?:\/\//i.test(message.mediaUrl || '');
+  const [src, setSrc] = useState<string | null>(isDataUri(message.mediaUrl) || isReusableDocumentUrl ? message.mediaUrl! : null);
+  const [documentSourceRequested, setDocumentSourceRequested] = useState(!isDocument);
+  const shouldLoadMedia = !isDocument || documentSourceRequested;
+  const [loadingMedia, setLoadingMedia] = useState(shouldLoadMedia && !isDataUri(message.mediaUrl) && !!message.rawKey);
   const [showModal, setShowModal] = useState(false);
 
   useEffect(() => {
-    if (!message.rawKey || src) return;
+    if (!shouldLoadMedia || !message.rawKey || src) return;
     let mounted = true;
     if (!src) setLoadingMedia(true);
     EvolutionApiService.getDecodedMedia(instanceName, message.rawKey).then((base64) => {
@@ -241,7 +331,11 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
       setLoadingMedia(false);
     });
     return () => { mounted = false; };
-  }, [instanceName, message.id, message.rawKey, src]);
+  }, [instanceName, message.id, message.rawKey, shouldLoadMedia, src]);
+
+  if (message.mediaType === 'document') {
+    return <DocumentMessageContent message={message} source={src} loading={loadingMedia} canLoadSource={Boolean(message.rawKey)} onLoadSource={() => setDocumentSourceRequested(true)} />;
+  }
 
   if (loadingMedia) {
     const mediaPlaceholderClass = message.mediaType === 'image'
@@ -284,9 +378,6 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
   if (message.mediaType === 'sticker') return src ? <img src={src} alt="Figurinha do WhatsApp" className="h-40 w-40 object-contain drop-shadow-lg" /> : <div className="text-[11px] text-slate-400">Figurinha indisponível</div>;
   if (message.mediaType === 'audio') return <div className="w-[310px] max-w-[58vw] rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-[11px] text-slate-400">Áudio indisponível para reprodução</div>;
   if (message.mediaType === 'video') return <div className="w-[310px] max-w-[58vw] rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-[11px] text-slate-400">Vídeo indisponível para reprodução</div>;
-  if (message.mediaType === 'document' && src) {
-    return <div className="my-1 flex max-w-xs items-center gap-2.5 rounded-xl border border-white/10 bg-black/30 p-2.5 shadow-inner"><Paperclip className="h-4 w-4 flex-shrink-0 text-amber-400" /><span className="flex-1 truncate text-xs font-bold">{message.content || 'Documento'}</span><a href={src} download="documento.pdf" className="rounded bg-amber-400 px-2.5 py-1 text-[11px] font-bold text-zinc-950 transition-colors hover:bg-amber-300">Baixar</a></div>;
-  }
   return null;
 };
 

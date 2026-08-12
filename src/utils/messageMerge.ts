@@ -52,6 +52,16 @@ const areQuotedMessagesEqual = (
   && Boolean(previous) === Boolean(next)
 );
 
+const areDocumentsEqual = (
+  previous?: NonNullable<Message['metadata']>['document'],
+  next?: NonNullable<Message['metadata']>['document'],
+) => (
+  previous?.fileName === next?.fileName
+  && previous?.mimeType === next?.mimeType
+  && previous?.fileSize === next?.fileSize
+  && Boolean(previous) === Boolean(next)
+);
+
 const areMetadataEqual = (
   previous?: Message['metadata'],
   next?: Message['metadata'],
@@ -68,6 +78,7 @@ const areMetadataEqual = (
     && previous.sentOutsideHub === next.sentOutsideHub
     && previous.clientMessageId === next.clientMessageId
     && areQuotedMessagesEqual(previous.quotedMessage, next.quotedMessage)
+    && areDocumentsEqual(previous.document, next.document)
     && previous.reaction === next.reaction
     && previous.systemLabel === next.systemLabel
     && previous.forwarded === next.forwarded
