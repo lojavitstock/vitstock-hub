@@ -55,7 +55,7 @@ export const useConversationMessages = ({
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const historyExpandedRef = useRef(false);
-  const newMessagesCountRef = useRef(0);
+  const newMessagesCountByConversationRef = useRef(new Map<string, number>());
   const scrollStatesRef = useRef(new Map<string, ConversationScrollState>());
   const scrollGenerationRef = useRef(0);
 
@@ -113,10 +113,10 @@ export const useConversationMessages = ({
     rememberScrollState(conversationId, container, false);
   }, [rememberScrollState]);
 
-  const clearNewMessages = useCallback(() => {
-    if (newMessagesCountRef.current === 0) return;
-    newMessagesCountRef.current = 0;
-    setNewMessagesCount(0);
+  const clearNewMessages = useCallback((conversationId = messagesConversationIdRef.current) => {
+    if (!conversationId) return;
+    newMessagesCountByConversationRef.current.delete(conversationId);
+    if (messagesConversationIdRef.current === conversationId) setNewMessagesCount(0);
   }, []);
 
   const registerNewMessages = useCallback((conversationId: string, count: number, stickyAtArrival = stickToBottomRef.current) => {
@@ -125,8 +125,8 @@ export const useConversationMessages = ({
       || stickyAtArrival
       || messagesConversationIdRef.current !== conversationId
     ) return;
-    const nextCount = newMessagesCountRef.current + count;
-    newMessagesCountRef.current = nextCount;
+    const nextCount = (newMessagesCountByConversationRef.current.get(conversationId) || 0) + count;
+    newMessagesCountByConversationRef.current.set(conversationId, nextCount);
     setNewMessagesCount(nextCount);
   }, []);
 
@@ -201,8 +201,13 @@ export const useConversationMessages = ({
     messagesConversationIdRef.current = activeConversationId;
     if (isConversationSwitch) {
       const savedState = scrollStatesRef.current.get(activeConversationId);
-      stickToBottomRef.current = savedState?.stickyToBottom ?? true;
-      clearNewMessages();
+      const stickyToBottom = savedState?.stickyToBottom ?? true;
+      stickToBottomRef.current = stickyToBottom;
+      if (stickyToBottom) {
+        clearNewMessages(activeConversationId);
+      } else {
+        setNewMessagesCount(newMessagesCountByConversationRef.current.get(activeConversationId) || 0);
+      }
       window.requestAnimationFrame(() => {
         restoreScrollPosition(activeConversationId, scrollGeneration);
         window.requestAnimationFrame(() => restoreScrollPosition(activeConversationId, scrollGeneration));
@@ -397,6 +402,11 @@ export const useConversationMessages = ({
 
       const previousMessages = messagesRef.current;
       const stickyAtArrival = stickToBottomRef.current;
+      const incomingIds = new Set(getNewIncomingMessageIds(
+        previousMessages,
+        event.type === 'message.upsert' && event.message ? [event.message] : [],
+        true,
+      ));
       const reconciledMessages = reconcileRealtimeMessages(previousMessages, activeConversationId, event);
       if (reconciledMessages === null) {
         // Keep the existing safety net for the current minimal upsert payload.
@@ -421,11 +431,8 @@ export const useConversationMessages = ({
         if (currentMessages === previousMessages) return reconciledMessages;
         return reconcileRealtimeMessages(currentMessages, activeConversationId, event) || currentMessages;
       });
-      const incomingMessage = event.type === 'message.upsert'
-        && event.message?.sender === 'contact'
-        && !event.message?.isInternalNote;
-      if (incomingMessage && !stickyAtArrival) {
-        registerNewMessages(activeConversationId, 1, stickyAtArrival);
+      if (incomingIds.size > 0 && !stickyAtArrival) {
+        registerNewMessages(activeConversationId, incomingIds.size, stickyAtArrival);
       } else {
         window.setTimeout(() => {
           if (
@@ -568,6 +575,10 @@ export const useConversationMessages = ({
     ? loadingOlderMessages
     : false;
 
+  const visibleNewMessagesCount = messagesConversationIdRef.current === activeConversationId
+    ? newMessagesCountByConversationRef.current.get(activeConversationId) || 0
+    : 0;
+
   return {
     messages: visibleMessages,
     hasMoreMessages: visibleHasMoreMessages,
@@ -580,6 +591,6 @@ export const useConversationMessages = ({
     messagesContainerRef,
     scrollToBottom,
     captureScrollState,
-    newMessagesCount,
+    newMessagesCount: visibleNewMessagesCount,
   };
 };

@@ -11,7 +11,7 @@ import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../s
 import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
 import { createMessageNotificationDeduper } from '../src/utils/messageNotification';
 import { conversationNeedsResponse } from '../src/utils/conversationState';
-import { getNewIncomingMessageIds } from '../src/utils/messageActivity';
+import { getMessageIdentityValues, getNewIncomingMessageIds } from '../src/utils/messageActivity';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../src/utils/realtimeConfig';
 import {
   CONVERSATION_MESSAGE_CACHE_LIMIT,
@@ -95,6 +95,18 @@ test('indicador aceita mensagem nova sem timestamp do provedor', () => {
   const incoming = [message('new-without-time', 0, 'nova mensagem')];
 
   assert.deepEqual(getNewIncomingMessageIds(previous, incoming, true), ['new-without-time']);
+});
+
+test('indicador reconhece a identidade rawKey e não duplica o evento SSE', () => {
+  const previous = [message('client-id', 200, 'já recebida', 'read', {
+    rawKey: { id: 'provider-id', remoteJid: 'conversation-1' },
+  })];
+  const duplicate = message('provider-id', 200, 'já recebida', 'read', {
+    rawKey: { id: 'provider-id', remoteJid: 'conversation-1' },
+  });
+
+  assert.deepEqual(getMessageIdentityValues(previous[0]), ['client-id', 'provider-id']);
+  assert.deepEqual(getNewIncomingMessageIds(previous, [duplicate], true), []);
 });
 
 test('origem frontend principal Ã© permitida', () => {
