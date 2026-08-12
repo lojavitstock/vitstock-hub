@@ -548,7 +548,7 @@ test('realtime de lease atualiza somente a conversa correspondente', () => {
   assert.equal(updated?.[1]?.lease?.ownerName, 'Ana');
 });
 
-test('snapshot antigo não remove lease ainda ativo recebido por realtime', () => {
+test('snapshot não remove lease observado enquanto a UI calcula a expiração localmente', () => {
   const active = conversation('conversation-1', {
     lease: {
       ownerUserId: 'user-a',
@@ -558,6 +558,21 @@ test('snapshot antigo não remove lease ainda ativo recebido por realtime', () =
   });
   const reconciled = reconcileConversationsMonotonic([active], [conversation('conversation-1')]);
   assert.equal(reconciled[0]?.lease?.ownerUserId, 'user-a');
+});
+
+test('expiração do lease não troca a referência da conversa nem reinicia a timeline', () => {
+  const current = [conversation('conversation-1', {
+    lease: {
+      ownerUserId: 'user-a',
+      ownerName: 'Ana',
+      expiresAt: Date.now() - 1,
+    },
+  })];
+  const reconciled = reconcileConversationsMonotonic(current, [conversation('conversation-1')]);
+
+  assert.strictEqual(reconciled, current);
+  assert.strictEqual(reconciled[0], current[0]);
+  assert.ok((reconciled[0]?.lease?.expiresAt || 0) <= Date.now());
 });
 
 test('falha de lease deixa a mensagem otimista explicitamente falha, nunca enviada', () => {

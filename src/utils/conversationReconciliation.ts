@@ -127,10 +127,16 @@ const preserveNewerActivity = (previous: Conversation, next: Conversation) => {
   };
 };
 
-const preserveActiveLease = (previous: Conversation, next: Conversation) => {
+/**
+ * The inbox snapshot only contains active leases. Keep the last observed
+ * lease when it disappears so expiry does not replace the active Conversation
+ * object (and therefore cannot reset its timeline). UI access still derives
+ * activity from expiresAt, so an expired lease is immediately non-blocking.
+ */
+const preserveObservedLease = (previous: Conversation, next: Conversation) => {
   const previousLease = previous.lease;
-  if (!previousLease || previousLease.expiresAt <= Date.now()) return next;
-  if (next.lease && next.lease.expiresAt >= previousLease.expiresAt) return next;
+  if (!previousLease) return next;
+  if (next.lease && next.lease.expiresAt > previousLease.expiresAt) return next;
   return { ...next, lease: previousLease };
 };
 
@@ -169,7 +175,7 @@ export const reconcileConversationsMonotonic = (
       || phoneVariants(phone).map((variant) => previousByPhone.get(variant)).find(Boolean);
     if (!previousConversation) return conversation;
 
-    const withLease = preserveActiveLease(previousConversation, conversation);
+    const withLease = preserveObservedLease(previousConversation, conversation);
     const protectedActivity = preserveNewerActivity(previousConversation, withLease);
     if (protectedActivity.preserved) locallyNewerIds.add(conversation.id);
     const nextConversation = protectedActivity.conversation;
