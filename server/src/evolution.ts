@@ -564,12 +564,22 @@ function providerMessageMetadata(record: any, message: any, fromMe: boolean) {
   // `record.contextInfo` may be supplied by Evolution as context for the chat
   // snapshot. It is not proof that the individual message came from an ad.
   // Traffic metadata must be derived only from the message payload itself.
-  const context = message?.contextInfo
+  const embeddedContext = message?.contextInfo
     || message?.extendedTextMessage?.contextInfo
     || message?.imageMessage?.contextInfo
     || message?.videoMessage?.contextInfo
     || message?.documentMessage?.contextInfo
     || {};
+  // Evolution messages.upsert may carry the message's ContextInfo next to the
+  // `message` object in data.contextInfo. This marker is set only while
+  // handling that one webhook record, so a chat snapshot can never leak its
+  // context into another message.
+  const webhookContext = record?.messageContextScope === 'webhook'
+    ? record?.contextInfo
+    : undefined;
+  const context = Object.keys(embeddedContext).length > 0
+    ? embeddedContext
+    : (webhookContext || {});
   const externalAd = context?.externalAdReply;
   const contact = message?.contactMessage;
   const location = message?.locationMessage;
@@ -585,10 +595,11 @@ function providerMessageMetadata(record: any, message: any, fromMe: boolean) {
   // a conversa. Mensagens enviadas pela loja podem carregar o mesmo
   // contextInfo do WhatsApp, mas não devem herdar a etiqueta do anúncio.
   const hasMessageBoundAdContext = Boolean(
-    externalAd
+    Object.keys(embeddedContext).length > 0
+    && (externalAd
     || context?.ctwaSignals
     || context?.conversionData
-    || context?.conversion_data,
+    || context?.conversion_data),
   );
   if (!fromMe && hasMessageBoundAdContext) {
     const trafficSource = context?.conversionSource
@@ -2260,13 +2271,20 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
 
     if (isMessageEvent) {
       const data = body?.data || body?.payload || body;
-      const records = Array.isArray(data)
+      const rawRecords = Array.isArray(data)
         ? data
         : Array.isArray(data?.messages)
           ? data.messages
           : Array.isArray(data?.records)
             ? data.records
             : [data];
+      // `data.contextInfo` is scoped to this webhook message. Preserve that
+      // fact explicitly for quote extraction without treating arbitrary
+      // record-level contexts from history/snapshots as message metadata.
+      const records = rawRecords.map((record: any) => ({
+        ...record,
+        messageContextScope: 'webhook' as const,
+      }));
 
       if (companyId) {
         for (const record of records) {

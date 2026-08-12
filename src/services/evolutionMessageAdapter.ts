@@ -7,6 +7,7 @@ type ProviderRecord = {
   message?: any;
   messageType?: string;
   contextInfo?: any;
+  messageContextScope?: 'webhook';
   metadata?: Message['metadata'];
   metadataScope?: 'persisted_message';
   messageTimestamp?: number | string;
@@ -141,12 +142,18 @@ const messageMetadata = (record: ProviderRecord, message: any): Message['metadat
   const msg = unwrapMessage(message);
   // The record-level context can describe the chat snapshot. An ad card is
   // valid only when its evidence is attached to this message payload.
-  const context = msg.contextInfo
+  const embeddedContext = msg.contextInfo
     || msg.extendedTextMessage?.contextInfo
     || msg.imageMessage?.contextInfo
     || msg.videoMessage?.contextInfo
     || msg.documentMessage?.contextInfo
     || {};
+  const webhookContext = record.messageContextScope === 'webhook'
+    ? record.contextInfo
+    : undefined;
+  const context = Object.keys(embeddedContext).length > 0
+    ? embeddedContext
+    : (webhookContext || {});
   const metadata: NonNullable<Message['metadata']> = { ...(record.metadata || {}) };
   // Metadata returned from the local PostgreSQL representation was already
   // derived by the backend per message. Raw Evolution records must derive ad
@@ -165,10 +172,11 @@ const messageMetadata = (record: ProviderRecord, message: any): Message['metadat
   const callInfo = callMessageInfo(record, msg, String(record.messageType || metadata.providerType || ''), fromMe);
   const externalAd = context?.externalAdReply;
   const hasMessageBoundAdContext = Boolean(
-    externalAd
+    Object.keys(embeddedContext).length > 0
+    && (externalAd
     || context?.ctwaSignals
     || context?.conversionData
-    || context?.conversion_data,
+    || context?.conversion_data),
   );
   if (!fromMe && hasMessageBoundAdContext) {
     const trafficSource = context?.conversionSource

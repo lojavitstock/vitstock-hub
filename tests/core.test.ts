@@ -1383,19 +1383,16 @@ test('resposta de atendente mantém referência explícita no estado otimista e 
   assert.equal(merged[1]?.senderName, 'Henrique');
 });
 
-test('normaliza resposta recebida somente a partir do contextInfo da própria mensagem', () => {
+test('normaliza resposta inbound da Evolution quando contextInfo vem ao lado de message', () => {
   const reply = normalizeEvolutionMessage({
     key: { id: 'reply-from-customer', fromMe: false },
     pushName: 'Cliente',
-    message: {
-      extendedTextMessage: {
-        text: 'Manda aí',
-        contextInfo: {
-          stanzaId: 'hub-original',
-          participant: '5521999999999@s.whatsapp.net',
-          quotedMessage: { conversation: 'Temos sim' },
-        },
-      },
+    messageContextScope: 'webhook',
+    message: { conversation: 'Manda aí' },
+    contextInfo: {
+      stanzaId: 'hub-original',
+      participant: '5521999999999@s.whatsapp.net',
+      quotedMessage: { conversation: 'Temos sim' },
     },
     messageTimestamp: 1_700_000_200,
   }, 0, 'conversation-1', 'Atendente');
@@ -1410,7 +1407,46 @@ test('normaliza resposta recebida somente a partir do contextInfo da própria me
 
   assert.equal(reply.metadata?.quotedMessage?.messageId, 'hub-original');
   assert.equal(reply.metadata?.quotedMessage?.content, 'Temos sim');
+  assert.equal(reply.metadata?.quotedMessage?.key?.participant, '5521999999999@s.whatsapp.net');
   assert.equal(common.metadata?.quotedMessage, undefined);
+});
+
+test('resposta inbound de imagem preserva o tipo citado no contexto do webhook', () => {
+  const reply = normalizeEvolutionMessage({
+    key: { id: 'reply-to-image', fromMe: false },
+    pushName: 'Cliente',
+    messageContextScope: 'webhook',
+    message: { conversation: 'Gostei dessa foto' },
+    contextInfo: {
+      stanzaId: 'hub-image-original',
+      participant: '5521999999999@s.whatsapp.net',
+      quotedMessage: { imageMessage: { caption: 'Antes e depois' } },
+    },
+    messageTimestamp: 1_700_000_205,
+  }, 0, 'conversation-1', 'Atendente');
+
+  assert.equal(reply.metadata?.quotedMessage?.messageId, 'hub-image-original');
+  assert.equal(reply.metadata?.quotedMessage?.mediaType, 'image');
+  assert.equal(reply.metadata?.quotedMessage?.content, 'Antes e depois');
+});
+
+test('SSE e polling preservam a mesma referência de reply inbound', () => {
+  const inboundReply = message('customer-reply-sse', 1_700, 'Perfeito', 'read', {
+    metadata: {
+      quotedMessage: {
+        messageId: 'hub-original-sse',
+        authorName: 'Henrique',
+        sender: 'attendant',
+        content: 'Podemos entregar amanhã',
+        key: { id: 'hub-original-sse', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
+      },
+    },
+  });
+  const realtime = reconcileRealtimeMessages([], 'conversation-1', { type: 'message.upsert', message: inboundReply });
+  const polled = mergeConversationMessages(realtime || [], [{ ...inboundReply, metadata: { ...inboundReply.metadata, quotedMessage: { ...inboundReply.metadata!.quotedMessage! } } }]);
+
+  assert.equal(realtime?.[0]?.metadata?.quotedMessage?.messageId, 'hub-original-sse');
+  assert.equal(polled[0]?.metadata?.quotedMessage?.content, 'Podemos entregar amanhã');
 });
 
 test('respostas a mídia preservam uma prévia compacta sem carregar a mídia original', () => {
