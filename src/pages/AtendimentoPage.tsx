@@ -495,7 +495,6 @@ export const AtendimentoPage: React.FC = () => {
     }
 
     const newMsgText = composerTextRef.current.trim();
-    const outboundText = `*${attendantName}*\n${newMsgText}`;
     const clientMessageId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     composerRef.current?.clear();
 
@@ -552,7 +551,7 @@ export const AtendimentoPage: React.FC = () => {
 
     if (!isInternalNote && !isMock) {
       try {
-      const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, outboundText, activeConv.id, newMsg.id);
+      const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, newMsgText, activeConv.id, newMsg.id);
       if (activeConversationIdRef.current === activeConv.id) {
         setMessages((previous) => previous.map((message) => message.id === newMsg.id ? {
           ...message,
@@ -784,8 +783,7 @@ export const AtendimentoPage: React.FC = () => {
       } else if (message.mediaType) {
         throw new Error('O arquivo original não está disponível para nova tentativa.');
       } else {
-        const outboundText = `*${attendantName}*\n${retryText}`;
-        result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, outboundText, activeConv.id, message.id);
+        result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, retryText, activeConv.id, message.id);
       }
       if (activeConversationIdRef.current === conversationId) {
         setMessages((previous) => previous.map((item) => item.id === message.id ? {
@@ -845,7 +843,6 @@ export const AtendimentoPage: React.FC = () => {
     const jid = `${cleanNum}@s.whatsapp.net`;
     const contactName = newChatName.trim() || `+${cleanNum}`;
     const messageText = newChatMessage.trim();
-    const outboundText = `*${attendantName}*\n${messageText}`;
     const clientMessageId = `new-chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     setStartingNewChat(true);
@@ -853,7 +850,7 @@ export const AtendimentoPage: React.FC = () => {
     let result: any = null;
     if (!isMock) {
       try {
-        result = await EvolutionApiService.sendTextMessage(instanceName, cleanNum, outboundText, jid, clientMessageId);
+        result = await EvolutionApiService.sendTextMessage(instanceName, cleanNum, messageText, jid, clientMessageId);
       } catch (error) {
         setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível iniciar a conversa.');
         setStartingNewChat(false);

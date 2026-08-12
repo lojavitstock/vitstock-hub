@@ -8,6 +8,7 @@ import { db } from './db.js';
 import { buildHasOlderMessagesQuery } from './hasOlderMessagesQuery.js';
 import { publishRealtimeEvent, registerRealtimeClient } from './realtime.js';
 import { acquireConversationLease, type ConversationLease } from './conversationLease.js';
+import { formatHubOutboundText, removeHubAgentPrefix } from './outboundMessage.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -972,6 +973,9 @@ async function persistProviderMessage(companyId: string, record: any, options: {
       if (persistedRow) {
         local.senderName = persistedRow.sender_name || undefined;
         local.metadata = persistedRow.metadata || {};
+        if (local.metadata?.sentByHub === true) {
+          local.content = removeHubAgentPrefix(local.content, local.senderName);
+        }
       }
     }
 
@@ -1854,7 +1858,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       `/message/sendText/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
       {
         method: 'POST',
-        body: JSON.stringify({ number, text, delay: 1200, linkPreview: true }),
+        body: JSON.stringify({
+          number,
+          text: formatHubOutboundText(request.user!.name, text),
+          delay: 1200,
+          linkPreview: true,
+        }),
       },
       );
       body = await response.json().catch(() => ({ error: 'Evolution API response invalid' }));
@@ -1966,7 +1975,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     let body: any;
     try {
       const caption = parsed.data.caption?.trim()
-        ? `*${request.user!.name}*\n${parsed.data.caption.trim()}`
+        ? formatHubOutboundText(request.user!.name, parsed.data.caption.trim())
         : undefined;
       response = await evolutionRequest(
         `/message/sendMedia/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,

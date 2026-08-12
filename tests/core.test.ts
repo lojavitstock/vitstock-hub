@@ -19,6 +19,7 @@ import {
   writeConversationMessagesCache,
 } from '../src/utils/conversationMessagesCache';
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
+import { formatHubOutboundText, removeHubAgentPrefix } from '../server/src/outboundMessage';
 import {
   acquireConversationLease,
   canAcquireConversationLease,
@@ -1025,6 +1026,47 @@ test('registro persistido do Hub mantém autoria após recarregar a conversa', (
   assert.equal(reloaded.content, 'Mensagem do atendimento');
   assert.equal(reloaded.metadata?.sentByHub, true);
   assert.equal(reloaded.metadata?.sentOutsideHub, undefined);
+});
+
+test('assinatura enviada à Evolution não contamina o conteúdo exibido do Leonardo', () => {
+  const evolutionPayload = formatHubOutboundText('Leonardo', 'Nova Iguaçu consigo entregar via correios');
+  const confirmed = normalizeEvolutionMessage({
+    key: { id: 'provider-leonardo-clean', fromMe: true },
+    metadataScope: 'persisted_message',
+    metadata: {
+      sentByHub: true,
+      sentByUserId: 'user-leonardo',
+      sentByUserName: 'Leonardo',
+      clientMessageId: 'local-leonardo-clean',
+    },
+    message: { conversation: evolutionPayload },
+    messageTimestamp: 1_700_000_110,
+  }, 0, 'conversation-1', 'Atendente');
+
+  assert.equal(evolutionPayload, '*Leonardo*\nNova Iguaçu consigo entregar via correios');
+  assert.equal(removeHubAgentPrefix(evolutionPayload, 'Leonardo'), 'Nova Iguaçu consigo entregar via correios');
+  assert.equal(confirmed.senderName, 'Leonardo');
+  assert.equal(confirmed.content, 'Nova Iguaçu consigo entregar via correios');
+});
+
+test('mensagem do Henrique preserva conteúdo legítimo iniciado por asteriscos', () => {
+  const evolutionPayload = formatHubOutboundText('Henrique', '*Oferta especial* para hoje');
+  const confirmed = normalizeEvolutionMessage({
+    key: { id: 'provider-henrique-clean', fromMe: true },
+    metadataScope: 'persisted_message',
+    metadata: {
+      sentByHub: true,
+      sentByUserId: 'user-henrique',
+      sentByUserName: 'Henrique',
+      clientMessageId: 'local-henrique-clean',
+    },
+    message: { conversation: evolutionPayload },
+    messageTimestamp: 1_700_000_111,
+  }, 0, 'conversation-1', 'Atendente');
+
+  assert.equal(evolutionPayload, '*Henrique*\n*Oferta especial* para hoje');
+  assert.equal(confirmed.senderName, 'Henrique');
+  assert.equal(confirmed.content, '*Oferta especial* para hoje');
 });
 
 test('mensagem externa parecida não é correlacionada com envio otimista sem ID explícito', () => {
