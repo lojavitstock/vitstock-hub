@@ -240,11 +240,10 @@ export const useConversationInbox = ({
     [activeConversationId, conversations],
   );
 
-  const activeChatLocked = Boolean(
-    activeConversation?.assignedAttendant
-      && activeConversation.assignedAttendant.id !== userId
-      && userRole !== 'admin',
-  );
+  const activeLease = activeConversation?.lease && activeConversation.lease.expiresAt > now
+    ? activeConversation.lease
+    : undefined;
+  const activeChatLocked = Boolean(activeLease && activeLease.ownerUserId !== userId);
 
   const normalizedConversationSearch = normalizeSearchText(conversationSearch.trim());
   const visibleConversations = useMemo(() => conversations.filter((conversation) => {
@@ -335,6 +334,30 @@ export const useConversationInbox = ({
     }
   }, [activeConversation, isMock]);
 
+  const pullActiveConversationLease = useCallback(async () => {
+    if (!activeConversation || isMock) return;
+    setCapturingChat(true);
+    setAssignmentFeedback('');
+    try {
+      const result = await EvolutionApiService.pullConversationLease(activeConversation.id, activeConversation.contact.phone);
+      const expiresAt = Date.parse(result.lease.expiresAt);
+      setConversations((previous) => previous.map((conversation) => conversation.id === activeConversation.id ? {
+        ...conversation,
+        lease: {
+          ownerUserId: result.lease.ownerUserId,
+          ownerName: result.lease.ownerName,
+          expiresAt,
+        },
+      } : conversation));
+      setAssignmentFeedback('Conversa puxada para voc\u00ea.');
+    } catch (error) {
+      setAssignmentFeedback(error instanceof Error ? error.message : 'N\u00e3o foi poss\u00edvel puxar a conversa');
+      await loadChats(false);
+    } finally {
+      setCapturingChat(false);
+    }
+  }, [activeConversation, isMock, loadChats]);
+
   const updateActiveChatStatus = useCallback(async (status: ChatStatus) => {
     if (!activeConversation) return;
 
@@ -382,6 +405,7 @@ export const useConversationInbox = ({
     activeConversationId,
     setActiveConversationId,
     activeChatLocked,
+    activeLease,
     filterTab,
     setFilterTab,
     conversationSearch,
@@ -397,6 +421,7 @@ export const useConversationInbox = ({
     setAssignmentFeedback,
     captureActiveChat,
     releaseActiveChat,
+    pullActiveConversationLease,
     updateActiveChatStatus,
     needsAttention,
   };

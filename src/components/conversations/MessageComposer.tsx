@@ -6,7 +6,9 @@ type MessageComposerProps = {
   quickReplyOpen: boolean;
   activeChatLocked: boolean;
   whatsappConnected: boolean;
-  assignedAttendantName?: string;
+  leaseOwnerName?: string;
+  onPullConversation?: () => void;
+  pullingConversation?: boolean;
   sendingMedia: boolean;
   attachmentInputRef: React.RefObject<HTMLInputElement>;
   onSubmit: (event: React.FormEvent) => void;
@@ -34,7 +36,9 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   quickReplyOpen,
   activeChatLocked,
   whatsappConnected,
-  assignedAttendantName,
+  leaseOwnerName,
+  onPullConversation,
+  pullingConversation,
   sendingMedia,
   attachmentInputRef,
   onSubmit,
@@ -99,8 +103,13 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
 
     <form onSubmit={onSubmit} className="border-t border-[#344047] bg-[#20292f] p-4">
       {activeChatLocked && (
-        <div className="mb-2 rounded-lg border border-violet-300/20 bg-violet-300/10 px-3 py-2 text-[11px] font-semibold text-violet-200">
-          Este atendimento está capturado por {assignedAttendantName || 'outro atendente'}.
+        <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-violet-300/20 bg-violet-300/10 px-3 py-2 text-xs font-semibold text-violet-200">
+          <span>Atendimento em andamento por {leaseOwnerName || 'outro atendente'}.</span>
+          {onPullConversation && (
+            <button type="button" onClick={onPullConversation} disabled={pullingConversation} className="shrink-0 rounded-md border border-violet-300/40 px-2.5 py-1 text-[11px] font-bold text-violet-100 transition-colors hover:bg-violet-300 hover:text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60">
+              {pullingConversation ? 'Puxando...' : 'Puxar conversa para você'}
+            </button>
+          )}
         </div>
       )}
       <div className="mb-2 flex items-center gap-2">

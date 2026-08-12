@@ -108,6 +108,11 @@ export interface Conversation {
   needsResponse?: boolean;
   status: ChatStatus;
   assignedAttendant?: Pick<Attendant, 'id' | 'name'>;
+  lease?: {
+    ownerUserId: string;
+    ownerName: string;
+    expiresAt: number;
+  };
   department: string;
 }
 

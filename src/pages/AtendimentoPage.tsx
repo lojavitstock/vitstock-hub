@@ -75,6 +75,7 @@ export const AtendimentoPage: React.FC = () => {
     activeConversationId: activeConvId,
     setActiveConversationId: setActiveConvId,
     activeChatLocked,
+    activeLease,
     filterTab,
     setFilterTab,
     conversationSearch,
@@ -89,6 +90,7 @@ export const AtendimentoPage: React.FC = () => {
     setAssignmentFeedback,
     captureActiveChat,
     releaseActiveChat,
+    pullActiveConversationLease,
     updateActiveChatStatus,
     needsAttention,
     rememberContactName,
@@ -463,9 +465,30 @@ export const AtendimentoPage: React.FC = () => {
   }, [showContactInfo, activeConvId]);
 
   */
+  const restoreFailedOptimisticActivity = (conversation: Conversation, optimisticMessageId: string) => {
+    setConversations((previous) => previous.map((item) => {
+      if (item.id !== conversation.id || item.lastMessageKey?.id !== optimisticMessageId) return item;
+      return {
+        ...item,
+        lastMessage: conversation.lastMessage,
+        lastMessageTimestamp: conversation.lastMessageTimestamp,
+        lastMessageAt: conversation.lastMessageAt,
+        lastMessageFromMe: conversation.lastMessageFromMe,
+        lastMessageKey: conversation.lastMessageKey,
+        unreadCount: conversation.unreadCount,
+        needsResponse: conversation.needsResponse,
+        status: conversation.status,
+      };
+    }));
+  };
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!composerTextRef.current.trim() || !activeConv || activeChatLocked) return;
+    if (!composerTextRef.current.trim() || !activeConv) return;
+    if (activeChatLocked) {
+      setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
+      return;
+    }
     if (!isInternalNote && !isMock && whatsappStatus !== 'connected') {
       setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de enviar mensagens.');
       return;
@@ -551,6 +574,7 @@ export const AtendimentoPage: React.FC = () => {
           setMessages((previous) => previous.map((message) => message.id === newMsg.id ? { ...message, status: 'failed' } : message));
           composerRef.current?.setText(newMsgText);
         }
+        restoreFailedOptimisticActivity(activeConv, newMsg.id);
         setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar a mensagem.');
         return;
       }
@@ -570,7 +594,11 @@ export const AtendimentoPage: React.FC = () => {
   };
 
   const handleAttachmentFile = async (file: File) => {
-    if (!file || !activeConv || activeChatLocked || isInternalNote || sendingMedia) return;
+    if (!file || !activeConv || isInternalNote || sendingMedia) return;
+    if (activeChatLocked) {
+      setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
+      return;
+    }
     if (!isMock && whatsappStatus !== 'connected') {
       setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de enviar anexos.');
       return;
@@ -672,6 +700,7 @@ export const AtendimentoPage: React.FC = () => {
         setMessages((previous) => previous.map((message) => message.id === localMessage.id ? { ...message, status: 'failed' } : message));
         composerRef.current?.setText(caption);
       }
+      restoreFailedOptimisticActivity(activeConv, localMessage.id);
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar o anexo.');
     } finally {
       setSendingMedia(false);
@@ -685,7 +714,11 @@ export const AtendimentoPage: React.FC = () => {
   };
 
   const handleInputPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!activeConv || activeChatLocked || isInternalNote || sendingMedia) return;
+    if (!activeConv || isInternalNote || sendingMedia) return;
+    if (activeChatLocked) {
+      setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
+      return;
+    }
     if (!isMock && whatsappStatus !== 'connected') {
       setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de enviar imagens.');
       return;
@@ -700,6 +733,10 @@ export const AtendimentoPage: React.FC = () => {
 
   const retryFailedMessage = useCallback(async (message: Message) => {
     if (!activeConv || isMock || message.status !== 'failed' || message.isInternalNote) return;
+    if (activeChatLocked) {
+      setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
+      return;
+    }
     if (whatsappStatus !== 'connected') {
       setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de tentar novamente.');
       return;
@@ -769,7 +806,7 @@ export const AtendimentoPage: React.FC = () => {
         setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível reenviar a mensagem.');
       }
     }
-  }, [activeConv, attendantName, instanceName, isMock, updateConversationActivity, whatsappStatus]);
+  }, [activeChatLocked, activeConv, activeLease?.ownerName, attendantName, instanceName, isMock, updateConversationActivity, whatsappStatus]);
 
   const handleSelectConversation = useCallback((conversation: Conversation) => {
     captureScrollState(activeConvId);
@@ -1156,7 +1193,9 @@ export const AtendimentoPage: React.FC = () => {
               quickReplyOpen={quickReplyOpen}
               activeChatLocked={activeChatLocked}
               whatsappConnected={whatsappConnected}
-              assignedAttendantName={activeConv.assignedAttendant?.name}
+              leaseOwnerName={activeLease?.ownerName}
+              onPullConversation={pullActiveConversationLease}
+              pullingConversation={capturingChat}
               sendingMedia={sendingMedia}
               attachmentInputRef={attachmentInputRef}
               onSubmit={handleSendMessage}

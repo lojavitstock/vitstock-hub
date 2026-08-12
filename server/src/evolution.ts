@@ -7,6 +7,7 @@ import { requireUser } from './auth.js';
 import { db } from './db.js';
 import { buildHasOlderMessagesQuery } from './hasOlderMessagesQuery.js';
 import { publishRealtimeEvent, registerRealtimeClient } from './realtime.js';
+import { acquireConversationLease, type ConversationLease } from './conversationLease.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -237,6 +238,90 @@ function assignmentJids(input: { remoteJid: string; phone?: string }) {
 
 function canonicalPhoneJid(number: string) {
   return `${number.replace(/\D/g, '')}@s.whatsapp.net`;
+}
+
+async function prepareOutboundConversation(input: {
+  companyId: string;
+  number: string;
+  remoteJid: string;
+}) {
+  const contact = await db.query<{ id: string }>(
+    `INSERT INTO contacts (company_id, name, phone)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (company_id, phone) DO UPDATE SET updated_at = now()
+     RETURNING id`,
+    [input.companyId, `+${input.number}`, `+${input.number}`],
+  );
+  const contactId = contact.rows[0]?.id;
+  if (!contactId) throw new Error('Contato n\u00e3o p\u00f4de ser preparado para o envio');
+
+  const existing = await db.query<{ id: string }>(
+    `SELECT id FROM conversations
+     WHERE company_id = $1
+       AND (evolution_remote_jid = $3 OR contact_id = $2)
+     ORDER BY CASE WHEN evolution_remote_jid = $3 THEN 0 ELSE 1 END, updated_at DESC
+     LIMIT 1`,
+    [input.companyId, contactId, input.remoteJid],
+  );
+  if (existing.rows[0]?.id) return existing.rows[0].id;
+
+  const created = await db.query<{ id: string }>(
+    `INSERT INTO conversations (company_id, contact_id, evolution_remote_jid)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (company_id, evolution_remote_jid) DO UPDATE
+       SET contact_id = EXCLUDED.contact_id,
+           updated_at = now()
+     RETURNING id`,
+    [input.companyId, contactId, input.remoteJid],
+  );
+  const conversationId = created.rows[0]?.id;
+  if (!conversationId) throw new Error('Conversa n\u00e3o p\u00f4de ser preparada para o envio');
+  return conversationId;
+}
+
+async function findConversationForLease(input: { companyId: string; remoteJid: string; phone?: string }) {
+  const phone = input.phone?.replace(/\D/g, '') || '';
+  const result = await db.query<{ id: string }>(
+    `SELECT c.id
+     FROM conversations c
+     JOIN contacts contact ON contact.id = c.contact_id
+     WHERE c.company_id = $1::uuid
+       AND (
+         c.evolution_remote_jid = ANY($2::text[])
+         OR ($3::text <> '' AND regexp_replace(contact.phone, '\\D', '', 'g') = $3::text)
+       )
+     ORDER BY CASE WHEN c.evolution_remote_jid = $4::text THEN 0 ELSE 1 END, c.updated_at DESC
+     LIMIT 1`,
+    [input.companyId, assignmentJids(input), phone, input.remoteJid],
+  );
+  return result.rows[0]?.id;
+}
+
+const leaseRealtimePayload = (input: { remoteJid: string; phone?: string; lease: ConversationLease }) => ({
+  remoteJid: input.remoteJid,
+  phone: input.phone || '',
+  leaseOwnerUserId: input.lease.ownerUserId,
+  leaseOwnerName: input.lease.ownerName,
+  leaseExpiresAt: input.lease.expiresAt,
+});
+
+async function acquireOutboundLease(input: {
+  companyId: string;
+  user: { id: string };
+  number: string;
+  remoteJid: string;
+}) {
+  const conversationId = await prepareOutboundConversation({
+    companyId: input.companyId,
+    number: input.number,
+    remoteJid: input.remoteJid,
+  });
+  const outcome = await acquireConversationLease(db, {
+    companyId: input.companyId,
+    conversationId,
+    userId: input.user.id,
+  });
+  return { conversationId, ...outcome };
 }
 
 function providerContactName(value: any) {
@@ -1237,10 +1322,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     let storedContacts: { rows: Array<{ name: string; phone: string; source: string }> };
     let assignments: { rows: Array<{ evolution_remote_jid: string; user_id: string; user_name: string }> };
+    let leases: { rows: Array<{ evolution_remote_jid: string; phone: string; owner_user_id: string; owner_name: string; expires_at: string }> };
     let statuses: { rows: Array<{ evolution_remote_jid: string; status: 'open' | 'pending' | 'resolved'; updated_at: string }> };
     let readStates: { rows: Array<{ evolution_remote_jid: string; last_read_message_timestamp: string }> };
     try {
-      [storedContacts, assignments, statuses, readStates] = await Promise.all([db.query<{
+      [storedContacts, assignments, leases, statuses, readStates] = await Promise.all([db.query<{
       name: string;
       phone: string;
       source: string;
@@ -1259,6 +1345,21 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
        FROM conversation_assignments a
        JOIN users u ON u.id = a.assigned_user_id
        WHERE a.company_id = $1`,
+      [_request.user!.companyId],
+    ), db.query<{
+      evolution_remote_jid: string;
+      phone: string;
+      owner_user_id: string;
+      owner_name: string;
+      expires_at: string;
+    }>(
+      `SELECT c.evolution_remote_jid, contact.phone, lease.owner_user_id, user_account.name AS owner_name, lease.expires_at
+       FROM conversation_leases lease
+       JOIN conversations c ON c.id = lease.conversation_id
+       JOIN contacts contact ON contact.id = c.contact_id
+       JOIN users user_account ON user_account.id = lease.owner_user_id
+       WHERE lease.company_id = $1
+         AND lease.expires_at > now()`,
       [_request.user!.companyId],
     ), db.query<{
       evolution_remote_jid: string;
@@ -1311,6 +1412,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       storedContacts: storedContacts.rows,
       whatsappNames: whatsappNames.rows,
       assignments: assignments.rows,
+      leases: leases.rows,
       statuses: statuses.rows,
       readStates: readStates.rows,
       dailyResponders: dailyResponders.rows,
@@ -1377,6 +1479,31 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       assignedUserName: null,
     });
     return { released: true, remoteJid: parsed.data.remoteJid };
+  });
+
+  app.post('/api/evolution/chats/pull-lease', { preHandler: requireUser }, async (request, reply) => {
+    const parsed = assignmentSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Conversa inv\u00e1lida' });
+    const currentUser = request.user!;
+    const conversationId = await findConversationForLease({
+      companyId: currentUser.companyId,
+      remoteJid: parsed.data.remoteJid,
+      phone: parsed.data.phone,
+    });
+    if (!conversationId) return reply.code(404).send({ error: 'Conversa ainda n\u00e3o est\u00e1 dispon\u00edvel para atendimento' });
+
+    const outcome = await acquireConversationLease(db, {
+      companyId: currentUser.companyId,
+      conversationId,
+      userId: currentUser.id,
+      force: true,
+    });
+    publishRealtimeEvent(currentUser.companyId, 'conversation.updated', leaseRealtimePayload({
+      remoteJid: parsed.data.remoteJid,
+      phone: parsed.data.phone,
+      lease: outcome.lease,
+    }));
+    return { remoteJid: parsed.data.remoteJid, lease: outcome.lease };
   });
 
   app.patch('/api/evolution/chats/status', { preHandler: requireUser }, async (request, reply) => {
@@ -1681,19 +1808,24 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     if (!parsed.success) return reply.code(400).send({ error: 'Mensagem inválida' });
     const { number, text, remoteJid, clientMessageId } = parsed.data;
     const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
-    const assigned = await db.query<{ assigned_user_id: string; user_name: string }>(
-      `SELECT a.assigned_user_id, u.name AS user_name
-       FROM conversation_assignments a
-       JOIN users u ON u.id = a.assigned_user_id
-       WHERE a.company_id = $1
-         AND a.evolution_remote_jid = ANY($2::text[])
-       ORDER BY a.updated_at DESC
-       LIMIT 1`,
-      [request.user!.companyId, assignmentJids({ remoteJid: canonicalRemoteJid, phone: number })],
-    );
-    if (assigned.rows[0] && assigned.rows[0].assigned_user_id !== request.user!.id && request.user!.role !== 'admin') {
-      return reply.code(409).send({ error: `Atendimento capturado por ${assigned.rows[0].user_name}` });
+    const leaseAcquisition = await acquireOutboundLease({
+      companyId: request.user!.companyId,
+      user: request.user!,
+      number,
+      remoteJid: canonicalRemoteJid,
+    });
+    if (!leaseAcquisition.acquired) {
+      return reply.code(409).send({
+        error: `Atendimento em andamento por ${leaseAcquisition.lease.ownerName}`,
+        code: 'conversation_lease_active',
+        lease: leaseAcquisition.lease,
+      });
     }
+    publishRealtimeEvent(request.user!.companyId, 'conversation.updated', leaseRealtimePayload({
+      remoteJid: canonicalRemoteJid,
+      phone: number,
+      lease: leaseAcquisition.lease,
+    }));
     const localMessage = await ensureOutboundMessage({
       companyId: request.user!.companyId,
       userId: request.user!.id,
@@ -1774,6 +1906,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     return {
       evolution: body,
       dailyResponder,
+      lease: leaseAcquisition.lease,
       remoteJid: canonicalRemoteJid,
       message: { id: localMessage.messageId, evolutionMessageId, status: 'sent', senderName: request.user!.name },
     };
@@ -1789,20 +1922,24 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       clientMessageId: parsed.data.clientMessageId,
     };
     const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
-    const assigned = await db.query<{ assigned_user_id: string; user_name: string }>(
-      `SELECT a.assigned_user_id, u.name AS user_name
-       FROM conversation_assignments a
-       JOIN users u ON u.id = a.assigned_user_id
-       WHERE a.company_id = $1
-         AND a.evolution_remote_jid = ANY($2::text[])
-       ORDER BY a.updated_at DESC
-       LIMIT 1`,
-      [request.user!.companyId, assignmentJids({ remoteJid: canonicalRemoteJid, phone: number })],
-    );
-    if (assigned.rows[0] && assigned.rows[0].assigned_user_id !== request.user!.id && request.user!.role !== 'admin') {
-      return reply.code(409).send({ error: `Atendimento capturado por ${assigned.rows[0].user_name}` });
+    const leaseAcquisition = await acquireOutboundLease({
+      companyId: request.user!.companyId,
+      user: request.user!,
+      number,
+      remoteJid: canonicalRemoteJid,
+    });
+    if (!leaseAcquisition.acquired) {
+      return reply.code(409).send({
+        error: `Atendimento em andamento por ${leaseAcquisition.lease.ownerName}`,
+        code: 'conversation_lease_active',
+        lease: leaseAcquisition.lease,
+      });
     }
-
+    publishRealtimeEvent(request.user!.companyId, 'conversation.updated', leaseRealtimePayload({
+      remoteJid: canonicalRemoteJid,
+      phone: number,
+      lease: leaseAcquisition.lease,
+    }));
     const localMessage = await ensureOutboundMessage({
       companyId: request.user!.companyId,
       userId: request.user!.id,
@@ -1894,6 +2031,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     return {
       evolution: body,
       dailyResponder,
+      lease: leaseAcquisition.lease,
       remoteJid: canonicalRemoteJid,
       message: { id: localMessage.messageId, evolutionMessageId, status: 'sent', senderName: request.user!.name },
     };

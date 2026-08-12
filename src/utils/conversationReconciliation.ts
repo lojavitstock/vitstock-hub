@@ -41,6 +41,13 @@ const areAssignedAttendantsEqual = (
   && Boolean(previous) === Boolean(next)
 );
 
+const areLeasesEqual = (previous?: Conversation['lease'], next?: Conversation['lease']) => (
+  previous?.ownerUserId === next?.ownerUserId
+  && previous?.ownerName === next?.ownerName
+  && previous?.expiresAt === next?.expiresAt
+  && Boolean(previous) === Boolean(next)
+);
+
 /**
  * Compares only fields that Atendimento reads for rendering or actions:
  * contact identity/avatar/tags, list preview/status, assignment and the
@@ -62,6 +69,7 @@ export const areConversationsEquivalent = (previous: Conversation, next: Convers
   && previous.needsResponse === next.needsResponse
   && previous.status === next.status
   && areAssignedAttendantsEqual(previous.assignedAttendant, next.assignedAttendant)
+  && areLeasesEqual(previous.lease, next.lease)
   && previous.department === next.department
 );
 
@@ -119,6 +127,13 @@ const preserveNewerActivity = (previous: Conversation, next: Conversation) => {
   };
 };
 
+const preserveActiveLease = (previous: Conversation, next: Conversation) => {
+  const previousLease = previous.lease;
+  if (!previousLease || previousLease.expiresAt <= Date.now()) return next;
+  if (next.lease && next.lease.expiresAt >= previousLease.expiresAt) return next;
+  return { ...next, lease: previousLease };
+};
+
 const sameConversationActivity = (previous: Conversation, next: Conversation) => (
   activityTimestamp(previous) === activityTimestamp(next)
   && previous.lastMessageFromMe === next.lastMessageFromMe
@@ -154,7 +169,8 @@ export const reconcileConversationsMonotonic = (
       || phoneVariants(phone).map((variant) => previousByPhone.get(variant)).find(Boolean);
     if (!previousConversation) return conversation;
 
-    const protectedActivity = preserveNewerActivity(previousConversation, conversation);
+    const withLease = preserveActiveLease(previousConversation, conversation);
+    const protectedActivity = preserveNewerActivity(previousConversation, withLease);
     if (protectedActivity.preserved) locallyNewerIds.add(conversation.id);
     const nextConversation = protectedActivity.conversation;
     // Reading is a local state transition that can arrive before the next

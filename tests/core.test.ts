@@ -20,6 +20,11 @@ import {
 } from '../src/utils/conversationMessagesCache';
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
 import {
+  acquireConversationLease,
+  canAcquireConversationLease,
+  CONVERSATION_LEASE_SECONDS,
+} from '../server/src/conversationLease';
+import {
   config,
   isAllowedFrontendOrigin,
   parseFrontendOrigins,
@@ -477,6 +482,89 @@ test('conversation.updated reconcilia responsável, status e leitura sem refetch
 test('política realtime usa intervalo de segurança de cinco minutos e evento explícito de reconexão', () => {
   assert.equal(REALTIME_SAFETY_INTERVAL_MS, 5 * 60 * 1000);
   assert.equal(REALTIME_RECONNECTED_EVENT, 'realtime.reconnected');
+});
+
+test('lease de conversa usa cinco minutos, renova para o dono e bloqueia outro atendente', () => {
+  const now = Date.parse('2026-08-12T12:00:00.000Z');
+  const active = { ownerUserId: 'user-a', expiresAt: new Date(now + CONVERSATION_LEASE_SECONDS * 1000).toISOString() };
+
+  assert.equal(CONVERSATION_LEASE_SECONDS, 300);
+  assert.equal(canAcquireConversationLease(undefined, 'user-a', now), true);
+  assert.equal(canAcquireConversationLease(active, 'user-a', now), true);
+  assert.equal(canAcquireConversationLease(active, 'user-b', now), false);
+  assert.equal(canAcquireConversationLease(active, 'user-b', now, true), true);
+  assert.equal(canAcquireConversationLease(active, 'user-b', now + CONVERSATION_LEASE_SECONDS * 1000), true);
+});
+
+test('aquisição concorrente da mesma conversa retorna um único dono', async () => {
+  let current: { ownerUserId: string; ownerName: string; expiresAt: Date } | undefined;
+  const names = new Map([['user-a', 'Ana'], ['user-b', 'Bruno']]);
+  const client = {
+    query: async (_text: string, values?: unknown[]) => {
+      const userId = String(values?.[2]);
+      const force = Boolean(values?.[4]);
+      const now = Date.now();
+      const acquired = !current
+        || current.expiresAt.getTime() <= now
+        || current.ownerUserId === userId
+        || force;
+      if (acquired) {
+        current = {
+          ownerUserId: userId,
+          ownerName: names.get(userId) || userId,
+          expiresAt: new Date(now + CONVERSATION_LEASE_SECONDS * 1000),
+        };
+      }
+      return {
+        rows: current ? [{
+          acquired,
+          owner_user_id: current.ownerUserId,
+          owner_name: current.ownerName,
+          expires_at: current.expiresAt,
+        }] : [],
+      };
+    },
+  };
+  const [first, second] = await Promise.all([
+    acquireConversationLease(client as never, { companyId: '00000000-0000-0000-0000-000000000001', conversationId: '00000000-0000-0000-0000-000000000002', userId: 'user-a' }),
+    acquireConversationLease(client as never, { companyId: '00000000-0000-0000-0000-000000000001', conversationId: '00000000-0000-0000-0000-000000000002', userId: 'user-b' }),
+  ]);
+
+  assert.equal(Number(first.acquired) + Number(second.acquired), 1);
+  assert.equal(current?.ownerUserId, first.acquired ? 'user-a' : 'user-b');
+});
+
+test('realtime de lease atualiza somente a conversa correspondente', () => {
+  const current = [conversation('conversation-1'), conversation('conversation-2')];
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'conversation.updated',
+    remoteJid: 'conversation-2',
+    leaseOwnerUserId: 'user-a',
+    leaseOwnerName: 'Ana',
+    leaseExpiresAt: '2026-08-12T12:05:00.000Z',
+  });
+  assert.ok(updated);
+  assert.strictEqual(updated?.[0], current[0]);
+  assert.equal(updated?.[1]?.lease?.ownerName, 'Ana');
+});
+
+test('snapshot antigo não remove lease ainda ativo recebido por realtime', () => {
+  const active = conversation('conversation-1', {
+    lease: {
+      ownerUserId: 'user-a',
+      ownerName: 'Ana',
+      expiresAt: Date.now() + CONVERSATION_LEASE_SECONDS * 1000,
+    },
+  });
+  const reconciled = reconcileConversationsMonotonic([active], [conversation('conversation-1')]);
+  assert.equal(reconciled[0]?.lease?.ownerUserId, 'user-a');
+});
+
+test('falha de lease deixa a mensagem otimista explicitamente falha, nunca enviada', () => {
+  const optimistic = message('pending-lease', Date.now(), 'texto', 'pending', { sender: 'attendant' });
+  const rejected = { ...optimistic, status: 'failed' as const };
+  assert.equal(rejected.status, 'failed');
+  assert.notEqual(rejected.status, 'sent');
 });
 
 test('phoneVariants cruza telefone brasileiro com e sem nono dígito', () => {

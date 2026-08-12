@@ -428,6 +428,8 @@ export class EvolutionApiService {
       const whatsappNamesMap = new Map<string, { name: string; avatar?: string }>();
       const assignmentsMap = new Map<string, { id: string; name: string }>();
       const assignmentsByNumber = new Map<string, { id: string; name: string }>();
+      const leasesMap = new Map<string, { ownerUserId: string; ownerName: string; expiresAt: number }>();
+      const leasesByNumber = new Map<string, { ownerUserId: string; ownerName: string; expiresAt: number }>();
       const dailyRespondersByNumber = new Map<string, { id: string; name: string; date: string }>();
       const statusesMap = new Map<string, { status: ChatStatus; updatedAt: number }>();
       const statusesByNumber = new Map<string, { status: ChatStatus; updatedAt: number }>();
@@ -441,6 +443,22 @@ export class EvolutionApiService {
             const number = assignment.evolution_remote_jid.split('@')[0].replace(/\D/g, '');
             if (number) assignmentsByNumber.set(number, value);
           }
+        });
+      }
+
+      if (Array.isArray(payload.leases)) {
+        payload.leases.forEach((lease: any) => {
+          const expiresAt = Date.parse(String(lease?.expires_at || ''));
+          if (!lease?.evolution_remote_jid || !lease?.owner_user_id || !lease?.owner_name || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) return;
+          const value = {
+            ownerUserId: lease.owner_user_id,
+            ownerName: lease.owner_name,
+            expiresAt,
+          };
+          leasesMap.set(lease.evolution_remote_jid, value);
+          phoneVariants(lease.phone || lease.evolution_remote_jid.split('@')[0]).forEach((phone) => {
+            if (phone) leasesByNumber.set(phone, value);
+          });
         });
       }
 
@@ -540,6 +558,9 @@ export class EvolutionApiService {
         const assignment = assignmentsMap.get(rawRemoteJid)
           || (altJid ? assignmentsMap.get(altJid) : undefined)
           || phoneVariants(cleanNumber).map((phone) => assignmentsByNumber.get(phone)).find(Boolean);
+        const lease = leasesMap.get(rawRemoteJid)
+          || (altJid ? leasesMap.get(altJid) : undefined)
+          || phoneVariants(cleanNumber).map((phone) => leasesByNumber.get(phone)).find(Boolean);
         const dailyResponder = phoneVariants(cleanNumber)
           .map((phone) => dailyRespondersByNumber.get(phone))
           .find(Boolean);
@@ -620,6 +641,7 @@ export class EvolutionApiService {
           needsResponse,
           department: 'Atendimento Geral',
           assignedAttendant: assignment ? { id: assignment.id, name: assignment.name } : undefined,
+          lease,
         };
 
         // Se o mapa já tiver este número, atualiza apenas se a mensagem for mais recente ou se o nome for melhor que a entrada existente
@@ -732,6 +754,19 @@ export class EvolutionApiService {
       afterTimestamp,
       limit,
     ));
+  }
+
+  static async pullConversationLease(remoteJid: string, phone?: string) {
+    const response = await apiFetch('/api/evolution/chats/pull-lease', {
+      method: 'POST',
+      body: JSON.stringify({ remoteJid, phone }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body?.error || 'N\u00e3o foi poss\u00edvel puxar a conversa');
+    return body as {
+      remoteJid: string;
+      lease: { ownerUserId: string; ownerName: string; expiresAt: string };
+    };
   }
 
   private static async fetchConversationMessagesPageUncoordinated(

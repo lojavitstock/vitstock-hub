@@ -13,6 +13,9 @@ export type RealtimeEventPayload = {
   status?: string;
   assignedUserId?: string | null;
   assignedUserName?: string | null;
+  leaseOwnerUserId?: string | null;
+  leaseOwnerName?: string | null;
+  leaseExpiresAt?: string | null;
   messageTimestamp?: number;
   message?: Message;
   [key: string]: unknown;
@@ -150,6 +153,34 @@ const updateConversationFromStatus = (
         contact: {
           ...next.contact,
           tags: [{ id: `assigned-${event.assignedUserId}`, name: event.assignedUserName, color: '#A78BFA' }],
+        },
+      };
+    } else {
+      return null;
+    }
+  }
+
+  if (hasOwn(event, 'leaseOwnerUserId')) {
+    if (event.leaseOwnerUserId === null) {
+      changed = changed || Boolean(next.lease);
+      next = { ...next, lease: undefined };
+    } else if (
+      typeof event.leaseOwnerUserId === 'string'
+      && typeof event.leaseOwnerName === 'string'
+      && typeof event.leaseExpiresAt === 'string'
+    ) {
+      const expiresAt = Date.parse(event.leaseExpiresAt);
+      if (!Number.isFinite(expiresAt)) return null;
+      changed = changed
+        || next.lease?.ownerUserId !== event.leaseOwnerUserId
+        || next.lease?.ownerName !== event.leaseOwnerName
+        || next.lease?.expiresAt !== expiresAt;
+      next = {
+        ...next,
+        lease: {
+          ownerUserId: event.leaseOwnerUserId,
+          ownerName: event.leaseOwnerName,
+          expiresAt,
         },
       };
     } else {
