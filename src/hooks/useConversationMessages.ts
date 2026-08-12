@@ -5,8 +5,7 @@ import { phoneVariants } from '../utils/phone';
 import { mergeConversationMessages } from '../utils/messageMerge';
 import { createLatestRequestGuard } from '../utils/requestCoordinator';
 import { reconcileRealtimeMessages } from '../utils/realtimeUpdates';
-import { classifyIncomingMessage, getNewIncomingMessageIds } from '../utils/messageActivity';
-import { debugNewMessageIndicator } from '../utils/newMessageIndicatorDebug';
+import { getNewIncomingMessageIds } from '../utils/messageActivity';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../utils/realtimeConfig';
 import {
   readConversationMessagesCache,
@@ -57,7 +56,6 @@ export const useConversationMessages = ({
   const stickToBottomRef = useRef(true);
   const historyExpandedRef = useRef(false);
   const newMessagesCountByConversationRef = useRef(new Map<string, number>());
-  const lastDebugHookOutputRef = useRef<string | null>(null);
   const scrollStatesRef = useRef(new Map<string, ConversationScrollState>());
   const scrollGenerationRef = useRef(0);
 
@@ -121,37 +119,18 @@ export const useConversationMessages = ({
     if (messagesConversationIdRef.current === conversationId) setNewMessagesCount(0);
   }, []);
 
-  const registerNewMessages = useCallback((conversationId: string, count: number, stickyAtArrival = stickToBottomRef.current, rejectionReason?: string) => {
+  const registerNewMessages = useCallback((conversationId: string, count: number, stickyAtArrival = stickToBottomRef.current) => {
     const previousCount = newMessagesCountByConversationRef.current.get(conversationId) || 0;
     if (
       count <= 0
       || stickyAtArrival
       || messagesConversationIdRef.current !== conversationId
     ) {
-      debugNewMessageIndicator({
-        phase: 'counter',
-        conversationId,
-        stickyAtArrival,
-        previousCount,
-        nextCount: previousCount,
-        mapValueAfterUpdate: previousCount,
-        incremented: false,
-        reason: count <= 0 ? rejectionReason || 'other' : stickyAtArrival ? 'sticky' : 'wrong-conversation',
-      });
       return;
     }
     const nextCount = previousCount + count;
     newMessagesCountByConversationRef.current.set(conversationId, nextCount);
     setNewMessagesCount(nextCount);
-    debugNewMessageIndicator({
-      phase: 'counter',
-      conversationId,
-      stickyAtArrival,
-      previousCount,
-      nextCount,
-      mapValueAfterUpdate: newMessagesCountByConversationRef.current.get(conversationId) || 0,
-      incremented: true,
-    });
   }, []);
 
   const scrollToBottom = useCallback(() => {
@@ -293,7 +272,6 @@ export const useConversationMessages = ({
           activeConversationId,
           incomingIds.size,
           stickyAtArrival,
-          incomingIds.size === 0 ? 'already-known' : undefined,
         );
       }
       writeConversationMessagesCache(messageCacheRef.current, activeConversationId, {
@@ -413,23 +391,6 @@ export const useConversationMessages = ({
         || eventRemoteJid === activeConversationId
         || event.message?.conversationId === activeConversationId;
 
-      if (event.type === 'message.upsert' && event.message && isActiveConversation) {
-        const rawKey = event.message.rawKey;
-        const rawKeyId = rawKey && typeof rawKey === 'object' && typeof rawKey.id === 'string'
-          ? rawKey.id
-          : undefined;
-        debugNewMessageIndicator({
-          phase: 'sse',
-          conversationId: eventConversationId || eventRemoteJid || event.message.conversationId || activeConversationId,
-          activeConversationId,
-          messageId: event.message.id,
-          rawKeyId,
-          fromMe: event.message.sender === 'attendant',
-          isInbound: event.message.sender === 'contact' && !event.message.isInternalNote,
-          matchedActiveConversation: isActiveConversation,
-        });
-      }
-
       if (!isActiveConversation && eventConversationId) {
         const cachedEntry = readConversationMessagesCache(messageCacheRef.current, eventConversationId);
         if (!cachedEntry) return;
@@ -450,41 +411,11 @@ export const useConversationMessages = ({
 
       const previousMessages = messagesRef.current;
       const stickyAtArrival = stickToBottomRef.current;
-      if (event.type === 'message.upsert') {
-        const container = messagesContainerRef.current;
-        const distanceFromBottom = container
-          ? container.scrollHeight - container.scrollTop - container.clientHeight
-          : undefined;
-        debugNewMessageIndicator({
-          phase: 'scroll-at-arrival',
-          conversationId: activeConversationId,
-          stickyRef: stickyAtArrival,
-          scrollTop: container?.scrollTop,
-          scrollHeight: container?.scrollHeight,
-          clientHeight: container?.clientHeight,
-          distanceFromBottom,
-        });
-      }
       const incomingIds = new Set(getNewIncomingMessageIds(
         previousMessages,
         event.type === 'message.upsert' && event.message ? [event.message] : [],
         true,
       ));
-      const classification = event.type === 'message.upsert' && event.message
-        ? classifyIncomingMessage(previousMessages, event.message, activeConversationId)
-        : undefined;
-      if (event.type === 'message.upsert') {
-        debugNewMessageIndicator({
-          phase: 'classification',
-          conversationId: activeConversationId,
-          messageId: event.message?.id,
-          identityKeys: classification?.identityKeys || [],
-          alreadyKnown: classification?.alreadyKnown || false,
-          consideredNew: classification?.consideredNew || false,
-          consideredInbound: classification?.consideredInbound || false,
-          reasonRejected: classification?.reasonRejected,
-        });
-      }
       const reconciledMessages = reconcileRealtimeMessages(previousMessages, activeConversationId, event);
       if (reconciledMessages === null) {
         // Keep the existing safety net for the current minimal upsert payload.
@@ -514,7 +445,6 @@ export const useConversationMessages = ({
           activeConversationId,
           incomingIds.size,
           stickyAtArrival,
-          incomingIds.size === 0 ? classification?.reasonRejected || 'already-known' : undefined,
         );
       } else {
         window.setTimeout(() => {
@@ -556,19 +486,6 @@ export const useConversationMessages = ({
     };
   }, [activeConversationId, attendantLabel, connectionStatus, instanceName, isMock, registerNewMessages, restoreScrollPosition, scrollToBottom]);
 
-  useEffect(() => {
-    const visibleCount = messagesConversationIdRef.current === activeConversationId
-      ? newMessagesCountByConversationRef.current.get(activeConversationId) || 0
-      : 0;
-    const outputKey = `${activeConversationId}:${visibleCount}`;
-    if (lastDebugHookOutputRef.current === outputKey) return;
-    lastDebugHookOutputRef.current = outputKey;
-    debugNewMessageIndicator({
-      phase: 'hook-output',
-      activeConversationId,
-      newMessagesCount: visibleCount,
-    });
-  }, [activeConversationId, newMessagesCount]);
 
   useEffect(() => {
     historyExpandedRef.current = historyExpanded;
