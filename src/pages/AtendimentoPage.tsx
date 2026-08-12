@@ -484,6 +484,11 @@ export const AtendimentoPage: React.FC = () => {
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       timestampMs: Date.now(),
       status: isInternalNote ? 'sent' : 'pending',
+      metadata: isInternalNote ? undefined : {
+        sentByHub: true,
+        sentByUserId: user?.id,
+        sentByUserName: attendantName,
+      },
       isInternalNote
     };
 
@@ -612,6 +617,11 @@ export const AtendimentoPage: React.FC = () => {
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       timestampMs: Date.now(),
       status: 'pending',
+      metadata: {
+        sentByHub: true,
+        sentByUserId: user?.id,
+        sentByUserName: attendantName,
+      },
     };
     setAssignmentFeedback('');
     setSendingMedia(true);
@@ -838,6 +848,11 @@ export const AtendimentoPage: React.FC = () => {
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       timestampMs: Date.now(),
       status: result?.message?.status || result?.status || 'sent',
+      metadata: {
+        sentByHub: true,
+        sentByUserId: user?.id,
+        sentByUserName: attendantName,
+      },
     }]);
     setShowNewChatModal(false);
     setNewChatNumber('');

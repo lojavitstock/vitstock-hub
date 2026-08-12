@@ -64,6 +64,11 @@ export interface Message {
     trafficSource?: string;
     trafficTitle?: string;
     trafficUrl?: string;
+    sentByHub?: boolean;
+    sentByUserId?: string;
+    sentByUserName?: string;
+    sentOutsideHub?: boolean;
+    clientMessageId?: string;
     location?: {
       latitude: number;
       longitude: number;

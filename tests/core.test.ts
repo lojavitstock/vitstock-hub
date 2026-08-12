@@ -546,6 +546,7 @@ test('merge reconcilia mensagem otimista com o ID real do provedor sem duplicar'
   const provider = message('provider-1', 1_700_000_001_000, '*Leonardo*\nOlá cliente', 'sent', {
     sender: 'attendant',
     senderName: 'Leonardo',
+    metadata: { sentByHub: true, sentByUserId: 'user-leonardo', sentByUserName: 'Leonardo', clientMessageId: 'local-1' },
     rawKey: { id: 'provider-1', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
   });
   const merged = mergeConversationMessages([optimistic], [provider]);
@@ -743,6 +744,8 @@ test('substitui conversa quando um campo visual relevante muda', () => {
 test('normaliza assinatura do atendente, áudio e mensagem interativa', () => {
   const normalized = normalizeEvolutionMessage({
     key: { id: 'provider-1', fromMe: true },
+    metadataScope: 'persisted_message',
+    metadata: { sentByHub: true, sentByUserId: 'user-leonardo', sentByUserName: 'Leonardo', clientMessageId: 'local-hub-1' },
     message: { audioMessage: { seconds: 12 }, conversation: '*Leonardo*\nOlá, cliente' },
     messageTimestamp: 1_700_000_000,
     status: 'DELIVERY_ACK',
@@ -753,6 +756,134 @@ test('normaliza assinatura do atendente, áudio e mensagem interativa', () => {
   assert.equal(normalized.mediaType, 'audio');
   assert.equal(normalized.mediaDuration, 12);
   assert.equal(normalized.status, 'delivered');
+});
+
+test('atribui autoria somente a envio interno persistido do Hub', () => {
+  const internal = normalizeEvolutionMessage({
+    key: { id: 'hub-1', fromMe: true },
+    metadataScope: 'persisted_message',
+    metadata: { sentByHub: true, sentByUserId: 'user-leonardo', sentByUserName: 'Leonardo' },
+    message: { conversation: '*Leonardo*\nMensagem enviada pelo Hub' },
+    messageTimestamp: 1_700_000_010,
+  }, 0, 'conversation-1', 'Outro atendente');
+
+  assert.equal(internal.sender, 'attendant');
+  assert.equal(internal.senderName, 'Leonardo');
+  assert.equal(internal.metadata?.sentOutsideHub, undefined);
+  assert.equal(internal.content, 'Mensagem enviada pelo Hub');
+});
+
+test('mensagem fromMe sem correlação do Hub permanece externa', () => {
+  const external = normalizeEvolutionMessage({
+    key: { id: 'web-1', fromMe: true },
+    pushName: 'Leonardo',
+    message: { conversation: 'Mensagem enviada pelo WhatsApp Web' },
+    messageTimestamp: 1_700_000_011,
+  }, 0, 'conversation-1', 'Leonardo');
+
+  assert.equal(external.sender, 'attendant');
+  assert.equal(external.senderName, undefined);
+  assert.equal(external.metadata?.sentOutsideHub, true);
+  assert.equal(external.metadata?.sentByHub, undefined);
+});
+
+test('mensagem externa não herda usuário anterior ou assinatura simulada', () => {
+  const external = normalizeEvolutionMessage({
+    key: { id: 'cell-1', fromMe: true },
+    message: { conversation: '*Leonardo*\nMensagem enviada pelo celular' },
+    messageTimestamp: 1_700_000_012,
+  }, 0, 'conversation-1', 'Mariana');
+
+  assert.equal(external.senderName, undefined);
+  assert.equal(external.metadata?.sentOutsideHub, true);
+  assert.equal(external.content, '*Leonardo*\nMensagem enviada pelo celular');
+});
+
+test('confirmação do Hub reconcilia o envio otimista sem perder autoria', () => {
+  const optimistic = message('local-hub-1', 1_700, 'Olá cliente', 'pending', {
+    sender: 'attendant',
+    senderName: 'Leonardo',
+    metadata: { sentByHub: true, sentByUserId: 'user-leonardo', sentByUserName: 'Leonardo' },
+  });
+  const confirmed = message('provider-hub-1', 1_701, 'Olá cliente', 'sent', {
+    sender: 'attendant',
+    senderName: 'Leonardo',
+    metadata: { sentByHub: true, sentByUserId: 'user-leonardo', sentByUserName: 'Leonardo', clientMessageId: 'local-hub-1' },
+    rawKey: { id: 'provider-hub-1', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
+  });
+  const merged = mergeConversationMessages([optimistic], [confirmed]);
+
+  assert.deepEqual(merged.map((item) => item.id), ['provider-hub-1']);
+  assert.equal(merged[0]?.senderName, 'Leonardo');
+  assert.equal(merged[0]?.metadata?.sentOutsideHub, undefined);
+});
+
+test('mensagem externa parecida não é correlacionada com envio otimista sem ID explícito', () => {
+  const optimistic = message('local-hub-2', 1_700, 'Mesmo texto', 'pending', {
+    sender: 'attendant',
+    senderName: 'Leonardo',
+    metadata: { sentByHub: true, sentByUserId: 'user-leonardo', sentByUserName: 'Leonardo' },
+  });
+  const external = message('external-provider-2', 1_701, 'Mesmo texto', 'sent', {
+    sender: 'attendant',
+    metadata: { sentOutsideHub: true },
+    rawKey: { id: 'external-provider-2', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
+  });
+  const merged = mergeConversationMessages([optimistic], [external]);
+
+  assert.deepEqual(merged.map((item) => item.id), ['local-hub-2', 'external-provider-2']);
+  assert.equal(merged[0]?.metadata?.sentByHub, true);
+  assert.equal(merged[1]?.metadata?.sentOutsideHub, true);
+});
+
+test('confirmação com ID explícito substitui evento externo antecipado sem duplicar', () => {
+  const optimistic = message('local-hub-3', 1_700, 'Mensagem do Hub', 'pending', {
+    sender: 'attendant',
+    senderName: 'Leonardo',
+    metadata: { sentByHub: true, sentByUserId: 'user-leonardo', sentByUserName: 'Leonardo' },
+  });
+  const earlyWebhook = message('provider-hub-3', 1_701, 'Mensagem do Hub', 'sent', {
+    sender: 'attendant',
+    metadata: { sentOutsideHub: true },
+    rawKey: { id: 'provider-hub-3', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
+  });
+  const confirmed = {
+    ...earlyWebhook,
+    senderName: 'Leonardo',
+    metadata: { sentByHub: true, sentByUserId: 'user-leonardo', sentByUserName: 'Leonardo', clientMessageId: 'local-hub-3' },
+  };
+  const merged = mergeConversationMessages([optimistic, earlyWebhook], [confirmed]);
+
+  assert.deepEqual(merged.map((item) => item.id), ['provider-hub-3']);
+  assert.equal(merged[0]?.senderName, 'Leonardo');
+  assert.equal(merged[0]?.metadata?.sentOutsideHub, undefined);
+});
+
+test('retry e reprocessamento preservam autoria interna já persistida', () => {
+  const failed = message('hub-retry-1', 1_700, 'Tentar novamente', 'failed', {
+    sender: 'attendant',
+    senderName: 'Leonardo',
+    metadata: { sentByHub: true, sentByUserId: 'user-leonardo', sentByUserName: 'Leonardo' },
+  });
+  const reprocessed = { ...failed, status: 'sent' as const };
+  const merged = mergeConversationMessages([failed], [reprocessed]);
+
+  assert.equal(merged[0]?.metadata?.sentByHub, true);
+  assert.equal(merged[0]?.metadata?.sentByUserName, 'Leonardo');
+  assert.equal(merged[0]?.metadata?.sentOutsideHub, undefined);
+});
+
+test('reprocessamento de mensagem externa continua sem autoria interna', () => {
+  const external = message('external-1', 1_700, 'Mensagem externa', 'sent', {
+    sender: 'attendant',
+    metadata: { sentOutsideHub: true },
+  });
+  const current = [external];
+  const merged = mergeConversationMessages(current, [{ ...external }]);
+
+  assert.strictEqual(merged, current);
+  assert.equal(merged[0]?.senderName, undefined);
+  assert.equal(merged[0]?.metadata?.sentOutsideHub, true);
 });
 
 test('normaliza figurinha recebida sem transformá-la em mensagem genérica', () => {

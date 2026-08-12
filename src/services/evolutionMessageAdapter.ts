@@ -239,10 +239,16 @@ export const normalizeEvolutionMessage = (
   const rawMessage = record.message || {};
   const msg = unwrapMessage(rawMessage);
   const media = mediaForMessage(rawMessage);
-  const metadata = messageMetadata(record, rawMessage);
+  const metadata = messageMetadata(record, rawMessage) || {};
   const interactive = interactiveMessage(msg);
   const content = messageText(rawMessage, record);
   const signed = fromMe ? parseSignature(content || '[Mensagem não identificada]') : { senderName: undefined, content: content || '[Mensagem não identificada]' };
+  const sentByHub = fromMe
+    && metadata.sentByHub === true
+    && typeof metadata.sentByUserName === 'string'
+    && metadata.sentByUserName.trim().length > 0;
+  if (fromMe && !sentByHub) metadata.sentOutsideHub = true;
+  if (sentByHub) delete metadata.sentOutsideHub;
   const timestampMs = record.messageTimestamp ? Number(record.messageTimestamp) * 1000 : undefined;
   const timestamp = timestampMs ? new Date(timestampMs).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : 'Agora';
   const durationValue = media.type === 'audio' ? msg.audioMessage?.seconds : media.type === 'video' ? msg.videoMessage?.seconds : undefined;
@@ -251,8 +257,10 @@ export const normalizeEvolutionMessage = (
     id: record.key?.id || record.id || `real-msg-${index}`,
     conversationId,
     sender: fromMe ? 'attendant' : 'contact',
-    senderName: fromMe ? (signed.senderName || attendantLabel) : (record.pushName || 'Contato'),
-    content: signed.content,
+    senderName: fromMe
+      ? (sentByHub ? metadata.sentByUserName!.trim() : undefined)
+      : (record.pushName || 'Contato'),
+    content: fromMe && sentByHub ? signed.content : (content || '[Mensagem não identificada]'),
     mediaUrl: media.url,
     mediaType: media.type,
     mediaDuration: durationValue ? Number(durationValue) : undefined,

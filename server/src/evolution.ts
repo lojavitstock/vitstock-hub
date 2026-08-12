@@ -581,6 +581,9 @@ function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
   const fromMe = record?.key?.fromMe === true;
   const message = unwrapProviderMessage(record?.message);
   const metadata = providerMessageMetadata(record, message, fromMe);
+  // Evolution's fromMe only proves that the connected WhatsApp account sent
+  // the message. Until an exact Hub outbox record is matched, it is external.
+  if (fromMe) metadata.sentOutsideHub = true;
   const mediaDuration = media?.type === 'audio' || media?.type === 'video'
     ? Number(media?.type === 'audio' ? message?.audioMessage?.seconds : message?.videoMessage?.seconds)
     : undefined;
@@ -590,7 +593,7 @@ function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
     phone: providerPhone(record) || fallbackPhone.replace(/\D/g, ''),
     sender: fromMe ? 'attendant' as const : 'contact' as const,
     senderName: fromMe
-      ? (record?.senderName || record?.pushName || 'Atendente')
+      ? undefined
       : (providerContactName(record) || record?.pushName || 'Contato'),
     content: providerMessageContent(record),
     mediaUrl: media?.url,
@@ -810,66 +813,10 @@ async function persistProviderMessage(companyId: string, record: any, options: {
       local.sentAt,
     ];
 
-    // O envio local é registrado antes da resposta da Evolution. Se o webhook
-    // chegar primeiro, vinculamos o ID do provedor à mensagem pendente em vez
-    // de criar uma segunda linha para o mesmo envio.
-    let linkedPendingMessage = false;
-    if (local.sender === 'attendant') {
-      const pending = await client.query<{ id: string }>(
-        `SELECT id
-         FROM messages
-         WHERE company_id = $1
-           AND conversation_id = $2
-           AND sender = 'attendant'
-           AND evolution_message_id IS NULL
-           AND is_internal_note = false
-           AND sent_at BETWEEN $3::timestamptz - interval '5 minutes'
-                           AND $3::timestamptz + interval '5 minutes'
-           AND (content = $4 OR media_type = $5)
-         ORDER BY abs(extract(epoch FROM (sent_at - $3::timestamptz))) ASC
-         LIMIT 1
-         FOR UPDATE`,
-         [companyId, conversationId, local.sentAt, local.content, local.mediaType || null],
-      );
-      const pendingId = pending.rows[0]?.id;
-      if (pendingId) {
-        const linked = await client.query(
-          `UPDATE messages
-           SET evolution_message_id = $1,
-               metadata = (
-                 COALESCE(metadata, '{}'::jsonb)
-                 - 'trafficSource' - 'trafficTitle' - 'trafficUrl'
-               ) || $2::jsonb,
-               content = CASE
-                  WHEN content ILIKE '[mensagem%suportada]'
-                    OR content ILIKE '[mensagem%identificada]'
-                  THEN $3
-                  ELSE content
-               END,
-               media_url = COALESCE(media_url, $4),
-               media_type = COALESCE(media_type, $5),
-               status = $6,
-               sent_at = $7
-           WHERE id = $8
-             AND evolution_message_id IS NULL`,
-           [
-             local.id,
-             JSON.stringify(local.metadata || {}),
-             local.content,
-             local.mediaUrl || null,
-             local.mediaType || null,
-             local.status,
-             local.sentAt,
-             pendingId,
-           ],
-        );
-        linkedPendingMessage = Boolean(linked.rowCount);
-      }
-    }
-
-    let insertedNewMessage = false;
-    if (!linkedPendingMessage) {
-      const inserted = await client.query<{ id: string }>(
+    // Do not infer Hub authorship by matching timestamp/content to a pending
+    // row. The exact Evolution id returned by the send endpoint is the only
+    // accepted correlation for internal authorship.
+    const inserted = await client.query<{ id: string }>(
         `INSERT INTO messages
          (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_url, media_type, metadata, status, sent_at, is_internal_note)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false)
@@ -877,18 +824,27 @@ async function persistProviderMessage(companyId: string, record: any, options: {
          RETURNING id`,
         messageParams,
       );
-      insertedNewMessage = Boolean(inserted.rowCount);
+    const insertedNewMessage = Boolean(inserted.rowCount);
 
-      // Reprocessamentos do webhook podem trazer metadados ou mídia que não
-      // existiam na primeira entrega. Atualizamos o registro sem tratá-lo como
-      // uma nova mensagem para fins de contagem de não lidas.
-      if (!insertedNewMessage) {
-        await client.query(
+    // Reprocessamentos podem trazer metadados ou mídia que não existiam na
+    // primeira entrega. Preservamos autoria interna somente quando já existe
+    // evidência persistida de um envio do Hub.
+    if (!insertedNewMessage) {
+      const refreshed = await client.query<{ sender_name: string | null; metadata: Record<string, any> }>(
           `UPDATE messages
             SET metadata = (
-                  COALESCE(messages.metadata, '{}'::jsonb)
-                  - 'trafficSource' - 'trafficTitle' - 'trafficUrl'
-                ) || $1::jsonb,
+                  CASE
+                    WHEN COALESCE(messages.metadata->>'sentByHub', 'false') = 'true' THEN
+                      (COALESCE(messages.metadata, '{}'::jsonb)
+                        - 'trafficSource' - 'trafficTitle' - 'trafficUrl' - 'sentOutsideHub')
+                      || ($1::jsonb - 'sentOutsideHub')
+                    ELSE
+                      (COALESCE(messages.metadata, '{}'::jsonb)
+                        - 'trafficSource' - 'trafficTitle' - 'trafficUrl'
+                        - 'sentByHub' - 'sentByUserId' - 'sentByUserName')
+                      || $1::jsonb
+                  END
+                ),
                 sender_name = CASE
                   WHEN messages.sender = 'contact'
                     AND COALESCE($2::text, '') <> ''
@@ -913,7 +869,8 @@ async function persistProviderMessage(companyId: string, record: any, options: {
                 END,
                 sent_at = $7
             WHERE company_id = $8
-              AND evolution_message_id = $9`,
+              AND evolution_message_id = $9
+            RETURNING sender_name, metadata`,
            [
              JSON.stringify(local.metadata || {}),
              local.senderName,
@@ -926,6 +883,10 @@ async function persistProviderMessage(companyId: string, record: any, options: {
              local.id,
            ],
         );
+      const persistedRow = refreshed.rows[0];
+      if (persistedRow) {
+        local.senderName = persistedRow.sender_name || undefined;
+        local.metadata = persistedRow.metadata || {};
       }
     }
 
@@ -935,7 +896,7 @@ async function persistProviderMessage(companyId: string, record: any, options: {
     await client.query('COMMIT');
     localInboxCache.delete(companyId);
     return {
-      persisted: insertedNewMessage || linkedPendingMessage,
+      persisted: insertedNewMessage,
       message: localMessageToRealtimeMessage(local, conversationId),
     };
   } catch (error) {
@@ -1085,7 +1046,12 @@ async function ensureOutboundMessage(input: {
       input.userName,
       input.content,
       input.mediaType || null,
-      JSON.stringify(input.clientMessageId ? { clientMessageId: input.clientMessageId } : {}),
+      JSON.stringify({
+        ...(input.clientMessageId ? { clientMessageId: input.clientMessageId } : {}),
+        sentByHub: true,
+        sentByUserId: input.userId,
+        sentByUserName: input.userName,
+      }),
     ],
   );
   const messageId = message.rows[0]?.id;
@@ -1115,6 +1081,13 @@ async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed
     // única pode bloquear esta atualização. Nesse caso, consolidamos o estado
     // no registro do provedor e removemos somente a linha local pendente.
     if (error?.code !== '23505' || !evolutionMessageId) throw error;
+    const pendingMessage = await db.query<{ sender_name: string | null; metadata: Record<string, any> }>(
+      `SELECT sender_name, metadata
+       FROM messages
+       WHERE id = $1
+       LIMIT 1`,
+      [messageId],
+    );
     const providerMessage = await db.query<{ id: string }>(
       `SELECT id
        FROM messages
@@ -1122,16 +1095,19 @@ async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed
        LIMIT 1`,
       [evolutionMessageId],
     );
-    if (!providerMessage.rows[0]) throw error;
+    const pending = pendingMessage.rows[0];
+    if (!providerMessage.rows[0] || !pending) throw error;
     await db.query(
       `UPDATE messages
-       SET status = CASE
-         WHEN status IN ('read', 'delivered') AND $2 = 'sent' THEN status
-         WHEN status = 'failed' AND $2 <> 'failed' THEN status
-         ELSE $2
-       END
+       SET sender_name = $2,
+           metadata = (COALESCE(metadata, '{}'::jsonb) - 'sentOutsideHub') || $3::jsonb,
+           status = CASE
+             WHEN status IN ('read', 'delivered') AND $4 = 'sent' THEN status
+             WHEN status = 'failed' AND $4 <> 'failed' THEN status
+             ELSE $4
+           END
        WHERE id = $1`,
-      [providerMessage.rows[0].id, status],
+      [providerMessage.rows[0].id, pending.sender_name, JSON.stringify(pending.metadata || {}), status],
     );
     await db.query(
       `DELETE FROM messages
@@ -1775,6 +1751,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         sender: 'attendant',
         senderName: request.user!.name,
         content: text,
+        metadata: {
+          sentByHub: true,
+          sentByUserId: request.user!.id,
+          sentByUserName: request.user!.name,
+          ...(clientMessageId ? { clientMessageId } : {}),
+        },
         rawKey: { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
         timestampMs: realtimeTimestampMs,
         timestamp: new Date(realtimeTimestampMs).toISOString(),
@@ -1875,12 +1857,33 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     const evolutionMessageId = body?.key?.id || body?.message?.key?.id || body?.data?.key?.id;
     await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
+    const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
+    const realtimeTimestampMs = Date.now();
     publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
       remoteJid: canonicalRemoteJid,
       phone: number,
-      messageId: typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId,
-      timestampMs: Date.now(),
+      messageId: realtimeMessageId,
+      timestampMs: realtimeTimestampMs,
       fromMe: true,
+      message: {
+        id: realtimeMessageId,
+        conversationId: localMessage.conversationId,
+        sender: 'attendant',
+        senderName: request.user!.name,
+        content: text,
+        mediaType: parsed.data.mediatype,
+        metadata: {
+          sentByHub: true,
+          sentByUserId: request.user!.id,
+          sentByUserName: request.user!.name,
+          ...(clientMessageId ? { clientMessageId } : {}),
+        },
+        rawKey: { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
+        timestampMs: realtimeTimestampMs,
+        timestamp: new Date(realtimeTimestampMs).toISOString(),
+        status: 'sent',
+        isInternalNote: false,
+      },
     });
     let dailyResponder: { id: string; name: string; date: string } | undefined;
     try {

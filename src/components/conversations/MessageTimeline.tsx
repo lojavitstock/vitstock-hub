@@ -311,7 +311,7 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
           {!isMe && <ContactPhoto name={activeConversation.contact.name} avatar={activeConversation.contact.avatar} size="small" />}
           <div>
             <div className={`space-y-2 rounded-lg px-3.5 py-3 text-[15px] leading-relaxed shadow-sm ${isMe ? 'rounded-tr-none border border-amber-300/15 bg-[#5b4b20] font-medium text-[#fff8df]' : 'rounded-tl-none border border-white/5 bg-[#273238] text-slate-100'}`}>
-              {isMe && <p className="mb-1 text-xs font-bold text-amber-200/75">{message.senderName}</p>}
+              {isMe && <p className="mb-1 text-xs font-bold text-amber-200/75">{message.metadata?.sentOutsideHub ? 'Enviado fora do Vitstock Hub' : message.senderName}</p>}
               <MediaMessageContent message={message} instanceName={instanceName} />
               <SpecialMessageContent message={message} contactPhone={activeConversation.contact.phone} />
               <InteractiveMessageContent message={message} />
