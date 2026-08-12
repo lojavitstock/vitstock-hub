@@ -1,5 +1,13 @@
 import type { Message } from '../types';
 
+export type NewMessageClassification = {
+  identityKeys: string[];
+  alreadyKnown: boolean;
+  consideredInbound: boolean;
+  consideredNew: boolean;
+  reasonRejected?: 'fromMe' | 'already-known' | 'wrong-conversation' | 'not-inbound' | 'history' | 'other';
+};
+
 export const getMessageIdentityValues = (message: Message): string[] => {
   const identities = new Set<string>();
   if (message.id) identities.add(message.id);
@@ -14,6 +22,43 @@ export const getMessageIdentityValues = (message: Message): string[] => {
 const sameMessageIdentity = (previous: Message, incoming: Message) => {
   const known = new Set(getMessageIdentityValues(previous));
   return getMessageIdentityValues(incoming).some((identity) => known.has(identity));
+};
+
+export const classifyIncomingMessage = (
+  previousMessages: Message[],
+  incoming: Message,
+  activeConversationId?: string,
+): NewMessageClassification => {
+  const identityKeys = getMessageIdentityValues(incoming);
+  const alreadyKnown = previousMessages.some((previous) => sameMessageIdentity(previous, incoming));
+  const consideredInbound = incoming.sender === 'contact' && !incoming.isInternalNote;
+  const wrongConversation = Boolean(
+    activeConversationId
+    && incoming.conversationId
+    && incoming.conversationId !== activeConversationId,
+  );
+  const latestKnownTimestamp = previousMessages.reduce(
+    (latest, message) => Math.max(latest, message.timestampMs || 0),
+    0,
+  );
+  const isHistory = Boolean(
+    latestKnownTimestamp > 0
+    && incoming.timestampMs
+    && incoming.timestampMs < latestKnownTimestamp,
+  );
+  const consideredNew = consideredInbound && !alreadyKnown && !wrongConversation && !isHistory;
+
+  let reasonRejected: NewMessageClassification['reasonRejected'];
+  if (!consideredNew) {
+    if (incoming.sender === 'attendant') reasonRejected = 'fromMe';
+    else if (alreadyKnown) reasonRejected = 'already-known';
+    else if (wrongConversation) reasonRejected = 'wrong-conversation';
+    else if (!consideredInbound) reasonRejected = 'not-inbound';
+    else if (isHistory) reasonRejected = 'history';
+    else reasonRejected = 'other';
+  }
+
+  return { identityKeys, alreadyKnown, consideredInbound, consideredNew, reasonRejected };
 };
 
 /**

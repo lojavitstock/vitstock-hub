@@ -37,6 +37,7 @@ import { formatMessageTimestamp } from '../components/conversations/conversation
 import { useConversationMessages } from '../hooks/useConversationMessages';
 import { conversationNeedsResponse, useConversationInbox } from '../hooks/useConversationInbox';
 import { useContactPanel } from '../hooks/useContactPanel';
+import { debugNewMessageIndicator } from '../utils/newMessageIndicatorDebug';
 
 
 export const AtendimentoPage: React.FC = () => {
@@ -55,6 +56,7 @@ export const AtendimentoPage: React.FC = () => {
   const composerTextRef = useRef('');
   const activeConversationIdRef = useRef<string | null>(null);
   const autoReadMarkersRef = useRef(new Map<string, string>());
+  const lastPageIndicatorDebugRef = useRef<string | null>(null);
   const handleComposerTextChange = useCallback((value: string) => {
     composerTextRef.current = value;
   }, []);
@@ -207,6 +209,17 @@ export const AtendimentoPage: React.FC = () => {
     isMock,
     connectionStatus: whatsappStatus,
   });
+
+  useEffect(() => {
+    const outputKey = `${activeConvId}:${newMessagesCount}`;
+    if (lastPageIndicatorDebugRef.current === outputKey) return;
+    lastPageIndicatorDebugRef.current = outputKey;
+    debugNewMessageIndicator({
+      phase: 'page-prop',
+      activeConversationId: activeConvId,
+      newMessagesCount,
+    });
+  }, [activeConvId, newMessagesCount]);
 
   // Rolar para a última mensagem automaticamente quando a conversa mudar ou chegar mensagem nova
   /* const loadChats = async (showLoading = true) => {

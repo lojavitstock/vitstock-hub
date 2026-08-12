@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   CheckCheck,
   Copy,
@@ -22,6 +22,7 @@ import { Conversation, Message } from '../../types';
 import { EvolutionApiService } from '../../services/evolutionApi';
 import { ContactPhoto } from './ContactPhoto';
 import { formatMessageDay, formatMessageTimestamp } from './conversationFormatters';
+import { debugNewMessageIndicator } from '../../utils/newMessageIndicatorDebug';
 
 type MessageTimelineProps = {
   messages: Message[];
@@ -265,6 +266,38 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
 };
 
 export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage }) => {
+  const shouldShowIndicator = newMessagesCount > 0 && Boolean(onJumpToLatest);
+  const lastTimelineDebugRef = useRef<string | null>(null);
+  useEffect(() => {
+    const renderKey = `${activeConversation.id}:${newMessagesCount}:${shouldShowIndicator}`;
+    if (lastTimelineDebugRef.current === renderKey) return;
+    lastTimelineDebugRef.current = renderKey;
+    debugNewMessageIndicator({
+      phase: 'timeline-render',
+      conversationId: activeConversation.id,
+      newMessagesCount,
+      shouldShowIndicator,
+    });
+  }, [activeConversation.id, newMessagesCount, shouldShowIndicator]);
+
+  useEffect(() => {
+    if (!shouldShowIndicator) return;
+    const element = document.querySelector<HTMLElement>('[data-testid="new-messages-indicator"]');
+    const style = element ? window.getComputedStyle(element) : undefined;
+    const rect = element?.getBoundingClientRect();
+    debugNewMessageIndicator({
+      phase: 'dom',
+      count: newMessagesCount,
+      elementExists: Boolean(element),
+      boundingRect: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : undefined,
+      display: style?.display,
+      visibility: style?.visibility,
+      opacity: style?.opacity,
+      position: style?.position,
+      zIndex: style?.zIndex,
+    });
+  }, [newMessagesCount, shouldShowIndicator]);
+
   let previousDay = '';
   return (
   <div ref={containerRef} style={{ overflowAnchor: 'none' }} className="chat-wallpaper relative flex-1 space-y-3 overflow-y-auto px-6 py-5 text-[15px]">
@@ -292,10 +325,11 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
         </button>
       </div>
     )}
-    {newMessagesCount > 0 && onJumpToLatest && (
+    {shouldShowIndicator && onJumpToLatest && (
       <button
         type="button"
         onClick={onJumpToLatest}
+        data-testid="new-messages-indicator"
         className="absolute bottom-5 right-6 z-20 rounded-full border border-emerald-300/40 bg-[#1f8f70] px-4 py-2 text-xs font-bold text-white shadow-lg transition-colors hover:bg-[#27a77f]"
       >
         ↓ {newMessagesCount} nova {newMessagesCount === 1 ? 'mensagem' : 'mensagens'}
