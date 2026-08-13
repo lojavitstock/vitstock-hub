@@ -38,6 +38,7 @@ import { useConversationMessages } from '../hooks/useConversationMessages';
 import { conversationNeedsResponse, useConversationInbox } from '../hooks/useConversationInbox';
 import { useContactPanel } from '../hooks/useContactPanel';
 import { toQuotedMessage } from '../utils/quotedMessage';
+import { canRestoreComposerDraft, captureComposerSubmission, readConversationDraft, scheduleComposerFocus, writeConversationDraft } from '../utils/composerSubmission';
 
 
 export const AtendimentoPage: React.FC = () => {
@@ -54,10 +55,16 @@ export const AtendimentoPage: React.FC = () => {
   const [whatsappStatus, setWhatsappStatus] = useState<WhatsappInstance['status']>('connecting');
   const composerRef = useRef<MessageComposerHandle>(null);
   const composerTextRef = useRef('');
+  const composerDraftsRef = useRef(new Map<string, string>());
+  const composerDraftRevisionRef = useRef(0);
   const activeConversationIdRef = useRef<string | null>(null);
   const autoReadMarkersRef = useRef(new Map<string, string>());
   const handleComposerTextChange = useCallback((value: string) => {
     composerTextRef.current = value;
+    composerDraftRevisionRef.current += 1;
+    const conversationId = activeConversationIdRef.current;
+    if (!conversationId) return;
+    writeConversationDraft(composerDraftsRef.current, conversationId, value);
   }, []);
   const [sendingMedia, setSendingMedia] = useState(false);
   const [isInternalNote, setIsInternalNote] = useState(false);
@@ -105,9 +112,18 @@ export const AtendimentoPage: React.FC = () => {
   });
 
   useEffect(() => {
+    const previousConversationId = activeConversationIdRef.current;
+    if (previousConversationId && previousConversationId !== activeConvId) {
+      writeConversationDraft(composerDraftsRef.current, previousConversationId, composerTextRef.current);
+    }
     activeConversationIdRef.current = activeConvId;
     setReplyTo(null);
   }, [activeConvId]);
+
+  useEffect(() => {
+    if (!activeConvId || whatsappStatus !== 'connected') return;
+    composerRef.current?.setText(readConversationDraft(composerDraftsRef.current, activeConvId));
+  }, [activeConvId, whatsappStatus]);
 
   useEffect(() => {
     if (!activeConv || activeConv.unreadCount <= 0) return;
@@ -490,6 +506,7 @@ export const AtendimentoPage: React.FC = () => {
     setReplyTo(message);
     setIsInternalNote(false);
     setQuickReplyOpen(false);
+    scheduleComposerFocus(() => composerRef.current?.focus());
   }, []);
 
   const handleSendMessage = async (e: React.FormEvent) => {
@@ -504,10 +521,26 @@ export const AtendimentoPage: React.FC = () => {
       return;
     }
 
-    const newMsgText = composerTextRef.current.trim();
-    const quotedMessage = !isInternalNote && replyTo ? toQuotedMessage(replyTo) : undefined;
+    const submission = captureComposerSubmission({
+      text: composerTextRef.current,
+      replyTarget: replyTo,
+      isInternalNote,
+    });
+    const newMsgText = submission.text;
+    const isInternalNoteToSend = submission.isInternalNote;
+    const quotedMessage = submission.replyTarget ? toQuotedMessage(submission.replyTarget) : undefined;
     const clientMessageId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setReplyTo(null);
     composerRef.current?.clear();
+    const clearedDraftRevision = composerDraftRevisionRef.current;
+
+    const restoreFailedDraft = () => {
+      if (activeConversationIdRef.current === activeConv.id && canRestoreComposerDraft(composerDraftRevisionRef.current, clearedDraftRevision)) {
+        composerRef.current?.setText(newMsgText);
+      } else if (!readConversationDraft(composerDraftsRef.current, activeConv.id)) {
+        writeConversationDraft(composerDraftsRef.current, activeConv.id, newMsgText);
+      }
+    };
 
     const newMsg: Message = {
       id: clientMessageId,
@@ -517,21 +550,21 @@ export const AtendimentoPage: React.FC = () => {
       content: newMsgText,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       timestampMs: Date.now(),
-      status: isInternalNote ? 'sent' : 'pending',
-      metadata: isInternalNote ? undefined : {
+      status: isInternalNoteToSend ? 'sent' : 'pending',
+      metadata: isInternalNoteToSend ? undefined : {
         sentByHub: true,
         sentByUserId: user?.id,
         sentByUserName: attendantName,
         clientMessageId,
         ...(quotedMessage ? { quotedMessage } : {}),
       },
-      isInternalNote
+      isInternalNote: isInternalNoteToSend
     };
 
     setMessages(prev => [...prev, newMsg]);
     window.setTimeout(scrollToBottom, 0);
 
-    if (!isInternalNote) {
+    if (!isInternalNoteToSend) {
       updateConversationActivity(activeConv.id, {
         lastMessage: newMsgText,
         lastMessageTimestamp: formatMessageTimestamp(newMsg.timestampMs, 'Agora'),
@@ -545,24 +578,23 @@ export const AtendimentoPage: React.FC = () => {
     }
 
     // Se NÃO for nota interna e NÃO for mock, envia mensagem real no WhatsApp via Evolution API!
-    if (isInternalNote && !isMock) {
+    if (isInternalNoteToSend && !isMock) {
       try {
         const savedNote = await EvolutionApiService.saveInternalNote(activeConv.id, activeConv.contact.phone, newMsgText);
         if (activeConversationIdRef.current === activeConv.id) {
           setMessages((previous) => previous.map((message) => message.id === newMsg.id ? savedNote : message));
         }
-        setReplyTo(null);
       } catch (error) {
         if (activeConversationIdRef.current === activeConv.id) {
           setMessages((previous) => previous.filter((message) => message.id !== newMsg.id));
-          composerRef.current?.setText(newMsgText);
         }
+        restoreFailedDraft();
         setAssignmentFeedback(error instanceof Error ? error.message : 'NÃ£o foi possÃ­vel salvar a nota interna.');
         return;
       }
     }
 
-    if (!isInternalNote && !isMock) {
+    if (!isInternalNoteToSend && !isMock) {
       try {
       const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, newMsgText, activeConv.id, newMsg.id, quotedMessage);
       if (activeConversationIdRef.current === activeConv.id) {
@@ -582,13 +614,11 @@ export const AtendimentoPage: React.FC = () => {
           },
         } : conversation));
       }
-      setReplyTo(null);
-      
       } catch (error) {
         if (activeConversationIdRef.current === activeConv.id) {
           setMessages((previous) => previous.map((message) => message.id === newMsg.id ? { ...message, status: 'failed' } : message));
-          composerRef.current?.setText(newMsgText);
         }
+        restoreFailedDraft();
         restoreFailedOptimisticActivity(activeConv, newMsg.id);
         setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar a mensagem.');
         return;
@@ -596,9 +626,7 @@ export const AtendimentoPage: React.FC = () => {
     }
 
     // Atualiza última mensagem na lista lateral
-    if (isMock) setReplyTo(null);
-
-    if (isInternalNote) {
+    if (isInternalNoteToSend) {
       setConversations(prev => prev.map(c => c.id === activeConv.id ? {
         ...c,
         lastMessage: `[Nota Interna]: ${newMsgText}`,
@@ -638,8 +666,24 @@ export const AtendimentoPage: React.FC = () => {
 
     const mediatype: 'image' | 'video' | 'document' = isImage ? 'image' : isVideo ? 'video' : 'document';
     const label = mediatype === 'image' ? '[Imagem]' : mediatype === 'video' ? '[Vídeo]' : '[Documento]';
-    const caption = composerTextRef.current.trim();
-    const quotedMessage = replyTo ? toQuotedMessage(replyTo) : undefined;
+    const submission = captureComposerSubmission({
+      text: composerTextRef.current,
+      replyTarget: replyTo,
+      isInternalNote: false,
+    });
+    const caption = submission.text;
+    const quotedMessage = submission.replyTarget ? toQuotedMessage(submission.replyTarget) : undefined;
+    setReplyTo(null);
+    setSendingMedia(true);
+    composerRef.current?.clear();
+    const clearedDraftRevision = composerDraftRevisionRef.current;
+    const restoreFailedDraft = () => {
+      if (activeConversationIdRef.current === activeConv.id && canRestoreComposerDraft(composerDraftRevisionRef.current, clearedDraftRevision)) {
+        composerRef.current?.setText(caption);
+      } else if (caption && !readConversationDraft(composerDraftsRef.current, activeConv.id)) {
+        writeConversationDraft(composerDraftsRef.current, activeConv.id, caption);
+      }
+    };
     const dataUrl = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result));
@@ -649,9 +693,17 @@ export const AtendimentoPage: React.FC = () => {
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível ler o anexo.');
       return '';
     });
-    if (!dataUrl) return;
+    if (!dataUrl) {
+      restoreFailedDraft();
+      setSendingMedia(false);
+      return;
+    }
     const media = dataUrl.split(',')[1];
-    if (!media) return;
+    if (!media) {
+      restoreFailedDraft();
+      setSendingMedia(false);
+      return;
+    }
     const clientMessageId = `media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const localMessage: Message = {
       id: clientMessageId,
@@ -676,8 +728,6 @@ export const AtendimentoPage: React.FC = () => {
       },
     };
     setAssignmentFeedback('');
-    setSendingMedia(true);
-    composerRef.current?.clear();
     setMessages((previous) => [...previous, localMessage]);
     window.setTimeout(scrollToBottom, 0);
     updateConversationActivity(activeConv.id, {
@@ -720,12 +770,11 @@ export const AtendimentoPage: React.FC = () => {
             }
           : conversation.contact,
       } : conversation));
-      setReplyTo(null);
     } catch (error) {
       if (activeConversationIdRef.current === activeConv.id) {
         setMessages((previous) => previous.map((message) => message.id === localMessage.id ? { ...message, status: 'failed' } : message));
-        composerRef.current?.setText(caption);
       }
+      restoreFailedDraft();
       restoreFailedOptimisticActivity(activeConv, localMessage.id);
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar o anexo.');
     } finally {

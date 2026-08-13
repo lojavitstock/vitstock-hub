@@ -31,6 +31,13 @@ import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
 import { canDownloadMessageMedia, messageCopyText, messageMenuActionsFor } from '../src/utils/messageActions';
 import {
+  canRestoreComposerDraft,
+  captureComposerSubmission,
+  readConversationDraft,
+  scheduleComposerFocus,
+  writeConversationDraft,
+} from '../src/utils/composerSubmission';
+import {
   acquireConversationLease,
   canAcquireConversationLease,
   CONVERSATION_LEASE_SECONDS,
@@ -1690,4 +1697,48 @@ test('deviceSent wrapper preserves a real message', () => {
   };
   assert.deepEqual(unwrapProviderMessage(wrapped.message), { conversation: 'Texto real' });
   assert.equal(isNonRenderableProviderMessage(wrapped), false);
+});
+
+test('reply snapshot is consumed by one send and never leaks to the next', () => {
+  const replyTarget = message('quoted-source', 1_700, 'Mensagem original');
+  const first = captureComposerSubmission({
+    text: 'Primeira resposta',
+    replyTarget,
+    isInternalNote: false,
+  });
+  const second = captureComposerSubmission({
+    text: 'Mensagem comum',
+    replyTarget: null,
+    isInternalNote: false,
+  });
+
+  assert.equal(first.replyTarget?.id, 'quoted-source');
+  assert.equal(second.replyTarget, null);
+});
+
+test('drafts are isolated by conversation and a sent draft is cleared', () => {
+  const drafts = new Map<string, string>();
+  writeConversationDraft(drafts, 'conversation-a', 'Rascunho A');
+  writeConversationDraft(drafts, 'conversation-b', 'Rascunho B');
+  writeConversationDraft(drafts, 'conversation-a', '');
+
+  assert.equal(readConversationDraft(drafts, 'conversation-a'), '');
+  assert.equal(readConversationDraft(drafts, 'conversation-b'), 'Rascunho B');
+});
+
+test('failed send restores a draft only when no newer composer change exists', () => {
+  assert.equal(canRestoreComposerDraft(7, 7), true);
+  assert.equal(canRestoreComposerDraft(8, 7), false);
+});
+
+test('reply action schedules focus for the composer textarea', () => {
+  let focused = false;
+  scheduleComposerFocus(
+    () => { focused = true; },
+    (callback) => {
+      callback(0);
+      return 1;
+    },
+  );
+  assert.equal(focused, true);
 });
