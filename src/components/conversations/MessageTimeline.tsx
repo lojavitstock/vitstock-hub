@@ -47,6 +47,7 @@ type MessageTimelineProps = {
   onJumpToLatest?: () => void;
   onRetryMessage: (message: Message) => void;
   onReplyMessage: (message: Message) => void;
+  onLayoutChange?: (reason: string, messageId?: string) => void;
 };
 
 const formatAudioTime = (seconds: number) => {
@@ -67,8 +68,12 @@ const isMediaPlaceholder = (message: Message) => {
 const QuotedMessageBlock: React.FC<{
   message: Message;
   onOpenOriginal: (messageId: string) => void;
-}> = ({ message, onOpenOriginal }) => {
+  onLayoutChange?: (reason: string, messageId: string) => void;
+}> = ({ message, onOpenOriginal, onLayoutChange }) => {
   const quoted = message.metadata?.quotedMessage;
+  useEffect(() => {
+    if (quoted) onLayoutChange?.('quoted-message.rendered', message.id);
+  }, [message.id, onLayoutChange, quoted]);
   if (!quoted) return null;
   const mediaLabel = quotedMediaLabel(quoted.mediaType);
   const excerpt = quotedMessageExcerpt(quoted);
@@ -282,7 +287,8 @@ const DocumentMessageContent: React.FC<{
   canLoadSource: boolean;
   onLoadSource: () => void;
   onOpenViewer: (item: MediaViewerItem, trigger: HTMLElement) => void;
-}> = ({ message, source, loading, canLoadSource, onLoadSource, onOpenViewer }) => {
+  onLayoutChange?: (reason: string, messageId: string) => void;
+}> = ({ message, source, loading, canLoadSource, onLoadSource, onOpenViewer, onLayoutChange }) => {
   const [openRequested, setOpenRequested] = useState(false);
   const presentation = getDocumentPresentation(message);
   const Icon = presentation.kind === 'pdf'
@@ -304,6 +310,10 @@ const DocumentMessageContent: React.FC<{
     if (item) onOpenViewer(item, document.activeElement as HTMLElement);
     setOpenRequested(false);
   }, [message, onOpenViewer, openRequested, source]);
+
+  useEffect(() => {
+    if (source) onLayoutChange?.('document.source.ready', message.id);
+  }, [message.id, onLayoutChange, source]);
 
   const openPreview = (trigger: HTMLElement) => {
     const item = mediaViewerItemFrom(message, source);
@@ -356,7 +366,8 @@ const MediaMessageContent: React.FC<{
   message: Message;
   instanceName: string;
   onOpenViewer: (item: MediaViewerItem, trigger: HTMLElement) => void;
-}> = ({ message, instanceName, onOpenViewer }) => {
+  onLayoutChange?: (reason: string, messageId: string) => void;
+}> = ({ message, instanceName, onOpenViewer, onLayoutChange }) => {
   const isMedia = ['image', 'audio', 'video', 'document', 'sticker'].includes(message.mediaType || '');
   if (!isMedia) return null;
 
@@ -383,7 +394,7 @@ const MediaMessageContent: React.FC<{
   }, [instanceName, message.id, message.rawKey, shouldLoadMedia, src]);
 
   if (message.mediaType === 'document') {
-    return <DocumentMessageContent message={message} source={src} loading={loadingMedia} canLoadSource={Boolean(message.rawKey)} onLoadSource={() => setDocumentSourceRequested(true)} onOpenViewer={onOpenViewer} />;
+    return <DocumentMessageContent message={message} source={src} loading={loadingMedia} canLoadSource={Boolean(message.rawKey)} onLoadSource={() => setDocumentSourceRequested(true)} onOpenViewer={onOpenViewer} onLayoutChange={onLayoutChange} />;
   }
 
   if (loadingMedia) {
@@ -405,7 +416,7 @@ const MediaMessageContent: React.FC<{
           const item = mediaViewerItemFrom(message, finalImageSrc);
           if (item) onOpenViewer(item, event.currentTarget);
         }} className="group relative mb-2 block max-w-xs overflow-hidden rounded-xl border border-black/20 text-left shadow-xl">
-          <img src={finalImageSrc} alt="Imagem WhatsApp" className="max-h-72 w-full cursor-pointer rounded-lg object-cover transition-all hover:opacity-90" />
+          <img src={finalImageSrc} alt="Imagem WhatsApp" onLoad={() => onLayoutChange?.('image.loaded', message.id)} onError={() => onLayoutChange?.('image.failed', message.id)} className="max-h-72 w-full cursor-pointer rounded-lg object-cover transition-all hover:opacity-90" />
           <div className="absolute bottom-2 right-2 rounded bg-black/60 px-2 py-1 text-[10px] font-bold text-white opacity-0 backdrop-blur-md transition-opacity group-hover:opacity-100">Clique para ampliar</div>
         </button>
       </>
@@ -422,7 +433,7 @@ const MediaMessageContent: React.FC<{
   return null;
 };
 
-export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage, onReplyMessage }) => {
+export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage, onReplyMessage, onLayoutChange }) => {
   const shouldShowIndicator = newMessagesCount > 0 && Boolean(onJumpToLatest);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [viewerItem, setViewerItem] = useState<MediaViewerItem | null>(null);
@@ -569,8 +580,8 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
                 onDownload={canDownloadMessageMedia(message) ? () => void downloadMessage(message) : undefined}
               />}
               {isMe && <p className="mb-1 text-xs font-bold text-amber-200/75">{message.metadata?.sentOutsideHub ? 'Enviado fora do Vitstock Hub' : message.senderName}</p>}
-              <QuotedMessageBlock message={message} onOpenOriginal={openQuotedMessage} />
-              <MediaMessageContent message={message} instanceName={instanceName} onOpenViewer={openMediaViewer} />
+              <QuotedMessageBlock message={message} onOpenOriginal={openQuotedMessage} onLayoutChange={onLayoutChange} />
+              <MediaMessageContent message={message} instanceName={instanceName} onOpenViewer={openMediaViewer} onLayoutChange={onLayoutChange} />
               <SpecialMessageContent message={message} contactPhone={activeConversation.contact.phone} />
               <InteractiveMessageContent message={message} />
               {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap">{message.content}</p>}

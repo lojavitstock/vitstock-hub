@@ -112,6 +112,10 @@ function traceOutbound(request: any, stage: string, input: {
   evolutionMessageId?: string;
   deduplicated?: boolean;
   ok?: boolean;
+  elapsedMs?: number;
+  idempotencyLockMs?: number;
+  persistenceMs?: number;
+  evolutionRequestMs?: number;
 }) {
   if (!outboundTraceEnabled) return;
   // This opt-in trace intentionally omits text, media, headers and secrets.
@@ -124,6 +128,10 @@ function traceOutbound(request: any, stage: string, input: {
     evolutionMessageId: input.evolutionMessageId,
     deduplicated: input.deduplicated,
     ok: input.ok,
+    elapsedMs: input.elapsedMs,
+    idempotencyLockMs: input.idempotencyLockMs,
+    persistenceMs: input.persistenceMs,
+    evolutionRequestMs: input.evolutionRequestMs,
     timestampMs: Date.now(),
   }));
 }
@@ -1228,6 +1236,8 @@ async function ensureOutboundMessage(input: {
   clientMessageId?: string;
   quotedMessage?: QuotedMessage;
 }) {
+  const persistenceStartedAt = Date.now();
+  let idempotencyLockMs: number | undefined;
   const quotedMessage = normalizedQuotedMessage(input.quotedMessage, input.remoteJid);
   const client = await db.connect();
   let transactionStarted = false;
@@ -1237,10 +1247,12 @@ async function ensureOutboundMessage(input: {
     if (input.clientMessageId) {
       // This lock covers the outbox lookup and insert across concurrent API
       // requests and workers. It is keyed only by explicit persisted IDs.
+      const lockStartedAt = Date.now();
       await client.query(
         'SELECT pg_advisory_xact_lock(hashtext($1::text))',
         [outboundIdempotencyLockKey(input.companyId, input.clientMessageId)],
       );
+      idempotencyLockMs = Date.now() - lockStartedAt;
     }
     const contact = await client.query<{ id: string }>(
     `INSERT INTO contacts (company_id, name, phone)
@@ -1296,6 +1308,8 @@ async function ensureOutboundMessage(input: {
           evolutionMessageId: previous.evolution_message_id,
           status: 'pending' as const,
           deduplicated: false,
+          persistenceMs: Date.now() - persistenceStartedAt,
+          idempotencyLockMs,
         };
       }
       await client.query('COMMIT');
@@ -1306,6 +1320,8 @@ async function ensureOutboundMessage(input: {
         evolutionMessageId: previous.evolution_message_id,
         status: previous.status,
         deduplicated: true,
+        persistenceMs: Date.now() - persistenceStartedAt,
+        idempotencyLockMs,
       };
     }
   }
@@ -1344,6 +1360,8 @@ async function ensureOutboundMessage(input: {
     evolutionMessageId: null,
     status: 'pending' as const,
     deduplicated: false,
+    persistenceMs: Date.now() - persistenceStartedAt,
+    idempotencyLockMs,
     };
   } catch (error) {
     if (transactionStarted) await client.query('ROLLBACK');
@@ -2017,6 +2035,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/evolution/messages/send', { preHandler: requireUser }, async (request, reply) => {
+    const outboundStartedAt = Date.now();
     const parsed = sendTextSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Mensagem inválida' });
     const { number, text, remoteJid, quotedMessage } = parsed.data;
@@ -2024,7 +2043,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
-    traceOutbound(request, 'received', { clientMessageId, remoteJid: canonicalRemoteJid });
+    traceOutbound(request, 'received', { clientMessageId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
     const leaseAcquisition = await acquireOutboundLease({
       companyId: request.user!.companyId,
       user: request.user!,
@@ -2058,6 +2077,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       remoteJid: canonicalRemoteJid,
       evolutionMessageId: localMessage.evolutionMessageId || undefined,
       deduplicated: localMessage.deduplicated,
+      elapsedMs: Date.now() - outboundStartedAt,
+      idempotencyLockMs: localMessage.idempotencyLockMs,
+      persistenceMs: localMessage.persistenceMs,
     });
     if (localMessage.deduplicated) {
       return {
@@ -2072,11 +2094,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       };
     }
     let dispatch: { ok: boolean; body: any };
+    const evolutionRequestStartedAt = Date.now();
     try {
       dispatch = await outboundEvolutionRequests.run(
         `${request.user!.companyId}:${clientMessageId}`,
         async () => {
-          traceOutbound(request, 'evolution.request', { clientMessageId, remoteJid: canonicalRemoteJid });
+          traceOutbound(request, 'evolution.request', { clientMessageId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
           const response = await evolutionRequest(
             `/message/sendText/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
             {
@@ -2111,8 +2134,16 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       remoteJid: canonicalRemoteJid,
       evolutionMessageId,
       ok: dispatch.ok,
+      elapsedMs: Date.now() - outboundStartedAt,
+      evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
     });
     await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
+    traceOutbound(request, 'persistence.confirmed', {
+      clientMessageId,
+      remoteJid: canonicalRemoteJid,
+      evolutionMessageId,
+      elapsedMs: Date.now() - outboundStartedAt,
+    });
     const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
     const realtimeTimestampMs = Date.now();
     publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
@@ -2143,6 +2174,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         isInternalNote: false,
       },
     });
+    traceOutbound(request, 'sse.published', {
+      clientMessageId,
+      remoteJid: canonicalRemoteJid,
+      evolutionMessageId: realtimeMessageId,
+      elapsedMs: Date.now() - outboundStartedAt,
+    });
 
     let dailyResponder: { id: string; name: string; date: string } | undefined;
     try {
@@ -2160,6 +2197,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/evolution/messages/send-media', { preHandler: requireUser }, async (request, reply) => {
+    const outboundStartedAt = Date.now();
     const parsed = sendMediaSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Anexo inválido' });
     const { number, text, remoteJid, quotedMessage } = {
@@ -2172,7 +2210,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
-    traceOutbound(request, 'received', { clientMessageId, remoteJid: canonicalRemoteJid });
+    traceOutbound(request, 'received', { clientMessageId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
     const leaseAcquisition = await acquireOutboundLease({
       companyId: request.user!.companyId,
       user: request.user!,
@@ -2210,6 +2248,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       remoteJid: canonicalRemoteJid,
       evolutionMessageId: localMessage.evolutionMessageId || undefined,
       deduplicated: localMessage.deduplicated,
+      elapsedMs: Date.now() - outboundStartedAt,
+      idempotencyLockMs: localMessage.idempotencyLockMs,
+      persistenceMs: localMessage.persistenceMs,
     });
     if (localMessage.deduplicated) {
       return {
@@ -2224,6 +2265,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       };
     }
     let dispatch: { ok: boolean; body: any };
+    const evolutionRequestStartedAt = Date.now();
     try {
       const caption = parsed.data.caption?.trim()
         ? formatHubOutboundText(request.user!.name, parsed.data.caption.trim())
@@ -2231,7 +2273,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       dispatch = await outboundEvolutionRequests.run(
         `${request.user!.companyId}:${clientMessageId}`,
         async () => {
-          traceOutbound(request, 'evolution.request', { clientMessageId, remoteJid: canonicalRemoteJid });
+          traceOutbound(request, 'evolution.request', { clientMessageId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
           const response = await evolutionRequest(
             `/message/sendMedia/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
             {
@@ -2268,8 +2310,16 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       remoteJid: canonicalRemoteJid,
       evolutionMessageId,
       ok: dispatch.ok,
+      elapsedMs: Date.now() - outboundStartedAt,
+      evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
     });
     await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
+    traceOutbound(request, 'persistence.confirmed', {
+      clientMessageId,
+      remoteJid: canonicalRemoteJid,
+      evolutionMessageId,
+      elapsedMs: Date.now() - outboundStartedAt,
+    });
     const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
     const realtimeTimestampMs = Date.now();
     publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
@@ -2303,6 +2353,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         status: 'sent',
         isInternalNote: false,
       },
+    });
+    traceOutbound(request, 'sse.published', {
+      clientMessageId,
+      remoteJid: canonicalRemoteJid,
+      evolutionMessageId: realtimeMessageId,
+      elapsedMs: Date.now() - outboundStartedAt,
     });
     let dailyResponder: { id: string; name: string; date: string } | undefined;
     try {

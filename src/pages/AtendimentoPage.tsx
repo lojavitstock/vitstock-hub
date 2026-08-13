@@ -39,6 +39,7 @@ import { conversationNeedsResponse, useConversationInbox } from '../hooks/useCon
 import { useContactPanel } from '../hooks/useContactPanel';
 import { toQuotedMessage } from '../utils/quotedMessage';
 import { canRestoreComposerDraft, captureComposerSubmission, readConversationDraft, scheduleComposerFocus, writeConversationDraft } from '../utils/composerSubmission';
+import { createOutboundTrace } from '../utils/outboundTrace';
 
 
 export const AtendimentoPage: React.FC = () => {
@@ -219,6 +220,7 @@ export const AtendimentoPage: React.FC = () => {
     messagesContainerRef,
     scrollToBottom,
     captureScrollState,
+    traceTimelineLayoutChange,
     newMessagesCount,
   } = useConversationMessages({
     activeConversationId: activeConvId,
@@ -561,8 +563,20 @@ export const AtendimentoPage: React.FC = () => {
       isInternalNote: isInternalNoteToSend
     };
 
+    const submitter = (e.nativeEvent as SubmitEvent).submitter;
+    const traceOutbound = !isInternalNoteToSend && !isMock
+      ? createOutboundTrace({
+        clientMessageId: newMsg.id,
+        conversationId: activeConv.id,
+        kind: 'text',
+        submitSource: submitter ? 'click' : 'keyboard',
+      })
+      : null;
+    traceOutbound?.('submit');
+
     setMessages(prev => [...prev, newMsg]);
-    window.setTimeout(scrollToBottom, 0);
+    traceOutbound?.('optimistic.rendered');
+    window.setTimeout(() => scrollToBottom('outbound.text.optimistic'), 0);
 
     if (!isInternalNoteToSend) {
       updateConversationActivity(activeConv.id, {
@@ -596,13 +610,16 @@ export const AtendimentoPage: React.FC = () => {
 
     if (!isInternalNoteToSend && !isMock) {
       try {
+      traceOutbound?.('http.started');
       const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, newMsgText, activeConv.id, newMsg.id, quotedMessage);
+      traceOutbound?.('http.completed', { ok: true, evolutionMessageId: result?.message?.evolutionMessageId || result?.message?.id || null });
       if (activeConversationIdRef.current === activeConv.id) {
         setMessages((previous) => previous.map((message) => message.id === newMsg.id ? {
           ...message,
           id: result?.message?.evolutionMessageId || result?.message?.id || message.id,
           status: result?.message?.status || result?.status || 'sent',
         } : message));
+        traceOutbound?.('optimistic.acknowledged', { status: result?.message?.status || result?.status || 'sent' });
       }
       const dailyResponder = result?.dailyResponder;
       if (dailyResponder?.id && dailyResponder?.name) {
@@ -615,6 +632,7 @@ export const AtendimentoPage: React.FC = () => {
         } : conversation));
       }
       } catch (error) {
+        traceOutbound?.('http.completed', { ok: false });
         if (activeConversationIdRef.current === activeConv.id) {
           setMessages((previous) => previous.map((message) => message.id === newMsg.id ? { ...message, status: 'failed' } : message));
         }
@@ -727,9 +745,12 @@ export const AtendimentoPage: React.FC = () => {
         ...(quotedMessage ? { quotedMessage } : {}),
       },
     };
+    const traceOutbound = createOutboundTrace({ clientMessageId: localMessage.id, conversationId: activeConv.id, kind: 'media' });
+    traceOutbound('submit');
     setAssignmentFeedback('');
     setMessages((previous) => [...previous, localMessage]);
-    window.setTimeout(scrollToBottom, 0);
+    traceOutbound('optimistic.rendered');
+    window.setTimeout(() => scrollToBottom('outbound.media.optimistic'), 0);
     updateConversationActivity(activeConv.id, {
       lastMessage: caption || label,
       lastMessageTimestamp: formatMessageTimestamp(localMessage.timestampMs, 'Agora'),
@@ -741,6 +762,7 @@ export const AtendimentoPage: React.FC = () => {
       moveToFront: true,
     });
     try {
+      traceOutbound('http.started');
       const result = await EvolutionApiService.sendMediaMessage({
         instanceName,
         number: activeConv.contact.phone,
@@ -753,12 +775,14 @@ export const AtendimentoPage: React.FC = () => {
         clientMessageId: localMessage.id,
         quotedMessage,
       });
+      traceOutbound('http.completed', { ok: true, evolutionMessageId: result?.message?.evolutionMessageId || result?.message?.id || null });
       if (activeConversationIdRef.current === activeConv.id) {
         setMessages((previous) => previous.map((message) => message.id === localMessage.id ? {
           ...message,
           id: result?.message?.evolutionMessageId || result?.message?.id || message.id,
           status: result?.message?.status || result?.status || 'sent',
         } : message));
+        traceOutbound('optimistic.acknowledged', { status: result?.message?.status || result?.status || 'sent' });
       }
       const dailyResponder = result?.dailyResponder;
       if (dailyResponder?.id && dailyResponder?.name) setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
@@ -771,6 +795,7 @@ export const AtendimentoPage: React.FC = () => {
           : conversation.contact,
       } : conversation));
     } catch (error) {
+      traceOutbound('http.completed', { ok: false });
       if (activeConversationIdRef.current === activeConv.id) {
         setMessages((previous) => previous.map((message) => message.id === localMessage.id ? { ...message, status: 'failed' } : message));
       }
@@ -1267,6 +1292,7 @@ export const AtendimentoPage: React.FC = () => {
               newMessagesCount={newMessagesCount}
               onLoadOlder={handleLoadOlderMessages}
               onJumpToLatest={scrollToBottom}
+              onLayoutChange={traceTimelineLayoutChange}
               onRetryMessage={handleRetryMessage}
               onReplyMessage={handleReplyMessage}
             />
