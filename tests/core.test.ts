@@ -24,6 +24,8 @@ import {
   formatHubOutboundText,
   removeHubAgentPrefix,
 } from '../server/src/outboundMessage';
+import { createOutboundRequestCoordinator, outboundDispatchAction, outboundIdempotencyLockKey } from '../server/src/outboundIdempotency';
+import { isNonRenderableProviderMessage, unwrapProviderMessage } from '../server/src/providerMessagePolicy';
 import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
@@ -1620,4 +1622,72 @@ test('mensagens comuns não são tratadas como resposta apenas por terem conteú
   const merged = mergeConversationMessages([ordinary], [sameText]);
   assert.equal(merged[0]?.metadata?.quotedMessage, undefined);
   assert.equal(merged[1]?.metadata?.quotedMessage, undefined);
+});
+
+test('outbound idempotency reuses an accepted client message id', () => {
+  const key = outboundIdempotencyLockKey('company-a', 'client-message-a');
+  assert.equal(key, 'vitstock:outbound:company-a:client-message-a');
+
+  let evolutionCalls = 0;
+  let storedStatus: 'pending' | 'sent' | 'delivered' | 'read' | 'failed' | undefined;
+  const submit = () => {
+    const action = outboundDispatchAction(storedStatus);
+    if (action === 'reuse') return action;
+    evolutionCalls += 1;
+    storedStatus = 'pending';
+    return action;
+  };
+
+  assert.equal(submit(), 'create');
+  assert.equal(submit(), 'reuse');
+  assert.equal(evolutionCalls, 1);
+  assert.equal(outboundDispatchAction('sent'), 'reuse');
+  assert.equal(outboundDispatchAction('delivered'), 'reuse');
+  assert.equal(outboundDispatchAction('read'), 'reuse');
+});
+
+test('concurrent outbound requests with the same client id dispatch Evolution once', async () => {
+  const coordinator = createOutboundRequestCoordinator<string>();
+  let evolutionCalls = 0;
+  let resolveDispatch: (result: string) => void = () => undefined;
+  const dispatch = () => {
+    evolutionCalls += 1;
+    return new Promise<string>((resolve) => { resolveDispatch = resolve; });
+  };
+
+  const first = coordinator.run('company-a:client-message-a', dispatch);
+  const second = coordinator.run('company-a:client-message-a', dispatch);
+  assert.strictEqual(first, second);
+  await Promise.resolve();
+  assert.equal(evolutionCalls, 1);
+  resolveDispatch('provider-message-a');
+  assert.equal(await first, 'provider-message-a');
+});
+
+test('explicit retry only reopens a failed outbound message', () => {
+  assert.equal(outboundDispatchAction('failed'), 'retry');
+  assert.equal(outboundDispatchAction('pending'), 'reuse');
+});
+
+test('encryption protocol events are not renderable messages', () => {
+  const secret = {
+    key: { id: 'secret-event', remoteJid: '5511999999999@s.whatsapp.net' },
+    messageType: 'secretEncryptedMessage',
+    message: { secretEncryptedMessage: { ciphertext: 'abc' } },
+  };
+  const senderKey = {
+    key: { id: 'key-event', remoteJid: '5511999999999@s.whatsapp.net' },
+    message: { senderKeyDistributionMessage: { groupId: 'group' } },
+  };
+  assert.equal(isNonRenderableProviderMessage(secret), true);
+  assert.equal(isNonRenderableProviderMessage(senderKey), true);
+});
+
+test('deviceSent wrapper preserves a real message', () => {
+  const wrapped = {
+    key: { id: 'device-sent', remoteJid: '5511999999999@s.whatsapp.net' },
+    message: { deviceSentMessage: { message: { conversation: 'Texto real' } } },
+  };
+  assert.deepEqual(unwrapProviderMessage(wrapped.message), { conversation: 'Texto real' });
+  assert.equal(isNonRenderableProviderMessage(wrapped), false);
 });

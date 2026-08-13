@@ -9,6 +9,8 @@ import { buildHasOlderMessagesQuery } from './hasOlderMessagesQuery.js';
 import { publishRealtimeEvent, registerRealtimeClient } from './realtime.js';
 import { acquireConversationLease, type ConversationLease } from './conversationLease.js';
 import { evolutionMessageIdFromResponse, formatHubOutboundText, removeHubAgentPrefix } from './outboundMessage.js';
+import { createOutboundRequestCoordinator, outboundDispatchAction, outboundIdempotencyLockKey } from './outboundIdempotency.js';
+import { isNonRenderableProviderMessage, providerMessageType, unwrapProviderMessage } from './providerMessagePolicy.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -101,6 +103,30 @@ type EvolutionChatsSnapshot = { chats: any[]; contacts: any[]; expiresAt: number
 const evolutionChatsCache = new Map<string, EvolutionChatsSnapshot>();
 const evolutionChatsInFlight = new Map<string, Promise<{ chats: any[]; contacts: any[] }>>();
 const localInboxCache = new Map<string, { chats: any[]; expiresAt: number }>();
+const outboundTraceEnabled = process.env.OUTBOUND_TRACE === 'true';
+const outboundEvolutionRequests = createOutboundRequestCoordinator<{ ok: boolean; body: any }>();
+
+function traceOutbound(request: any, stage: string, input: {
+  clientMessageId?: string;
+  remoteJid?: string;
+  evolutionMessageId?: string;
+  deduplicated?: boolean;
+  ok?: boolean;
+}) {
+  if (!outboundTraceEnabled) return;
+  // This opt-in trace intentionally omits text, media, headers and secrets.
+  console.info('[OUTBOUND_TRACE]', JSON.stringify({
+    stage,
+    requestId: request.id,
+    userId: request.user?.id,
+    remoteJid: input.remoteJid,
+    clientMessageId: input.clientMessageId,
+    evolutionMessageId: input.evolutionMessageId,
+    deduplicated: input.deduplicated,
+    ok: input.ok,
+    timestampMs: Date.now(),
+  }));
+}
 
 async function refreshEvolutionChatsSnapshot(companyId: string) {
   const current = evolutionChatsInFlight.get(companyId);
@@ -174,8 +200,8 @@ async function loadLocalInboxChats(companyId: string) {
   }>(
     `SELECT c.evolution_remote_jid,
             c.unread_count,
-            c.last_message,
-            c.last_message_at,
+            COALESCE(latest.content, NULLIF(c.last_message, '[Mensagem protegida]')) AS last_message,
+            COALESCE(latest.sent_at, c.last_message_at) AS last_message_at,
             ct.name AS contact_name,
             ct.avatar_url,
             latest.evolution_message_id AS message_id,
@@ -184,10 +210,11 @@ async function loadLocalInboxChats(companyId: string) {
      FROM conversations c
      JOIN contacts ct ON ct.id = c.contact_id
      LEFT JOIN LATERAL (
-       SELECT m.evolution_message_id, m.sender, m.sent_at
+       SELECT m.evolution_message_id, m.sender, m.content, m.sent_at
        FROM messages m
        WHERE m.conversation_id = c.id
          AND m.is_internal_note = false
+         AND COALESCE(m.metadata->>'providerType', '') NOT IN ('secretEncryptedMessage', 'senderKeyDistributionMessage')
        ORDER BY m.sent_at DESC
        LIMIT 1
      ) latest ON true
@@ -369,21 +396,6 @@ function normalizeProviderMessageStatus(value: unknown): 'sent' | 'delivered' | 
   return undefined;
 }
 
-function unwrapProviderMessage(message: any) {
-  let current = message || {};
-  for (let index = 0; index < 6; index += 1) {
-    const nested = current?.ephemeralMessage?.message
-      || current?.viewOnceMessage?.message
-      || current?.viewOnceMessageV2?.message
-      || current?.documentWithCaptionMessage?.message
-      || current?.associatedChildMessage?.message
-      || current?.editedMessage?.message;
-    if (!nested) break;
-    current = nested;
-  }
-  return current;
-}
-
 function firstProviderText(...values: unknown[]) {
   return values.find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim();
 }
@@ -451,19 +463,6 @@ function evolutionQuotedPayload(quoted: QuotedMessage | undefined, fallbackRemot
       ...(normalized.key!.participant ? { participant: normalized.key!.participant } : {}),
     },
   };
-}
-
-function providerMessageType(record: any, message: any) {
-  const explicit = String(record?.messageType || '').trim();
-  if (explicit) return explicit;
-  const knownTypes = [
-    'conversation', 'extendedTextMessage', 'imageMessage', 'audioMessage', 'videoMessage',
-    'documentMessage', 'stickerMessage', 'contactMessage', 'locationMessage', 'reactionMessage',
-    'protocolMessage', 'associatedChildMessage', 'interactiveMessage', 'templateMessage',
-    'buttonsMessage', 'listMessage', 'pollCreationMessage', 'pollUpdateMessage', 'callLogMessage',
-    'call', 'placeholderMessage', 'secretEncryptedMessage', 'statusMentionMessage',
-  ];
-  return knownTypes.find((type) => message?.[type]) || '';
 }
 
 function providerCallInfo(record: any, message: any, type: string, fromMe: boolean) {
@@ -646,8 +645,6 @@ function providerMessageMetadata(record: any, message: any, fromMe: boolean) {
         : 'Evento do WhatsApp';
   } else if (type === 'placeholderMessage') {
     metadata.systemLabel = 'Mensagem indisponível';
-  } else if (type === 'secretEncryptedMessage') {
-    metadata.systemLabel = 'Mensagem protegida';
   } else if (type === 'statusMentionMessage') {
     metadata.systemLabel = 'Menção de status';
   }
@@ -1015,6 +1012,9 @@ async function findOrCreateConversation(
 }
 
 async function persistProviderMessage(companyId: string, record: any, options: { incrementUnread: boolean; reopen: boolean; fallbackPhone?: string }) {
+  if (isNonRenderableProviderMessage(record)) {
+    return { persisted: false, ignored: true, message: undefined };
+  }
   const local = providerRecordToLocalMessage(record, options.fallbackPhone);
   if (!local.id || !local.remoteJid || local.remoteJid.endsWith('@g.us') || !local.phone) return undefined;
 
@@ -1229,7 +1229,20 @@ async function ensureOutboundMessage(input: {
   quotedMessage?: QuotedMessage;
 }) {
   const quotedMessage = normalizedQuotedMessage(input.quotedMessage, input.remoteJid);
-  const contact = await db.query<{ id: string }>(
+  const client = await db.connect();
+  let transactionStarted = false;
+  try {
+    await client.query('BEGIN');
+    transactionStarted = true;
+    if (input.clientMessageId) {
+      // This lock covers the outbox lookup and insert across concurrent API
+      // requests and workers. It is keyed only by explicit persisted IDs.
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtext($1::text))',
+        [outboundIdempotencyLockKey(input.companyId, input.clientMessageId)],
+      );
+    }
+    const contact = await client.query<{ id: string }>(
     `INSERT INTO contacts (company_id, name, phone)
      VALUES ($1, $2, $3)
      ON CONFLICT (company_id, phone) DO UPDATE SET updated_at = now()
@@ -1239,7 +1252,7 @@ async function ensureOutboundMessage(input: {
   const contactId = contact.rows[0]?.id;
   if (!contactId) throw new Error('Contato não pôde ser preparado para o envio');
 
-  const conversationId = await findOrCreateConversation(db, {
+    const conversationId = await findOrCreateConversation(client, {
     companyId: input.companyId,
     contactId,
     remoteJid: input.remoteJid,
@@ -1251,7 +1264,7 @@ async function ensureOutboundMessage(input: {
   if (!conversationId) throw new Error('Conversa não pôde ser preparada para o envio');
 
   if (input.clientMessageId) {
-    const existing = await db.query<{
+    const existing = await client.query<{
       id: string;
       conversation_id: string;
       evolution_message_id: string | null;
@@ -1267,13 +1280,15 @@ async function ensureOutboundMessage(input: {
     );
     const previous = existing.rows[0];
     if (previous) {
-      if (previous.status === 'failed') {
-        await db.query(
+      if (outboundDispatchAction(previous.status) === 'retry') {
+        await client.query(
           `UPDATE messages
            SET status = 'pending', sent_at = now()
            WHERE id = $1`,
           [previous.id],
         );
+        await client.query('COMMIT');
+        transactionStarted = false;
         localInboxCache.delete(input.companyId);
         return {
           conversationId: previous.conversation_id,
@@ -1283,6 +1298,8 @@ async function ensureOutboundMessage(input: {
           deduplicated: false,
         };
       }
+      await client.query('COMMIT');
+      transactionStarted = false;
       return {
         conversationId: previous.conversation_id,
         messageId: previous.id,
@@ -1293,7 +1310,7 @@ async function ensureOutboundMessage(input: {
     }
   }
 
-  const message = await db.query<{ id: string }>(
+    const message = await client.query<{ id: string }>(
     `INSERT INTO messages
       (company_id, conversation_id, sender, sender_name, content, media_type, metadata, status, is_internal_note)
      VALUES ($1, $2, 'attendant', $3, $4, $5, $6::jsonb, 'pending', false)
@@ -1318,14 +1335,22 @@ async function ensureOutboundMessage(input: {
   );
   const messageId = message.rows[0]?.id;
   if (!messageId) throw new Error('Mensagem não pôde ser registrada');
-  localInboxCache.delete(input.companyId);
-  return {
+    await client.query('COMMIT');
+    transactionStarted = false;
+    localInboxCache.delete(input.companyId);
+    return {
     conversationId,
     messageId,
     evolutionMessageId: null,
     status: 'pending' as const,
     deduplicated: false,
-  };
+    };
+  } catch (error) {
+    if (transactionStarted) await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed', evolutionMessageId?: string) {
@@ -1456,6 +1481,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       const localChats = await fetchLocalInboxChats(_request.user!.companyId);
       const knownRemoteJids = new Set(chatsData.map((chat: any) => String(chat?.remoteJid || chat?.id || '')));
       const knownPhones = new Set(chatsData.map((chat: any) => providerContactPhone(chat)).filter(Boolean));
+      const localByRemoteJid = new Map(localChats.map((chat: any) => [String(chat?.remoteJid || chat?.id || ''), chat]));
+      const localByPhone = new Map(localChats.map((chat: any) => [providerContactPhone(chat), chat]));
+      chatsData = chatsData.map((chat: any) => {
+        if (!isNonRenderableProviderMessage(chat?.lastMessage)) return chat;
+        return localByRemoteJid.get(String(chat?.remoteJid || chat?.id || ''))
+          || localByPhone.get(providerContactPhone(chat))
+          || { ...chat, lastMessage: undefined };
+      });
       const missingLocalChats = localChats.filter((chat: any) => {
         const remoteJid = String(chat?.remoteJid || chat?.id || '');
         const phone = providerContactPhone(chat);
@@ -1887,6 +1920,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         AND ${beforeFilter}
         AND ${afterFilter}
         AND m.is_internal_note = false
+        AND COALESCE(m.metadata->>'providerType', '') NOT IN ('secretEncryptedMessage', 'senderKeyDistributionMessage')
       ORDER BY m.sent_at DESC
       LIMIT $${pageSizeParam}`, pageQueryParams);
 
@@ -1927,6 +1961,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       const records = body?.messages?.records || body?.records || (Array.isArray(body) ? body : []);
       if (!Array.isArray(records)) continue;
       records.forEach((record: any, index: number) => {
+        if (isNonRenderableProviderMessage(record)) return;
         const id = record?.key?.id || record?.id || `${record?.messageTimestamp || 'unknown'}-${index}`;
         if (!recordsById.has(String(id))) recordsById.set(String(id), record);
       });
@@ -1954,6 +1989,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         AND ${beforeFilter}
         AND ${afterFilter}
         AND m.is_internal_note = false
+        AND COALESCE(m.metadata->>'providerType', '') NOT IN ('secretEncryptedMessage', 'senderKeyDistributionMessage')
       ORDER BY m.sent_at DESC
       LIMIT $${pageSizeParam}`, pageQueryParams);
 
@@ -1988,6 +2024,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
+    traceOutbound(request, 'received', { clientMessageId, remoteJid: canonicalRemoteJid });
     const leaseAcquisition = await acquireOutboundLease({
       companyId: request.user!.companyId,
       user: request.user!,
@@ -2016,6 +2053,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       clientMessageId,
       quotedMessage: normalizedQuote,
     });
+    traceOutbound(request, 'outbox.prepared', {
+      clientMessageId,
+      remoteJid: canonicalRemoteJid,
+      evolutionMessageId: localMessage.evolutionMessageId || undefined,
+      deduplicated: localMessage.deduplicated,
+    });
     if (localMessage.deduplicated) {
       return {
         remoteJid: canonicalRemoteJid,
@@ -2028,35 +2071,47 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         deduplicated: true,
       };
     }
-    let response: Response;
-    let body: any;
+    let dispatch: { ok: boolean; body: any };
     try {
-      response = await evolutionRequest(
-      `/message/sendText/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          number,
-          text: formatHubOutboundText(request.user!.name, text),
-          delay: 1200,
-          linkPreview: true,
-          ...(evolutionQuote
-            ? { quoted: evolutionQuote }
-            : {}),
-        }),
-      },
+      dispatch = await outboundEvolutionRequests.run(
+        `${request.user!.companyId}:${clientMessageId}`,
+        async () => {
+          traceOutbound(request, 'evolution.request', { clientMessageId, remoteJid: canonicalRemoteJid });
+          const response = await evolutionRequest(
+            `/message/sendText/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                number,
+                text: formatHubOutboundText(request.user!.name, text),
+                delay: 1200,
+                linkPreview: true,
+                ...(evolutionQuote ? { quoted: evolutionQuote } : {}),
+              }),
+            },
+          );
+          return {
+            ok: response.ok,
+            body: await response.json().catch(() => ({ error: 'Evolution API response invalid' })),
+          };
+        },
       );
-      body = await response.json().catch(() => ({ error: 'Evolution API response invalid' }));
     } catch (error) {
       await updateOutboundMessage(localMessage.messageId, 'failed');
       request.log.warn({ err: error }, 'Falha de comunicação com a Evolution API');
       return reply.code(502).send({ error: 'Evolution API unavailable', messageId: localMessage.messageId });
     }
-    if (!response.ok) {
+    if (!dispatch.ok) {
       await updateOutboundMessage(localMessage.messageId, 'failed');
       return reply.code(502).send({ error: 'Evolution API unavailable', messageId: localMessage.messageId });
     }
-    const evolutionMessageId = evolutionMessageIdFromResponse(body);
+    const evolutionMessageId = evolutionMessageIdFromResponse(dispatch.body);
+    traceOutbound(request, 'evolution.response', {
+      clientMessageId,
+      remoteJid: canonicalRemoteJid,
+      evolutionMessageId,
+      ok: dispatch.ok,
+    });
     await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
     const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
     const realtimeTimestampMs = Date.now();
@@ -2096,7 +2151,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       request.log.warn({ err: error }, 'NÃ£o foi possÃ­vel registrar o primeiro atendente do dia');
     }
     return {
-      evolution: body,
+      evolution: dispatch.body,
       dailyResponder,
       lease: leaseAcquisition.lease,
       remoteJid: canonicalRemoteJid,
@@ -2117,6 +2172,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
+    traceOutbound(request, 'received', { clientMessageId, remoteJid: canonicalRemoteJid });
     const leaseAcquisition = await acquireOutboundLease({
       companyId: request.user!.companyId,
       user: request.user!,
@@ -2149,6 +2205,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       clientMessageId,
       quotedMessage: normalizedQuote,
     });
+    traceOutbound(request, 'outbox.prepared', {
+      clientMessageId,
+      remoteJid: canonicalRemoteJid,
+      evolutionMessageId: localMessage.evolutionMessageId || undefined,
+      deduplicated: localMessage.deduplicated,
+    });
     if (localMessage.deduplicated) {
       return {
         remoteJid: canonicalRemoteJid,
@@ -2161,40 +2223,52 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         deduplicated: true,
       };
     }
-    let response: Response;
-    let body: any;
+    let dispatch: { ok: boolean; body: any };
     try {
       const caption = parsed.data.caption?.trim()
         ? formatHubOutboundText(request.user!.name, parsed.data.caption.trim())
         : undefined;
-      response = await evolutionRequest(
-        `/message/sendMedia/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            number,
-            mediatype: parsed.data.mediatype,
-            mimetype: parsed.data.mimetype,
-            media: parsed.data.media,
-            fileName: parsed.data.fileName,
-            caption,
-            ...(evolutionQuote
-              ? { quoted: evolutionQuote }
-              : {}),
-          }),
+      dispatch = await outboundEvolutionRequests.run(
+        `${request.user!.companyId}:${clientMessageId}`,
+        async () => {
+          traceOutbound(request, 'evolution.request', { clientMessageId, remoteJid: canonicalRemoteJid });
+          const response = await evolutionRequest(
+            `/message/sendMedia/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                number,
+                mediatype: parsed.data.mediatype,
+                mimetype: parsed.data.mimetype,
+                media: parsed.data.media,
+                fileName: parsed.data.fileName,
+                caption,
+                ...(evolutionQuote ? { quoted: evolutionQuote } : {}),
+              }),
+            },
+          );
+          return {
+            ok: response.ok,
+            body: await response.json().catch(() => ({ error: 'Evolution API response invalid' })),
+          };
         },
       );
-      body = await response.json().catch(() => ({ error: 'Evolution API response invalid' }));
     } catch (error) {
       await updateOutboundMessage(localMessage.messageId, 'failed');
       request.log.warn({ err: error }, 'Falha de comunicação com a Evolution API ao enviar anexo');
       return reply.code(502).send({ error: 'Evolution API indisponível', messageId: localMessage.messageId });
     }
-    if (!response.ok) {
+    if (!dispatch.ok) {
       await updateOutboundMessage(localMessage.messageId, 'failed');
       return reply.code(502).send({ error: 'Evolution API indisponível', messageId: localMessage.messageId });
     }
-    const evolutionMessageId = evolutionMessageIdFromResponse(body);
+    const evolutionMessageId = evolutionMessageIdFromResponse(dispatch.body);
+    traceOutbound(request, 'evolution.response', {
+      clientMessageId,
+      remoteJid: canonicalRemoteJid,
+      evolutionMessageId,
+      ok: dispatch.ok,
+    });
     await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
     const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
     const realtimeTimestampMs = Date.now();
@@ -2237,7 +2311,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       request.log.warn({ err: error }, 'Não foi possível registrar o primeiro atendente do dia');
     }
     return {
-      evolution: body,
+      evolution: dispatch.body,
       dailyResponder,
       lease: leaseAcquisition.lease,
       remoteJid: canonicalRemoteJid,
@@ -2323,7 +2397,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       if (companyId) {
         for (const record of records) {
           try {
+            traceOutbound(request, `webhook.${normalizedEvent}`, {
+              remoteJid: providerRemoteJid(record),
+              evolutionMessageId: providerMessageId(record),
+            });
             const persisted = await persistProviderMessage(companyId, record, { incrementUnread: true, reopen: true });
+            if (persisted?.ignored) continue;
             if (persisted?.persisted) {
               persistedMessages += 1;
             }
@@ -2347,6 +2426,10 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
 
     const statusUpdate = extractWebhookMessageStatus(body);
     if (statusUpdate) {
+      traceOutbound(request, `webhook.${normalizedEvent}`, {
+        remoteJid: providerRemoteJid(body?.data || body?.payload || body),
+        evolutionMessageId: statusUpdate.messageId,
+      });
       const eventKey = `${event}:${statusUpdate.messageId}:${statusUpdate.status}`;
       try {
         const inserted = await db.query(
