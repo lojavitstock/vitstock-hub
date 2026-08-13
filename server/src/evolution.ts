@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
@@ -8,7 +8,7 @@ import { db } from './db.js';
 import { buildHasOlderMessagesQuery } from './hasOlderMessagesQuery.js';
 import { publishRealtimeEvent, registerRealtimeClient } from './realtime.js';
 import { acquireConversationLease, type ConversationLease } from './conversationLease.js';
-import { formatHubOutboundText, removeHubAgentPrefix } from './outboundMessage.js';
+import { evolutionMessageIdFromResponse, formatHubOutboundText, removeHubAgentPrefix } from './outboundMessage.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -1983,7 +1983,8 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.post('/api/evolution/messages/send', { preHandler: requireUser }, async (request, reply) => {
     const parsed = sendTextSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Mensagem inválida' });
-    const { number, text, remoteJid, clientMessageId, quotedMessage } = parsed.data;
+    const { number, text, remoteJid, quotedMessage } = parsed.data;
+    const clientMessageId = parsed.data.clientMessageId || `hub-${randomUUID()}`;
     const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
@@ -2055,7 +2056,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       await updateOutboundMessage(localMessage.messageId, 'failed');
       return reply.code(502).send({ error: 'Evolution API unavailable', messageId: localMessage.messageId });
     }
-    const evolutionMessageId = body?.key?.id || body?.message?.key?.id || body?.data?.key?.id;
+    const evolutionMessageId = evolutionMessageIdFromResponse(body);
     await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
     const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
     const realtimeTimestampMs = Date.now();
@@ -2106,13 +2107,13 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.post('/api/evolution/messages/send-media', { preHandler: requireUser }, async (request, reply) => {
     const parsed = sendMediaSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Anexo inválido' });
-    const { number, text, remoteJid, clientMessageId, quotedMessage } = {
+    const { number, text, remoteJid, quotedMessage } = {
       number: parsed.data.number,
       text: parsed.data.caption?.trim() || `[${parsed.data.mediatype}]`,
       remoteJid: parsed.data.remoteJid,
-      clientMessageId: parsed.data.clientMessageId,
       quotedMessage: parsed.data.quotedMessage,
     };
+    const clientMessageId = parsed.data.clientMessageId || `hub-${randomUUID()}`;
     const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
@@ -2193,7 +2194,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       await updateOutboundMessage(localMessage.messageId, 'failed');
       return reply.code(502).send({ error: 'Evolution API indisponível', messageId: localMessage.messageId });
     }
-    const evolutionMessageId = body?.key?.id || body?.message?.key?.id || body?.data?.key?.id;
+    const evolutionMessageId = evolutionMessageIdFromResponse(body);
     await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
     const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
     const realtimeTimestampMs = Date.now();

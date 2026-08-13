@@ -770,6 +770,11 @@ export const AtendimentoPage: React.FC = () => {
 
     const conversationId = activeConv.id;
     const retryText = message.content.trim();
+    const clientMessageId = message.metadata?.sentByHub === true
+      && typeof message.metadata.clientMessageId === 'string'
+      && message.metadata.clientMessageId.trim()
+      ? message.metadata.clientMessageId
+      : message.id;
     if (!retryText && !message.mediaUrl) return;
     setAssignmentFeedback('');
     setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'pending' } : item));
@@ -801,13 +806,13 @@ export const AtendimentoPage: React.FC = () => {
           mimetype,
           media,
           caption: retryText || undefined,
-          clientMessageId: message.id,
+          clientMessageId,
           quotedMessage: message.metadata?.quotedMessage,
         });
       } else if (message.mediaType) {
         throw new Error('O arquivo original não está disponível para nova tentativa.');
       } else {
-        result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, retryText, activeConv.id, message.id, message.metadata?.quotedMessage);
+        result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, retryText, activeConv.id, clientMessageId, message.metadata?.quotedMessage);
       }
       if (activeConversationIdRef.current === conversationId) {
         setMessages((previous) => previous.map((item) => item.id === message.id ? {
@@ -815,7 +820,7 @@ export const AtendimentoPage: React.FC = () => {
           id: result?.message?.evolutionMessageId || result?.message?.id || item.id,
           status: result?.message?.status || result?.status || 'sent',
           metadata: item.metadata?.sentByHub === true
-            ? { ...item.metadata, clientMessageId: item.metadata.clientMessageId || message.id }
+            ? { ...item.metadata, clientMessageId: item.metadata.clientMessageId || clientMessageId }
             : item.metadata,
         } : item));
       }

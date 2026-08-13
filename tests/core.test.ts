@@ -19,7 +19,11 @@ import {
   writeConversationMessagesCache,
 } from '../src/utils/conversationMessagesCache';
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
-import { formatHubOutboundText, removeHubAgentPrefix } from '../server/src/outboundMessage';
+import {
+  evolutionMessageIdFromResponse,
+  formatHubOutboundText,
+  removeHubAgentPrefix,
+} from '../server/src/outboundMessage';
 import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
@@ -1051,6 +1055,21 @@ test('assinatura enviada à Evolution não contamina o conteúdo exibido do Leon
   assert.equal(removeHubAgentPrefix(evolutionPayload, 'Leonardo'), 'Nova Iguaçu consigo entregar via correios');
   assert.equal(confirmed.senderName, 'Leonardo');
   assert.equal(confirmed.content, 'Nova Iguaçu consigo entregar via correios');
+});
+
+test('extrai o ID explícito da Evolution para texto, reply, mídia, documento e caption', () => {
+  const responses = [
+    ['texto', { key: { id: 'text-1' } }, 'text-1'],
+    ['reply', { message: { key: { id: 'reply-1' } } }, 'reply-1'],
+    ['imagem', { data: { key: { id: 'image-1' } } }, 'image-1'],
+    ['documento', { data: { message: { key: { id: 'document-1' } } } }, 'document-1'],
+    ['caption', { response: { message: { key: { id: 'caption-1' } } } }, 'caption-1'],
+  ] as const;
+
+  for (const [, payload, expectedId] of responses) {
+    assert.equal(evolutionMessageIdFromResponse(payload), expectedId);
+  }
+  assert.equal(evolutionMessageIdFromResponse({ data: { message: { id: 'sem-key' } } }), undefined);
 });
 
 test('mensagem do Henrique preserva conteúdo legítimo iniciado por asteriscos', () => {
