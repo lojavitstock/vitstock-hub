@@ -70,9 +70,11 @@ const areReactionsEqual = (
   if (!previous || !next || previous.length !== next.length) return false;
   return previous.every((reaction, index) => (
     reaction.emoji === next[index]?.emoji
+    && reaction.reactorKey === next[index]?.reactorKey
     && reaction.actorId === next[index]?.actorId
     && reaction.participant === next[index]?.participant
     && reaction.fromMe === next[index]?.fromMe
+    && reaction.updatedAt === next[index]?.updatedAt
   ));
 };
 
@@ -153,7 +155,7 @@ const hubClientMessageId = (message: Message) => (
 );
 
 const preserveHubAttribution = (current: Message, incoming: Message): Message => {
-  const withPreservedReactions = current.metadata?.reactions?.length && !incoming.metadata?.reactions
+  const withPreservedReactions = current.metadata?.reactions?.length && incoming.metadata === undefined
     ? { ...incoming, metadata: { ...(incoming.metadata || {}), reactions: current.metadata.reactions } }
     : incoming;
   if (current.metadata?.sentByHub !== true || withPreservedReactions.metadata?.sentByHub === true) return withPreservedReactions;

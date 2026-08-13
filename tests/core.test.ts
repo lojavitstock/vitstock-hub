@@ -1656,7 +1656,7 @@ test('Evolution reaction uses reactionMessage.key.id as the only target identity
   assert.equal(isProviderReactionEvent(event), true);
   assert.equal(isEvolutionReactionEvent(event), true);
   assert.equal(update?.targetMessageId, 'original-message-1');
-  assert.equal(update?.actorId, '5521999999999@s.whatsapp.net');
+  assert.equal(update?.reactorKey, 'jid:5521999999999');
   assert.equal(update?.emoji, '\u2764\ufe0f');
 });
 
@@ -1670,7 +1670,7 @@ test('reaction SSE updates the original Hub message without adding a timeline it
     ...original,
     metadata: {
       ...original.metadata,
-      reactions: [{ emoji: '\ud83d\udc4d', actorId: '5521999999999@s.whatsapp.net', fromMe: false }],
+      reactions: [{ emoji: '\ud83d\udc4d', reactorKey: 'jid:5521999999999', actorId: 'jid:5521999999999', fromMe: false, updatedAt: 1_700_000_000_000 }],
     },
   };
   const updated = reconcileRealtimeMessages([original], 'conversation-1', {
@@ -1688,12 +1688,12 @@ test('reaction SSE updates the original Hub message without adding a timeline it
 test('equivalent reaction events from SSE, polling and refresh preserve identity', () => {
   const current = [message('reaction-stable', 1_700, 'Message', 'read', {
     metadata: {
-      reactions: [{ emoji: '\ud83d\ude0d', actorId: '5521999999999@s.whatsapp.net', fromMe: false }],
+      reactions: [{ emoji: '\ud83d\ude0d', reactorKey: 'jid:5521999999999', actorId: 'jid:5521999999999', fromMe: false, updatedAt: 1_700_000_000_000 }],
     },
   })];
   const equivalentSnapshot = {
     ...current[0],
-    metadata: { reactions: [{ emoji: '\ud83d\ude0d', actorId: '5521999999999@s.whatsapp.net', fromMe: false }] },
+    metadata: { reactions: [{ emoji: '\ud83d\ude0d', reactorKey: 'jid:5521999999999', actorId: 'jid:5521999999999', fromMe: false, updatedAt: 1_700_000_000_000 }] },
   };
   const sse = reconcileRealtimeMessages(current, 'conversation-1', {
     type: 'message.upsert',
@@ -1710,27 +1710,29 @@ test('equivalent reaction events from SSE, polling and refresh preserve identity
 
 test('a reaction can be replaced or removed by the same participant', () => {
   const initial = [
-    { emoji: '\u2764\ufe0f', actorId: 'client-a', fromMe: false },
-    { emoji: '\ud83d\udc4d', actorId: '__vitstock_self__', fromMe: true },
+    { emoji: '\u2764\ufe0f', reactorKey: 'jid:5521999999999', actorId: 'jid:5521999999999', fromMe: false, updatedAt: 1_700_000_000_000 },
+    { emoji: '\ud83d\udc4d', reactorKey: '__vitstock_self__', actorId: '__vitstock_self__', fromMe: true, updatedAt: 1_700_000_000_000 },
   ];
   const swapped = applyProviderReaction(initial, {
     targetMessageId: 'reaction-target',
-    actorId: 'client-a',
+    reactorKey: 'jid:5521999999999',
     emoji: '\ud83d\ude02',
     fromMe: false,
+    updatedAt: 1_700_000_010_000,
   });
   const removed = applyProviderReaction(swapped, {
     targetMessageId: 'reaction-target',
-    actorId: 'client-a',
+    reactorKey: 'jid:5521999999999',
     emoji: '',
     fromMe: false,
+    updatedAt: 1_700_000_020_000,
   });
 
   assert.deepEqual(swapped, [
-    { emoji: '\ud83d\udc4d', actorId: '__vitstock_self__', fromMe: true },
-    { emoji: '\ud83d\ude02', actorId: 'client-a', fromMe: false },
+    { emoji: '\ud83d\udc4d', reactorKey: '__vitstock_self__', actorId: '__vitstock_self__', fromMe: true, updatedAt: 1_700_000_000_000 },
+    { emoji: '\ud83d\ude02', reactorKey: 'jid:5521999999999', actorId: 'jid:5521999999999', fromMe: false, updatedAt: 1_700_000_010_000 },
   ]);
-  assert.deepEqual(removed, [{ emoji: '\ud83d\udc4d', actorId: '__vitstock_self__', fromMe: true }]);
+  assert.deepEqual(removed, [{ emoji: '\ud83d\udc4d', reactorKey: '__vitstock_self__', actorId: '__vitstock_self__', fromMe: true, updatedAt: 1_700_000_000_000 }]);
 });
 
 test('reaction with a missing original is never associated by phone or content', () => {
@@ -1751,7 +1753,7 @@ test('reactions preserve replies and external authorship metadata', () => {
     metadata: {
       sentOutsideHub: true,
       quotedMessage: { messageId: 'source', content: 'Original' },
-      reactions: [{ emoji: '\u2764\ufe0f', actorId: 'client-a', fromMe: false }],
+      reactions: [{ emoji: '\u2764\ufe0f', reactorKey: 'jid:5521999999999', actorId: 'jid:5521999999999', fromMe: false, updatedAt: 1_700_000_000_000 }],
     },
   })];
   const equivalent = {
@@ -1759,7 +1761,7 @@ test('reactions preserve replies and external authorship metadata', () => {
     metadata: {
       ...current[0].metadata,
       quotedMessage: { ...current[0].metadata?.quotedMessage },
-      reactions: [{ emoji: '\u2764\ufe0f', actorId: 'client-a', fromMe: false }],
+      reactions: [{ emoji: '\u2764\ufe0f', reactorKey: 'jid:5521999999999', actorId: 'jid:5521999999999', fromMe: false, updatedAt: 1_700_000_000_000 }],
     },
   };
   const merged = mergeConversationMessages(current, [equivalent]);
@@ -1767,6 +1769,122 @@ test('reactions preserve replies and external authorship metadata', () => {
   assert.equal(merged, current);
   assert.equal(merged[0]?.metadata?.quotedMessage?.messageId, 'source');
   assert.equal(merged[0]?.metadata?.sentOutsideHub, true);
+});
+
+test('reaction updates normalize equivalent JID formats into one reactor key', () => {
+  const bySwhatsapp = providerReactionUpdate({
+    key: { id: 'reaction-1', participant: '5521999999999@s.whatsapp.net', fromMe: false },
+    messageTimestamp: 1_700_000_000,
+    message: { reactionMessage: { key: { id: 'target' }, text: '\ud83d\ude33' } },
+  })!;
+  const byCus = providerReactionUpdate({
+    key: { id: 'reaction-2', participant: '5521999999999@c.us', fromMe: false },
+    messageTimestamp: 1_700_000_010,
+    message: { reactionMessage: { key: { id: 'target' }, text: '\u2764\ufe0f' } },
+  })!;
+  const swapped = applyProviderReaction(applyProviderReaction([], bySwhatsapp), byCus);
+
+  assert.equal(bySwhatsapp.reactorKey, 'jid:5521999999999');
+  assert.equal(byCus.reactorKey, bySwhatsapp.reactorKey);
+  assert.deepEqual(swapped.map((reaction) => reaction.emoji), ['\u2764\ufe0f']);
+});
+
+test('a stale polling reaction cannot restore an older emoji after a newer change', () => {
+  const current = [{
+    emoji: '\u2764\ufe0f', reactorKey: 'jid:5521999999999', actorId: 'jid:5521999999999', fromMe: false, updatedAt: 2_000,
+  }];
+  const stale = applyProviderReaction(current, {
+    targetMessageId: 'target', reactorKey: 'jid:5521999999999', emoji: '\ud83d\ude33', fromMe: false, updatedAt: 1_000,
+  });
+
+  assert.equal(stale, current);
+  assert.equal(stale[0]?.emoji, '\u2764\ufe0f');
+});
+
+test('different participants retain one current reaction each on the same message', () => {
+  const first = applyProviderReaction([], {
+    targetMessageId: 'target', reactorKey: 'jid:5521999999999', emoji: '\u2764\ufe0f', fromMe: false, updatedAt: 1_000,
+  });
+  const next = applyProviderReaction(first, {
+    targetMessageId: 'target', reactorKey: 'jid:5521988888888', emoji: '\ud83d\udc4d', fromMe: false, updatedAt: 1_001,
+  });
+
+  assert.equal(next.length, 2);
+  assert.deepEqual(next.map((reaction) => reaction.reactorKey), ['jid:5521999999999', 'jid:5521988888888']);
+});
+
+test('a persisted reaction removal is not restored when the refreshed metadata is explicit', () => {
+  const current = [message('hub-reaction-removed', 1_700, 'Message', 'sent', {
+    sender: 'attendant',
+    metadata: {
+      sentByHub: true,
+      sentByUserId: 'user-1',
+      sentByUserName: 'Leonardo',
+      reactions: [{ emoji: '\u2764\ufe0f', reactorKey: 'jid:5521999999999', actorId: 'jid:5521999999999', fromMe: false, updatedAt: 2_000 }],
+    },
+  })];
+  const refreshed = {
+    ...current[0],
+    metadata: { sentByHub: true, sentByUserId: 'user-1', sentByUserName: 'Leonardo' },
+  };
+  const merged = mergeConversationMessages(current, [refreshed]);
+
+  assert.notEqual(merged, current);
+  assert.equal(merged[0]?.metadata?.reactions, undefined);
+});
+
+test('reaction events outside the loaded timeline are a no-op and do not request a reload fallback', () => {
+  const current = [message('loaded-message', 1_700, 'Visible')];
+  const result = reconcileRealtimeMessages(current, 'conversation-1', {
+    type: 'message.upsert',
+    reaction: true,
+    message: {
+      ...message('older-not-loaded', 1_600, 'Older'),
+      metadata: {
+        reactions: [{ emoji: '\ud83d\udc4d', reactorKey: 'jid:5521999999999', actorId: 'jid:5521999999999', fromMe: false, updatedAt: 1_700_000_000_000 }],
+      },
+    },
+  });
+
+  assert.equal(result, current);
+  assert.deepEqual(result.map((item) => item.id), ['loaded-message']);
+});
+
+test('reaction metadata updates only the loaded target without changing message order', () => {
+  const first = message('first', 1_000, 'First');
+  const target = message('target', 2_000, 'Target');
+  const current = [first, target];
+  const updatedTarget = {
+    ...target,
+    metadata: {
+      reactions: [{ emoji: '\ud83d\udc4d', reactorKey: 'jid:5521999999999', actorId: 'jid:5521999999999', fromMe: false, updatedAt: 2_100 }],
+    },
+  };
+  const updated = reconcileRealtimeMessages(current, 'conversation-1', {
+    type: 'message.upsert', reaction: true, message: updatedTarget,
+  });
+
+  assert.deepEqual(updated?.map((item) => item.id), ['first', 'target']);
+  assert.equal(updated?.[0], first);
+  assert.notEqual(updated?.[1], target);
+});
+
+test('reaction SSE updates a loaded target even when the conversation JID has changed', () => {
+  const current = [message('provider-target', 2_000, 'Target')];
+  const updated = reconcileRealtimeMessages(current, 'current-lid@lid', {
+    type: 'message.upsert',
+    reaction: true,
+    message: {
+      ...current[0],
+      conversationId: 'current-phone@s.whatsapp.net',
+      metadata: {
+        reactions: [{ emoji: '\ud83d\udc4d', reactorKey: 'jid:5521999999999', actorId: 'jid:5521999999999', fromMe: false, updatedAt: 2_100 }],
+      },
+    },
+  });
+
+  assert.equal(updated?.length, 1);
+  assert.equal(updated?.[0]?.metadata?.reactions?.[0]?.emoji, '\ud83d\udc4d');
 });
 
 test('outbound idempotency reuses an accepted client message id', () => {

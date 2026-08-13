@@ -11,7 +11,13 @@ import { acquireConversationLease, type ConversationLease } from './conversation
 import { evolutionMessageIdFromResponse, formatHubOutboundText, removeHubAgentPrefix } from './outboundMessage.js';
 import { createOutboundRequestCoordinator, outboundDispatchAction, outboundIdempotencyLockKey } from './outboundIdempotency.js';
 import { isNonRenderableProviderMessage, providerMessageType, unwrapProviderMessage } from './providerMessagePolicy.js';
-import { applyProviderReaction, isProviderReactionEvent, normalizeStoredReactions, providerReactionUpdate } from './messageReactions.js';
+import {
+  applyProviderReaction,
+  areStoredReactionsEqual,
+  isProviderReactionEvent,
+  normalizeStoredReactions,
+  providerReactionUpdate,
+} from './messageReactions.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -839,6 +845,9 @@ function localMessageToProviderRecord(row: any) {
   const timestamp = Math.floor(new Date(row.sent_at).getTime() / 1000);
   const key = { id, remoteJid, fromMe: row.sender === 'attendant' };
   const metadata = { ...(row.metadata || {}) };
+  if (Array.isArray(metadata.reactions)) {
+    metadata.reactions = normalizeStoredReactions(metadata.reactions);
+  }
   if (row.sender === 'attendant') {
     delete metadata.trafficSource;
     delete metadata.trafficTitle;
@@ -945,9 +954,14 @@ async function persistProviderReaction(companyId: string, record: any) {
       return { persisted: false, reaction: true, originalFound: false, message: undefined };
     }
 
-    const reactions = normalizeStoredReactions(row.metadata?.reactions);
+    const storedReactions = Array.isArray(row.metadata?.reactions)
+      ? row.metadata.reactions
+      : [];
+    const reactions = normalizeStoredReactions(storedReactions);
     const nextReactions = applyProviderReaction(reactions, update);
-    if (nextReactions === reactions) {
+    const metadataNeedsNormalization = Boolean(row.metadata?.reaction)
+      || !areStoredReactionsEqual(storedReactions, reactions);
+    if (nextReactions === reactions && !metadataNeedsNormalization) {
       await client.query('COMMIT');
       // An equivalent provider event must not cause a second realtime update
       // for the original message.
@@ -2109,6 +2123,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         request.log.warn({ err: error, messageId: providerMessageId(record) }, 'Falha ao reconciliar mensagem da Evolution com o PostgreSQL');
       }
     }
+    reactionRecords.sort((left, right) => {
+      const leftUpdate = providerReactionUpdate(left);
+      const rightUpdate = providerReactionUpdate(right);
+      return (leftUpdate?.updatedAt || 0) - (rightUpdate?.updatedAt || 0);
+    });
     for (const record of reactionRecords) {
       try {
         await persistProviderMessage(request.user!.companyId, record, {

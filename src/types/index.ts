@@ -100,9 +100,11 @@ export interface Message {
     };
     reactions?: Array<{
       emoji: string;
+      reactorKey: string;
       actorId: string;
       participant?: string;
       fromMe?: boolean;
+      updatedAt: number;
     }>;
     reaction?: string;
     systemLabel?: string;

@@ -269,6 +269,13 @@ export const reconcileRealtimeMessages = (
 ): Message[] | null => {
   if (event.type === 'message.upsert') {
     const message = event.message;
+    // A reaction is a metadata-only update. Missing/out-of-window targets are
+    // intentionally a no-op, never a reason to reload or reset this timeline.
+    if (event.reaction === true) {
+      if (!message?.id) return current;
+      if (!current.some((item) => item.id === message.id)) return current;
+      return mergeConversationMessages(current, [message]);
+    }
     if (!message?.id || (message.conversationId && message.conversationId !== activeConversationId)) return null;
     // mergeConversationMessages correlates a provider ID that arrives before
     // the POST response with the matching optimistic outbound message.

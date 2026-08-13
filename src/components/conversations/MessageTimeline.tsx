@@ -603,7 +603,7 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
               {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap">{message.content}</p>}
               {message.metadata?.reactions?.length ? <ReactionBadges reactions={message.metadata.reactions} align={isMe ? 'right' : 'left'} /> : null}
             </div>
-            <div className={`${message.metadata?.reactions?.length ? 'mt-4' : 'mt-1'} flex items-center gap-1 text-xs text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
+            <div className={`mt-4 flex items-center gap-1 text-xs text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
               <span>{formatMessageTimestamp(message.timestampMs, message.timestamp)}</span>
               {isMe && message.status === 'failed' && <span className="font-bold text-red-300">Falha no envio</span>}
               {isMe && message.status === 'pending' && <RefreshCw className="h-3.5 w-3.5 animate-spin text-amber-300" aria-label="Enviando" />}
