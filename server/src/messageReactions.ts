@@ -1,11 +1,14 @@
 import { unwrapProviderMessage } from './providerMessagePolicy.js';
 
+export const HUB_REACTOR_KEY = '__vitstock_self__';
+
 export type StoredMessageReaction = {
   emoji: string;
   /** Canonical key for one reactor on one message. */
   reactorKey: string;
   /** Kept for compatibility with reactions persisted before reactorKey. */
   actorId: string;
+  actorName?: string;
   participant?: string;
   fromMe?: boolean;
   /** Provider event timestamp in milliseconds. Zero means a legacy record. */
@@ -20,6 +23,8 @@ export type ProviderReactionUpdate = {
   participant?: string;
   fromMe: boolean;
   updatedAt: number;
+  actorId?: string;
+  actorName?: string;
 };
 
 const nonEmptyText = (value: unknown) => typeof value === 'string' && value.trim()
@@ -56,7 +61,7 @@ const isPhoneJid = (value: string) => {
 };
 
 const reactorDetails = (record: any, fromMe: boolean) => {
-  if (fromMe) return { reactorKey: '__vitstock_self__' };
+  if (fromMe) return { reactorKey: HUB_REACTOR_KEY };
 
   const candidates = [
     record?.key?.participant,
@@ -120,6 +125,7 @@ const sameStoredReaction = (left: StoredMessageReaction, right: StoredMessageRea
   left.emoji === right.emoji
   && left.reactorKey === right.reactorKey
   && left.actorId === right.actorId
+  && left.actorName === right.actorName
   && left.participant === right.participant
   && left.fromMe === right.fromMe
   && left.updatedAt === right.updatedAt
@@ -137,14 +143,15 @@ export const normalizeStoredReactions = (value: unknown): StoredMessageReaction[
     const emoji = nonEmptyText(item?.emoji);
     const participant = nonEmptyText(item?.participant);
     const legacyActor = nonEmptyText(item?.reactorKey) || nonEmptyText(item?.actorId);
-    const reactorKey = legacyActor === '__vitstock_self__'
+    const reactorKey = legacyActor === HUB_REACTOR_KEY
       ? legacyActor
       : canonicalJidKey(participant || legacyActor || '');
     if (!emoji || !reactorKey || reactorKey === 'jid:') return;
     const next: StoredMessageReaction = {
       emoji,
       reactorKey,
-      actorId: reactorKey,
+      actorId: nonEmptyText(item?.actorId) || reactorKey,
+      ...(nonEmptyText(item?.actorName) ? { actorName: nonEmptyText(item?.actorName) } : {}),
       ...(participant ? { participant } : {}),
       ...(typeof item?.fromMe === 'boolean' ? { fromMe: item.fromMe } : {}),
       updatedAt: timestampMs(item?.updatedAt),
@@ -173,7 +180,8 @@ export const applyProviderReaction = (
   return [...withoutReactor, {
     emoji: update.emoji,
     reactorKey: update.reactorKey,
-    actorId: update.reactorKey,
+    actorId: update.actorId || existing?.actorId || update.reactorKey,
+    ...(update.actorName || existing?.actorName ? { actorName: update.actorName || existing?.actorName } : {}),
     ...(update.participant ? { participant: update.participant } : {}),
     fromMe: update.fromMe,
     updatedAt: update.updatedAt,

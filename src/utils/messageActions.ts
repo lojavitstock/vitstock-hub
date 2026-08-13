@@ -8,6 +8,7 @@ export const messageCopyText = (message: Message) => message.content;
 
 export const messageMenuActionsFor = (message: Message) => [
   'reply',
+  'react',
   'copy',
   ...(canDownloadMessageMedia(message) ? ['download'] : []),
 ] as const;

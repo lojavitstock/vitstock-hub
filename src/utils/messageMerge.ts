@@ -72,6 +72,7 @@ const areReactionsEqual = (
     reaction.emoji === next[index]?.emoji
     && reaction.reactorKey === next[index]?.reactorKey
     && reaction.actorId === next[index]?.actorId
+    && reaction.actorName === next[index]?.actorName
     && reaction.participant === next[index]?.participant
     && reaction.fromMe === next[index]?.fromMe
     && reaction.updatedAt === next[index]?.updatedAt

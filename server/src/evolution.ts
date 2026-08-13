@@ -8,12 +8,13 @@ import { db } from './db.js';
 import { buildHasOlderMessagesQuery } from './hasOlderMessagesQuery.js';
 import { publishRealtimeEvent, registerRealtimeClient } from './realtime.js';
 import { acquireConversationLease, type ConversationLease } from './conversationLease.js';
-import { evolutionMessageIdFromResponse, formatHubOutboundText, removeHubAgentPrefix } from './outboundMessage.js';
+import { evolutionMessageIdFromResponse, evolutionReactionPayload, formatHubOutboundText, removeHubAgentPrefix } from './outboundMessage.js';
 import { createOutboundRequestCoordinator, outboundDispatchAction, outboundIdempotencyLockKey } from './outboundIdempotency.js';
 import { isNonRenderableProviderMessage, providerMessageType, unwrapProviderMessage } from './providerMessagePolicy.js';
 import {
   applyProviderReaction,
   areStoredReactionsEqual,
+  HUB_REACTOR_KEY,
   isProviderReactionEvent,
   normalizeStoredReactions,
   providerReactionUpdate,
@@ -59,6 +60,12 @@ const sendMediaSchema = z.object({
   caption: z.string().max(4096).optional(),
   clientMessageId: z.string().trim().min(1).max(128).optional(),
   quotedMessage: sendTextSchema.shape.quotedMessage,
+});
+const sendReactionSchema = z.object({
+  number: z.string().regex(/^\d{8,20}$/),
+  remoteJid: z.string().min(3).max(128),
+  messageId: z.string().trim().min(1).max(256),
+  emoji: z.union([z.enum(['👍', '❤️', '😂', '😮', '😢', '🙏']), z.null()]),
 });
 const mediaSchema = z.object({ messageKey: z.record(z.string(), z.unknown()) });
 const phoneSchema = z.object({ number: z.string().regex(/^\d{8,20}$/) });
@@ -995,6 +1002,57 @@ async function persistProviderReaction(companyId: string, record: any) {
   } finally {
     client.release();
   }
+}
+
+/**
+ * Persists a Hub-initiated reaction on its target message. A reaction never
+ * creates a message or mutates conversation activity; the webhook only
+ * confirms this same metadata later.
+ */
+async function persistHubReaction(input: {
+  message: {
+    id: string;
+    evolution_message_id: string;
+    sender: 'contact' | 'attendant' | 'system';
+    sender_name: string | null;
+    content: string;
+    media_url: string | null;
+    media_type: string | null;
+    metadata: Record<string, any>;
+    status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
+    sent_at: string;
+    evolution_remote_jid: string;
+  };
+  emoji: string;
+  user: { id: string; name: string };
+}) {
+  const current = normalizeStoredReactions(input.message.metadata?.reactions);
+  const reactions = applyProviderReaction(current, {
+    targetMessageId: input.message.evolution_message_id,
+    reactorKey: HUB_REACTOR_KEY,
+    emoji: input.emoji,
+    fromMe: true,
+    updatedAt: Date.now(),
+    actorId: input.user.id,
+    actorName: input.user.name,
+  });
+  if (reactions === current && !input.message.metadata?.reaction) {
+    return storedMessageToRealtimeMessage(input.message);
+  }
+
+  const metadata = { ...(input.message.metadata || {}) };
+  delete metadata.reaction;
+  if (reactions.length) metadata.reactions = reactions;
+  else delete metadata.reactions;
+  const updated = await db.query<{ metadata: Record<string, any> }>(
+    `UPDATE messages
+     SET metadata = $1::jsonb
+     WHERE id = $2::uuid
+     RETURNING metadata`,
+    [JSON.stringify(metadata), input.message.id],
+  );
+  input.message.metadata = updated.rows[0]?.metadata || metadata;
+  return storedMessageToRealtimeMessage(input.message);
 }
 
 async function hydrateQuotedMessageMetadata(
@@ -2526,6 +2584,108 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       remoteJid: canonicalRemoteJid,
       message: { id: localMessage.messageId, evolutionMessageId, status: 'sent', senderName: request.user!.name },
     };
+  });
+
+  app.post('/api/evolution/messages/reaction', { preHandler: requireUser }, async (request, reply) => {
+    const parsed = sendReactionSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Reação inválida' });
+
+    const { number, remoteJid, messageId, emoji } = parsed.data;
+    const phone = number.replace(/\D/g, '');
+    // The frontend supplies an id only to address a visible message. The
+    // target itself is always resolved inside the authenticated company.
+    const targetResult = await db.query<{
+      id: string;
+      evolution_message_id: string;
+      sender: 'contact' | 'attendant' | 'system';
+      sender_name: string | null;
+      content: string;
+      media_url: string | null;
+      media_type: string | null;
+      metadata: Record<string, any>;
+      status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
+      sent_at: string;
+      evolution_remote_jid: string;
+      contact_phone: string;
+    }>(
+      `SELECT m.id, m.evolution_message_id, m.sender, m.sender_name, m.content,
+              m.media_url, m.media_type, m.metadata, m.status, m.sent_at,
+              c.evolution_remote_jid,
+              regexp_replace(contact.phone, '\\D', '', 'g') AS contact_phone
+       FROM messages m
+       JOIN conversations c ON c.id = m.conversation_id
+       JOIN contacts contact ON contact.id = c.contact_id
+       WHERE m.company_id = $1::uuid
+         AND m.evolution_message_id = $2::text
+         AND m.is_internal_note = false
+         AND (
+           c.evolution_remote_jid = ANY($3::text[])
+           OR regexp_replace(contact.phone, '\\D', '', 'g') = $4::text
+         )
+       LIMIT 1`,
+      [request.user!.companyId, messageId, assignmentJids({ remoteJid, phone }), phone],
+    );
+    const target = targetResult.rows[0];
+    if (!target) return reply.code(404).send({ error: 'Mensagem não disponível para reação' });
+
+    const leaseAcquisition = await acquireOutboundLease({
+      companyId: request.user!.companyId,
+      user: request.user!,
+      number: target.contact_phone || phone,
+      remoteJid: target.evolution_remote_jid,
+    });
+    if (!leaseAcquisition.acquired) {
+      return reply.code(409).send({
+        error: `Atendimento em andamento por ${leaseAcquisition.lease.ownerName}`,
+        code: 'conversation_lease_active',
+        lease: leaseAcquisition.lease,
+      });
+    }
+    publishRealtimeEvent(request.user!.companyId, 'conversation.updated', leaseRealtimePayload({
+      remoteJid: target.evolution_remote_jid,
+      phone: target.contact_phone || phone,
+      lease: leaseAcquisition.lease,
+    }));
+
+    let dispatch: { ok: boolean; body: any };
+    try {
+      const response = await evolutionRequest(
+        `/message/sendReaction/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+        {
+          method: 'POST',
+          body: JSON.stringify(evolutionReactionPayload({
+            id: target.evolution_message_id,
+            remoteJid: target.evolution_remote_jid,
+            fromMe: target.sender === 'attendant',
+          }, emoji || '')),
+        },
+      );
+      dispatch = {
+        ok: response.ok,
+        body: await response.json().catch(() => ({ error: 'Resposta inválida da Evolution API' })),
+      };
+    } catch (error) {
+      request.log.warn({ err: error, messageId }, 'Falha ao enviar reação para a Evolution API');
+      return reply.code(502).send({ error: 'Evolution API indisponível no momento' });
+    }
+    if (!dispatch.ok) return reply.code(502).send({ error: 'Não foi possível enviar a reação ao WhatsApp' });
+
+    const message = await persistHubReaction({
+      message: target,
+      emoji: emoji || '',
+      user: request.user!,
+    });
+    publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
+      remoteJid: target.evolution_remote_jid,
+      phone: target.contact_phone || phone,
+      messageId: target.evolution_message_id,
+      timestampMs: message.timestampMs,
+      fromMe: true,
+      reaction: true,
+      message,
+    });
+
+    return { message, lease: leaseAcquisition.lease, evolution: dispatch.body };
   });
 
   app.post('/api/evolution/media', { preHandler: requireUser }, async (request, reply) => {

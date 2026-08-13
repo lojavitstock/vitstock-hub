@@ -40,6 +40,12 @@ import { useContactPanel } from '../hooks/useContactPanel';
 import { toQuotedMessage } from '../utils/quotedMessage';
 import { canRestoreComposerDraft, captureComposerSubmission, readConversationDraft, scheduleComposerFocus, writeConversationDraft } from '../utils/composerSubmission';
 import { createOutboundTrace } from '../utils/outboundTrace';
+import {
+  canReactToMessage,
+  nextHubReactionEmoji,
+  withOptimisticHubReaction,
+  type CommonReactionEmoji,
+} from '../utils/messageReactionActions';
 
 
 export const AtendimentoPage: React.FC = () => {
@@ -511,6 +517,67 @@ export const AtendimentoPage: React.FC = () => {
     scheduleComposerFocus(() => composerRef.current?.focus());
   }, []);
 
+  const handleReactMessage = useCallback(async (message: Message, emoji: CommonReactionEmoji) => {
+    if (!activeConv || !canReactToMessage(message)) {
+      setAssignmentFeedback('Aguarde a confirmação da mensagem antes de reagir.');
+      return;
+    }
+    if (activeChatLocked) {
+      setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
+      return;
+    }
+    if (!isMock && whatsappStatus !== 'connected') {
+      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de reagir.');
+      return;
+    }
+
+    const reactionToSend = nextHubReactionEmoji(message, emoji);
+    const optimisticUpdatedAt = Date.now();
+    const targetMessageId = message.id;
+    const providerMessageId = message.rawKey.id.trim();
+    const originalMetadata = message.metadata;
+    setAssignmentFeedback('');
+    setMessages((previous) => previous.map((item) => (
+      item.id === targetMessageId
+        ? withOptimisticHubReaction(item, reactionToSend, {
+            actorId: user?.id,
+            actorName: attendantName,
+            updatedAt: optimisticUpdatedAt,
+          })
+        : item
+    )));
+
+    if (isMock) return;
+    try {
+      const result = await EvolutionApiService.sendMessageReaction({
+        number: activeConv.contact.phone,
+        remoteJid: activeConv.id,
+        messageId: providerMessageId,
+        emoji: reactionToSend,
+      });
+      if (activeConversationIdRef.current !== activeConv.id || !result.message?.metadata) return;
+      setMessages((previous) => previous.map((item) => (
+        item.id === targetMessageId
+          ? { ...item, metadata: result.message.metadata }
+          : item
+      )));
+    } catch (error) {
+      if (activeConversationIdRef.current === activeConv.id) {
+        setMessages((previous) => previous.map((item) => {
+          const optimisticReaction = item.metadata?.reactions?.find((reaction) => (
+            reaction.reactorKey === '__vitstock_self__' && reaction.updatedAt === optimisticUpdatedAt
+          ));
+          const optimisticRemoval = reactionToSend === null && !item.metadata?.reactions?.some((reaction) => (
+            reaction.reactorKey === '__vitstock_self__'
+          ));
+          if (item.id !== targetMessageId || (!optimisticReaction && !optimisticRemoval)) return item;
+          return { ...item, metadata: originalMetadata };
+        }));
+      }
+      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar a reação.');
+    }
+  }, [activeChatLocked, activeConv, activeLease?.ownerName, attendantName, isMock, setAssignmentFeedback, setMessages, user?.id, whatsappStatus]);
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!composerTextRef.current.trim() || !activeConv) return;
@@ -614,10 +681,12 @@ export const AtendimentoPage: React.FC = () => {
       const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, newMsgText, activeConv.id, newMsg.id, quotedMessage);
       traceOutbound?.('http.completed', { ok: true, evolutionMessageId: result?.message?.evolutionMessageId || result?.message?.id || null });
       if (activeConversationIdRef.current === activeConv.id) {
+        const providerMessageId = result?.message?.evolutionMessageId || result?.message?.id;
         setMessages((previous) => previous.map((message) => message.id === newMsg.id ? {
           ...message,
-          id: result?.message?.evolutionMessageId || result?.message?.id || message.id,
+          id: providerMessageId || message.id,
           status: result?.message?.status || result?.status || 'sent',
+          ...(providerMessageId ? { rawKey: { id: providerMessageId, remoteJid: activeConv.id, fromMe: true } } : {}),
         } : message));
         traceOutbound?.('optimistic.acknowledged', { status: result?.message?.status || result?.status || 'sent' });
       }
@@ -777,10 +846,12 @@ export const AtendimentoPage: React.FC = () => {
       });
       traceOutbound('http.completed', { ok: true, evolutionMessageId: result?.message?.evolutionMessageId || result?.message?.id || null });
       if (activeConversationIdRef.current === activeConv.id) {
+        const providerMessageId = result?.message?.evolutionMessageId || result?.message?.id;
         setMessages((previous) => previous.map((message) => message.id === localMessage.id ? {
           ...message,
-          id: result?.message?.evolutionMessageId || result?.message?.id || message.id,
+          id: providerMessageId || message.id,
           status: result?.message?.status || result?.status || 'sent',
+          ...(providerMessageId ? { rawKey: { id: providerMessageId, remoteJid: activeConv.id, fromMe: true } } : {}),
         } : message));
         traceOutbound('optimistic.acknowledged', { status: result?.message?.status || result?.status || 'sent' });
       }
@@ -889,10 +960,12 @@ export const AtendimentoPage: React.FC = () => {
         result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, retryText, activeConv.id, clientMessageId, message.metadata?.quotedMessage);
       }
       if (activeConversationIdRef.current === conversationId) {
+        const providerMessageId = result?.message?.evolutionMessageId || result?.message?.id;
         setMessages((previous) => previous.map((item) => item.id === message.id ? {
           ...item,
-          id: result?.message?.evolutionMessageId || result?.message?.id || item.id,
+          id: providerMessageId || item.id,
           status: result?.message?.status || result?.status || 'sent',
+          ...(providerMessageId ? { rawKey: { id: providerMessageId, remoteJid: activeConv.id, fromMe: true } } : {}),
           metadata: item.metadata?.sentByHub === true
             ? { ...item.metadata, clientMessageId: item.metadata.clientMessageId || clientMessageId }
             : item.metadata,
@@ -1295,6 +1368,7 @@ export const AtendimentoPage: React.FC = () => {
               onLayoutChange={traceTimelineLayoutChange}
               onRetryMessage={handleRetryMessage}
               onReplyMessage={handleReplyMessage}
+              onReactMessage={handleReactMessage}
             />
 
             <MessageComposer

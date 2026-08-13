@@ -37,3 +37,9 @@ export const removeHubAgentPrefix = (content: string, authorName?: string) => {
   if (!author) return content;
   return content.replace(new RegExp(`^\\*${escapeRegExp(author)}\\*\\r?\\n`), '');
 };
+
+/** Uses the exact provider key; no message text or timestamp is involved. */
+export const evolutionReactionPayload = (
+  key: { id: string; remoteJid: string; fromMe: boolean },
+  reaction: string,
+) => ({ key, reaction });

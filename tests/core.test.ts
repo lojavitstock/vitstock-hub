@@ -21,6 +21,7 @@ import {
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
 import {
   evolutionMessageIdFromResponse,
+  evolutionReactionPayload,
   formatHubOutboundText,
   removeHubAgentPrefix,
 } from '../server/src/outboundMessage';
@@ -35,6 +36,11 @@ import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
 import { canDownloadMessageMedia, messageCopyText, messageMenuActionsFor } from '../src/utils/messageActions';
+import {
+  canReactToMessage,
+  nextHubReactionEmoji,
+  withOptimisticHubReaction,
+} from '../src/utils/messageReactionActions';
 import {
   canRestoreComposerDraft,
   captureComposerSubmission,
@@ -1660,18 +1666,60 @@ test('viewer unificado fecha somente com Escape', () => {
   assert.equal(isMediaViewerCloseKey('v'), false);
 });
 
-test('menu de mensagem expõe responder e copiar, com download apenas para mídia', () => {
+test('menu de mensagem expõe reagir, responder e copiar, com download apenas para mídia', () => {
   const text = message('menu-text', 1_709, 'Texto do cliente');
   const document = message('menu-document', 1_710, '[Documento]', 'read', {
     mediaType: 'document',
     rawKey: { id: 'menu-document', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
   });
 
-  assert.deepEqual(messageMenuActionsFor(text), ['reply', 'copy']);
-  assert.deepEqual(messageMenuActionsFor(document), ['reply', 'copy', 'download']);
+  assert.deepEqual(messageMenuActionsFor(text), ['reply', 'react', 'copy']);
+  assert.deepEqual(messageMenuActionsFor(document), ['reply', 'react', 'copy', 'download']);
   assert.equal(canDownloadMessageMedia(text), false);
   assert.equal(canDownloadMessageMedia(document), true);
   assert.equal(messageCopyText(text), 'Texto do cliente');
+});
+
+test('reação outbound exige uma chave real e alterna somente a reação do Hub', () => {
+  const pending = message('pending-message', 1_720, 'Aguardando', 'pending', {
+    rawKey: { id: 'pending-message', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
+  });
+  const target = message('reaction-target', 1_721, 'Mensagem alvo', 'sent', {
+    rawKey: { id: 'provider-message-id', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+    metadata: {
+      reactions: [{ emoji: '❤️', reactorKey: 'jid:5521988888888', actorId: 'jid:5521988888888', fromMe: false, updatedAt: 1_700 }],
+    },
+  });
+
+  assert.equal(canReactToMessage(pending), false);
+  assert.equal(canReactToMessage(target), true);
+  assert.equal(nextHubReactionEmoji(target, '👍'), '👍');
+
+  const reacted = withOptimisticHubReaction(target, '👍', {
+    actorId: 'user-henrique', actorName: 'Henrique', updatedAt: 1_800,
+  });
+  assert.equal(reacted.content, target.content);
+  assert.deepEqual(reacted.metadata?.reactions?.map((reaction) => reaction.emoji), ['❤️', '👍']);
+  assert.equal(reacted.metadata?.reactions?.find((reaction) => reaction.reactorKey === '__vitstock_self__')?.actorId, 'user-henrique');
+  assert.equal(nextHubReactionEmoji(reacted, '👍'), null);
+
+  const removed = withOptimisticHubReaction(reacted, null, { actorId: 'user-henrique', updatedAt: 1_801 });
+  assert.deepEqual(removed.metadata?.reactions?.map((reaction) => reaction.emoji), ['❤️']);
+});
+
+test('payload de reação da Evolution usa somente a chave explícita da mensagem', () => {
+  assert.deepEqual(evolutionReactionPayload({
+    id: 'provider-message-id',
+    remoteJid: '5521999999999@s.whatsapp.net',
+    fromMe: false,
+  }, '❤️'), {
+    key: {
+      id: 'provider-message-id',
+      remoteJid: '5521999999999@s.whatsapp.net',
+      fromMe: false,
+    },
+    reaction: '❤️',
+  });
 });
 
 test('snapshot posterior sem reply não remove a referência persistida do envio interno', () => {
@@ -1806,6 +1854,29 @@ test('a reaction can be replaced or removed by the same participant', () => {
     { emoji: '\ud83d\ude02', reactorKey: 'jid:5521999999999', actorId: 'jid:5521999999999', fromMe: false, updatedAt: 1_700_000_010_000 },
   ]);
   assert.deepEqual(removed, [{ emoji: '\ud83d\udc4d', reactorKey: '__vitstock_self__', actorId: '__vitstock_self__', fromMe: true, updatedAt: 1_700_000_000_000 }]);
+});
+
+test('confirmação da Evolution preserva a autoria da reação enviada pelo Hub', () => {
+  const optimistic = applyProviderReaction([], {
+    targetMessageId: 'reaction-target',
+    reactorKey: '__vitstock_self__',
+    emoji: '🙏',
+    fromMe: true,
+    updatedAt: 2_000,
+    actorId: 'user-henrique',
+    actorName: 'Henrique',
+  });
+  const confirmed = applyProviderReaction(optimistic, {
+    targetMessageId: 'reaction-target',
+    reactorKey: '__vitstock_self__',
+    emoji: '🙏',
+    fromMe: true,
+    updatedAt: 2_001,
+  });
+
+  assert.equal(confirmed.length, 1);
+  assert.equal(confirmed[0]?.actorId, 'user-henrique');
+  assert.equal(confirmed[0]?.actorName, 'Henrique');
 });
 
 test('reaction with a missing original is never associated by phone or content', () => {

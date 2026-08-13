@@ -835,6 +835,29 @@ export class EvolutionApiService {
     }
   }
 
+  static async sendMessageReaction(input: {
+    number: string;
+    remoteJid: string;
+    messageId: string;
+    emoji: '👍' | '❤️' | '😂' | '😮' | '😢' | '🙏' | null;
+  }): Promise<{ message: Message }> {
+    if (USE_MOCK) {
+      return { message: {} as Message };
+    }
+    const response = await apiFetch('/api/evolution/messages/reaction', {
+      method: 'POST',
+      body: JSON.stringify({
+        number: input.number.replace(/\D/g, ''),
+        remoteJid: input.remoteJid,
+        messageId: input.messageId,
+        emoji: input.emoji,
+      }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body?.error || 'Não foi possível enviar a reação');
+    return body;
+  }
+
 
   /**
    * Buscar histórico de mensagens de uma conversa diretamente da Evolution API no Railway

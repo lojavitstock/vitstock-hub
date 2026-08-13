@@ -102,6 +102,7 @@ export interface Message {
       emoji: string;
       reactorKey: string;
       actorId: string;
+      actorName?: string;
       participant?: string;
       fromMe?: boolean;
       updatedAt: number;
