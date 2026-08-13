@@ -41,6 +41,7 @@ import {
   nextHubReactionEmoji,
   withOptimisticHubReaction,
 } from '../src/utils/messageReactionActions';
+import { positionMessageActionMenu, positionReactionPalette } from '../src/utils/messagePopoverPosition';
 import {
   canRestoreComposerDraft,
   captureComposerSubmission,
@@ -1664,6 +1665,32 @@ test('viewer unificado fecha somente com Escape', () => {
   assert.equal(isMediaViewerCloseKey('Escape'), true);
   assert.equal(isMediaViewerCloseKey('Enter'), false);
   assert.equal(isMediaViewerCloseKey('v'), false);
+});
+
+test('posiciona popovers da mensagem dentro da viewport nas duas bordas', () => {
+  const viewport = { width: 400, height: 300 };
+  const menu = { width: 176, height: 172 };
+  const palette = { width: 260, height: 48 };
+  const nearLeft = { left: 0, right: 28, top: 24, bottom: 48, width: 28, height: 24 };
+  const nearRight = { left: 372, right: 400, top: 260, bottom: 284, width: 28, height: 24 };
+
+  const leftMenu = positionMessageActionMenu(nearLeft, menu, viewport, 'left');
+  const rightMenu = positionMessageActionMenu(nearRight, menu, viewport, 'right');
+  const leftPalette = positionReactionPalette(nearLeft, palette, viewport);
+  const rightPalette = positionReactionPalette(nearRight, palette, viewport);
+
+  for (const position of [leftMenu, rightMenu]) {
+    assert.ok(position.left >= 8);
+    assert.ok(position.left + menu.width <= viewport.width - 8);
+    assert.ok(position.top >= 8);
+    assert.ok(position.top + menu.height <= viewport.height - 8);
+  }
+  for (const position of [leftPalette, rightPalette]) {
+    assert.ok(position.left >= 8);
+    assert.ok(position.left + palette.width <= viewport.width - 8);
+    assert.ok(position.top >= 8);
+    assert.ok(position.top + palette.height <= viewport.height - 8);
+  }
 });
 
 test('menu de mensagem expõe reagir, responder e copiar, com download apenas para mídia', () => {

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   CheckCheck,
   ChevronDown,
@@ -34,6 +35,7 @@ import { getDocumentPresentation } from '../../utils/documentMedia';
 import { mediaViewerItemFrom, type MediaViewerItem } from '../../utils/mediaViewer';
 import { canDownloadMessageMedia, messageCopyText } from '../../utils/messageActions';
 import { COMMON_REACTION_EMOJIS, canReactToMessage, type CommonReactionEmoji } from '../../utils/messageReactionActions';
+import { positionMessageActionMenu, positionReactionPalette, type PopoverPosition } from '../../utils/messagePopoverPosition';
 
 type MessageTimelineProps = {
   messages: Message[];
@@ -123,13 +125,42 @@ const MessageActionMenu: React.FC<{
   onDownload?: () => void;
 }> = ({ message, isOpen, align, triggerRef, onClose, onReply, onReact, onCopy, onDownload }) => {
   const menuRef = React.useRef<HTMLDivElement>(null);
+  const paletteRef = React.useRef<HTMLDivElement>(null);
+  const reactionTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [reactionPaletteOpen, setReactionPaletteOpen] = useState(false);
+  const fallbackMenuSize = { width: 176, height: 172 };
+  const fallbackPaletteSize = { width: 260, height: 48 };
+  const initialMenuPosition = (): PopoverPosition => {
+    if (typeof window === 'undefined') return { top: 8, left: 8 };
+    const anchor = triggerRef.current?.getBoundingClientRect();
+    if (!anchor) return { top: 8, left: 8 };
+    return positionMessageActionMenu(anchor, fallbackMenuSize, { width: window.innerWidth, height: window.innerHeight }, align);
+  };
+  const [menuPosition, setMenuPosition] = useState<PopoverPosition>(initialMenuPosition);
+  const [palettePosition, setPalettePosition] = useState<PopoverPosition | null>(null);
+
+  const updatePositions = React.useCallback(() => {
+    const anchor = triggerRef.current?.getBoundingClientRect();
+    if (!anchor) return;
+    const menuRect = menuRef.current?.getBoundingClientRect();
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    setMenuPosition(positionMessageActionMenu(anchor, menuRect || fallbackMenuSize, viewport, align));
+
+    if (!reactionPaletteOpen) {
+      setPalettePosition(null);
+      return;
+    }
+    const paletteAnchor = reactionTriggerRef.current?.getBoundingClientRect();
+    if (!paletteAnchor) return;
+    const paletteRect = paletteRef.current?.getBoundingClientRect();
+    setPalettePosition(positionReactionPalette(paletteAnchor, paletteRect || fallbackPaletteSize, viewport));
+  }, [align, reactionPaletteOpen, triggerRef]);
 
   useEffect(() => {
     if (!isOpen) return;
     const closeOnOutside = (event: PointerEvent) => {
       const target = event.target as Node;
-      if (!menuRef.current?.contains(target) && !triggerRef.current?.contains(target)) onClose();
+      if (!menuRef.current?.contains(target) && !paletteRef.current?.contains(target) && !triggerRef.current?.contains(target)) onClose();
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
@@ -147,14 +178,27 @@ const MessageActionMenu: React.FC<{
     };
   }, [isOpen, onClose, triggerRef]);
 
-  if (!isOpen) return null;
+  React.useLayoutEffect(() => {
+    if (!isOpen) return;
+    updatePositions();
+    window.addEventListener('resize', updatePositions);
+    window.addEventListener('scroll', updatePositions, true);
+    return () => {
+      window.removeEventListener('resize', updatePositions);
+      window.removeEventListener('scroll', updatePositions, true);
+    };
+  }, [isOpen, updatePositions]);
+
+  if (!isOpen || typeof document === 'undefined') return null;
   const itemClass = 'flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-semibold text-slate-200 transition-colors hover:bg-white/10 focus:bg-white/10 focus:outline-none';
   const reactionAvailable = canReactToMessage(message);
 
-  return (
-    <div ref={menuRef} role="menu" aria-label="Ações da mensagem" className={`absolute top-8 z-30 min-w-36 overflow-visible rounded-lg border border-white/10 bg-[#243038] py-1 shadow-2xl ${align === 'left' ? 'left-0' : 'right-0'}`}>
+  return createPortal(
+    <>
+    <div ref={menuRef} role="menu" aria-label="Ações da mensagem" className="fixed z-[60] w-44 rounded-lg border border-white/10 bg-[#243038] py-1 shadow-2xl" style={menuPosition}>
       <button type="button" role="menuitem" onClick={onReply} className={itemClass}><Reply className="h-3.5 w-3.5 text-amber-300" /> Responder</button>
       <button
+        ref={reactionTriggerRef}
         type="button"
         role="menuitem"
         disabled={!reactionAvailable}
@@ -164,8 +208,8 @@ const MessageActionMenu: React.FC<{
       >
         <SmilePlus className="h-3.5 w-3.5 text-amber-300" /> Reagir
       </button>
-      {reactionPaletteOpen && reactionAvailable && (
-        <div role="menu" aria-label="Escolher reação" className={`absolute top-8 z-40 flex gap-1 rounded-xl border border-white/10 bg-[#1a242a] p-1.5 shadow-2xl ${align === 'left' ? 'left-full ml-1' : 'right-full mr-1'}`}>
+      {reactionPaletteOpen && reactionAvailable && palettePosition && (
+        <div ref={paletteRef} role="menu" aria-label="Escolher reação" className="fixed z-[61] flex gap-1 rounded-xl border border-white/10 bg-[#1a242a] p-1.5 shadow-2xl" style={palettePosition || undefined}>
           {COMMON_REACTION_EMOJIS.map((emoji) => (
             <button
               key={emoji}
@@ -187,6 +231,8 @@ const MessageActionMenu: React.FC<{
       {messageCopyText(message) && <button type="button" role="menuitem" onClick={onCopy} className={itemClass}><Copy className="h-3.5 w-3.5 text-slate-300" /> Copiar</button>}
       {onDownload && canDownloadMessageMedia(message) && <button type="button" role="menuitem" onClick={onDownload} className={itemClass}><Download className="h-3.5 w-3.5 text-amber-300" /> Baixar</button>}
     </div>
+    </>,
+    document.body,
   );
 };
 
