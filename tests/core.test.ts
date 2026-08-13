@@ -4,7 +4,7 @@ import test from 'node:test';
 import type { ServerResponse } from 'node:http';
 import { phoneVariants } from '../src/utils/phone';
 import { mergeConversationMessages } from '../src/utils/messageMerge';
-import { normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
+import { isEvolutionReactionEvent, normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
 import { callMessageInfo } from '../src/utils/callMessage';
 import { reconcileConversations, reconcileConversationsMonotonic } from '../src/utils/conversationReconciliation';
 import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../src/utils/requestCoordinator';
@@ -26,6 +26,11 @@ import {
 } from '../server/src/outboundMessage';
 import { createOutboundRequestCoordinator, outboundDispatchAction, outboundIdempotencyLockKey } from '../server/src/outboundIdempotency';
 import { isNonRenderableProviderMessage, unwrapProviderMessage } from '../server/src/providerMessagePolicy';
+import {
+  applyProviderReaction,
+  isProviderReactionEvent,
+  providerReactionUpdate,
+} from '../server/src/messageReactions';
 import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
@@ -1629,6 +1634,139 @@ test('mensagens comuns não são tratadas como resposta apenas por terem conteú
   const merged = mergeConversationMessages([ordinary], [sameText]);
   assert.equal(merged[0]?.metadata?.quotedMessage, undefined);
   assert.equal(merged[1]?.metadata?.quotedMessage, undefined);
+});
+
+test('Evolution reaction uses reactionMessage.key.id as the only target identity', () => {
+  const event = {
+    key: {
+      id: 'reaction-event-1',
+      remoteJid: '5521999999999@s.whatsapp.net',
+      participant: '5521999999999@s.whatsapp.net',
+      fromMe: false,
+    },
+    message: {
+      reactionMessage: {
+        key: { id: 'original-message-1', remoteJid: '5521988888888@s.whatsapp.net', fromMe: true },
+        text: '\u2764\ufe0f',
+      },
+    },
+  };
+
+  const update = providerReactionUpdate(event);
+  assert.equal(isProviderReactionEvent(event), true);
+  assert.equal(isEvolutionReactionEvent(event), true);
+  assert.equal(update?.targetMessageId, 'original-message-1');
+  assert.equal(update?.actorId, '5521999999999@s.whatsapp.net');
+  assert.equal(update?.emoji, '\u2764\ufe0f');
+});
+
+test('reaction SSE updates the original Hub message without adding a timeline item', () => {
+  const original = message('original-reaction-target', 1_700, 'Original message', 'read', {
+    sender: 'attendant',
+    senderName: 'Henrique',
+    metadata: { sentByHub: true, sentByUserId: 'henrique', sentByUserName: 'Henrique' },
+  });
+  const reacted = {
+    ...original,
+    metadata: {
+      ...original.metadata,
+      reactions: [{ emoji: '\ud83d\udc4d', actorId: '5521999999999@s.whatsapp.net', fromMe: false }],
+    },
+  };
+  const updated = reconcileRealtimeMessages([original], 'conversation-1', {
+    type: 'message.upsert',
+    reaction: true,
+    message: reacted,
+  });
+
+  assert.equal(updated?.length, 1);
+  assert.equal(updated?.[0]?.id, 'original-reaction-target');
+  assert.deepEqual(updated?.[0]?.metadata?.reactions, reacted.metadata?.reactions);
+  assert.equal(updated?.[0]?.metadata?.sentByHub, true);
+});
+
+test('equivalent reaction events from SSE, polling and refresh preserve identity', () => {
+  const current = [message('reaction-stable', 1_700, 'Message', 'read', {
+    metadata: {
+      reactions: [{ emoji: '\ud83d\ude0d', actorId: '5521999999999@s.whatsapp.net', fromMe: false }],
+    },
+  })];
+  const equivalentSnapshot = {
+    ...current[0],
+    metadata: { reactions: [{ emoji: '\ud83d\ude0d', actorId: '5521999999999@s.whatsapp.net', fromMe: false }] },
+  };
+  const sse = reconcileRealtimeMessages(current, 'conversation-1', {
+    type: 'message.upsert',
+    reaction: true,
+    message: equivalentSnapshot,
+  });
+  const polling = mergeConversationMessages(sse || current, [equivalentSnapshot]);
+
+  assert.equal(sse, current);
+  assert.equal(polling, current);
+  assert.equal(polling.length, 1);
+  assert.equal(polling[0]?.metadata?.reactions?.length, 1);
+});
+
+test('a reaction can be replaced or removed by the same participant', () => {
+  const initial = [
+    { emoji: '\u2764\ufe0f', actorId: 'client-a', fromMe: false },
+    { emoji: '\ud83d\udc4d', actorId: '__vitstock_self__', fromMe: true },
+  ];
+  const swapped = applyProviderReaction(initial, {
+    targetMessageId: 'reaction-target',
+    actorId: 'client-a',
+    emoji: '\ud83d\ude02',
+    fromMe: false,
+  });
+  const removed = applyProviderReaction(swapped, {
+    targetMessageId: 'reaction-target',
+    actorId: 'client-a',
+    emoji: '',
+    fromMe: false,
+  });
+
+  assert.deepEqual(swapped, [
+    { emoji: '\ud83d\udc4d', actorId: '__vitstock_self__', fromMe: true },
+    { emoji: '\ud83d\ude02', actorId: 'client-a', fromMe: false },
+  ]);
+  assert.deepEqual(removed, [{ emoji: '\ud83d\udc4d', actorId: '__vitstock_self__', fromMe: true }]);
+});
+
+test('reaction with a missing original is never associated by phone or content', () => {
+  const event = {
+    key: { id: 'reaction-missing-source', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+    message: { reactionMessage: { key: { id: 'missing-original' }, text: '\ud83d\udc4d' } },
+  };
+  const update = providerReactionUpdate(event)!;
+  const unrelated = message('same-content-but-not-target', 1_700, 'Similar message');
+
+  assert.notEqual(unrelated.id, update.targetMessageId);
+  assert.equal([unrelated].find((item) => item.id === update.targetMessageId), undefined);
+  assert.equal(isEvolutionReactionEvent(event), true);
+});
+
+test('reactions preserve replies and external authorship metadata', () => {
+  const current = [message('reply-with-reaction', 1_700, 'Reply', 'read', {
+    metadata: {
+      sentOutsideHub: true,
+      quotedMessage: { messageId: 'source', content: 'Original' },
+      reactions: [{ emoji: '\u2764\ufe0f', actorId: 'client-a', fromMe: false }],
+    },
+  })];
+  const equivalent = {
+    ...current[0],
+    metadata: {
+      ...current[0].metadata,
+      quotedMessage: { ...current[0].metadata?.quotedMessage },
+      reactions: [{ emoji: '\u2764\ufe0f', actorId: 'client-a', fromMe: false }],
+    },
+  };
+  const merged = mergeConversationMessages(current, [equivalent]);
+
+  assert.equal(merged, current);
+  assert.equal(merged[0]?.metadata?.quotedMessage?.messageId, 'source');
+  assert.equal(merged[0]?.metadata?.sentOutsideHub, true);
 });
 
 test('outbound idempotency reuses an accepted client message id', () => {

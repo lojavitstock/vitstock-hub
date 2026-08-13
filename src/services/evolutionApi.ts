@@ -1,6 +1,6 @@
 import { ChatStatus, WhatsappInstance, Conversation, Message } from '../types';
 import { mockInstances, mockConversations } from './mockData';
-import { evolutionMessagePreview, normalizeEvolutionMessage } from './evolutionMessageAdapter';
+import { evolutionMessagePreview, isEvolutionReactionEvent, normalizeEvolutionMessage } from './evolutionMessageAdapter';
 import { phoneVariants } from '../utils/phone';
 import { callMessageInfo } from '../utils/callMessage';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
@@ -862,7 +862,9 @@ export class EvolutionApiService {
       }
 
       // A Evolution API retorna do mais recente para o mais antigo. Invertemos para exibir cronologicamente.
-      const chronologicalMsgs = [...rawMsgs].reverse();
+      const chronologicalMsgs = [...rawMsgs]
+        .reverse()
+        .filter((record: any) => !isEvolutionReactionEvent(record));
 
       return {
         messages: chronologicalMsgs.map((m: any, idx: number) => normalizeEvolutionMessage(m, idx, remoteJid, attendantLabel)),

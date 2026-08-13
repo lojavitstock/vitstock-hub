@@ -181,6 +181,7 @@ export const useConversationInbox = ({
 
     const unsubscribe = EvolutionApiService.subscribeToRealtimeEvents((event) => {
       if (event.type === 'message.upsert'
+        && event.reaction !== true
         && messageNotificationDeduperRef.current.shouldNotify(event.message)) {
         playNotificationSound();
       }

@@ -11,6 +11,7 @@ import { acquireConversationLease, type ConversationLease } from './conversation
 import { evolutionMessageIdFromResponse, formatHubOutboundText, removeHubAgentPrefix } from './outboundMessage.js';
 import { createOutboundRequestCoordinator, outboundDispatchAction, outboundIdempotencyLockKey } from './outboundIdempotency.js';
 import { isNonRenderableProviderMessage, providerMessageType, unwrapProviderMessage } from './providerMessagePolicy.js';
+import { applyProviderReaction, isProviderReactionEvent, normalizeStoredReactions, providerReactionUpdate } from './messageReactions.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -222,7 +223,7 @@ async function loadLocalInboxChats(companyId: string) {
        FROM messages m
        WHERE m.conversation_id = c.id
          AND m.is_internal_note = false
-         AND COALESCE(m.metadata->>'providerType', '') NOT IN ('secretEncryptedMessage', 'senderKeyDistributionMessage')
+         AND COALESCE(m.metadata->>'providerType', '') NOT IN ('secretEncryptedMessage', 'senderKeyDistributionMessage', 'reactionMessage')
        ORDER BY m.sent_at DESC
        LIMIT 1
      ) latest ON true
@@ -876,6 +877,106 @@ function localMessageToProviderRecord(row: any) {
   };
 }
 
+function storedMessageToRealtimeMessage(row: any) {
+  const timestampMs = new Date(row.sent_at).getTime();
+  const id = row.evolution_message_id || row.id;
+  return {
+    id,
+    conversationId: row.evolution_remote_jid,
+    sender: row.sender,
+    senderName: row.sender_name || undefined,
+    content: row.content,
+    mediaUrl: row.media_url || undefined,
+    mediaType: row.media_type || undefined,
+    metadata: row.metadata || {},
+    rawKey: { id, remoteJid: row.evolution_remote_jid, fromMe: row.sender === 'attendant' },
+    timestampMs,
+    timestamp: new Date(timestampMs).toISOString(),
+    status: row.status,
+    isInternalNote: false,
+  };
+}
+
+type ProviderPersistenceResult = {
+  persisted: boolean;
+  ignored?: boolean;
+  reaction?: boolean;
+  originalFound?: boolean;
+  message?: any;
+};
+
+async function persistProviderReaction(companyId: string, record: any) {
+  const update = providerReactionUpdate(record);
+  if (!update) return undefined;
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    // reactionMessage.key.id is the only association used here. If the
+    // original has not arrived yet, no visual message is invented.
+    const original = await client.query<{
+      id: string;
+      evolution_message_id: string | null;
+      sender: 'contact' | 'attendant' | 'system';
+      sender_name: string | null;
+      content: string;
+      media_url: string | null;
+      media_type: string | null;
+      metadata: Record<string, any>;
+      status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
+      sent_at: string;
+      evolution_remote_jid: string;
+    }>(
+      `SELECT m.id, m.evolution_message_id, m.sender, m.sender_name, m.content,
+              m.media_url, m.media_type, m.metadata, m.status, m.sent_at,
+              c.evolution_remote_jid
+       FROM messages m
+       INNER JOIN conversations c ON c.id = m.conversation_id
+       WHERE m.company_id = $1
+         AND (m.evolution_message_id = $2 OR m.id::text = $2)
+       ORDER BY m.sent_at DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [companyId, update.targetMessageId],
+    );
+    const row = original.rows[0];
+    if (!row) {
+      await client.query('COMMIT');
+      return { persisted: false, reaction: true, originalFound: false, message: undefined };
+    }
+
+    const reactions = normalizeStoredReactions(row.metadata?.reactions);
+    const nextReactions = applyProviderReaction(reactions, update);
+    if (nextReactions === reactions) {
+      await client.query('COMMIT');
+      // An equivalent provider event must not cause a second realtime update
+      // for the original message.
+      return { persisted: false, reaction: true, originalFound: true, message: undefined };
+    }
+
+    const metadata = { ...(row.metadata || {}) };
+    delete metadata.reaction;
+    if (nextReactions.length) metadata.reactions = nextReactions;
+    else delete metadata.reactions;
+    const updated = await client.query<{ metadata: Record<string, any> }>(
+      `UPDATE messages
+       SET metadata = $1::jsonb
+       WHERE id = $2
+       RETURNING metadata`,
+      [JSON.stringify(metadata), row.id],
+    );
+    row.metadata = updated.rows[0]?.metadata || metadata;
+    await client.query('COMMIT');
+    localInboxCache.delete(companyId);
+    return { persisted: false, reaction: true, originalFound: true, message: storedMessageToRealtimeMessage(row) };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function hydrateQuotedMessageMetadata(
   client: Pick<PoolClient, 'query'>,
   companyId: string,
@@ -1019,9 +1120,16 @@ async function findOrCreateConversation(
   return conversationId;
 }
 
-async function persistProviderMessage(companyId: string, record: any, options: { incrementUnread: boolean; reopen: boolean; fallbackPhone?: string }) {
+async function persistProviderMessage(
+  companyId: string,
+  record: any,
+  options: { incrementUnread: boolean; reopen: boolean; fallbackPhone?: string },
+): Promise<ProviderPersistenceResult | undefined> {
   if (isNonRenderableProviderMessage(record)) {
     return { persisted: false, ignored: true, message: undefined };
+  }
+  if (isProviderReactionEvent(record)) {
+    return persistProviderReaction(companyId, record);
   }
   const local = providerRecordToLocalMessage(record, options.fallbackPhone);
   if (!local.id || !local.remoteJid || local.remoteJid.endsWith('@g.us') || !local.phone) return undefined;
@@ -1938,7 +2046,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         AND ${beforeFilter}
         AND ${afterFilter}
         AND m.is_internal_note = false
-        AND COALESCE(m.metadata->>'providerType', '') NOT IN ('secretEncryptedMessage', 'senderKeyDistributionMessage')
+        AND COALESCE(m.metadata->>'providerType', '') NOT IN ('secretEncryptedMessage', 'senderKeyDistributionMessage', 'reactionMessage')
       ORDER BY m.sent_at DESC
       LIMIT $${pageSizeParam}`, pageQueryParams);
 
@@ -1974,12 +2082,17 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
 
     const recordsById = new Map<string, any>();
+    const reactionRecords: any[] = [];
     for (const response of successfulResponses) {
       const body: any = await response.json().catch(() => ({}));
       const records = body?.messages?.records || body?.records || (Array.isArray(body) ? body : []);
       if (!Array.isArray(records)) continue;
       records.forEach((record: any, index: number) => {
         if (isNonRenderableProviderMessage(record)) return;
+        if (isProviderReactionEvent(record)) {
+          reactionRecords.push(record);
+          return;
+        }
         const id = record?.key?.id || record?.id || `${record?.messageTimestamp || 'unknown'}-${index}`;
         if (!recordsById.has(String(id))) recordsById.set(String(id), record);
       });
@@ -1996,6 +2109,17 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         request.log.warn({ err: error, messageId: providerMessageId(record) }, 'Falha ao reconciliar mensagem da Evolution com o PostgreSQL');
       }
     }
+    for (const record of reactionRecords) {
+      try {
+        await persistProviderMessage(request.user!.companyId, record, {
+          incrementUnread: false,
+          reopen: false,
+          fallbackPhone: parsed.data.phone,
+        });
+      } catch (error) {
+        request.log.warn({ err: error, messageId: providerMessageId(record) }, 'Falha ao reconciliar reação da Evolution com o PostgreSQL');
+      }
+    }
 
     const reconciledMessages = await db.query(`
       SELECT m.id, m.evolution_message_id, m.sender, m.sender_name, m.content, m.media_url,
@@ -2007,7 +2131,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         AND ${beforeFilter}
         AND ${afterFilter}
         AND m.is_internal_note = false
-        AND COALESCE(m.metadata->>'providerType', '') NOT IN ('secretEncryptedMessage', 'senderKeyDistributionMessage')
+        AND COALESCE(m.metadata->>'providerType', '') NOT IN ('secretEncryptedMessage', 'senderKeyDistributionMessage', 'reactionMessage')
       ORDER BY m.sent_at DESC
       LIMIT $${pageSizeParam}`, pageQueryParams);
 
@@ -2463,14 +2587,15 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
               persistedMessages += 1;
             }
             const remoteJid = providerRemoteJid(record);
-            if (remoteJid) {
+            if (remoteJid && persisted?.message) {
               publishRealtimeEvent(companyId, 'message.upsert', {
                 remoteJid,
                 phone: providerPhone(record),
-                messageId: providerMessageId(record),
-                timestampMs: providerMessageDate(record).getTime(),
+                messageId: persisted.message.id,
+                timestampMs: persisted.message.timestampMs,
                 fromMe: record?.key?.fromMe === true,
-                ...(persisted?.message ? { message: persisted.message } : {}),
+                ...(persisted.reaction ? { reaction: true } : {}),
+                message: persisted.message,
               });
             }
           } catch (error) {

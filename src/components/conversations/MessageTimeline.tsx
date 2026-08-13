@@ -65,6 +65,22 @@ const isMediaPlaceholder = (message: Message) => {
   return message.mediaType === 'sticker' && (content === '[figurinha]' || content === '[sticker]' || !content);
 };
 
+const ReactionBadges: React.FC<{ reactions: NonNullable<NonNullable<Message['metadata']>['reactions']>; align: 'left' | 'right' }> = ({ reactions, align }) => {
+  const grouped = reactions.reduce<Array<{ emoji: string; count: number }>>((groups, reaction) => {
+    const current = groups.find((group) => group.emoji === reaction.emoji);
+    if (current) current.count += 1;
+    else groups.push({ emoji: reaction.emoji, count: 1 });
+    return groups;
+  }, []);
+  if (!grouped.length) return null;
+
+  return (
+    <span className={`absolute -bottom-3 z-10 inline-flex min-h-5 max-w-[170px] items-center gap-1 rounded-full border border-white/15 bg-[#20292f] px-1.5 py-0.5 text-[12px] leading-none shadow-md ${align === 'right' ? 'right-2' : 'left-2'}`} aria-label="Reações da mensagem">
+      {grouped.map((reaction) => <span key={reaction.emoji}>{reaction.emoji}{reaction.count > 1 ? <sup className="ml-0.5 text-[9px] font-bold text-slate-200">{reaction.count}</sup> : null}</span>)}
+    </span>
+  );
+};
+
 const QuotedMessageBlock: React.FC<{
   message: Message;
   onOpenOriginal: (messageId: string) => void;
@@ -585,8 +601,9 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
               <SpecialMessageContent message={message} contactPhone={activeConversation.contact.phone} />
               <InteractiveMessageContent message={message} />
               {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap">{message.content}</p>}
+              {message.metadata?.reactions?.length ? <ReactionBadges reactions={message.metadata.reactions} align={isMe ? 'right' : 'left'} /> : null}
             </div>
-            <div className={`mt-1 flex items-center gap-1 text-xs text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
+            <div className={`${message.metadata?.reactions?.length ? 'mt-4' : 'mt-1'} flex items-center gap-1 text-xs text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
               <span>{formatMessageTimestamp(message.timestampMs, message.timestamp)}</span>
               {isMe && message.status === 'failed' && <span className="font-bold text-red-300">Falha no envio</span>}
               {isMe && message.status === 'pending' && <RefreshCw className="h-3.5 w-3.5 animate-spin text-amber-300" aria-label="Enviando" />}

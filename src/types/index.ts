@@ -98,6 +98,12 @@ export interface Message {
       displayName: string;
       phone?: string;
     };
+    reactions?: Array<{
+      emoji: string;
+      actorId: string;
+      participant?: string;
+      fromMe?: boolean;
+    }>;
     reaction?: string;
     systemLabel?: string;
     forwarded?: boolean;

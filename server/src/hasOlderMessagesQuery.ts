@@ -33,6 +33,7 @@ export function buildHasOlderMessagesQuery(
         AND ${conversationFilter}
         AND m.sent_at <= to_timestamp($${afterParam}::double precision / 1000)
         AND m.is_internal_note = false
+        AND COALESCE(m.metadata->>'providerType', '') <> 'reactionMessage'
       LIMIT 1`,
     values,
   };

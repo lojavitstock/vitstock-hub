@@ -62,6 +62,20 @@ const areDocumentsEqual = (
   && Boolean(previous) === Boolean(next)
 );
 
+const areReactionsEqual = (
+  previous?: NonNullable<Message['metadata']>['reactions'],
+  next?: NonNullable<Message['metadata']>['reactions'],
+) => {
+  if (previous === next) return true;
+  if (!previous || !next || previous.length !== next.length) return false;
+  return previous.every((reaction, index) => (
+    reaction.emoji === next[index]?.emoji
+    && reaction.actorId === next[index]?.actorId
+    && reaction.participant === next[index]?.participant
+    && reaction.fromMe === next[index]?.fromMe
+  ));
+};
+
 const areMetadataEqual = (
   previous?: Message['metadata'],
   next?: Message['metadata'],
@@ -79,6 +93,7 @@ const areMetadataEqual = (
     && previous.clientMessageId === next.clientMessageId
     && areQuotedMessagesEqual(previous.quotedMessage, next.quotedMessage)
     && areDocumentsEqual(previous.document, next.document)
+    && areReactionsEqual(previous.reactions, next.reactions)
     && previous.reaction === next.reaction
     && previous.systemLabel === next.systemLabel
     && previous.forwarded === next.forwarded
@@ -138,24 +153,27 @@ const hubClientMessageId = (message: Message) => (
 );
 
 const preserveHubAttribution = (current: Message, incoming: Message): Message => {
-  if (current.metadata?.sentByHub !== true || incoming.metadata?.sentByHub === true) return incoming;
+  const withPreservedReactions = current.metadata?.reactions?.length && !incoming.metadata?.reactions
+    ? { ...incoming, metadata: { ...(incoming.metadata || {}), reactions: current.metadata.reactions } }
+    : incoming;
+  if (current.metadata?.sentByHub !== true || withPreservedReactions.metadata?.sentByHub === true) return withPreservedReactions;
 
   // A provider snapshot can confirm the same Evolution id without carrying
   // Hub-only metadata. The existing item is the persisted proof of authorship,
   // so retain it instead of reclassifying a Hub send as WhatsApp Web.
   const metadata = {
-    ...(incoming.metadata || {}),
+    ...(withPreservedReactions.metadata || {}),
     sentByHub: true,
     sentByUserId: current.metadata.sentByUserId,
     sentByUserName: current.metadata.sentByUserName,
     ...(hubClientMessageId(current) ? { clientMessageId: hubClientMessageId(current) } : {}),
-    ...(current.metadata.quotedMessage && !incoming.metadata?.quotedMessage
+    ...(current.metadata.quotedMessage && !withPreservedReactions.metadata?.quotedMessage
       ? { quotedMessage: current.metadata.quotedMessage }
       : {}),
   };
   delete metadata.sentOutsideHub;
   return {
-    ...incoming,
+    ...withPreservedReactions,
     senderName: current.senderName,
     content: current.content,
     metadata,

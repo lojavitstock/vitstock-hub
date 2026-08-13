@@ -10,6 +10,7 @@ export type RealtimeEventPayload = {
   messageId?: string;
   timestampMs?: number;
   fromMe?: boolean;
+  reaction?: boolean;
   status?: string;
   assignedUserId?: string | null;
   assignedUserName?: string | null;
@@ -228,6 +229,9 @@ export const reconcileRealtimeConversation = (
   event: RealtimeEventPayload,
 ): Conversation[] | null => {
   if (event.type !== 'conversation.updated' && event.type !== 'message.upsert') return null;
+  // A reaction updates metadata on an existing message. It is never a new
+  // conversation activity and must not move the chat or alter unread state.
+  if (event.type === 'message.upsert' && event.reaction === true) return previous;
 
   const index = previous.findIndex((conversation) => eventMatchesConversation(conversation, event));
   if (index < 0) return null;

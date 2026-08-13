@@ -114,6 +114,15 @@ export const evolutionMessagePreview = (record: any): string | undefined => (
   messageText(record?.message || record, record)
 );
 
+/**
+ * A reaction is an update to the message referenced by reactionMessage.key,
+ * not a standalone timeline message. The backend persists that update on the
+ * original message; this guard also protects the client from legacy/raw rows.
+ */
+export const isEvolutionReactionEvent = (record: ProviderRecord | any): boolean => Boolean(
+  unwrapMessage(record?.message || record)?.reactionMessage,
+);
+
 const quotedMessageFromContext = (context: any): NonNullable<NonNullable<Message['metadata']>['quotedMessage']> | undefined => {
   const messageId = firstText(context?.stanzaId, context?.stanzaID, context?.quotedMessage?.key?.id);
   if (!messageId) return undefined;
