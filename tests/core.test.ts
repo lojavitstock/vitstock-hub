@@ -23,6 +23,7 @@ import { formatHubOutboundText, removeHubAgentPrefix } from '../server/src/outbo
 import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
+import { canDownloadMessageMedia, messageCopyText, messageMenuActionsFor } from '../src/utils/messageActions';
 import {
   acquireConversationLease,
   canAcquireConversationLease,
@@ -1551,6 +1552,20 @@ test('viewer unificado fecha somente com Escape', () => {
   assert.equal(isMediaViewerCloseKey('Escape'), true);
   assert.equal(isMediaViewerCloseKey('Enter'), false);
   assert.equal(isMediaViewerCloseKey('v'), false);
+});
+
+test('menu de mensagem expõe responder e copiar, com download apenas para mídia', () => {
+  const text = message('menu-text', 1_709, 'Texto do cliente');
+  const document = message('menu-document', 1_710, '[Documento]', 'read', {
+    mediaType: 'document',
+    rawKey: { id: 'menu-document', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+  });
+
+  assert.deepEqual(messageMenuActionsFor(text), ['reply', 'copy']);
+  assert.deepEqual(messageMenuActionsFor(document), ['reply', 'copy', 'download']);
+  assert.equal(canDownloadMessageMedia(text), false);
+  assert.equal(canDownloadMessageMedia(document), true);
+  assert.equal(messageCopyText(text), 'Texto do cliente');
 });
 
 test('snapshot posterior sem reply não remove a referência persistida do envio interno', () => {

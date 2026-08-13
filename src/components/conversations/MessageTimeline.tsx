@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   CheckCheck,
+  ChevronDown,
   Copy,
   Download,
   ExternalLink,
@@ -30,6 +31,7 @@ import { formatMessageDay, formatMessageTimestamp } from './conversationFormatte
 import { quotedMediaLabel, quotedMessageExcerpt } from '../../utils/quotedMessage';
 import { getDocumentPresentation } from '../../utils/documentMedia';
 import { mediaViewerItemFrom, type MediaViewerItem } from '../../utils/mediaViewer';
+import { canDownloadMessageMedia, messageCopyText } from '../../utils/messageActions';
 
 type MessageTimelineProps = {
   messages: Message[];
@@ -82,6 +84,51 @@ const QuotedMessageBlock: React.FC<{
       <span className="block truncate text-xs font-bold text-emerald-200">{quoted.authorName || 'Mensagem citada'}</span>
       <span className="mt-0.5 block truncate text-xs text-slate-200/80">{mediaLabel ? `${mediaLabel}${quoted.content && !hasOnlyMediaPlaceholder ? ` · ${quoted.content}` : ''}` : excerpt}</span>
     </button>
+  );
+};
+
+const MessageActionMenu: React.FC<{
+  message: Message;
+  isOpen: boolean;
+  align: 'left' | 'right';
+  triggerRef: React.RefObject<HTMLButtonElement>;
+  onClose: () => void;
+  onReply: () => void;
+  onCopy: () => void;
+  onDownload?: () => void;
+}> = ({ message, isOpen, align, triggerRef, onClose, onReply, onCopy, onDownload }) => {
+  const menuRef = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const closeOnOutside = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!menuRef.current?.contains(target) && !triggerRef.current?.contains(target)) onClose();
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      window.requestAnimationFrame(() => triggerRef.current?.focus());
+    };
+    window.addEventListener('pointerdown', closeOnOutside, true);
+    window.addEventListener('keydown', closeOnEscape, true);
+    return () => {
+      window.removeEventListener('pointerdown', closeOnOutside, true);
+      window.removeEventListener('keydown', closeOnEscape, true);
+    };
+  }, [isOpen, onClose, triggerRef]);
+
+  if (!isOpen) return null;
+  const itemClass = 'flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-semibold text-slate-200 transition-colors hover:bg-white/10 focus:bg-white/10 focus:outline-none';
+
+  return (
+    <div ref={menuRef} role="menu" aria-label="Ações da mensagem" className={`absolute top-8 z-30 min-w-36 overflow-hidden rounded-lg border border-white/10 bg-[#243038] py-1 shadow-2xl ${align === 'left' ? 'left-0' : 'right-0'}`}>
+      <button type="button" role="menuitem" onClick={onReply} className={itemClass}><Reply className="h-3.5 w-3.5 text-amber-300" /> Responder</button>
+      {messageCopyText(message) && <button type="button" role="menuitem" onClick={onCopy} className={itemClass}><Copy className="h-3.5 w-3.5 text-slate-300" /> Copiar</button>}
+      {onDownload && canDownloadMessageMedia(message) && <button type="button" role="menuitem" onClick={onDownload} className={itemClass}><Download className="h-3.5 w-3.5 text-amber-300" /> Baixar</button>}
+    </div>
   );
 };
 
@@ -247,6 +294,9 @@ const DocumentMessageContent: React.FC<{
         : presentation.kind === 'word' || presentation.kind === 'text'
           ? FileText
           : File;
+  const humanMetadata = presentation.kind === 'pdf'
+    ? ['PDF', presentation.formattedSize].filter(Boolean).join(' · ')
+    : [presentation.extension, presentation.formattedSize].filter(Boolean).join(' · ');
 
   useEffect(() => {
     if (!openRequested || !source) return;
@@ -267,40 +317,37 @@ const DocumentMessageContent: React.FC<{
     }
   };
 
-  return (
-    <div className="my-1 w-[320px] max-w-[58vw] overflow-hidden rounded-xl border border-white/10 bg-black/25 shadow-inner">
-      <button
-        type="button"
-        onClick={presentation.kind === 'pdf' ? (event) => openPreview(event.currentTarget) : undefined}
-        className={`flex w-full items-center gap-3 p-3 text-left ${presentation.kind === 'pdf' ? 'transition-colors hover:bg-white/5' : ''}`}
-        title={presentation.kind === 'pdf' ? 'Visualizar PDF' : undefined}
-      >
-        <span className={`flex h-11 w-10 flex-shrink-0 items-center justify-center rounded-lg ${presentation.kind === 'pdf' ? 'bg-red-500/15 text-red-300' : 'bg-amber-400/10 text-amber-300'}`}>
-          <Icon className="h-5 w-5" />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-xs font-bold text-slate-100">{presentation.fileName}</span>
-          <span className="mt-0.5 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-            {presentation.extension}{presentation.formattedSize ? ` · ${presentation.formattedSize}` : ''}
-          </span>
-        </span>
-        {presentation.kind === 'pdf' && <span className="text-[10px] font-bold text-amber-300">Visualizar</span>}
-      </button>
-      <div className="flex items-center justify-between border-t border-white/10 px-3 py-2">
-        <span className="text-[10px] text-slate-500">{presentation.mimeType || 'Documento'}</span>
-        {source ? (
-          <a href={source} download={presentation.fileName} className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-bold text-amber-300 transition-colors hover:bg-white/5 hover:text-amber-200">
-            <Download className="h-3.5 w-3.5" /> Baixar
-          </a>
-        ) : canLoadSource ? (
-          <button type="button" onClick={onLoadSource} disabled={loading} className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-bold text-amber-300 transition-colors hover:bg-white/5 hover:text-amber-200 disabled:cursor-wait disabled:text-slate-400">
-            {loading ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-            {loading ? 'Preparando...' : 'Baixar'}
-          </button>
-        ) : (
-          <span className="text-[11px] font-semibold text-slate-500">Arquivo indisponível</span>
-        )}
+  const downloadAction = source ? (
+    <a href={source} download={presentation.fileName} className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-bold text-amber-300 transition-colors hover:bg-white/5 hover:text-amber-200">
+      <Download className="h-3.5 w-3.5" /> Baixar
+    </a>
+  ) : canLoadSource ? (
+    <button type="button" onClick={onLoadSource} disabled={loading} className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-bold text-amber-300 transition-colors hover:bg-white/5 hover:text-amber-200 disabled:cursor-wait disabled:text-slate-400">
+      {loading ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+      {loading ? 'Preparando...' : 'Baixar'}
+    </button>
+  ) : <span className="text-[11px] font-semibold text-slate-500">Arquivo indisponível</span>;
+
+  if (presentation.kind === 'pdf') {
+    return (
+      <div className="my-1 w-[320px] max-w-[58vw] overflow-hidden rounded-xl border border-white/10 bg-black/25 shadow-inner">
+        <button type="button" onClick={(event) => openPreview(event.currentTarget)} className="flex h-28 w-full items-center justify-center bg-gradient-to-br from-red-100 via-white to-slate-200 text-left transition-opacity hover:opacity-90" title="Abrir PDF">
+          <span className="flex h-16 w-12 flex-col items-center justify-center rounded-md border border-red-300/60 bg-white text-red-500 shadow-sm"><FileText className="h-6 w-6" /><span className="mt-1 text-[9px] font-extrabold">PDF</span></span>
+        </button>
+        <div className="flex items-center gap-2.5 border-t border-white/10 px-3 py-2.5">
+          <span className="flex h-8 w-7 flex-shrink-0 items-center justify-center rounded bg-red-500/15 text-red-300"><FileText className="h-4 w-4" /></span>
+          <span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold text-slate-100">{presentation.fileName}</span><span className="mt-0.5 block text-[10px] font-semibold text-slate-400">{humanMetadata}</span></span>
+          {downloadAction}
+        </div>
       </div>
+    );
+  }
+
+  return (
+    <div className="my-1 flex w-[320px] max-w-[58vw] items-center gap-3 rounded-xl border border-white/10 bg-black/25 px-3 py-3 shadow-inner">
+      <span className="flex h-11 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-amber-400/10 text-amber-300"><Icon className="h-5 w-5" /></span>
+      <span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold text-slate-100">{presentation.fileName}</span><span className="mt-0.5 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">{humanMetadata}</span></span>
+      {downloadAction}
     </div>
   );
 };
@@ -379,11 +426,16 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
   const shouldShowIndicator = newMessagesCount > 0 && Boolean(onJumpToLatest);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [viewerItem, setViewerItem] = useState<MediaViewerItem | null>(null);
+  const [openMenuMessageId, setOpenMenuMessageId] = useState<string | null>(null);
+  const [messageActionError, setMessageActionError] = useState<string | null>(null);
   const highlightTimeoutRef = React.useRef<number | undefined>();
   const viewerTriggerRef = React.useRef<HTMLElement | null>(null);
+  const menuTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const actionErrorTimeoutRef = React.useRef<number | undefined>();
 
   useEffect(() => () => {
     if (highlightTimeoutRef.current) window.clearTimeout(highlightTimeoutRef.current);
+    if (actionErrorTimeoutRef.current) window.clearTimeout(actionErrorTimeoutRef.current);
   }, []);
 
   const openQuotedMessage = (messageId: string) => {
@@ -407,20 +459,64 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
     window.requestAnimationFrame(() => viewerTriggerRef.current?.focus());
   }, []);
 
+  const showMessageActionError = React.useCallback((messageId: string) => {
+    setMessageActionError(messageId);
+    if (actionErrorTimeoutRef.current) window.clearTimeout(actionErrorTimeoutRef.current);
+    actionErrorTimeoutRef.current = window.setTimeout(() => setMessageActionError(null), 3_000);
+  }, []);
+
+  const copyMessage = React.useCallback(async (message: Message) => {
+    const text = messageCopyText(message);
+    setOpenMenuMessageId(null);
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const fallback = document.createElement('textarea');
+        fallback.value = text;
+        fallback.setAttribute('readonly', '');
+        fallback.style.position = 'fixed';
+        fallback.style.opacity = '0';
+        document.body.appendChild(fallback);
+        fallback.select();
+        const copied = document.execCommand('copy');
+        fallback.remove();
+        if (!copied) throw new Error('copy_failed');
+      }
+    } catch {
+      showMessageActionError(message.id);
+    }
+  }, [showMessageActionError]);
+
+  const downloadMessage = React.useCallback(async (message: Message) => {
+    setOpenMenuMessageId(null);
+    try {
+      const directSource = message.mediaUrl?.startsWith('data:') ? message.mediaUrl : undefined;
+      const decodedSource = !directSource && message.rawKey
+        ? await EvolutionApiService.getDecodedMedia(instanceName, message.rawKey)
+        : undefined;
+      const source = directSource || decodedSource || message.mediaUrl;
+      if (!source) throw new Error('media_unavailable');
+      const presentation = message.mediaType === 'document' ? getDocumentPresentation(message) : undefined;
+      const fileName = presentation?.fileName
+        || (message.mediaType === 'image' ? 'imagem-whatsapp.jpg' : message.mediaType === 'video' ? 'video-whatsapp.mp4' : 'arquivo-whatsapp');
+      const anchor = document.createElement('a');
+      anchor.href = source;
+      anchor.download = fileName;
+      anchor.style.display = 'none';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    } catch {
+      showMessageActionError(message.id);
+    }
+  }, [instanceName, showMessageActionError]);
+
   let previousDay = '';
   return (
   <div className="relative min-h-0 flex-1">
   <div ref={containerRef} style={{ overflowAnchor: 'none' }} className="chat-wallpaper relative h-full space-y-3 overflow-y-auto px-6 py-5 text-[15px]">
-    {loadingMessages && (
-      <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#152027]/85 backdrop-blur-[1px]">
-        <div className="flex flex-col items-center gap-3 rounded-2xl border border-amber-300/20 bg-[#20292f]/95 px-8 py-7 text-center shadow-2xl">
-          <RefreshCw className="h-7 w-7 animate-spin text-amber-300" />
-          <p className="text-sm font-bold text-slate-100">Carregando mensagens...</p>
-          <span className="text-xs text-slate-400">Buscando as mensagens mais recentes</span>
-          <span className="h-1.5 w-48 overflow-hidden rounded-full bg-slate-700"><span className="block h-full w-2/3 animate-pulse rounded-full bg-amber-400" /></span>
-        </div>
-      </div>
-    )}
+    {loadingMessages && <div aria-label="Carregando mensagens" className="pointer-events-none absolute left-1/2 top-4 z-10 flex -translate-x-1/2 items-center justify-center rounded-full border border-white/10 bg-[#243038]/95 px-3 py-2 shadow-lg"><RefreshCw className="h-4 w-4 animate-spin text-amber-300" /></div>}
     {!loadingMessages && hasMoreMessages && !historyExpanded && onLoadOlder && (
       <div className="flex min-h-[180px] items-center justify-center py-4">
         <button type="button" onClick={onLoadOlder} disabled={loadingOlderMessages} className="rounded-full border border-amber-400/40 bg-amber-400/10 px-5 py-3 text-sm font-bold text-amber-200 shadow-lg transition-colors hover:bg-amber-400/20 disabled:cursor-wait disabled:opacity-60">
@@ -450,7 +546,28 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
         <div data-message-id={message.id} className={`flex max-w-[78%] gap-2 rounded-xl transition-shadow ${highlightedMessageId === message.id ? 'ring-2 ring-emerald-300/80 ring-offset-2 ring-offset-[#152027]' : ''} ${isMe ? 'ml-auto flex-row-reverse' : ''}`}>
           {!isMe && <ContactPhoto name={activeConversation.contact.name} avatar={activeConversation.contact.avatar} size="small" />}
           <div>
-            <div className={`space-y-2 rounded-lg px-3.5 py-3 text-[15px] leading-relaxed shadow-sm ${isMe ? 'rounded-tr-none border border-amber-300/15 bg-[#5b4b20] font-medium text-[#fff8df]' : 'rounded-tl-none border border-white/5 bg-[#273238] text-slate-100'}`}>
+            <div className={`group/message relative space-y-2 rounded-lg px-3.5 py-3 text-[15px] leading-relaxed shadow-sm ${isMe ? 'rounded-tr-none border border-amber-300/15 bg-[#5b4b20] font-medium text-[#fff8df]' : 'rounded-tl-none border border-white/5 bg-[#273238] text-slate-100'}`}>
+              <button
+                ref={openMenuMessageId === message.id ? menuTriggerRef : undefined}
+                type="button"
+                aria-label="Abrir ações da mensagem"
+                aria-haspopup="menu"
+                aria-expanded={openMenuMessageId === message.id}
+                onClick={(event) => setOpenMenuMessageId((current) => current === message.id ? null : message.id)}
+                className={`absolute top-1 z-20 flex h-6 w-6 items-center justify-center rounded-md bg-black/20 text-slate-300 opacity-55 transition-opacity hover:bg-black/35 hover:text-white md:opacity-0 md:group-hover/message:opacity-100 ${isMe ? 'left-1' : 'right-1'}`}
+              >
+                <ChevronDown className="h-4 w-4" />
+              </button>
+              {openMenuMessageId === message.id && <MessageActionMenu
+                message={message}
+                isOpen
+                align={isMe ? 'left' : 'right'}
+                triggerRef={menuTriggerRef}
+                onClose={() => setOpenMenuMessageId(null)}
+                onReply={() => { setOpenMenuMessageId(null); onReplyMessage(message); }}
+                onCopy={() => void copyMessage(message)}
+                onDownload={canDownloadMessageMedia(message) ? () => void downloadMessage(message) : undefined}
+              />}
               {isMe && <p className="mb-1 text-xs font-bold text-amber-200/75">{message.metadata?.sentOutsideHub ? 'Enviado fora do Vitstock Hub' : message.senderName}</p>}
               <QuotedMessageBlock message={message} onOpenOriginal={openQuotedMessage} />
               <MediaMessageContent message={message} instanceName={instanceName} onOpenViewer={openMediaViewer} />
@@ -459,15 +576,13 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
               {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap">{message.content}</p>}
             </div>
             <div className={`mt-1 flex items-center gap-1 text-xs text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
-              <button type="button" onClick={() => onReplyMessage(message)} className="mr-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-semibold text-zinc-500 transition-colors hover:bg-white/5 hover:text-amber-200" title="Responder esta mensagem">
-                <Reply className="h-3.5 w-3.5" /> Responder
-              </button>
               <span>{formatMessageTimestamp(message.timestampMs, message.timestamp)}</span>
               {isMe && message.status === 'failed' && <span className="font-bold text-red-300">Falha no envio</span>}
-              {isMe && message.status === 'pending' && <span className="font-semibold text-amber-300">Enviando...</span>}
+              {isMe && message.status === 'pending' && <RefreshCw className="h-3.5 w-3.5 animate-spin text-amber-300" aria-label="Enviando" />}
               {isMe && message.status !== 'failed' && message.status !== 'pending' && <CheckCheck className={`h-3.5 w-3.5 ${message.status === 'read' ? 'text-emerald-400' : message.status === 'delivered' ? 'text-amber-400' : 'text-slate-400'}`} />}
               {isMe && message.status === 'failed' && <button type="button" onClick={() => onRetryMessage(message)} className="ml-1 font-bold text-amber-300 underline decoration-amber-300/50 underline-offset-2 hover:text-amber-200">Tentar novamente</button>}
             </div>
+            {messageActionError === message.id && <span className={`mt-1 block text-[11px] font-semibold text-red-300 ${isMe ? 'text-right' : ''}`}>Não foi possível concluir esta ação.</span>}
           </div>
         </div>
         </React.Fragment>
