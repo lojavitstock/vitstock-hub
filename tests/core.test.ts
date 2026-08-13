@@ -4,7 +4,7 @@ import test from 'node:test';
 import type { ServerResponse } from 'node:http';
 import { phoneVariants } from '../src/utils/phone';
 import { mergeConversationMessages } from '../src/utils/messageMerge';
-import { isEvolutionReactionEvent, normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
+import { evolutionMessagePreview, isEvolutionReactionEvent, normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
 import { callMessageInfo } from '../src/utils/callMessage';
 import { reconcileConversations, reconcileConversationsMonotonic } from '../src/utils/conversationReconciliation';
 import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../src/utils/requestCoordinator';
@@ -474,6 +474,79 @@ test('SSE de mídia sem legenda usa resumo do tipo no preview', () => {
   });
 
   assert.equal(updated?.[0]?.lastMessage, '[Imagem]');
+});
+
+test('reactionMessage never becomes an inbox preview', () => {
+  const reactionEvent = {
+    key: { id: 'reaction-event', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+    message: { reactionMessage: { key: { id: 'target-message' }, text: '❤️' } },
+  };
+
+  assert.equal(evolutionMessagePreview(reactionEvent), undefined);
+  assert.equal(isEvolutionReactionEvent(reactionEvent), true);
+});
+
+test('reaction SSE keeps inbox preview, timestamp, unread and needsResponse unchanged', () => {
+  const current = [conversation('conversation-1', {
+    lastMessage: 'Última mensagem real',
+    lastMessageAt: 1_800_000_000_000,
+    lastMessageFromMe: false,
+    unreadCount: 3,
+    needsResponse: true,
+  })];
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'message.upsert',
+    reaction: true,
+    remoteJid: 'conversation-1',
+    message: {
+      ...message('target-message', 1_800_000_100_000, 'Reagiu com: ❤️'),
+      conversationId: 'conversation-1',
+    },
+  });
+
+  assert.equal(updated, current);
+  assert.equal(updated?.[0]?.lastMessage, 'Última mensagem real');
+  assert.equal(updated?.[0]?.lastMessageAt, 1_800_000_000_000);
+  assert.equal(updated?.[0]?.unreadCount, 3);
+  assert.equal(updated?.[0]?.needsResponse, true);
+});
+
+test('reaction SSE never reorders the inbox even when its event timestamp is newer', () => {
+  const first = conversation('first', { lastMessageAt: 2_000, lastMessage: 'Mensagem atual' });
+  const target = conversation('target', { lastMessageAt: 1_000, lastMessage: 'Mensagem antiga' });
+  const current = [first, target];
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'message.upsert',
+    reaction: true,
+    remoteJid: 'target',
+    message: { ...message('target-message', 9_999, 'Reagiu com: 😳'), conversationId: 'target' },
+  });
+
+  assert.equal(updated, current);
+  assert.deepEqual(updated?.map((item) => item.id), ['first', 'target']);
+});
+
+test('stale inbox snapshot without a real message preserves the previous real preview', () => {
+  const previous = [conversation('conversation-1', {
+    lastMessage: 'Texto real anterior',
+    lastMessageAt: 2_000,
+    lastMessageFromMe: true,
+    unreadCount: 0,
+    needsResponse: false,
+  })];
+  // This mirrors the defensive frontend representation of a raw reaction
+  // snapshot: no lastMessage and timestamp zero, never "Reagiu com".
+  const snapshot = [conversation('conversation-1', {
+    lastMessage: 'Conversa iniciada',
+    lastMessageAt: 0,
+    lastMessageFromMe: false,
+    unreadCount: 0,
+    needsResponse: false,
+  })];
+  const reconciled = reconcileConversationsMonotonic(previous, snapshot);
+
+  assert.equal(reconciled[0]?.lastMessage, 'Texto real anterior');
+  assert.equal(reconciled[0]?.lastMessageAt, 2_000);
 });
 
 test('conversation.updated reconcilia responsável, status e leitura sem refetch', () => {

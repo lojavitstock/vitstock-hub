@@ -215,7 +215,13 @@ async function loadLocalInboxChats(companyId: string) {
   }>(
     `SELECT c.evolution_remote_jid,
             c.unread_count,
-            COALESCE(latest.content, NULLIF(c.last_message, '[Mensagem protegida]')) AS last_message,
+            COALESCE(
+              latest.content,
+              CASE
+                WHEN c.last_message LIKE 'Reagiu com:%' THEN NULL
+                ELSE NULLIF(c.last_message, '[Mensagem protegida]')
+              END
+            ) AS last_message,
             COALESCE(latest.sent_at, c.last_message_at) AS last_message_at,
             ct.name AS contact_name,
             ct.avatar_url,
@@ -234,7 +240,7 @@ async function loadLocalInboxChats(companyId: string) {
        LIMIT 1
      ) latest ON true
      WHERE c.company_id = $1
-     ORDER BY COALESCE(c.last_message_at, c.updated_at) DESC`,
+     ORDER BY COALESCE(latest.sent_at, c.last_message_at, c.updated_at) DESC`,
     [companyId],
   );
 
@@ -1624,7 +1630,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       const localByRemoteJid = new Map(localChats.map((chat: any) => [String(chat?.remoteJid || chat?.id || ''), chat]));
       const localByPhone = new Map(localChats.map((chat: any) => [providerContactPhone(chat), chat]));
       chatsData = chatsData.map((chat: any) => {
-        if (!isNonRenderableProviderMessage(chat?.lastMessage)) return chat;
+        // A reaction is a metadata update, not a chat activity. Evolution may
+        // still expose it as lastMessage in findChats, so always replace it
+        // with the last persisted user-visible message before serializing the
+        // inbox snapshot.
+        if (!isNonRenderableProviderMessage(chat?.lastMessage) && !isProviderReactionEvent(chat?.lastMessage)) return chat;
         return localByRemoteJid.get(String(chat?.remoteJid || chat?.id || ''))
           || localByPhone.get(providerContactPhone(chat))
           || { ...chat, lastMessage: undefined };

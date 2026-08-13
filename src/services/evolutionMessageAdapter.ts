@@ -111,7 +111,9 @@ const messageText = (message: any, record: any = {}): string | undefined => {
 };
 
 export const evolutionMessagePreview = (record: any): string | undefined => (
-  messageText(record?.message || record, record)
+  isEvolutionReactionEvent(record)
+    ? undefined
+    : messageText(record?.message || record, record)
 );
 
 /**

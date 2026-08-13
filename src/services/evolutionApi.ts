@@ -565,10 +565,16 @@ export class EvolutionApiService {
         const dailyResponder = phoneVariants(cleanNumber)
           .map((phone) => dailyRespondersByNumber.get(phone))
           .find(Boolean);
-        const lastMessageFromMe = Boolean(item.lastMessage?.key?.fromMe);
-        const lastMessageAt = item.lastMessage?.messageTimestamp
-          ? Number(item.lastMessage.messageTimestamp) * 1000
-          : item.updatedAt
+        // Defensive guard for stale backends/snapshots: a reaction must never
+        // become inbox activity even before the backend replaces it with the
+        // last persisted real message.
+        const lastMessage = isEvolutionReactionEvent(item.lastMessage)
+          ? undefined
+          : item.lastMessage;
+        const lastMessageFromMe = Boolean(lastMessage?.key?.fromMe);
+        const lastMessageAt = lastMessage?.messageTimestamp
+          ? Number(lastMessage.messageTimestamp) * 1000
+          : lastMessage && item.updatedAt
             ? Date.parse(item.updatedAt)
             : 0;
         const rawUnreadCount = Number(item.unreadCount) || 0;
@@ -605,7 +611,7 @@ export class EvolutionApiService {
         let displayName = savedName ||
                           savedContact?.name ||
                           whatsappContact?.name ||
-                          item.lastMessage?.pushName || 
+                          lastMessage?.pushName ||
                           item.pushName || 
                           item.name || 
                           item.verifiedName;
@@ -614,10 +620,10 @@ export class EvolutionApiService {
           displayName = `+${cleanNumber}`;
         }
 
-        const messageContent = evolutionMessagePreview(item.lastMessage) || 'Conversa iniciada';
+        const messageContent = evolutionMessagePreview(lastMessage) || 'Conversa iniciada';
 
-        const timestampStr = item.updatedAt || item.lastMessage?.messageTimestamp
-          ? new Date(item.updatedAt || Number(item.lastMessage?.messageTimestamp) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        const timestampStr = lastMessage && (item.updatedAt || lastMessage.messageTimestamp)
+          ? new Date(item.updatedAt || Number(lastMessage.messageTimestamp) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
           : 'Hoje';
 
         const conversationObj: Conversation = {
@@ -636,7 +642,7 @@ export class EvolutionApiService {
           lastMessageTimestamp: timestampStr,
           lastMessageAt,
           lastMessageFromMe,
-          lastMessageKey: item.lastMessage?.key,
+          lastMessageKey: lastMessage?.key,
           unreadCount,
           status: effectiveStatus,
           needsResponse,
