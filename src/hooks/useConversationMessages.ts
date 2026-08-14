@@ -356,7 +356,7 @@ export const useConversationMessages = ({
       if (!hasCachedMessages && !savedState) stickToBottomRef.current = shouldScroll;
       isInitialFetch = false;
       const conversation = conversationsRef.current.find((item) => item.id === activeConversationId);
-      const phone = conversation?.contact.phone || activeConversationId;
+      const phone = conversation?.isGroup ? '' : conversation?.contact.phone || activeConversationId;
       const reconcile = shouldReconcile;
       const afterTimestamp = reconcile
         ? Math.max(0, Date.now() - HISTORY_WINDOW_MS)
@@ -444,7 +444,7 @@ export const useConversationMessages = ({
       const eventRemoteJid = String(event.remoteJid || '');
       const eventPhone = String(event.phone || '').replace(/\D/g, '');
       const matchingConversation = conversationsRef.current.find((item) => {
-        const conversationPhone = item.contact.phone.replace(/\D/g, '');
+        const conversationPhone = item.isGroup ? '' : item.contact.phone.replace(/\D/g, '');
         const samePhone = Boolean(eventPhone && conversationPhone
           && phoneVariants(eventPhone).some((variant) => phoneVariants(conversationPhone).includes(variant)));
         return item.id === eventRemoteJid
@@ -575,7 +575,7 @@ export const useConversationMessages = ({
     if (!activeConversationId || isMock || !hasMoreMessages || loadingOlderRef.current) return;
     const oldestTimestamp = messagesRef.current[0]?.timestampMs || Date.now();
     const conversation = conversationsRef.current.find((item) => item.id === activeConversationId);
-    const phone = conversation?.contact.phone || activeConversationId;
+    const phone = conversation?.isGroup ? '' : conversation?.contact.phone || activeConversationId;
     const container = messagesContainerRef.current;
     const previousHeight = container?.scrollHeight || 0;
     const previousTop = container?.scrollTop || 0;

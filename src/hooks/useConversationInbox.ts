@@ -118,10 +118,12 @@ export const useConversationInbox = ({
       const previousActiveConversation = previousConversations.find(
         (conversation) => conversation.id === activeConversationIdRef.current,
       );
-      const previousActivePhone = previousActiveConversation?.contact.phone.replace(/\D/g, '');
+      const previousActivePhone = previousActiveConversation && !previousActiveConversation.isGroup
+        ? previousActiveConversation.contact.phone.replace(/\D/g, '')
+        : undefined;
       const mergedChats = realChats.map((conversation) => {
         const locallyReadAt = readOverridesRef.current.get(conversation.id);
-        const phone = conversation.contact.phone.replace(/\D/g, '');
+        const phone = conversation.isGroup ? '' : conversation.contact.phone.replace(/\D/g, '');
         const savedName = phoneVariants(phone)
           .map((variant) => contactNameOverridesRef.current.get(variant))
           .find(Boolean);
@@ -251,11 +253,12 @@ export const useConversationInbox = ({
     const matchesFilter = filterTab === 'all'
       || (filterTab === 'unread' && conversation.unreadCount > 0)
       || (filterTab === 'unanswered' && conversationNeedsResponse(conversation))
+      || (filterTab === 'groups' && conversation.isGroup === true)
       || (filterTab === 'delivery' && conversation.status === 'pending')
       || (filterTab === 'resolved' && conversation.status === 'resolved');
     if (!matchesFilter) return false;
     if (!normalizedConversationSearch) return true;
-    return [conversation.contact.name, conversation.contact.phone]
+    return [conversation.contact.name, conversation.groupName || '', conversation.contact.phone]
       .some((value) => normalizeSearchText(value).includes(normalizedConversationSearch));
   }), [conversations, filterTab, normalizedConversationSearch]);
 
@@ -280,6 +283,7 @@ export const useConversationInbox = ({
   }, []);
 
   const rememberContactName = useCallback((phone: string, name: string) => {
+    if (phone.toLowerCase().endsWith('@g.us')) return;
     const normalizedPhone = phone.replace(/\D/g, '');
     const normalizedName = name.trim();
     if (!normalizedPhone || isPhoneOnlyName(normalizedName)) return;

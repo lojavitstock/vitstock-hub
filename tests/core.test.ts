@@ -4,7 +4,7 @@ import test from 'node:test';
 import type { ServerResponse } from 'node:http';
 import { phoneVariants } from '../src/utils/phone';
 import { mergeConversationMessages } from '../src/utils/messageMerge';
-import { evolutionMessagePreview, isEvolutionReactionEvent, normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
+import { evolutionMessagePreview, isEvolutionReactionEvent, isWhatsAppGroupJid, normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
 import { callMessageInfo } from '../src/utils/callMessage';
 import { reconcileConversations, reconcileConversationsMonotonic } from '../src/utils/conversationReconciliation';
 import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../src/utils/requestCoordinator';

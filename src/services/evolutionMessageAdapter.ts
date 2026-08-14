@@ -12,9 +12,19 @@ type ProviderRecord = {
   metadataScope?: 'persisted_message';
   messageTimestamp?: number | string;
   pushName?: string;
+  participant?: string;
+  participantPn?: string;
+  senderPn?: string;
+  participantName?: string;
+  senderName?: string;
   status?: unknown;
   update?: { status?: unknown };
 };
+
+/** WhatsApp group chats use the full `number@g.us` JID as remoteJid. */
+export const isWhatsAppGroupJid = (value?: string | null) => (
+  typeof value === 'string' && value.trim().toLowerCase().endsWith('@g.us')
+);
 
 const unwrapMessage = (message: any) => {
   let current = message || {};
@@ -199,6 +209,17 @@ const messageMetadata = (record: ProviderRecord, message: any): Message['metadat
     if (document) metadata.document = document;
   }
   const fromMe = record.key?.fromMe === true;
+  const participantJid = firstText(
+    record.key?.participant,
+    record.key?.participantPn,
+    record.participant,
+    record.participantPn,
+    record.senderPn,
+    record.key?.senderPn,
+  );
+  if (participantJid) metadata.participantJid = participantJid;
+  const participantName = firstText(record.pushName, record.participantName, record.senderName);
+  if (!fromMe && participantName) metadata.participantName = participantName;
   const callInfo = callMessageInfo(record, msg, String(record.messageType || metadata.providerType || ''), fromMe);
   const externalAd = context?.externalAdReply;
   const hasMessageBoundAdContext = Boolean(
@@ -326,7 +347,7 @@ export const normalizeEvolutionMessage = (
     sender: fromMe ? 'attendant' : 'contact',
     senderName: fromMe
       ? (sentByHub ? metadata.sentByUserName!.trim() : undefined)
-      : (record.pushName || 'Contato'),
+      : (metadata.participantName || record.pushName || 'Contato'),
     content: fromMe && sentByHub ? signed.content : (content || '[Mensagem não identificada]'),
     mediaUrl: media.url,
     mediaType: media.type,

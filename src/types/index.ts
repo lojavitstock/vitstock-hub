@@ -107,6 +107,9 @@ export interface Message {
       fromMe?: boolean;
       updatedAt: number;
     }>;
+    /** Participant identity used by WhatsApp group messages/replies. */
+    participantJid?: string;
+    participantName?: string;
     reaction?: string;
     systemLabel?: string;
     forwarded?: boolean;
@@ -120,6 +123,9 @@ export interface Message {
 
 export interface Conversation {
   id: string;
+  isGroup?: boolean;
+  groupName?: string;
+  groupAvatar?: string;
   contact: Contact;
   lastMessage: string;
   lastMessageTimestamp: string;

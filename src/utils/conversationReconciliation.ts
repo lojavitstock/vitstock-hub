@@ -55,6 +55,9 @@ const areLeasesEqual = (previous?: Conversation['lease'], next?: Conversation['l
  */
 export const areConversationsEquivalent = (previous: Conversation, next: Conversation) => (
   previous.id === next.id
+  && previous.isGroup === next.isGroup
+  && previous.groupName === next.groupName
+  && previous.groupAvatar === next.groupAvatar
   && previous.contact.id === next.contact.id
   && previous.contact.name === next.contact.name
   && previous.contact.phone === next.contact.phone

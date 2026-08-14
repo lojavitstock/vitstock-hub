@@ -31,8 +31,17 @@ const jidSchema = z.object({
   afterTimestamp: z.coerce.number().int().positive().optional(),
   limit: z.coerce.number().int().min(20).max(200).optional(),
 });
+/** Evolution groups are addressed by the full `number@g.us` JID. For sends,
+ * that exact JID is passed in the provider `number` field; participants stay
+ * in message key.participant and never become the conversation identity. */
+const isWhatsAppGroupJid = (value: string | undefined | null) => (
+  typeof value === 'string' && value.trim().toLowerCase().endsWith('@g.us')
+);
+const evolutionRecipientSchema = z.string().min(3).max(128).refine((value) => (
+  /^\d{8,20}$/.test(value) || isWhatsAppGroupJid(value)
+), 'destinatário Evolution inválido');
 const sendTextSchema = z.object({
-  number: z.string().regex(/^\d{8,20}$/),
+  number: evolutionRecipientSchema,
   text: z.string().min(1).max(4096),
   remoteJid: z.string().min(3).max(128).optional(),
   clientMessageId: z.string().trim().min(1).max(128).optional(),
@@ -51,7 +60,7 @@ const sendTextSchema = z.object({
   }).optional(),
 });
 const sendMediaSchema = z.object({
-  number: z.string().regex(/^\d{8,20}$/),
+  number: evolutionRecipientSchema,
   remoteJid: z.string().min(3).max(128).optional(),
   mediatype: z.enum(['image', 'video', 'document']),
   mimetype: z.string().min(3).max(100),
@@ -62,7 +71,7 @@ const sendMediaSchema = z.object({
   quotedMessage: sendTextSchema.shape.quotedMessage,
 });
 const sendReactionSchema = z.object({
-  number: z.string().regex(/^\d{8,20}$/),
+  number: evolutionRecipientSchema,
   remoteJid: z.string().min(3).max(128),
   messageId: z.string().trim().min(1).max(256),
   emoji: z.union([z.enum(['👍', '❤️', '😂', '😮', '😢', '🙏']), z.null()]),
@@ -218,7 +227,11 @@ async function loadLocalInboxChats(companyId: string) {
     avatar_url: string | null;
     message_id: string | null;
     message_sender: string | null;
+    message_sender_name: string | null;
     message_sent_at: Date | string | null;
+    is_group: boolean;
+    group_name: string | null;
+    group_avatar_url: string | null;
   }>(
     `SELECT c.evolution_remote_jid,
             c.unread_count,
@@ -234,11 +247,15 @@ async function loadLocalInboxChats(companyId: string) {
             ct.avatar_url,
             latest.evolution_message_id AS message_id,
             latest.sender AS message_sender,
-            latest.sent_at AS message_sent_at
+            latest.sender_name AS message_sender_name,
+            latest.sent_at AS message_sent_at,
+            c.is_group,
+            c.group_name,
+            c.group_avatar_url
      FROM conversations c
      JOIN contacts ct ON ct.id = c.contact_id
      LEFT JOIN LATERAL (
-       SELECT m.evolution_message_id, m.sender, m.content, m.sent_at
+       SELECT m.evolution_message_id, m.sender, m.sender_name, m.content, m.sent_at
        FROM messages m
        WHERE m.conversation_id = c.id
          AND m.is_internal_note = false
@@ -255,22 +272,32 @@ async function loadLocalInboxChats(companyId: string) {
     const dateValue = row.message_sent_at || row.last_message_at;
     const timestamp = dateValue ? Math.floor(new Date(dateValue).getTime() / 1000) : 0;
     const remoteJid = row.evolution_remote_jid;
+    const isGroup = Boolean(row.is_group) || isWhatsAppGroupJid(remoteJid);
+    const rawPreview = row.last_message || '[Conversa iniciada]';
+    const preview = isGroup && row.message_sender
+      ? `${row.message_sender_name || (row.message_sender === 'attendant' ? 'Atendente' : 'Participante')}: ${rawPreview}`
+      : rawPreview;
     return {
       id: remoteJid,
       remoteJid,
+      isGroup,
+      groupName: row.group_name || undefined,
+      groupAvatarUrl: row.group_avatar_url || undefined,
       unreadCount: Number(row.unread_count) || 0,
       updatedAt: dateValue ? new Date(dateValue).toISOString() : undefined,
       pushName: row.contact_name,
-      profilePicUrl: row.avatar_url || undefined,
+      profilePicUrl: row.group_avatar_url || row.avatar_url || undefined,
       lastMessage: {
         key: {
           id: row.message_id || `local-${remoteJid}-${timestamp}`,
           remoteJid,
           fromMe: row.message_sender === 'attendant',
         },
-        message: { conversation: row.last_message || '[Conversa iniciada]' },
+        message: { conversation: preview },
         messageTimestamp: timestamp,
         pushName: row.contact_name,
+        participantName: row.message_sender_name || undefined,
+        previewIsPrefixed: isGroup,
       },
     };
   });
@@ -301,8 +328,9 @@ async function forwardEvolutionRequest(path: string, reply: FastifyReply, init?:
 
 function assignmentJids(input: { remoteJid: string; phone?: string }) {
   const jids = [input.remoteJid];
-  const digits = input.phone?.replace(/\D/g, '') || '';
-  if (digits.length >= 8 && digits.length <= 20) jids.push(`${digits}@s.whatsapp.net`);
+  const phone = String(input.phone || '').trim();
+  const digits = phone.replace(/\D/g, '') || '';
+  if (!isWhatsAppGroupJid(phone) && digits.length >= 8 && digits.length <= 20) jids.push(`${digits}@s.whatsapp.net`);
   return [...new Set(jids)];
 }
 
@@ -315,12 +343,15 @@ async function prepareOutboundConversation(input: {
   number: string;
   remoteJid: string;
 }) {
+  const isGroup = isWhatsAppGroupJid(input.remoteJid);
+  const contactPhone = isGroup ? input.remoteJid : `+${input.number.replace(/\D/g, '')}`;
+  const contactName = isGroup ? `Grupo ${input.remoteJid.split('@')[0]}` : contactPhone;
   const contact = await db.query<{ id: string }>(
     `INSERT INTO contacts (company_id, name, phone)
      VALUES ($1, $2, $3)
      ON CONFLICT (company_id, phone) DO UPDATE SET updated_at = now()
      RETURNING id`,
-    [input.companyId, `+${input.number}`, `+${input.number}`],
+    [input.companyId, contactName, contactPhone],
   );
   const contactId = contact.rows[0]?.id;
   if (!contactId) throw new Error('Contato n\u00e3o p\u00f4de ser preparado para o envio');
@@ -336,13 +367,13 @@ async function prepareOutboundConversation(input: {
   if (existing.rows[0]?.id) return existing.rows[0].id;
 
   const created = await db.query<{ id: string }>(
-    `INSERT INTO conversations (company_id, contact_id, evolution_remote_jid)
-     VALUES ($1, $2, $3)
+    `INSERT INTO conversations (company_id, contact_id, evolution_remote_jid, is_group, group_name)
+     VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (company_id, evolution_remote_jid) DO UPDATE
        SET contact_id = EXCLUDED.contact_id,
            updated_at = now()
      RETURNING id`,
-    [input.companyId, contactId, input.remoteJid],
+    [input.companyId, contactId, input.remoteJid, isGroup, isGroup ? contactName : null],
   );
   const conversationId = created.rows[0]?.id;
   if (!conversationId) throw new Error('Conversa n\u00e3o p\u00f4de ser preparada para o envio');
@@ -402,7 +433,26 @@ function providerContactName(value: any) {
   return name;
 }
 
+function providerGroupName(value: any) {
+  const candidate = value?.groupName
+    || value?.subject
+    || value?.groupMetadata?.subject
+    || value?.chatName
+    || value?.name
+    || value?.notify;
+  if (typeof candidate !== 'string') return '';
+  const name = candidate.trim();
+  if (!name || name === 'WhatsApp Business' || name === 'Você' || /^\+?[\d\s().-]+$/.test(name)) return '';
+  return name;
+}
+
 function providerContactPhone(value: any) {
+  const primaryJid = value?.remoteJid
+    || value?.id
+    || value?.lastMessage?.key?.remoteJid
+    || value?.key?.remoteJid
+    || '';
+  if (isWhatsAppGroupJid(String(primaryJid))) return '';
   const rawJid = value?.lastMessage?.key?.remoteJidAlt
     || value?.key?.remoteJidAlt
     || value?.remoteJidAlt
@@ -410,6 +460,7 @@ function providerContactPhone(value: any) {
     || value?.id
     || value?.key?.remoteJid
     || '';
+  if (isWhatsAppGroupJid(String(rawJid))) return '';
   const digits = String(rawJid).split('@')[0]?.replace(/\D/g, '') || '';
   return digits.length >= 8 && digits.length <= 20 ? digits : '';
 }
@@ -615,6 +666,19 @@ function providerMessageMetadata(record: any, message: any, fromMe: boolean) {
   const call = message?.callLogMessage || message?.call || message?.offerMessage;
   const callInfo = providerCallInfo(record, message, type, fromMe);
   const metadata: Record<string, any> = { providerType: type };
+  const participantJid = firstProviderText(
+    record?.key?.participant,
+    record?.key?.participantPn,
+    record?.participant,
+    record?.participantPn,
+    record?.senderPn,
+    record?.key?.senderPn,
+  );
+  if (participantJid) metadata.participantJid = participantJid;
+  if (!fromMe) {
+    const participantName = providerContactName(record) || firstProviderText(record?.pushName, record?.participantName);
+    if (participantName) metadata.participantName = participantName;
+  }
   const document = providerDocumentMetadata(message);
   if (document) metadata.document = document;
   const quotedMessage = quotedMessageFromContext(context);
@@ -776,6 +840,7 @@ function providerRemoteJid(record: any) {
 
 function providerPhone(record: any) {
   const remoteJid = providerRemoteJid(record);
+  if (isWhatsAppGroupJid(remoteJid)) return remoteJid;
   const phoneJid = record?.key?.senderPn
     || record?.key?.participantPn
     || record?.senderPn
@@ -801,6 +866,11 @@ function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
   const fromMe = record?.key?.fromMe === true;
   const message = unwrapProviderMessage(record?.message);
   const metadata = providerMessageMetadata(record, message, fromMe);
+  const remoteJid = providerRemoteJid(record);
+  const isGroup = isWhatsAppGroupJid(remoteJid);
+  const groupName = isGroup
+    ? (providerGroupName(record) || providerGroupName(record?.chat) || providerGroupName(record?.groupMetadata))
+    : '';
   // Evolution's fromMe only proves that the connected WhatsApp account sent
   // the message. Until an exact Hub outbox record is matched, it is external.
   if (fromMe) metadata.sentOutsideHub = true;
@@ -809,12 +879,17 @@ function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
     : undefined;
   return {
     id: providerMessageId(record),
-    remoteJid: providerRemoteJid(record),
-    phone: providerPhone(record) || fallbackPhone.replace(/\D/g, ''),
+    remoteJid,
+    phone: isGroup ? remoteJid : providerPhone(record) || fallbackPhone.replace(/\D/g, ''),
+    isGroup,
+    groupName: groupName || undefined,
+    groupAvatarUrl: isGroup
+      ? (record?.profilePicUrl || record?.profilePictureUrl || record?.profilePicture || undefined)
+      : undefined,
     sender: fromMe ? 'attendant' as const : 'contact' as const,
     senderName: fromMe
       ? undefined
-      : (providerContactName(record) || record?.pushName || 'Contato'),
+      : (metadata.participantName || providerContactName(record) || record?.pushName || 'Contato'),
     content: providerMessageContent(record),
     mediaUrl: media?.url,
     mediaType: media?.type,
@@ -856,8 +931,13 @@ function localMessageToProviderRecord(row: any) {
   const remoteJid = row.evolution_remote_jid;
   const id = row.evolution_message_id || row.id;
   const timestamp = Math.floor(new Date(row.sent_at).getTime() / 1000);
-  const key = { id, remoteJid, fromMe: row.sender === 'attendant' };
   const metadata = { ...(row.metadata || {}) };
+  const key = {
+    id,
+    remoteJid,
+    fromMe: row.sender === 'attendant',
+    ...(metadata.participantJid ? { participant: metadata.participantJid } : {}),
+  };
   if (Array.isArray(metadata.reactions)) {
     metadata.reactions = normalizeStoredReactions(metadata.reactions);
   }
@@ -911,7 +991,12 @@ function storedMessageToRealtimeMessage(row: any) {
     mediaUrl: row.media_url || undefined,
     mediaType: row.media_type || undefined,
     metadata: row.metadata || {},
-    rawKey: { id, remoteJid: row.evolution_remote_jid, fromMe: row.sender === 'attendant' },
+    rawKey: {
+      id,
+      remoteJid: row.evolution_remote_jid,
+      fromMe: row.sender === 'attendant',
+      ...(row.metadata?.participantJid ? { participant: row.metadata.participantJid } : {}),
+    },
     timestampMs,
     timestamp: new Date(timestampMs).toISOString(),
     status: row.status,
@@ -1113,6 +1198,9 @@ async function findOrCreateConversation(
     lastMessageAt: Date;
     reopenResolved: boolean;
     assignedUserId?: string;
+    isGroup?: boolean;
+    groupName?: string;
+    groupAvatarUrl?: string;
   },
 ) {
   // A Evolution pode alternar entre o JID do telefone e um @lid para o mesmo
@@ -1146,9 +1234,12 @@ async function findOrCreateConversation(
              WHEN $5 AND status = 'resolved' THEN 'open'
              ELSE status
            END,
+           is_group = COALESCE($6, conversations.is_group),
+           group_name = COALESCE(NULLIF($7, ''), conversations.group_name),
+           group_avatar_url = COALESCE(NULLIF($8, ''), conversations.group_avatar_url),
            updated_at = now()
        WHERE id = $1`,
-      [existingId, input.contactId, input.lastMessageAt, input.lastMessage, input.reopenResolved],
+      [existingId, input.contactId, input.lastMessageAt, input.lastMessage, input.reopenResolved, input.isGroup ?? false, input.groupName || '', input.groupAvatarUrl || ''],
     );
     return existingId;
   }
@@ -1156,8 +1247,8 @@ async function findOrCreateConversation(
   const created = input.assignedUserId
     ? await client.query<{ id: string }>(
       `INSERT INTO conversations
-        (company_id, contact_id, evolution_remote_jid, assigned_user_id, status, last_message, last_message_at)
-       VALUES ($1, $2, $3, $4, 'open', $5, $6)
+        (company_id, contact_id, evolution_remote_jid, assigned_user_id, status, last_message, last_message_at, is_group, group_name, group_avatar_url)
+       VALUES ($1, $2, $3, $4, 'open', $5, $6, $7, NULLIF($8, ''), NULLIF($9, ''))
        ON CONFLICT (company_id, evolution_remote_jid) DO UPDATE SET
          last_message = CASE
            WHEN EXCLUDED.last_message_at >= COALESCE(conversations.last_message_at, to_timestamp(0)) THEN EXCLUDED.last_message
@@ -1169,12 +1260,12 @@ async function findOrCreateConversation(
          END,
          updated_at = now()
        RETURNING id`,
-      [input.companyId, input.contactId, input.remoteJid, input.assignedUserId, input.lastMessage, input.lastMessageAt],
+      [input.companyId, input.contactId, input.remoteJid, input.assignedUserId, input.lastMessage, input.lastMessageAt, input.isGroup ?? false, input.groupName || '', input.groupAvatarUrl || ''],
     )
     : await client.query<{ id: string }>(
       `INSERT INTO conversations
-        (company_id, contact_id, evolution_remote_jid, status, last_message, last_message_at)
-       VALUES ($1, $2, $3, 'open', $4, $5)
+        (company_id, contact_id, evolution_remote_jid, status, last_message, last_message_at, is_group, group_name, group_avatar_url)
+       VALUES ($1, $2, $3, 'open', $4, $5, $7, NULLIF($8, ''), NULLIF($9, ''))
        ON CONFLICT (company_id, evolution_remote_jid) DO UPDATE SET
          contact_id = EXCLUDED.contact_id,
          last_message = CASE
@@ -1191,7 +1282,7 @@ async function findOrCreateConversation(
          END,
          updated_at = now()
        RETURNING id`,
-      [input.companyId, input.contactId, input.remoteJid, input.lastMessage, input.lastMessageAt, input.reopenResolved],
+      [input.companyId, input.contactId, input.remoteJid, input.lastMessage, input.lastMessageAt, input.reopenResolved, input.isGroup ?? false, input.groupName || '', input.groupAvatarUrl || ''],
     );
   const conversationId = created.rows[0]?.id;
   if (!conversationId) throw new Error('Conversa não pôde ser preparada');
@@ -1210,18 +1301,29 @@ async function persistProviderMessage(
     return persistProviderReaction(companyId, record);
   }
   const local = providerRecordToLocalMessage(record, options.fallbackPhone);
-  if (!local.id || !local.remoteJid || local.remoteJid.endsWith('@g.us') || !local.phone) return undefined;
+  if (!local.id || !local.remoteJid || !local.phone) return undefined;
 
   const client = await db.connect();
   try {
     await client.query('BEGIN');
     local.metadata = await hydrateQuotedMessageMetadata(client, companyId, local.metadata || {}, local.remoteJid);
+    const isGroup = Boolean(local.isGroup) || isWhatsAppGroupJid(local.remoteJid);
+    const groupName = isGroup ? local.groupName : undefined;
+    const displayGroupName = groupName || `Grupo ${local.remoteJid.split('@')[0]}`;
+    const contactPhone = isGroup ? local.remoteJid : `+${local.phone}`;
+    const contactName = isGroup
+      ? displayGroupName
+      : local.sender === 'contact' ? local.senderName : `+${local.phone}`;
+    const conversationPreview = isGroup
+      ? `${local.senderName || (local.sender === 'attendant' ? 'Atendente' : 'Participante')}: ${local.content}`
+      : local.content;
     const contact = await client.query<{ id: string }>(
       `INSERT INTO contacts (company_id, name, phone, avatar_url)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (company_id, phone) DO UPDATE SET
          name = CASE
            WHEN contacts.source = 'google' THEN contacts.name
+           WHEN $5::boolean AND EXCLUDED.name <> '' THEN EXCLUDED.name
            WHEN EXCLUDED.name !~ '^\\+?[0-9\\s().-]+$'
              AND (contacts.name ~ '^\\+?[0-9\\s().-]+$' OR contacts.name IN ('Contato', 'WhatsApp Business', 'Você'))
              THEN EXCLUDED.name
@@ -1230,7 +1332,7 @@ async function persistProviderMessage(
          avatar_url = COALESCE(EXCLUDED.avatar_url, contacts.avatar_url),
          updated_at = now()
        RETURNING id`,
-      [companyId, local.sender === 'contact' ? local.senderName : `+${local.phone}`, `+${local.phone}`, null],
+      [companyId, contactName, contactPhone, local.groupAvatarUrl || null, isGroup && Boolean(groupName)],
     );
     const contactId = contact.rows[0]?.id;
     if (!contactId) throw new Error('Contato não pôde ser preparado para a mensagem recebida');
@@ -1239,9 +1341,12 @@ async function persistProviderMessage(
       companyId,
       contactId,
       remoteJid: local.remoteJid,
-      lastMessage: local.content,
+      lastMessage: conversationPreview,
       lastMessageAt: local.sentAt,
       reopenResolved: options.reopen && local.sender === 'contact',
+      isGroup,
+      groupName,
+      groupAvatarUrl: local.groupAvatarUrl,
     });
     if (!conversationId) throw new Error('Conversa não pôde ser preparada para a mensagem recebida');
 
@@ -1368,6 +1473,7 @@ function extractWebhookMessageStatus(body: any) {
 }
 
 async function recordDailyResponder(companyId: string, number: string, user: { id: string; name: string }) {
+  if (isWhatsAppGroupJid(number)) return undefined;
   const remoteJid = canonicalPhoneJid(number);
   const existing = await db.query<{
     user_id: string;
@@ -1440,12 +1546,16 @@ async function ensureOutboundMessage(input: {
       );
       idempotencyLockMs = Date.now() - lockStartedAt;
     }
+    const isGroup = isWhatsAppGroupJid(input.remoteJid);
+    const contactPhone = isGroup ? input.remoteJid : `+${input.number.replace(/\D/g, '')}`;
+    const contactName = isGroup ? `Grupo ${input.remoteJid.split('@')[0]}` : contactPhone;
+    const conversationPreview = isGroup ? `${input.userName}: ${input.content}` : input.content;
     const contact = await client.query<{ id: string }>(
     `INSERT INTO contacts (company_id, name, phone)
      VALUES ($1, $2, $3)
      ON CONFLICT (company_id, phone) DO UPDATE SET updated_at = now()
      RETURNING id`,
-    [input.companyId, `+${input.number}`, `+${input.number}`],
+    [input.companyId, contactName, contactPhone],
   );
   const contactId = contact.rows[0]?.id;
   if (!contactId) throw new Error('Contato não pôde ser preparado para o envio');
@@ -1454,10 +1564,12 @@ async function ensureOutboundMessage(input: {
     companyId: input.companyId,
     contactId,
     remoteJid: input.remoteJid,
-    lastMessage: input.content,
+    lastMessage: conversationPreview,
     lastMessageAt: new Date(),
     reopenResolved: true,
     assignedUserId: input.userId,
+    isGroup,
+    groupName: undefined,
   });
   if (!conversationId) throw new Error('Conversa não pôde ser preparada para o envio');
 
@@ -1686,7 +1798,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       const knownRemoteJids = new Set(chatsData.map((chat: any) => String(chat?.remoteJid || chat?.id || '')));
       const knownPhones = new Set(chatsData.map((chat: any) => providerContactPhone(chat)).filter(Boolean));
       const localByRemoteJid = new Map(localChats.map((chat: any) => [String(chat?.remoteJid || chat?.id || ''), chat]));
-      const localByPhone = new Map(localChats.map((chat: any) => [providerContactPhone(chat), chat]));
+      const localByPhone = new Map(localChats
+        .map((chat: any) => [providerContactPhone(chat), chat] as const)
+        .filter(([phone]) => Boolean(phone)));
       chatsData = chatsData.map((chat: any) => {
         // A reaction is a metadata update, not a chat activity. Evolution may
         // still expose it as lastMessage in findChats, so always replace it
@@ -1700,7 +1814,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       const missingLocalChats = localChats.filter((chat: any) => {
         const remoteJid = String(chat?.remoteJid || chat?.id || '');
         const phone = providerContactPhone(chat);
-        return !knownRemoteJids.has(remoteJid) && !knownPhones.has(phone);
+        return !knownRemoteJids.has(remoteJid) && (!phone || !knownPhones.has(phone));
       });
       if (missingLocalChats.length > 0) chatsData = [...chatsData, ...missingLocalChats];
     } catch (error) {
@@ -2251,7 +2365,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     if (!parsed.success) return reply.code(400).send({ error: 'Mensagem inválida' });
     const { number, text, remoteJid, quotedMessage } = parsed.data;
     const clientMessageId = parsed.data.clientMessageId || `hub-${randomUUID()}`;
-    const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
+    const canonicalRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : canonicalPhoneJid(number));
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
     traceOutbound(request, 'received', { clientMessageId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
@@ -2316,7 +2430,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
             {
               method: 'POST',
               body: JSON.stringify({
-                number,
+                number: isWhatsAppGroupJid(canonicalRemoteJid) ? canonicalRemoteJid : number,
                 text: formatHubOutboundText(request.user!.name, text),
                 delay: 1200,
                 linkPreview: true,
@@ -2418,7 +2532,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       quotedMessage: parsed.data.quotedMessage,
     };
     const clientMessageId = parsed.data.clientMessageId || `hub-${randomUUID()}`;
-    const canonicalRemoteJid = remoteJid || canonicalPhoneJid(number);
+    const canonicalRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : canonicalPhoneJid(number));
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
     traceOutbound(request, 'received', { clientMessageId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
@@ -2490,7 +2604,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
             {
               method: 'POST',
               body: JSON.stringify({
-                number,
+                number: isWhatsAppGroupJid(canonicalRemoteJid) ? canonicalRemoteJid : number,
                 mediatype: parsed.data.mediatype,
                 mimetype: parsed.data.mimetype,
                 media: parsed.data.media,
@@ -2623,15 +2737,18 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
            OR regexp_replace(contact.phone, '\\D', '', 'g') = $4::text
          )
        LIMIT 1`,
-      [request.user!.companyId, messageId, assignmentJids({ remoteJid, phone }), phone],
+      [request.user!.companyId, messageId, assignmentJids({ remoteJid, phone: isWhatsAppGroupJid(number) ? number : phone }), phone],
     );
-    const target = targetResult.rows[0];
+    const target = targetResult.rows[0]!;
+    const leaseNumber = isWhatsAppGroupJid(target?.evolution_remote_jid)
+      ? target.evolution_remote_jid
+      : target?.contact_phone || phone;
     if (!target) return reply.code(404).send({ error: 'Mensagem não disponível para reação' });
 
     const leaseAcquisition = await acquireOutboundLease({
       companyId: request.user!.companyId,
       user: request.user!,
-      number: target.contact_phone || phone,
+      number: leaseNumber,
       remoteJid: target.evolution_remote_jid,
     });
     if (!leaseAcquisition.acquired) {
@@ -2643,7 +2760,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     publishRealtimeEvent(request.user!.companyId, 'conversation.updated', leaseRealtimePayload({
       remoteJid: target.evolution_remote_jid,
-      phone: target.contact_phone || phone,
+      phone: leaseNumber,
       lease: leaseAcquisition.lease,
     }));
 
@@ -2677,7 +2794,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     });
     publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
       remoteJid: target.evolution_remote_jid,
-      phone: target.contact_phone || phone,
+      phone: leaseNumber,
       messageId: target.evolution_message_id,
       timestampMs: message.timestampMs,
       fromMe: true,

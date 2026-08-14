@@ -654,8 +654,11 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
         <React.Fragment key={message.id}>
         {showDay && <DaySeparator label={messageDay} />}
         <div data-message-id={message.id} className={`flex max-w-[78%] gap-2 rounded-xl transition-shadow ${highlightedMessageId === message.id ? 'ring-2 ring-emerald-300/80 ring-offset-2 ring-offset-[#152027]' : ''} ${isMe ? 'ml-auto flex-row-reverse' : ''}`}>
-          {!isMe && <ContactPhoto name={activeConversation.contact.name} avatar={activeConversation.contact.avatar} size="small" />}
+          {!isMe && <ContactPhoto name={activeConversation.isGroup ? (activeConversation.groupName || activeConversation.contact.name) : activeConversation.contact.name} avatar={activeConversation.contact.avatar} size="small" />}
           <div>
+            {activeConversation.isGroup && !isMe && message.senderName && (
+              <p className="mb-1 px-1 text-[11px] font-extrabold text-emerald-300">{message.senderName}</p>
+            )}
             <div className={`group/message relative space-y-2 rounded-lg px-3.5 py-3 text-[15px] leading-relaxed shadow-sm ${isMe ? 'rounded-tr-none border border-amber-300/15 bg-[#5b4b20] font-medium text-[#fff8df]' : 'rounded-tl-none border border-white/5 bg-[#273238] text-slate-100'}`}>
               <button
                 ref={openMenuMessageId === message.id ? menuTriggerRef : undefined}
@@ -682,7 +685,7 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
               {isMe && <p className="mb-1 text-xs font-bold text-amber-200/75">{message.metadata?.sentOutsideHub ? 'Enviado fora do Vitstock Hub' : message.senderName}</p>}
               <QuotedMessageBlock message={message} onOpenOriginal={openQuotedMessage} onLayoutChange={onLayoutChange} />
               <MediaMessageContent message={message} instanceName={instanceName} onOpenViewer={openMediaViewer} onLayoutChange={onLayoutChange} />
-              <SpecialMessageContent message={message} contactPhone={activeConversation.contact.phone} />
+              <SpecialMessageContent message={message} contactPhone={activeConversation.isGroup ? undefined : activeConversation.contact.phone} />
               <InteractiveMessageContent message={message} />
               {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap">{message.content}</p>}
               {message.metadata?.reactions?.length ? <ReactionBadges reactions={message.metadata.reactions} align={isMe ? 'right' : 'left'} /> : null}

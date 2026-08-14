@@ -96,8 +96,12 @@ const updateConversationFromMessage = (
 
   const timestampMs = Number(message.timestampMs ?? event.timestampMs ?? 0);
   const isIncoming = message.sender === 'contact';
+  const messagePreview = comparableMessagePreview(message);
+  const expectedPreview = conversation.isGroup
+    ? `${isIncoming ? (message.senderName || 'Participante') : (message.senderName || 'Atendente')}: ${messagePreview}`
+    : messagePreview;
   const isSameActivity = conversation.lastMessageFromMe === !isIncoming
-    && comparableMessagePreview(message) === conversation.lastMessage.trim();
+    && expectedPreview === conversation.lastMessage.trim();
   const isOlderActivity = Boolean(conversation.lastMessageAt && timestampMs > 0 && timestampMs < conversation.lastMessageAt);
   if (isOlderActivity && !isSameActivity) return conversation;
 
@@ -117,7 +121,9 @@ const updateConversationFromMessage = (
     : conversation.unreadCount;
   const next: Conversation = {
     ...conversation,
-    lastMessage: message.content || mediaPreview(message.mediaType) || conversation.lastMessage,
+    lastMessage: conversation.isGroup
+      ? `${message.sender === 'attendant' ? (message.senderName || 'Atendente') : (message.senderName || 'Participante')}: ${message.content || mediaPreview(message.mediaType) || conversation.lastMessage}`
+      : message.content || mediaPreview(message.mediaType) || conversation.lastMessage,
     lastMessageTimestamp: formatMessageTime(timestampMs, message.timestamp),
     lastMessageAt: timestampMs || conversation.lastMessageAt,
     lastMessageFromMe: !isIncoming,

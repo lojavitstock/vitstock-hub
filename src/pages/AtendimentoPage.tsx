@@ -647,7 +647,7 @@ export const AtendimentoPage: React.FC = () => {
 
     if (!isInternalNoteToSend) {
       updateConversationActivity(activeConv.id, {
-        lastMessage: newMsgText,
+        lastMessage: activeConv.isGroup ? `${attendantName}: ${newMsgText}` : newMsgText,
         lastMessageTimestamp: formatMessageTimestamp(newMsg.timestampMs, 'Agora'),
         lastMessageAt: newMsg.timestampMs || Date.now(),
         lastMessageFromMe: true,
@@ -821,7 +821,7 @@ export const AtendimentoPage: React.FC = () => {
     traceOutbound('optimistic.rendered');
     window.setTimeout(() => scrollToBottom('outbound.media.optimistic'), 0);
     updateConversationActivity(activeConv.id, {
-      lastMessage: caption || label,
+      lastMessage: activeConv.isGroup ? `${attendantName}: ${caption || label}` : (caption || label),
       lastMessageTimestamp: formatMessageTimestamp(localMessage.timestampMs, 'Agora'),
       lastMessageAt: localMessage.timestampMs || Date.now(),
       lastMessageFromMe: true,
@@ -1310,7 +1310,7 @@ export const AtendimentoPage: React.FC = () => {
                   <h2 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
                     {activeConv.contact.name}
                   </h2>
-                  <p className="text-xs text-zinc-400 font-mono">{activeConv.contact.phone}</p>
+                  <p className="text-xs text-zinc-400 font-mono">{activeConv.isGroup ? 'Grupo WhatsApp' : activeConv.contact.phone}</p>
                 </div>
               </button>
 
