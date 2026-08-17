@@ -315,11 +315,33 @@ Um Preview pode precisar ser incluído explicitamente em `ALLOWED_FRONTEND_ORIGI
 2. informe a origem que precisaria ser autorizada;
 3. aguarde autorização para qualquer alteração externa.
 
-## 14. Automação por agentes
+## 14. Fluxo de execução
 
-Agentes auxiliares podem apoiar revisão, análise, testes, inspeção e busca de regressões. O agente principal continua responsável por interpretar a tarefa, manter escopo, avaliar evidências e preparar a entrega.
+O fluxo operacional normal do projeto é:
 
-Nenhum agente auxiliar recebe autoridade automática para merge, deploy, produção, migrations de produção ou secrets. Este runbook não depende de comandos ou integração específica do OpenHands.
+```text
+Issue/tarefa
+↓
+Codex
+↓
+implementação
+↓
+validação técnica
+↓
+revisão do diff
+↓
+commit/push/PR quando autorizado
+↓
+READY FOR HUMAN REVIEW
+↓
+Preview
+↓
+validação humana
+↓
+merge humano
+```
+
+O Codex é atualmente o único agente automatizado autorizado nesse fluxo. Ferramentas auxiliares futuras dependerão de autorização humana explícita e não recebem autoridade automática para merge, deploy, produção, migrations de produção ou secrets.
 
 ## 15. Ready for Human Review
 

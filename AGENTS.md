@@ -1,6 +1,6 @@
 # Vitstock Hub — Agent Instructions
 
-Este arquivo define as regras obrigatórias para qualquer agente de IA que trabalhe neste repositório, incluindo Codex, OpenHands e agentes futuros.
+Este arquivo define as regras obrigatórias para qualquer agente de IA que trabalhe neste repositório, incluindo o Codex e agentes futuros autorizados.
 
 O objetivo destas regras é permitir desenvolvimento assistido por IA com autonomia controlada, mudanças pequenas, rastreabilidade e validação humana antes de integração à produção.
 
@@ -366,7 +366,7 @@ O estado final do agente deve ser **READY FOR HUMAN REVIEW**, nunca **DONE**. A 
 
 A decisão humana prevalece sobre decisões automatizadas relacionadas a escopo, arquitetura, produto, prioridades, deploy, produção, merge e aceitação funcional.
 
-OpenHands, Codex ou qualquer outro agente podem analisar, implementar dentro do escopo, testar, revisar, identificar problemas, sugerir melhorias e preparar Pull Requests. Eles não possuem autoridade final sobre produto ou produção.
+Atualmente, o Codex é o único agente automatizado autorizado no fluxo normal do projeto. Ele pode analisar, implementar dentro do escopo, testar, revisar, identificar problemas, sugerir melhorias e preparar Pull Requests. Nenhum agente possui autoridade final sobre produto ou produção; ferramentas auxiliares futuras dependerão de autorização humana explícita.
 
 ---
 

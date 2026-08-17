@@ -210,11 +210,11 @@ Regression checks:
 
 O Preview é a etapa de validação funcional. Um agente pode preparar cenário, executar checks locais e reportar evidências, mas não aceita sozinho UX, integração real ou prontidão para produção.
 
-## 12. Papel de agentes auxiliares
+## 12. Responsabilidade pela validação
 
-OpenHands ou outro agente pode executar testes, revisar diff, procurar regressões, analisar falhas e comparar uma alteração com os invariantes. Não recebe autoridade para alterar testes arbitrariamente, aceitar regressão, fazer merge, deploy, migrations de produção ou administrar secrets.
+O Codex executa testes, revisa diff, procura regressões, analisa falhas e compara uma alteração com os invariantes. Não pode alterar testes arbitrariamente, aceitar regressão, fazer merge, deploy, migrations de produção ou administrar secrets.
 
-O agente principal continua responsável por interpretar a evidência e manter o escopo.
+Ferramentas auxiliares futuras, quando explicitamente autorizadas, são opcionais e não substituem a responsabilidade do Codex de interpretar a evidência e manter o escopo.
 
 ## 13. Critério mínimo de saída
 
