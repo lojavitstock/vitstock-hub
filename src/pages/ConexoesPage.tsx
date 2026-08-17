@@ -373,7 +373,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
               </div>
               <h4 className="text-sm font-bold text-emerald-400">WhatsApp Pareado & Pronto para Atendimento!</h4>
               <p className="text-xs text-zinc-400 max-w-md mx-auto">
-                Suas mensagens de entrada e saída estão sendo sincronizadas via WebSocket com a sua Evolution API na Oracle Cloud.
+                Suas mensagens de entrada e saída estão sendo sincronizadas em tempo real com a sua Evolution API na Oracle Cloud.
               </p>
               <button
                 type="button"
@@ -438,7 +438,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
             <div>
               <span className="text-zinc-500 block mb-0.5 font-bold">Webhooks & Sessão</span>
               <span className="text-emerald-400 font-bold flex items-center gap-1">
-                <CheckCircle className="w-3.5 h-3.5" /> WebSocket Conectado
+                <CheckCircle className="w-3.5 h-3.5" /> Eventos em Tempo Real Ativos
               </span>
             </div>
             <div>
