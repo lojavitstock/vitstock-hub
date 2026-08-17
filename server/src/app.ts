@@ -6,6 +6,7 @@ import { db } from './db.js';
 import { loadUser, registerAuthRoutes } from './auth.js';
 import { registerEvolutionRoutes } from './evolution.js';
 import { registerGoogleContactRoutes } from './google-contacts.js';
+import { registerContactRoutes } from './contacts.js';
 
 export async function createApp() {
   const app = Fastify({
@@ -49,6 +50,7 @@ export async function createApp() {
   await registerAuthRoutes(app);
   await registerEvolutionRoutes(app);
   await registerGoogleContactRoutes(app);
+  await registerContactRoutes(app);
 
   app.setErrorHandler((error, request, reply) => {
     const httpError = (error && typeof error === 'object' ? error : {}) as Error & { statusCode?: number; code?: string };

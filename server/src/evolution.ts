@@ -356,13 +356,29 @@ async function prepareOutboundConversation(input: {
   const contactId = contact.rows[0]?.id;
   if (!contactId) throw new Error('Contato n\u00e3o p\u00f4de ser preparado para o envio');
 
+  if (!isGroup) {
+    await db.query(
+      `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
+       VALUES ($1, $2, $3, $4, true, 'whatsapp')
+       ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET updated_at = now()`,
+      [input.companyId, contactId, contactPhone, contactPhone.replace(/\D/g, '')],
+    );
+  }
+
+  await db.query(
+    `INSERT INTO contact_channel_identities (company_id, contact_id, channel, identity, identity_type)
+     VALUES ($1, $2, 'whatsapp', $3, $4)
+     ON CONFLICT (company_id, channel, identity) DO UPDATE SET contact_id = EXCLUDED.contact_id, updated_at = now()`,
+    [input.companyId, contactId, input.remoteJid, input.remoteJid.endsWith('@lid') ? 'lid' : 'remote_jid'],
+  );
+
   const existing = await db.query<{ id: string }>(
     `SELECT id FROM conversations
      WHERE company_id = $1
-       AND (evolution_remote_jid = $3 OR contact_id = $2)
-     ORDER BY CASE WHEN evolution_remote_jid = $3 THEN 0 ELSE 1 END, updated_at DESC
+       AND evolution_remote_jid = $2
+     ORDER BY updated_at DESC
      LIMIT 1`,
-    [input.companyId, contactId, input.remoteJid],
+    [input.companyId, input.remoteJid],
   );
   if (existing.rows[0]?.id) return existing.rows[0].id;
 
@@ -381,19 +397,15 @@ async function prepareOutboundConversation(input: {
 }
 
 async function findConversationForLease(input: { companyId: string; remoteJid: string; phone?: string }) {
-  const phone = input.phone?.replace(/\D/g, '') || '';
   const result = await db.query<{ id: string }>(
     `SELECT c.id
      FROM conversations c
      JOIN contacts contact ON contact.id = c.contact_id
      WHERE c.company_id = $1::uuid
-       AND (
-         c.evolution_remote_jid = ANY($2::text[])
-         OR ($3::text <> '' AND regexp_replace(contact.phone, '\\D', '', 'g') = $3::text)
-       )
-     ORDER BY CASE WHEN c.evolution_remote_jid = $4::text THEN 0 ELSE 1 END, c.updated_at DESC
+       AND c.evolution_remote_jid = $2::text
+     ORDER BY c.updated_at DESC
      LIMIT 1`,
-    [input.companyId, assignmentJids(input), phone, input.remoteJid],
+    [input.companyId, input.remoteJid],
   );
   return result.rows[0]?.id;
 }
@@ -1203,16 +1215,14 @@ async function findOrCreateConversation(
     groupAvatarUrl?: string;
   },
 ) {
-  // A Evolution pode alternar entre o JID do telefone e um @lid para o mesmo
-  // contato. Primeiro reutilizamos uma conversa do contato e só criamos uma
-  // nova quando não existe nenhuma identidade local para aquele telefone.
+  // Uma Conversation representa uma identidade remota específica. Nunca
+  // reutilize uma thread apenas porque o contact_id coincide.
   const existing = await client.query<{ id: string }>(
     `SELECT id
      FROM conversations
      WHERE company_id = $1
-       AND (evolution_remote_jid = $3 OR contact_id = $2)
-     ORDER BY CASE WHEN evolution_remote_jid = $3 THEN 0 ELSE 1 END,
-              updated_at DESC
+       AND evolution_remote_jid = $3
+     ORDER BY updated_at DESC
      LIMIT 1
      FOR UPDATE`,
     [input.companyId, input.contactId, input.remoteJid],
@@ -1336,6 +1346,22 @@ async function persistProviderMessage(
     );
     const contactId = contact.rows[0]?.id;
     if (!contactId) throw new Error('Contato não pôde ser preparado para a mensagem recebida');
+
+    if (!isGroup) {
+      await client.query(
+        `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
+         VALUES ($1, $2, $3, $4, true, 'whatsapp')
+         ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET updated_at = now()`,
+        [companyId, contactId, contactPhone, contactPhone.replace(/\D/g, '')],
+      );
+    }
+
+    await client.query(
+      `INSERT INTO contact_channel_identities (company_id, contact_id, channel, identity, identity_type)
+       VALUES ($1, $2, 'whatsapp', $3, $4)
+       ON CONFLICT (company_id, channel, identity) DO UPDATE SET contact_id = EXCLUDED.contact_id, updated_at = now()`,
+      [companyId, contactId, local.remoteJid, local.remoteJid.endsWith('@lid') ? 'lid' : 'remote_jid'],
+    );
 
     const conversationId = await findOrCreateConversation(client, {
       companyId,
@@ -1559,6 +1585,22 @@ async function ensureOutboundMessage(input: {
   );
   const contactId = contact.rows[0]?.id;
   if (!contactId) throw new Error('Contato não pôde ser preparado para o envio');
+
+    if (!isGroup) {
+      await client.query(
+        `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
+         VALUES ($1, $2, $3, $4, true, 'whatsapp')
+         ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET updated_at = now()`,
+        [input.companyId, contactId, contactPhone, contactPhone.replace(/\D/g, '')],
+      );
+    }
+
+    await client.query(
+      `INSERT INTO contact_channel_identities (company_id, contact_id, channel, identity, identity_type)
+       VALUES ($1, $2, 'whatsapp', $3, $4)
+       ON CONFLICT (company_id, channel, identity) DO UPDATE SET contact_id = EXCLUDED.contact_id, updated_at = now()`,
+      [input.companyId, contactId, input.remoteJid, input.remoteJid.endsWith('@lid') ? 'lid' : 'remote_jid'],
+    );
 
     const conversationId = await findOrCreateConversation(client, {
     companyId: input.companyId,

@@ -73,7 +73,7 @@ export async function requireUser(request: FastifyRequest, reply: FastifyReply) 
   if (!request.user) return reply.code(401).send({ error: 'Não autenticado' });
 }
 
-async function requireAdmin(request: FastifyRequest, reply: FastifyReply) {
+export async function requireAdmin(request: FastifyRequest, reply: FastifyReply) {
   if (!request.user) return reply.code(401).send({ error: 'Não autenticado' });
   if (request.user.role !== 'admin') return reply.code(403).send({ error: 'Apenas administradores podem gerenciar a equipe' });
 }

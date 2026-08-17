@@ -327,7 +327,7 @@ Os detalhes finais deste comportamento ainda podem evoluir conforme validação 
 
 Contacts representam pessoas ou entidades que interagem com a Vitstock.
 
-Um contato pode futuramente centralizar:
+O módulo operacional de contatos centraliza:
 
 * identificação;
 * telefone;
@@ -337,7 +337,15 @@ Um contato pode futuramente centralizar:
 * informações comerciais;
 * campos personalizados;
 * observações;
-* atividades.
+* atividades e histórico de auditoria quando aplicável.
+
+Telefones, e-mails e identidades de canal são valores separados do perfil.
+Cada conversa continua sendo uma thread independente por identidade WhatsApp;
+grupos permanecem no Atendimento e não aparecem como pessoas em Contatos.
+Contatos podem ser pesquisados, paginados, etiquetados, arquivados e
+mesclados/restaurados sob as permissões administrativas existentes. A
+integração Google permanece a origem deliberada para salvar e editar dados
+externos, sem apagar o contato local quando a sincronização falha.
 
 O contato deve funcionar como ponto de união entre comunicação e relacionamento comercial.
 

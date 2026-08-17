@@ -142,7 +142,11 @@ async function googleFetch(path: string, accessToken: string, init?: RequestInit
     headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', ...init?.headers },
     signal: AbortSignal.timeout(20_000),
   });
-  if (!response.ok) throw new Error(`Google People API respondeu ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(`Google People API respondeu ${response.status}`) as Error & { status: number };
+    error.status = response.status;
+    throw error;
+  }
   return response;
 }
 
@@ -452,71 +456,75 @@ async function upsertLocalContacts(companyId: string, people: GooglePerson[]) {
 }
 
 async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]) {
-  const unique = new Map<string, ReturnType<typeof contactFieldsFromPerson>>();
+  let imported = 0;
   for (const person of people) {
     const fields = contactFieldsFromPerson(person);
     if (!fields.name || !fields.phone) continue;
-    for (const phone of [fields.phone, ...fields.otherPhones]) {
-      unique.set(phone, { ...fields, phone });
+    const existing = await db.query<{ id: string; phone: string; manual_override: Record<string, string> }>(
+      `SELECT id, phone, manual_override FROM contacts
+       WHERE company_id = $1 AND (google_resource_name = $2 OR phone = $3)
+       ORDER BY CASE WHEN google_resource_name = $2 THEN 0 ELSE 1 END LIMIT 1`,
+      [companyId, person.resourceName || '', fields.phone],
+    );
+    const row = existing.rows[0];
+    let contactId = row?.id;
+    if (!contactId) {
+      const created = await db.query<{ id: string }>(
+        `INSERT INTO contacts (company_id, name, phone, email, avatar_url, cpf, address, secondary_phone,
+          google_resource_name, source, nickname, birthday, company, job_title, website, notes,
+          google_etag, google_data, google_synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'google', $10, $11, $12, $13, $14, $15, $16, $17, now())
+         ON CONFLICT (company_id, phone) DO UPDATE SET google_resource_name = COALESCE(EXCLUDED.google_resource_name, contacts.google_resource_name), updated_at = now()
+         RETURNING id`,
+        [companyId, fields.name, fields.phone, fields.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, fields.otherPhones[0] || null, fields.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, fields.etag || null, fields.googleData],
+      );
+      contactId = created.rows[0]?.id;
     }
+    if (!contactId) continue;
+    const manualOverride = (row?.manual_override || {}) as Record<string, string>;
+    const preservePhone = manualOverride.phone === 'manual';
+    const preserveEmail = manualOverride.email === 'manual';
+    await db.query(
+      `UPDATE contacts SET
+         name = CASE WHEN manual_override ? 'name' THEN name ELSE $2 END,
+         phone = CASE WHEN manual_override ? 'phone' THEN phone ELSE $3 END,
+         email = CASE WHEN manual_override ? 'email' THEN email ELSE $4 END,
+         avatar_url = COALESCE($5, avatar_url), cpf = CASE WHEN manual_override ? 'cpf' THEN cpf ELSE $6 END,
+         address = CASE WHEN manual_override ? 'address' THEN address ELSE $7 END,
+         secondary_phone = CASE WHEN manual_override ? 'phone' THEN secondary_phone ELSE $8 END,
+         google_resource_name = $9, source = CASE WHEN source = 'hub' THEN source ELSE 'google' END,
+         nickname = CASE WHEN manual_override ? 'nickname' THEN nickname ELSE $10 END,
+         birthday = CASE WHEN manual_override ? 'birthday' THEN birthday ELSE $11 END,
+         company = CASE WHEN manual_override ? 'company' THEN company ELSE $12 END,
+         job_title = CASE WHEN manual_override ? 'jobTitle' THEN job_title ELSE $13 END,
+         website = CASE WHEN manual_override ? 'website' THEN website ELSE $14 END,
+         notes = CASE WHEN manual_override ? 'notes' THEN notes ELSE $15 END,
+         google_etag = $16, google_data = $17, google_synced_at = now(), updated_at = now(), version = version + 1
+       WHERE company_id = $1 AND id = $18`,
+      [companyId, fields.name, fields.phone, fields.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, fields.otherPhones[0] || null, fields.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, fields.etag || null, fields.googleData, contactId],
+    );
+    const phoneValues = [fields.phone, ...fields.otherPhones];
+    if (!preservePhone) await db.query('UPDATE contact_phones SET is_primary = false, updated_at = now() WHERE contact_id = $1', [contactId]);
+    if (!preserveEmail) await db.query('UPDATE contact_emails SET is_primary = false, updated_at = now() WHERE contact_id = $1', [contactId]);
+    for (const [index, phone] of phoneValues.entries()) {
+      await db.query(
+        `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
+         VALUES ($1, $2, $3, $4, $5, 'google')
+         ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET phone = EXCLUDED.phone, is_primary = EXCLUDED.is_primary, source = 'google', updated_at = now()`,
+        [companyId, contactId, phone, normalizePhone(phone), index === 0 && !preservePhone],
+      );
+    }
+    for (const [index, email] of fields.emails.entries()) {
+      await db.query(
+        `INSERT INTO contact_emails (company_id, contact_id, email, normalized_email, is_primary, source)
+         VALUES ($1, $2, $3, $4, $5, 'google')
+         ON CONFLICT (contact_id, normalized_email) DO UPDATE SET email = EXCLUDED.email, is_primary = EXCLUDED.is_primary, source = 'google', updated_at = now()`,
+        [companyId, contactId, email, email.toLowerCase(), index === 0 && !preserveEmail],
+      );
+    }
+    imported += 1;
   }
-  const contacts = Array.from(unique.values());
-  if (contacts.length === 0) return 0;
-
-  await db.query(
-    `INSERT INTO contacts (
-       company_id, name, phone, email, avatar_url, cpf, address, secondary_phone,
-       google_resource_name, source, nickname, birthday, company, job_title,
-       website, notes, google_etag, google_data, google_synced_at
-     )
-     SELECT $1, item.name, item.phone, item.email, item.avatar_url, item.cpf, item.address,
-            item.secondary_phone, item.resource_name, 'google', item.nickname, item.birthday,
-            item.company, item.job_title, item.website, item.notes, item.etag,
-            item.google_data, now()
-     FROM jsonb_to_recordset($2::jsonb) AS item(
-       name text, phone text, email text, avatar_url text, cpf text, address text,
-       secondary_phone text, resource_name text, nickname text, birthday text,
-       company text, job_title text, website text, notes text, etag text, google_data jsonb
-     )
-     ON CONFLICT (company_id, phone) DO UPDATE SET
-       name = EXCLUDED.name,
-       email = EXCLUDED.email,
-       avatar_url = EXCLUDED.avatar_url,
-       cpf = EXCLUDED.cpf,
-       address = EXCLUDED.address,
-       secondary_phone = EXCLUDED.secondary_phone,
-       google_resource_name = EXCLUDED.google_resource_name,
-       source = 'google',
-       nickname = EXCLUDED.nickname,
-       birthday = EXCLUDED.birthday,
-       company = EXCLUDED.company,
-       job_title = EXCLUDED.job_title,
-       website = EXCLUDED.website,
-       notes = EXCLUDED.notes,
-       google_etag = EXCLUDED.google_etag,
-       google_data = EXCLUDED.google_data,
-       google_synced_at = now(),
-       updated_at = now()`,
-    [companyId, JSON.stringify(contacts.map((contact) => ({
-      name: contact.name,
-      phone: contact.phone,
-      email: contact.email || null,
-      avatar_url: contact.avatarUrl || null,
-      cpf: contact.cpf || null,
-      address: contact.address || null,
-      secondary_phone: contact.otherPhones[0] || null,
-      resource_name: contact.resourceName || null,
-      nickname: contact.nickname || null,
-      birthday: contact.birthday || null,
-      company: contact.company || null,
-      job_title: contact.jobTitle || null,
-      website: contact.website || null,
-      notes: contact.notes || null,
-      etag: contact.etag || null,
-      google_data: contact.googleData,
-    })))],
-  );
-  return contacts.length;
+  return imported;
 }
 
 export async function syncGoogleContactsForCompany(companyId: string) {
@@ -659,6 +667,7 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
            AND (
              regexp_replace(phone, '\\D', '', 'g') = ANY($2::text[])
              OR regexp_replace(COALESCE(secondary_phone, ''), '\\D', '', 'g') = ANY($2::text[])
+             OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.contact_id = contacts.id AND cp.normalized_phone = ANY($2::text[]))
            )
          ORDER BY CASE WHEN source = 'google' OR google_resource_name IS NOT NULL THEN 0 ELSE 1 END
          LIMIT 1`,
@@ -781,100 +790,59 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
         notes: contact.notes || '',
         googleData: { ...person, ...payload, resourceName, etag: person.etag || existing?.etag || null },
       };
-      await db.query(
-        `INSERT INTO contacts (
-           company_id, name, phone, email, cpf, address, secondary_phone, avatar_url,
-           google_resource_name, source, nickname, birthday, company, job_title,
-           website, notes, google_etag, google_data, google_synced_at
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'google', $10, $11, $12, $13, $14, $15, $16, $17, now())
-         ON CONFLICT (company_id, phone) DO UPDATE SET
-           name = EXCLUDED.name,
-           email = EXCLUDED.email,
-           cpf = EXCLUDED.cpf,
-           address = EXCLUDED.address,
-           secondary_phone = EXCLUDED.secondary_phone,
-           avatar_url = COALESCE(EXCLUDED.avatar_url, contacts.avatar_url),
-           google_resource_name = EXCLUDED.google_resource_name,
-           source = 'google',
-           nickname = EXCLUDED.nickname,
-           birthday = EXCLUDED.birthday,
-           company = EXCLUDED.company,
-           job_title = EXCLUDED.job_title,
-           website = EXCLUDED.website,
-           notes = EXCLUDED.notes,
-           google_etag = EXCLUDED.google_etag,
-           google_data = EXCLUDED.google_data,
-           google_synced_at = now(),
-           updated_at = now()`,
-        [request.user!.companyId, contact.name, phone, emailValues[0] || null, contact.cpf || null, contact.address || null, otherPhone || null, saved.avatarUrl || null, resourceName, saved.nickname || contact.nickname || null, saved.birthday || contact.birthday || null, saved.company || contact.company || null, saved.jobTitle || contact.jobTitle || null, saved.website || contact.website || null, saved.notes || contact.notes || null, person.etag || existing?.etag || null, saved.googleData],
-      );
+      const resourceLocal = resourceName
+        ? await db.query<{ id: string; phone: string }>('SELECT id, phone FROM contacts WHERE company_id = $1 AND google_resource_name = $2 LIMIT 1', [request.user!.companyId, resourceName])
+        : { rows: [] as Array<{ id: string; phone: string }> };
+      const phoneLocal = await db.query<{ id: string }>('SELECT id FROM contacts WHERE company_id = $1 AND phone = $2 LIMIT 1', [request.user!.companyId, phone]);
+      if (resourceLocal.rows[0] && phoneLocal.rows[0] && resourceLocal.rows[0].id !== phoneLocal.rows[0].id) {
+        return reply.code(409).send({ error: 'O telefone informado já pertence a outro contato. Revise a duplicidade antes de salvar.', conflict: true });
+      }
+      let savedContactId = resourceLocal.rows[0]?.id || phoneLocal.rows[0]?.id;
+      if (savedContactId) {
+        await db.query(
+          `UPDATE contacts SET name = $2, phone = $3, email = $4, cpf = $5, address = $6, secondary_phone = $7,
+             avatar_url = COALESCE($8, avatar_url), google_resource_name = $9, source = 'google', nickname = $10,
+             birthday = $11, company = $12, job_title = $13, website = $14, notes = $15, google_etag = $16,
+             google_data = $17, google_synced_at = now(), updated_at = now(), version = version + 1 WHERE id = $1 AND company_id = $18`,
+          [savedContactId, contact.name, phone, emailValues[0] || null, contact.cpf || null, contact.address || null, otherPhone || null, saved.avatarUrl || null, resourceName, saved.nickname || contact.nickname || null, saved.birthday || contact.birthday || null, saved.company || contact.company || null, saved.jobTitle || contact.jobTitle || null, saved.website || contact.website || null, saved.notes || contact.notes || null, person.etag || existing?.etag || null, saved.googleData, request.user!.companyId],
+        );
+      } else {
+        const inserted = await db.query<{ id: string }>(
+          `INSERT INTO contacts (company_id, name, phone, email, cpf, address, secondary_phone, avatar_url,
+             google_resource_name, source, nickname, birthday, company, job_title, website, notes, google_etag, google_data, google_synced_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'google', $10, $11, $12, $13, $14, $15, $16, $17, now()) RETURNING id`,
+          [request.user!.companyId, contact.name, phone, emailValues[0] || null, contact.cpf || null, contact.address || null, otherPhone || null, saved.avatarUrl || null, resourceName, saved.nickname || contact.nickname || null, saved.birthday || contact.birthday || null, saved.company || contact.company || null, saved.jobTitle || contact.jobTitle || null, saved.website || contact.website || null, saved.notes || contact.notes || null, person.etag || existing?.etag || null, saved.googleData],
+        );
+        savedContactId = inserted.rows[0]!.id;
+      }
+      if (savedContactId) {
+        await db.query('UPDATE contact_phones SET is_primary = false, updated_at = now() WHERE contact_id = $1', [savedContactId]);
+        await db.query('UPDATE contact_emails SET is_primary = false, updated_at = now() WHERE contact_id = $1', [savedContactId]);
+        for (const [index, value] of [phone, ...otherPhones].entries()) {
+          await db.query(
+            `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
+             VALUES ($1, $2, $3, $4, $5, 'google')
+             ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET phone = EXCLUDED.phone, is_primary = EXCLUDED.is_primary, source = 'google', updated_at = now()`,
+            [request.user!.companyId, savedContactId, value, normalizePhone(value), index === 0],
+          );
+        }
+        for (const [index, value] of emailValues.entries()) {
+          await db.query(
+            `INSERT INTO contact_emails (company_id, contact_id, email, normalized_email, is_primary, source)
+             VALUES ($1, $2, $3, $4, $5, 'google')
+             ON CONFLICT (contact_id, normalized_email) DO UPDATE SET email = EXCLUDED.email, is_primary = EXCLUDED.is_primary, source = 'google', updated_at = now()`,
+            [request.user!.companyId, savedContactId, value, value.toLowerCase(), index === 0],
+          );
+        }
+      }
       googleContactsCache.delete(request.user!.companyId);
       return reply.code(existing ? 200 : 201).send({ saved: true, ...saved, name: contact.name, resourceName, phone, otherPhone, otherPhones, emails: emailValues });
-    } catch (error) {
+    } catch (error: any) {
       request.log.warn({ err: error }, 'Não foi possível salvar contato no Google');
+      if (error?.status === 412) return reply.code(409).send({ error: 'O contato foi alterado no Google. Atualize os dados e tente novamente.', conflict: true });
+      if (error?.status === 429) return reply.code(503).send({ error: 'O Google está temporariamente indisponível. Tente novamente.', retryable: true });
       return reply.code(502).send({ error: 'Não foi possível salvar o contato no Google Contacts' });
     }
   });
 
-  app.get('/api/contacts', { preHandler: requireUser }, async (request) => {
-    const result = await db.query(
-      `SELECT id, name, phone, email, avatar_url, notes, cpf, address, secondary_phone,
-              nickname, birthday, company, job_title, website, google_resource_name,
-              google_etag, google_data, google_synced_at, source, created_at
-       FROM contacts WHERE company_id = $1 ORDER BY name`, [request.user!.companyId],
-    );
-    return { contacts: result.rows };
-  });
-
-  app.post('/api/contacts', { preHandler: requireUser }, async (request, reply) => {
-    const parsed = contactSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Contato inválido' });
-    const phone = normalizePhone(parsed.data.phone);
-    const local = await db.query<{ id: string }>(
-      `INSERT INTO contacts (company_id, name, phone, email, source) VALUES ($1, $2, $3, $4, 'hub')
-       ON CONFLICT (company_id, phone) DO UPDATE SET name = EXCLUDED.name, email = EXCLUDED.email, source = 'hub', updated_at = now()
-       RETURNING id`, [request.user!.companyId, parsed.data.name, phone, parsed.data.email || null],
-    );
-
-    let googleSynced = false;
-    try {
-      const token = await accessTokenForCompany(request.user!.companyId);
-      const people = await listGoogleContactsForCompany(request.user!.companyId);
-      const variants = phoneVariants(phone);
-      const existing = people.find((person) => person.phoneNumbers?.some((item) => variants.has(normalizePhone(item.value || ''))));
-      let person: GooglePerson;
-      if (existing?.resourceName) {
-        const response = await googleFetch(`/${existing.resourceName}:updateContact?updatePersonFields=names,emailAddresses,phoneNumbers&personFields=${encodeURIComponent(GOOGLE_PERSON_FIELDS)}`, token, {
-          method: 'PATCH', body: JSON.stringify({ etag: existing.etag, names: [{ givenName: parsed.data.name }], phoneNumbers: [{ value: `+${phone}` }], emailAddresses: parsed.data.email ? [{ value: parsed.data.email }] : [] }),
-        });
-        person = await response.json() as GooglePerson;
-      } else {
-        const response = await googleFetch(`/people:createContact?personFields=${encodeURIComponent(GOOGLE_PERSON_FIELDS)}`, token, {
-          method: 'POST', body: JSON.stringify({ names: [{ givenName: parsed.data.name }], phoneNumbers: [{ value: `+${phone}` }], emailAddresses: parsed.data.email ? [{ value: parsed.data.email }] : [] }),
-        });
-        person = await response.json() as GooglePerson;
-      }
-      const fields = contactFieldsFromPerson({
-        ...person,
-        ...(!person.names?.length ? { names: [{ displayName: parsed.data.name }] } : {}),
-        ...(!person.phoneNumbers?.length ? { phoneNumbers: [{ value: phone }] } : {}),
-      });
-      await db.query(
-        `UPDATE contacts SET
-           name = $2, phone = $3, email = $4, avatar_url = $5, cpf = $6, address = $7,
-           secondary_phone = $8, google_resource_name = $9, source = 'google',
-           nickname = $10, birthday = $11, company = $12, job_title = $13,
-           website = $14, notes = $15, google_etag = $16, google_data = $17,
-           google_synced_at = now(), updated_at = now()
-         WHERE id = $1`,
-        [local.rows[0]!.id, parsed.data.name, phone, fields.email || parsed.data.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, fields.otherPhones[0] || null, fields.resourceName || existing?.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, person.etag || existing?.etag || null, fields.googleData],
-      );
-      googleContactsCache.delete(request.user!.companyId);
-      googleSynced = true;
-    } catch (error) {
-      request.log.warn({ err: error }, 'Contato salvo localmente, mas não sincronizado com Google');
-    }
-    return reply.code(201).send({ id: local.rows[0]!.id, googleSynced });
-  });
 }
