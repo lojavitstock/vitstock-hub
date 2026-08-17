@@ -13,7 +13,7 @@ Evite aprovações redundantes, checklists extensos, procedimentos para cenário
 ## 1. Fluxo operacional padrão
 
 ```text
-Issue / tarefa
+Issue aberta + `codex-ready` (ou instrução direta do responsável)
   ↓
 entender escopo e ler contexto necessário
   ↓
@@ -27,9 +27,9 @@ revisar diff
   ↓
 commit e push, quando autorizados
   ↓
-Preview e validação humana
-  ↓
 READY FOR HUMAN REVIEW
+  ↓
+Preview e validação humana
   ↓
 merge humano
 ```
@@ -58,6 +58,25 @@ Antes de modificar qualquer arquivo:
 6. Investigue a implementação existente antes de editar. Para bugs sem causa clara, diagnostique antes de corrigir.
 
 Não é necessário criar branch nova quando a tarefa já atribui uma. Nunca trabalhe diretamente em `main`.
+
+### Fila autorizada e execução de uma Issue
+
+`codex-ready` significa que a Issue foi revisada e está explicitamente autorizada por uma pessoa para execução pelo Codex. O Codex só inicia autonomamente uma Issue aberta com essa label; backlog, `ROADMAP.md` ou a existência de uma Issue não são autorização. O Codex não aplica a própria label. Instruções diretas do responsável continuam sendo autorização explícita fora da fila.
+
+Trabalhe em uma única Issue autorizada por vez. Não misture escopos nem inicie a próxima automaticamente. Para cada Issue:
+
+1. localize a Issue aberta e confirme `codex-ready`, quando o trabalho vier da fila;
+2. leia a Issue e confirme o escopo e os critérios de aceite;
+3. confirme a baseline indicada, sem assumir `main`;
+4. crie/use `codex/issue-<numero>-<slug-curto>` a partir da baseline confirmada;
+5. investigue o código e implemente a menor mudança verificável;
+6. execute os checks aplicáveis de `docs/TESTING.md`;
+7. faça o self-review do diff e confirme que não há mudanças fora do escopo;
+8. crie commit, faça push somente da branch da Issue e prepare a Pull Request contra a baseline correta, quando solicitado;
+9. remova `codex-ready` após criar a Pull Request e mantenha a Issue aberta;
+10. forneça o plano de validação manual e pare em **READY FOR HUMAN REVIEW**.
+
+Não faça merge nesta etapa. Uma nova Issue exige nova autorização humana.
 
 ## 3. Alterações já existentes
 
@@ -304,7 +323,7 @@ Para migrations, acrescente `## Migration Impact`. Em alterações sensíveis de
 O Preview da Vercel é o ambiente de validação funcional antes do merge:
 
 ```text
-branch → push → Preview → validação humana → merge
+branch → push → READY FOR HUMAN REVIEW → Preview → validação humana → merge
 ```
 
 O agente pode confirmar implementação, checks executados e a existência de Preview quando observável. Não pode confirmar sozinho aprovação funcional, UX, integração ou prontidão para produção.
@@ -320,7 +339,7 @@ Um Preview pode precisar ser incluído explicitamente em `ALLOWED_FRONTEND_ORIGI
 O fluxo operacional normal do projeto é:
 
 ```text
-Issue/tarefa
+Issue aberta + `codex-ready` (ou instrução direta do responsável)
 ↓
 Codex
 ↓
@@ -357,6 +376,27 @@ Uma tarefa chega a **READY FOR HUMAN REVIEW** quando, conforme aplicável:
 - plano objetivo de teste manual fornecido.
 
 Não use apenas `DONE`: aprovação funcional continua sendo humana.
+
+Após a validação humana, o merge somente pode ocorrer com autorização explícita, na baseline correta. Em seguida, registre a validação, feche a Issue quando apropriado, remova a branch da Issue somente quando for seguro e sincronize a baseline. **READY FOR HUMAN REVIEW** nunca implica merge automático.
+
+### Relatório final
+
+Ao entregar uma tarefa, use de forma concisa:
+
+```text
+READY FOR HUMAN REVIEW
+Issue:
+Branch:
+Baseline:
+Diagnóstico:
+Arquivos alterados:
+Mudança:
+Validação técnica:
+Commit:
+PR:
+Manual Test Plan:
+Riscos/observações:
+```
 
 ## 16. Modelo de Manual Test Plan
 

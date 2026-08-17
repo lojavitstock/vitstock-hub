@@ -76,6 +76,14 @@ Leia quando relevante:
 
 Não leia documentação irrelevante apenas para aumentar contexto. Priorize o menor conjunto de informações necessário para executar a tarefa corretamente.
 
+## Workflow orientado por GitHub Issues
+
+`codex-ready` significa: **esta Issue foi revisada e está explicitamente autorizada para execução pelo Codex**.
+
+O Codex pode iniciar autonomamente somente uma Issue que esteja aberta e tenha a label `codex-ready`. Uma Issue aberta sem essa label, uma Issue apenas existente no backlog ou um item do `ROADMAP.md` não constitui autorização. O Codex não deve aplicar essa label por conta própria; a autorização é humana. Quando a Pull Request for criada, a label deve ser removida, mantendo a Issue aberta até a validação humana e a conclusão do ciclo.
+
+O Codex trabalha em uma única Issue `codex-ready` por vez. Não deve iniciar outra Issue, misturar escopos ou avançar automaticamente depois de preparar uma tarefa para revisão. Instruções diretas do responsável continuam válidas mesmo sem a label e são tratadas como a autorização explícita daquela tarefa; a label governa somente a fila autônoma.
+
 ---
 
 # 4. Understand Before Changing
@@ -113,6 +121,10 @@ git branch --show-current
 Se já existir uma branch definida para a tarefa, utilize-a. Não crie outra branch desnecessariamente. Se nenhuma branch estiver definida, utilize uma branch descritiva, preferencialmente `codex/<tipo>-<descricao>`.
 
 A integração com `main` exige aprovação humana.
+
+### Branch por Issue e baseline
+
+Para uma Issue autorizada, use uma branch isolada no formato `codex/issue-<numero>-<slug-curto>`, por exemplo `codex/issue-4-websocket-copy`. Confirme a baseline antes de criar a branch; ela pode ser `codex/perf-atendimento-inbox` neste ciclo e não deve ser presumida como `main`. Se a baseline não estiver clara, pare e peça orientação. Cada Issue deve permanecer isolada em sua própria branch e Pull Request.
 
 ---
 
@@ -245,13 +257,15 @@ testes
 ↓
 checks e build aplicáveis
 ↓
-commit
+commit, quando autorizado
 ↓
-push
+push, quando autorizado
 ↓
-Pull Request / Preview
+Pull Request, quando solicitado
 ↓
-validação humana
+READY FOR HUMAN REVIEW
+↓
+Preview / validação humana
 ↓
 merge
 ```
