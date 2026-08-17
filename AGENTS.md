@@ -27,7 +27,7 @@ Stack principal:
 * React
 * Vite
 * Node.js
-* Express
+* Fastify
 * Evolution API
 * SSE para realtime
 * Vercel para frontend
@@ -54,6 +54,8 @@ Use as fontes de informação nesta ordem:
 Se documentação e implementação atual divergirem, não assuma automaticamente que uma delas está correta. Investigue a divergência e registre-a.
 
 Google Docs, conversas antigas, handoffs e notas externas são apenas referências históricas; não são fonte oficial para implementação.
+
+Quando uma tarefa definir explicitamente uma branch de desenvolvimento, essa branch será a baseline de implementação da tarefa. Não assuma que `main` contém o trabalho mais recente desse ciclo; a baseline pode mudar em tarefas futuras.
 
 ---
 
@@ -142,6 +144,10 @@ Nunca:
 
 Qualquer exceção exige autorização humana explícita para aquela ação específica. Autorização pontual não implica autorização permanente.
 
+Alterações que adicionem ou modifiquem migrations exigem atenção adicional: um deploy posteriormente aprovado pode executá-las automaticamente pelo fluxo configurado no Railway. Destaque migrations na entrega/PR, inclua plano de validação, impacto e risco; nunca as execute manualmente em produção como agente.
+
+Antes de executar uma ação que possa modificar dados, enviar mensagens, alterar o estado do WhatsApp ou executar migrations, verifique qual ambiente e quais serviços estão configurados. `localhost` e `npm run dev:local` não garantem banco ou provider isolados; iniciar processos locais para leitura, build e testes não exige essa verificação adicional.
+
 ---
 
 # 8. Secrets
@@ -168,6 +174,9 @@ No Atendimento:
 * preserve reconciliação, deduplicação, ordenação e identidade por IDs estáveis;
 * eventos duplicados de SSE/polling não devem gerar mensagens duplicadas;
 * atualizações antigas não devem sobrescrever estado mais recente;
+* correlacione mensagens do Hub somente por identificadores explícitos, nunca por texto ou proximidade de horário;
+* mantenha metadata de anúncio, reply e reaction restrita à mensagem que a contém; reaction não é nova atividade de conversa;
+* preserve o scroll por conversa e não trate `connecting` ou `disconnected` como estado operacional;
 * mudanças não devem degradar performance perceptível da Inbox.
 
 Não substitua mecanismos existentes por implementações aparentemente mais simples sem entender por que eles existem.
@@ -214,11 +223,10 @@ Antes de declarar uma implementação pronta para revisão, execute os testes re
 
 ```bash
 npm test
-npm run lint
 npm run build
 ```
 
-Utilize os comandos reais definidos pelo projeto caso sejam diferentes. Execute também testes específicos relacionados à alteração quando existirem.
+Utilize somente os comandos reais definidos pelo projeto; consulte `docs/TESTING.md` e `docs/RUNBOOK.md` para os checks de frontend e backend. Execute também testes específicos relacionados à alteração quando existirem.
 
 Não ignore testes falhando. Se um teste já falhava antes da alteração, confirme que é preexistente e registre-o na entrega. Não altere testes apenas para fazer uma implementação incorreta passar.
 
@@ -235,9 +243,7 @@ implementação
 ↓
 testes
 ↓
-lint
-↓
-build
+checks e build aplicáveis
 ↓
 commit
 ↓
@@ -323,7 +329,7 @@ Principais arquivos modificados.
 
 ## Validation
 
-Testes, lint e build executados.
+Testes, checks e builds executados.
 
 ## Risks
 
@@ -344,8 +350,7 @@ O trabalho do agente está concluído quando:
 * o escopo solicitado foi implementado;
 * não existem alterações não relacionadas;
 * testes relevantes passaram;
-* lint passou, quando disponível;
-* build passou, quando aplicável;
+* checks e builds aplicáveis passaram;
 * documentação necessária foi atualizada;
 * mudanças foram revisadas;
 * commit foi criado quando solicitado;

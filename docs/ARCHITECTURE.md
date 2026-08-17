@@ -158,7 +158,7 @@ The schema is company-scoped. The important tables are:
 | Area | Tables | Notes |
 | --- | --- | --- |
 | Organization and access | `companies`, `users`, `sessions` | Users have `admin` or `attendant` roles; sessions store only a token HMAC. |
-| Contacts and conversations | `contacts`, `conversations` | A conversation is keyed per company by `evolution_remote_jid`; it carries persisted inbox fields. |
+| Contacts and conversations | `contacts`, `conversations` | A conversation is keyed per company by `evolution_remote_jid`; it carries persisted inbox fields plus group identity/presentation fields (`is_group`, `group_name`, `group_avatar_url`). The `(company_id, is_group, last_message_at DESC)` index supports ordered group-scoped inbox queries. |
 | Message history | `messages` | Provider message ID is unique per company; `metadata` is JSONB for message-scoped details. |
 | Provider webhook processing | `webhook_events` | Deduplicates provider event keys. |
 | Google Contacts | `google_connections` and Google-related fields on `contacts` | OAuth token material is stored encrypted by the backend integration. |
@@ -474,7 +474,7 @@ The root README states that the configured `.env.local` may still point the loca
 
 ## 20. Testing
 
-The repository uses Node's built-in test runner through `npm test`, currently executing `tests/core.test.ts` via `tests/run-tests.mjs`. The suite covers many core regressions around:
+The repository uses Node's built-in test runner through `npm test`, which runs `tests/core.test.ts` and `tests/groupConversations.test.ts` via `tests/run-tests.mjs`. The suites cover many core regressions around:
 
 - conversation and message reconciliation;
 - optimistic sends and explicit client-message identity;
@@ -534,5 +534,5 @@ The main sources used for this document were:
 - `src/utils/conversationReconciliation.ts`, `messageMerge.ts`, `realtimeUpdates.ts`, `requestCoordinator.ts`, `conversationMessagesCache.ts`, `scrollTrace.ts` and related media/reply/reaction helpers;
 - `src/components/conversations/*`;
 - `server/src/app.ts`, `index.ts`, `config.ts`, `db.ts`, `auth.ts`, `evolution.ts`, `realtime.ts`, `google-contacts.ts` and migration scripts;
-- `server/migrations/001_initial.sql` through `014_conversation_leases.sql`;
+- `server/migrations/001_initial.sql` through `015_group_conversations.sql`;
 - `server/railway.json`, `vercel.json`, package scripts, local-development script and `tests/core.test.ts`.
