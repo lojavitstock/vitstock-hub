@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { config, isQaMode } from './config.js';
 import { db } from './db.js';
-import { requireUser } from './auth.js';
+import { requireAdmin, requireUser } from './auth.js';
 import { decryptSecret, encryptSecret } from './security/encryption.js';
 import { currentQaGoogleScenario, qaGoogleFailure, qaGooglePeople } from './qa.js';
 
@@ -600,7 +600,7 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
     return { connected: Boolean(result.rows[0]), connection: result.rows[0] || null };
   });
 
-  app.get('/api/google/connect', { preHandler: requireUser }, async (request, reply) => {
+  app.get('/api/google/connect', { preHandler: requireAdmin }, async (request, reply) => {
     if (isQaMode) {
       await db.query(
         `INSERT INTO google_connections (company_id, google_email, refresh_token_encrypted, access_token_encrypted, access_token_expires_at, scopes)
@@ -646,7 +646,7 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
     return reply.redirect(`${config.FRONTEND_URL}/contatos?google=connected`);
   });
 
-  app.post('/api/google/sync', { preHandler: requireUser }, async (request, reply) => {
+  app.post('/api/google/sync', { preHandler: requireAdmin }, async (request, reply) => {
     if (isQaMode) {
       const failure = qaGoogleFailure();
       if (failure) return reply.code(failure.status || 504).send({ error: failure.message, qaMock: true });
@@ -654,6 +654,20 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
       const scenario = currentQaGoogleScenario();
       const importedPeople = scenario === 'partial' ? people.slice(0, 1) : people;
       const imported = await upsertFullLocalContacts(request.user!.companyId, importedPeople);
+      const resourceNames = importedPeople
+        .map((person) => person.resourceName)
+        .filter((value): value is string => Boolean(value));
+      await db.query(
+        `UPDATE contacts
+         SET google_resource_name = NULL, google_etag = NULL, google_data = '{}'::jsonb,
+             google_synced_at = NULL,
+             source = CASE WHEN source = 'google' THEN 'hub' ELSE source END,
+             updated_at = now()
+         WHERE company_id = $1
+           AND google_resource_name IS NOT NULL
+           AND NOT (google_resource_name = ANY($2::text[]))`,
+        [request.user!.companyId, resourceNames],
+      );
       return {
         imported,
         total: people.length,
