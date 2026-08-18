@@ -1,10 +1,11 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { config } from './config.js';
+import { config, isQaMode } from './config.js';
 import { db } from './db.js';
 import { requireUser } from './auth.js';
 import { decryptSecret, encryptSecret } from './security/encryption.js';
+import { currentQaGoogleScenario, qaGoogleFailure, qaGooglePeople } from './qa.js';
 
 const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/contacts';
 const GOOGLE_PERSON_FIELDS = [
@@ -137,6 +138,7 @@ function readState(value: string) {
 }
 
 async function googleFetch(path: string, accessToken: string, init?: RequestInit) {
+  if (isQaMode) throw new Error('QA_MODE bloqueou chamada Google externa');
   const response = await fetch(`https://people.googleapis.com/v1${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', ...init?.headers },
@@ -151,6 +153,7 @@ async function googleFetch(path: string, accessToken: string, init?: RequestInit
 }
 
 async function accessTokenForCompany(companyId: string) {
+  if (isQaMode) throw new Error('QA_MODE usa somente o mock local do Google');
   const result = await db.query<{
     refresh_token_encrypted: string;
     access_token_encrypted: string | null;
@@ -598,6 +601,15 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/google/connect', { preHandler: requireUser }, async (request, reply) => {
+    if (isQaMode) {
+      await db.query(
+        `INSERT INTO google_connections (company_id, google_email, refresh_token_encrypted, access_token_encrypted, access_token_expires_at, scopes)
+         VALUES ($1, 'qa-google@example.test', $2, $3, now() + interval '1 day', $4)
+         ON CONFLICT (company_id) DO UPDATE SET google_email = EXCLUDED.google_email, updated_at = now()`,
+        [request.user!.companyId, encryptSecret('qa-refresh-token'), encryptSecret('qa-access-token'), ['qa-mock']],
+      );
+      return { url: `${config.FRONTEND_URL}/contatos?google=mock-connected` };
+    }
     if (!ensureConfigured(reply)) return;
     const state = signState({ companyId: request.user!.companyId, exp: Date.now() + 10 * 60_000, nonce: randomBytes(16).toString('hex') });
     const query = new URLSearchParams({
@@ -608,6 +620,7 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/google/callback', async (request, reply) => {
+    if (isQaMode) return reply.redirect(`${config.FRONTEND_URL}/contatos?google=mock-connected`);
     if (!ensureConfigured(reply)) return;
     const parsed = z.object({ code: z.string(), state: z.string() }).safeParse(request.query);
     if (!parsed.success) return reply.code(400).send({ error: 'Retorno OAuth inválido' });
@@ -633,7 +646,23 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
     return reply.redirect(`${config.FRONTEND_URL}/contatos?google=connected`);
   });
 
-  app.post('/api/google/sync', { preHandler: requireUser }, async (request) => {
+  app.post('/api/google/sync', { preHandler: requireUser }, async (request, reply) => {
+    if (isQaMode) {
+      const failure = qaGoogleFailure();
+      if (failure) return reply.code(failure.status || 504).send({ error: failure.message, qaMock: true });
+      const people = qaGooglePeople() as GooglePerson[];
+      const scenario = currentQaGoogleScenario();
+      const importedPeople = scenario === 'partial' ? people.slice(0, 1) : people;
+      const imported = await upsertFullLocalContacts(request.user!.companyId, importedPeople);
+      return {
+        imported,
+        total: people.length,
+        scenario,
+        fullSync: scenario === 'sync-token-expired' || scenario === 'external-delete',
+        partial: scenario === 'partial',
+        errors: scenario === 'partial' ? [{ resourceName: people[1]?.resourceName || 'people/qa-new', error: 'Contato QA rejeitado parcialmente' }] : [],
+      };
+    }
     return syncGoogleContactsForCompany(request.user!.companyId);
   });
 
@@ -733,6 +762,19 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
     const parsed = googleContactFormSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Preencha nome e telefone para salvar o contato' });
     const contact = parsed.data;
+    if (isQaMode) {
+      const failure = qaGoogleFailure();
+      if (failure) return reply.code(failure.status || 504).send({ error: failure.message, qaMock: true });
+      const phone = normalizePhone(contact.phone);
+      const person = {
+        ...buildGooglePersonPayload(contact),
+        resourceName: contact.resourceName || `people/qa-${phone}`,
+        etag: `qa-etag-${Date.now()}`,
+      } as GooglePerson;
+      await upsertFullLocalContacts(request.user!.companyId, [person]);
+      const saved = contactFieldsFromPerson(person);
+      return { saved: true, qaMock: true, name: saved.name, resourceName: person.resourceName, phone, otherPhone: saved.otherPhones[0] || '' };
+    }
     const phone = normalizePhone(contact.phone);
     const otherPhones = Array.from(new Set([
       ...splitFormValues(contact.otherPhone).map(normalizePhone),

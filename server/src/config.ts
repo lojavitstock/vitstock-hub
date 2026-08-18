@@ -18,6 +18,7 @@ export function parseFrontendOrigins(value: string): string[] {
 
 const configSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  QA_MODE: z.preprocess((value) => value === true || value === 'true', z.boolean()).default(false),
   PORT: z.coerce.number().int().positive().default(3001),
   DATABASE_URL: z.string().min(1),
   SESSION_SECRET: z.string().min(43),
@@ -40,6 +41,25 @@ if (!parsed.success) {
 
 export const config = parsed.data;
 export const isProduction = config.NODE_ENV === 'production';
+export const isQaMode = config.QA_MODE;
+
+export function isLocalHost(value: string) {
+  try {
+    const url = new URL(value);
+    return ['localhost', '127.0.0.1', '::1'].includes(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+if (isQaMode) {
+  if (!isLocalHost(config.DATABASE_URL)) {
+    throw new Error('QA_MODE exige DATABASE_URL apontando para PostgreSQL local');
+  }
+  if (!isLocalHost(config.EVOLUTION_API_URL)) {
+    throw new Error('QA_MODE exige EVOLUTION_API_URL apontando para um mock local');
+  }
+}
 
 const configuredFrontendOrigins = new Set([
   config.FRONTEND_URL,

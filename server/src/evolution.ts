@@ -2,7 +2,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
-import { config, isAllowedFrontendOrigin } from './config.js';
+import { config, isAllowedFrontendOrigin, isQaMode } from './config.js';
 import { requireUser } from './auth.js';
 import { db } from './db.js';
 import { buildHasOlderMessagesQuery } from './hasOlderMessagesQuery.js';
@@ -19,6 +19,7 @@ import {
   normalizeStoredReactions,
   providerReactionUpdate,
 } from './messageReactions.js';
+import { qaEvolutionResponse } from './qa.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -111,6 +112,7 @@ function matchesWebhookSecret(value: string | undefined) {
 }
 
 async function evolutionRequest(path: string, init?: RequestInit) {
+  if (isQaMode) return qaEvolutionResponse(path, init);
   return fetch(`${config.EVOLUTION_API_URL}${path}`, {
     ...init,
     headers: {

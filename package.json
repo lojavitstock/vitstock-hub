@@ -10,9 +10,13 @@
     "preview": "vite preview",
     "server:dev": "npm --prefix server run dev",
     "server:build": "npm --prefix server run build",
-    "test": "node tests/run-tests.mjs tests/core.test.ts && node tests/run-tests.mjs tests/groupConversations.test.ts && node tests/run-tests.mjs tests/contactDomain.test.ts",
+    "test": "node tests/run-tests.mjs tests/core.test.ts && node tests/run-tests.mjs tests/groupConversations.test.ts && node tests/run-tests.mjs tests/contactDomain.test.ts && node tests/run-tests.mjs tests/qaEnvironment.test.ts",
     "server:migrate": "npm --prefix server run migrate",
-    "server:seed-admin": "npm --prefix server run seed:admin"
+    "server:seed-admin": "npm --prefix server run seed:admin",
+    "qa:setup": "node scripts/qa.mjs setup",
+    "qa:seed": "node scripts/qa.mjs seed",
+    "qa:reset": "node scripts/qa.mjs reset",
+    "qa:start": "node scripts/qa.mjs start"
   },
   "dependencies": {
     "clsx": "^2.1.1",
