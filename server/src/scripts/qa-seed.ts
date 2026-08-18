@@ -60,6 +60,12 @@ async function seed() {
     const group = await addContact(companyA, 'Grupo QA (fora de Contatos)', '120363000000@g.us');
     await addConversation(companyA, group, '120363000000@g.us', 'Mensagem de grupo QA.', true);
 
+    // Massa suficiente para validar paginação, busca e ordenação sem alterar
+    // os fixtures especiais usados pelos cenários funcionais.
+    for (let index = 1; index <= 65; index += 1) {
+      await addContact(companyA, `Contato QA Página ${String(index).padStart(2, '0')}`, `552199100${String(index).padStart(4, '0')}`);
+    }
+
     const tagVip = (await client.query<{ id: string }>(`INSERT INTO contact_tags (company_id, name, color) VALUES ($1, 'QA VIP', '#EABB19') RETURNING id`, [companyA])).rows[0]!.id;
     const tagImport = (await client.query<{ id: string }>(`INSERT INTO contact_tags (company_id, name, color) VALUES ($1, 'QA Importação', '#3B82F6') RETURNING id`, [companyA])).rows[0]!.id;
     await client.query(`INSERT INTO contact_tag_links (company_id, contact_id, tag_id) VALUES ($1, $2, $3), ($1, $4, $5)`, [companyA, ana, tagVip, multi, tagImport]);

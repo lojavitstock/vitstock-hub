@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { db } from './db.js';
+import { canMergeContacts } from './contactMerge.js';
 import { requireAdmin, requireUser } from './auth.js';
 import {
   normalizeContactEmail,
@@ -205,7 +206,14 @@ export async function registerContactRoutes(app: FastifyInstance) {
       `SELECT cv.id, cv.evolution_remote_jid, cv.status, cv.last_message, cv.last_message_at, cv.is_group, cv.group_name
        FROM conversations cv WHERE cv.company_id = $1 AND cv.contact_id = $2 AND cv.is_group = false ORDER BY cv.last_message_at DESC NULLS LAST, cv.id`, [request.user!.companyId, id],
     );
-    return { contact: enrichRows([contact], tags, channels)[0], conversations: conversations.rows };
+    const merge = await db.query(
+      `SELECT id, source_contact_id, target_contact_id, status, created_at
+       FROM contact_merge_operations
+       WHERE company_id = $1 AND status = 'merged'
+         AND (source_contact_id = $2 OR target_contact_id = $2)
+       ORDER BY created_at DESC LIMIT 1`, [request.user!.companyId, id],
+    );
+    return { contact: enrichRows([contact], tags, channels)[0], conversations: conversations.rows, merge: merge.rows[0] || null };
   });
 
   app.post('/api/contacts', { preHandler: requireUser }, async (request, reply) => {
@@ -352,7 +360,7 @@ export async function registerContactRoutes(app: FastifyInstance) {
       const contacts = await client.query('SELECT * FROM contacts WHERE company_id = $1 AND id = ANY($2::uuid[]) FOR UPDATE', [request.user!.companyId, [parsed.data.sourceContactId, parsed.data.targetContactId]]);
       const source = contacts.rows.find((row) => row.id === parsed.data.sourceContactId);
       const target = contacts.rows.find((row) => row.id === parsed.data.targetContactId);
-      if (!source || !target || source.merged_into_contact_id) { await client.query('ROLLBACK'); return reply.code(404).send({ error: 'Contatos não encontrados ou já mesclados' }); }
+      if (!canMergeContacts(source, target)) { await client.query('ROLLBACK'); return reply.code(404).send({ error: 'Contatos não encontrados ou já mesclados' }); }
       const merge = await client.query('INSERT INTO contact_merge_operations (company_id, source_contact_id, target_contact_id, performed_by, field_snapshot) VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING id', [request.user!.companyId, source.id, target.id, request.user!.id, JSON.stringify({ source, targetVersion: target.version })]);
       const mergeId = merge.rows[0]!.id;
       const moved = await client.query('UPDATE conversations SET contact_id = $1, updated_at = now() WHERE company_id = $2 AND contact_id = $3 RETURNING id', [target.id, request.user!.companyId, source.id]);
@@ -389,7 +397,7 @@ export async function registerContactRoutes(app: FastifyInstance) {
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   });
 
-  app.post('/api/contacts/import', { preHandler: requireAdmin }, async (request, reply) => {
+  app.post('/api/contacts/import', { preHandler: requireAdmin, bodyLimit: 12 * 1024 * 1024 }, async (request, reply) => {
     const parsed = z.object({ csv: z.string().min(1).max(5_000_000), preview: z.boolean().optional() }).safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'CSV inválido' });
     const rows = parseContactCsv(parsed.data.csv);
@@ -414,18 +422,30 @@ export async function registerContactRoutes(app: FastifyInstance) {
 
   app.post('/api/contacts/import/:jobId/execute', { preHandler: requireAdmin }, async (request, reply) => {
     const jobId = String((request.params as any).jobId || '');
-    const job = await db.query('SELECT id FROM contact_import_jobs WHERE id = $1 AND company_id = $2 AND status = \'review\' FOR UPDATE', [jobId, request.user!.companyId]);
-    if (!job.rows[0]) return reply.code(404).send({ error: 'Importação não encontrada ou já processada' });
+    const job = await db.query<{ id: string; status: string; summary: { total?: number; created?: number; updated?: number; invalid?: number } }>(
+      `SELECT id, status, summary FROM contact_import_jobs
+       WHERE id = $1 AND company_id = $2 AND status IN ('review', 'running', 'failed')`, [jobId, request.user!.companyId],
+    );
+    if (!job.rows[0]) {
+      const completed = await db.query<{ status: string; summary: any }>('SELECT status, summary FROM contact_import_jobs WHERE id = $1 AND company_id = $2', [jobId, request.user!.companyId]);
+      if (completed.rows[0]?.status === 'completed' || completed.rows[0]?.status === 'partial') return { jobId, status: completed.rows[0].status, summary: completed.rows[0].summary, replayed: true };
+      return reply.code(404).send({ error: 'Importação não encontrada ou já processada' });
+    }
     const rows = await db.query<{ id: string; row_number: number; raw_data: Record<string, string> }>('SELECT id, row_number, raw_data FROM contact_import_rows WHERE job_id = $1 AND status = \'pending\' ORDER BY row_number', [jobId]);
     let created = 0; let updated = 0; let invalid = 0;
     await db.query('UPDATE contact_import_jobs SET status = \'running\', updated_at = now() WHERE id = $1', [jobId]);
-    for (const row of rows.rows) {
-      const name = row.raw_data.name || row.raw_data.nome || '';
-      const phone = normalizeContactPhone(row.raw_data.phone || row.raw_data.telefone || row.raw_data.celular || '');
-      if (!name || phone.length < 8) { invalid += 1; await db.query('UPDATE contact_import_rows SET status = \'invalid\', error = $2 WHERE id = $1', [row.id, 'Nome ou telefone inválido']); continue; }
-      const result = await ensureContact(request.user!.companyId, { name, phone, email: row.raw_data.email || row.raw_data['e-mail'] || '', company: row.raw_data.company || row.raw_data.empresa || '', notes: row.raw_data.notes || row.raw_data.notas || '', source: 'csv/import' } as any, 'csv/import', true);
-      const status = result.created ? 'created' : 'updated'; if (result.created) created += 1; else updated += 1;
-      await db.query('UPDATE contact_import_rows SET status = $2, contact_id = $3, error = NULL WHERE id = $1', [row.id, status, result.id]);
+    try {
+      for (const row of rows.rows) {
+        const name = row.raw_data.name || row.raw_data.nome || '';
+        const phone = normalizeContactPhone(row.raw_data.phone || row.raw_data.telefone || row.raw_data.celular || '');
+        if (!name || phone.length < 8) { invalid += 1; await db.query('UPDATE contact_import_rows SET status = \'invalid\', error = $2 WHERE id = $1', [row.id, 'Nome ou telefone inválido']); continue; }
+        const result = await ensureContact(request.user!.companyId, { name, phone, email: row.raw_data.email || row.raw_data['e-mail'] || '', company: row.raw_data.company || row.raw_data.empresa || '', notes: row.raw_data.notes || row.raw_data.notas || '', source: 'csv/import' } as any, 'csv/import', true);
+        const status = result.created ? 'created' : 'updated'; if (result.created) created += 1; else updated += 1;
+        await db.query('UPDATE contact_import_rows SET status = $2, contact_id = $3, error = NULL WHERE id = $1', [row.id, status, result.id]);
+      }
+    } catch (error) {
+      await db.query('UPDATE contact_import_jobs SET status = \'failed\', updated_at = now() WHERE id = $1', [jobId]);
+      throw error;
     }
     const status = invalid ? 'partial' : 'completed';
     await db.query('UPDATE contact_import_jobs SET status = $2, summary = $3::jsonb, updated_at = now() WHERE id = $1', [jobId, status, JSON.stringify({ total: rows.rows.length, created, updated, invalid })]);

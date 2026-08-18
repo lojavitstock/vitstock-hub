@@ -6,6 +6,7 @@ import { config, isAllowedFrontendOrigin, isQaMode } from './config.js';
 import { requireUser } from './auth.js';
 import { db } from './db.js';
 import { buildHasOlderMessagesQuery } from './hasOlderMessagesQuery.js';
+import { buildExistingConversationQuery } from './conversationQueries.js';
 import { publishRealtimeEvent, registerRealtimeClient } from './realtime.js';
 import { acquireConversationLease, type ConversationLease } from './conversationLease.js';
 import { evolutionMessageIdFromResponse, evolutionReactionPayload, formatHubOutboundText, removeHubAgentPrefix } from './outboundMessage.js';
@@ -1219,36 +1220,27 @@ async function findOrCreateConversation(
 ) {
   // Uma Conversation representa uma identidade remota específica. Nunca
   // reutilize uma thread apenas porque o contact_id coincide.
-  const existing = await client.query<{ id: string }>(
-    `SELECT id
-     FROM conversations
-     WHERE company_id = $1
-       AND evolution_remote_jid = $3
-     ORDER BY updated_at DESC
-     LIMIT 1
-     FOR UPDATE`,
-    [input.companyId, input.contactId, input.remoteJid],
-  );
+  const existing = await client.query<{ id: string }>(buildExistingConversationQuery(input));
   const existingId = existing.rows[0]?.id;
   if (existingId) {
     await client.query(
       `UPDATE conversations
-       SET contact_id = $2,
+       SET contact_id = $2::uuid,
            last_message = CASE
-             WHEN $3 >= COALESCE(last_message_at, to_timestamp(0)) THEN $4
+             WHEN $3::timestamptz >= COALESCE(last_message_at, to_timestamp(0)) THEN $4::text
              ELSE last_message
            END,
            last_message_at = CASE
-             WHEN $3 >= COALESCE(last_message_at, to_timestamp(0)) THEN $3
+             WHEN $3::timestamptz >= COALESCE(last_message_at, to_timestamp(0)) THEN $3::timestamptz
              ELSE last_message_at
            END,
            status = CASE
-             WHEN $5 AND status = 'resolved' THEN 'open'
+             WHEN $5::boolean AND status = 'resolved' THEN 'open'
              ELSE status
            END,
-           is_group = COALESCE($6, conversations.is_group),
-           group_name = COALESCE(NULLIF($7, ''), conversations.group_name),
-           group_avatar_url = COALESCE(NULLIF($8, ''), conversations.group_avatar_url),
+           is_group = COALESCE($6::boolean, conversations.is_group),
+           group_name = COALESCE(NULLIF($7::text, ''), conversations.group_name),
+           group_avatar_url = COALESCE(NULLIF($8::text, ''), conversations.group_avatar_url),
            updated_at = now()
        WHERE id = $1`,
       [existingId, input.contactId, input.lastMessageAt, input.lastMessage, input.reopenResolved, input.isGroup ?? false, input.groupName || '', input.groupAvatarUrl || ''],
@@ -1260,7 +1252,7 @@ async function findOrCreateConversation(
     ? await client.query<{ id: string }>(
       `INSERT INTO conversations
         (company_id, contact_id, evolution_remote_jid, assigned_user_id, status, last_message, last_message_at, is_group, group_name, group_avatar_url)
-       VALUES ($1, $2, $3, $4, 'open', $5, $6, $7, NULLIF($8, ''), NULLIF($9, ''))
+       VALUES ($1::uuid, $2::uuid, $3::text, $4::uuid, 'open', $5::text, $6::timestamptz, $7::boolean, NULLIF($8::text, ''), NULLIF($9::text, ''))
        ON CONFLICT (company_id, evolution_remote_jid) DO UPDATE SET
          last_message = CASE
            WHEN EXCLUDED.last_message_at >= COALESCE(conversations.last_message_at, to_timestamp(0)) THEN EXCLUDED.last_message
@@ -1277,7 +1269,7 @@ async function findOrCreateConversation(
     : await client.query<{ id: string }>(
       `INSERT INTO conversations
         (company_id, contact_id, evolution_remote_jid, status, last_message, last_message_at, is_group, group_name, group_avatar_url)
-       VALUES ($1, $2, $3, 'open', $4, $5, $7, NULLIF($8, ''), NULLIF($9, ''))
+       VALUES ($1::uuid, $2::uuid, $3::text, 'open', $4::text, $5::timestamptz, $7::boolean, NULLIF($8::text, ''), NULLIF($9::text, ''))
        ON CONFLICT (company_id, evolution_remote_jid) DO UPDATE SET
          contact_id = EXCLUDED.contact_id,
          last_message = CASE
@@ -1289,7 +1281,7 @@ async function findOrCreateConversation(
            ELSE conversations.last_message_at
          END,
          status = CASE
-           WHEN $6 AND conversations.status = 'resolved' THEN 'open'
+           WHEN $6::boolean AND conversations.status = 'resolved' THEN 'open'
            ELSE conversations.status
          END,
          updated_at = now()

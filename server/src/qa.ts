@@ -55,10 +55,12 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
   const method = (init?.method || 'GET').toUpperCase();
   const body = path.includes('/message/sendText/') || path.includes('/message/sendMedia/')
     ? { key: { id: `qa-evolution-${randomUUID()}` } }
-    : path.includes('/message/sendReaction/') ? { status: 'ok' }
-      : path.includes('/connectionState/') ? { instance: { state: 'open' } }
-        : path.includes('/findChats/') || path.includes('/findContacts/') ? []
-          : path.includes('/instance/connect/') ? { code: 'QA_MOCK_CONNECTED' }
+      : path.includes('/message/sendReaction/') ? { status: 'ok' }
+        : path.includes('/connectionState/') ? { instance: { state: 'open' } }
+          : path.includes('/findChats/') || path.includes('/findContacts/') ? []
+            : path.includes('/chat/findMessages/') ? { messages: { records: [] } }
+              : path.includes('/chat/markMessageAsRead/') ? { status: 'read' }
+                : path.includes('/instance/connect/') ? { code: 'QA_MOCK_CONNECTED' }
             : path.includes('/instance/logout/') ? { status: 'loggedOut' }
               : path.includes('/chat/getBase64FromMediaMessage') ? { base64: '' }
                 : path.includes('/profile/') ? { name: 'Vitstock QA', picture: null }
