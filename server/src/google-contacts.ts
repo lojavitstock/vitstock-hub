@@ -550,6 +550,40 @@ export async function syncGoogleContactsForCompany(companyId: string) {
   return { imported, total: people.length };
 }
 
+type GoogleSyncError = {
+  status: number;
+  error: string;
+  code: string;
+  retryable: boolean;
+};
+
+/** Keeps provider/schema failures actionable without exposing internal errors. */
+export function googleSyncErrorResponse(error: unknown): GoogleSyncError {
+  const details = (error || {}) as { code?: unknown; status?: unknown; message?: unknown };
+  const code = typeof details.code === 'string' ? details.code : '';
+  const status = typeof details.status === 'number' ? details.status : 0;
+  const message = typeof details.message === 'string' ? details.message.toLowerCase() : '';
+
+  if (code === '42703' || code === '42P01') {
+    return {
+      status: 503,
+      error: 'O banco de contatos ainda não está atualizado para a sincronização Google.',
+      code: 'GOOGLE_SCHEMA_OUTDATED',
+      retryable: false,
+    };
+  }
+  if (status === 401 || status === 403 || message.includes('não conectado')) {
+    return { status: 401, error: 'Reconecte o Google Contacts para sincronizar.', code: 'GOOGLE_AUTH_REQUIRED', retryable: false };
+  }
+  if (status === 429) {
+    return { status: 429, error: 'O Google limitou temporariamente a sincronização. Tente novamente em alguns instantes.', code: 'GOOGLE_RATE_LIMITED', retryable: true };
+  }
+  if (message.includes('timeout') || message.includes('timed out') || message.includes('aborted')) {
+    return { status: 504, error: 'A sincronização Google demorou mais que o esperado. Tente novamente.', code: 'GOOGLE_SYNC_TIMEOUT', retryable: true };
+  }
+  return { status: 502, error: 'Não foi possível concluir a sincronização com o Google Contacts.', code: 'GOOGLE_SYNC_FAILED', retryable: true };
+}
+
 function buildGooglePersonPayload(contact: z.infer<typeof googleContactFormSchema>) {
   const phoneValues = Array.from(new Set([
     normalizePhone(contact.phone),
@@ -677,7 +711,13 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
         errors: scenario === 'partial' ? [{ resourceName: people[1]?.resourceName || 'people/qa-new', error: 'Contato QA rejeitado parcialmente' }] : [],
       };
     }
-    return syncGoogleContactsForCompany(request.user!.companyId);
+    try {
+      return await syncGoogleContactsForCompany(request.user!.companyId);
+    } catch (error) {
+      const response = googleSyncErrorResponse(error);
+      request.log.warn({ code: response.code, providerStatus: typeof (error as { status?: unknown })?.status === 'number' ? (error as { status: number }).status : undefined }, 'Google Contacts sync failed');
+      return reply.code(response.status).send(response);
+    }
   });
 
   app.post('/api/google/contact-status', { preHandler: requireUser }, async (request, reply) => {

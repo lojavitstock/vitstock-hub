@@ -75,9 +75,11 @@ export const ConversationListItem = React.memo<ConversationListItemProps>(({
         </span>
 
         <span className="flex flex-wrap items-center gap-1.5">
-          <span className="rounded-md border border-[#46535a] bg-[#263239] px-1.5 py-0.5 text-[10px] font-semibold leading-4 text-slate-300">
-            {conversation.department}
-          </span>
+          {conversation.department !== 'Atendimento Geral' && (
+            <span className="rounded-md border border-[#46535a] bg-[#263239] px-1.5 py-0.5 text-[10px] font-semibold leading-4 text-slate-300">
+              {conversation.department}
+            </span>
+          )}
           {needsResponse && (
             <span className="rounded-md border border-emerald-300/25 bg-emerald-300/10 px-1.5 py-0.5 text-[10px] font-bold leading-4 text-emerald-200">
               Não Respondido

@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "server:dev": "npm --prefix server run dev",
     "server:build": "npm --prefix server run build",
-    "test": "node tests/run-tests.mjs tests/core.test.ts && node tests/run-tests.mjs tests/groupConversations.test.ts && node tests/run-tests.mjs tests/contactDomain.test.ts && node tests/run-tests.mjs tests/qaEnvironment.test.ts",
+    "test": "node tests/run-tests.mjs tests/core.test.ts && node tests/run-tests.mjs tests/groupConversations.test.ts && node tests/run-tests.mjs tests/contactDomain.test.ts && node tests/run-tests.mjs tests/contactChatNavigation.test.ts && node tests/run-tests.mjs tests/qaEnvironment.test.ts",
     "server:migrate": "npm --prefix server run migrate",
     "server:seed-admin": "npm --prefix server run seed:admin",
     "qa:setup": "node scripts/qa.mjs setup",

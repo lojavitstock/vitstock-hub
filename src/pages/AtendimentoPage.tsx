@@ -40,6 +40,7 @@ import { useContactPanel } from '../hooks/useContactPanel';
 import { toQuotedMessage } from '../utils/quotedMessage';
 import { canRestoreComposerDraft, captureComposerSubmission, readConversationDraft, scheduleComposerFocus, writeConversationDraft } from '../utils/composerSubmission';
 import { createOutboundTrace } from '../utils/outboundTrace';
+import { findConversationForContactChat, normalizeContactChatPhone } from '../utils/contactChatNavigation';
 import {
   canReactToMessage,
   nextHubReactionEmoji,
@@ -83,6 +84,8 @@ export const AtendimentoPage: React.FC = () => {
   const [newChatName, setNewChatName] = useState('');
   const [newChatMessage, setNewChatMessage] = useState('');
   const [startingNewChat, setStartingNewChat] = useState(false);
+  const [pendingContactChatId, setPendingContactChatId] = useState<string | null>(null);
+  const pendingContactChatRef = useRef<Conversation | null>(null);
 
   const {
     conversations,
@@ -191,14 +194,65 @@ export const AtendimentoPage: React.FC = () => {
   }, [instanceName]);
 
   useEffect(() => {
-    const state = location.state as { startChat?: { phone?: string; name?: string } } | null;
-    if (!state?.startChat?.phone) return;
-    setNewChatNumber(state.startChat.phone.replace(/\D/g, ''));
-    setNewChatName(state.startChat.name || '');
-    setNewChatMessage('');
-    setAssignmentFeedback('');
-    setShowNewChatModal(true);
-  }, [location.state]);
+    const startChat = (location.state as { startChat?: { phone?: string; name?: string; remoteJid?: string; contactId?: string } } | null)?.startChat;
+    if ((!startChat?.phone && !startChat?.remoteJid) || whatsappStatus !== 'connected' || loadingChats) return;
+    const existing = findConversationForContactChat(conversations, startChat);
+    if (existing) {
+      pendingContactChatRef.current = null;
+      setPendingContactChatId(null);
+      setActiveConvId(existing.id);
+      void markConversationAsRead(existing);
+      navigate(location.pathname, { replace: true, state: null });
+      return;
+    }
+    if (!startChat.phone) return;
+    const cleanPhone = normalizeContactChatPhone(startChat.phone);
+    if (cleanPhone.length < 8) {
+      pendingContactChatRef.current = null;
+      setPendingContactChatId(null);
+      setAssignmentFeedback('O contato não possui um número de WhatsApp válido.');
+      navigate(location.pathname, { replace: true, state: null });
+      return;
+    }
+    const jid = startChat.remoteJid || `${cleanPhone}@s.whatsapp.net`;
+    const pendingConversation: Conversation = {
+      id: jid,
+      contact: {
+        id: startChat.contactId || jid,
+        name: startChat.name?.trim() || `+${cleanPhone}`,
+        phone: `+${cleanPhone}`,
+        avatar: '',
+        tags: [],
+        createdAt: new Date().toISOString().split('T')[0],
+      },
+      lastMessage: 'Nenhuma mensagem ainda',
+      lastMessageTimestamp: '',
+      lastMessageAt: 0,
+      lastMessageFromMe: false,
+      unreadCount: 0,
+      needsResponse: false,
+      status: 'open',
+      department: '',
+    };
+    pendingContactChatRef.current = pendingConversation;
+    setConversations((previous) => previous.some((conversation) => conversation.id === jid)
+      ? previous
+      : [pendingConversation, ...previous]);
+    setPendingContactChatId(jid);
+    setActiveConvId(jid);
+    setAssignmentFeedback('Nova conversa pronta. Digite uma mensagem para iniciar o atendimento.');
+    navigate(location.pathname, { replace: true, state: null });
+  }, [conversations, loadingChats, location.pathname, location.state, markConversationAsRead, navigate, setActiveConvId, setAssignmentFeedback, setConversations, whatsappStatus]);
+
+  useEffect(() => {
+    if (!pendingContactChatId || conversations.some((conversation) => conversation.id === pendingContactChatId)) return;
+    const pendingConversation = pendingContactChatRef.current;
+    if (pendingConversation?.id === pendingContactChatId) {
+      setConversations((previous) => previous.some((conversation) => conversation.id === pendingContactChatId)
+        ? previous
+        : [pendingConversation, ...previous]);
+    }
+  }, [conversations, pendingContactChatId, setConversations]);
 
 
   /* // Carregar conversas ao iniciar e manter atualizado a cada 4 segundos
@@ -712,6 +766,11 @@ export const AtendimentoPage: React.FC = () => {
       }
     }
 
+    if (!isInternalNoteToSend && pendingContactChatId === activeConv.id) {
+      pendingContactChatRef.current = null;
+      setPendingContactChatId(null);
+    }
+
     // Atualiza última mensagem na lista lateral
     if (isInternalNoteToSend) {
       setConversations(prev => prev.map(c => c.id === activeConv.id ? {
@@ -865,6 +924,10 @@ export const AtendimentoPage: React.FC = () => {
             }
           : conversation.contact,
       } : conversation));
+      if (pendingContactChatId === activeConv.id) {
+        pendingContactChatRef.current = null;
+        setPendingContactChatId(null);
+      }
     } catch (error) {
       traceOutbound('http.completed', { ok: false });
       if (activeConversationIdRef.current === activeConv.id) {
