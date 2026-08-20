@@ -3,7 +3,7 @@ import test from 'node:test';
 import { isAllowedFrontendOrigin, isLocalHost, parseFrontendOrigins } from '../server/src/config';
 import { currentQaGoogleScenario, qaEvolutionResponse, qaGoogleFailure, qaGooglePeople, setQaGoogleScenario } from '../server/src/qa';
 import { buildExistingConversationQuery } from '../server/src/conversationQueries';
-import { googleSyncErrorResponse } from '../server/src/google-contacts';
+import { googleIntegrationState, googleSyncErrorResponse } from '../server/src/google-contacts';
 
 test('QA host guard accepts only local database/provider targets', () => {
   assert.equal(isLocalHost('postgresql://vitstock@127.0.0.1:55432/vitstock_qa'), true);
@@ -53,6 +53,16 @@ test('Google sync exposes actionable errors instead of generic internal failures
   assert.equal(reconnect.retryable, false);
   assert.equal(googleSyncErrorResponse({ status: 429 }).retryable, true);
   assert.equal(googleSyncErrorResponse(new Error('The operation was aborted due to timeout')).status, 504);
+});
+
+test('Google integration state is tenant-local and maps persisted sync outcomes', () => {
+  assert.equal(googleIntegrationState(null), 'not_connected');
+  assert.equal(googleIntegrationState({ sync_status: 'never' }), 'connected');
+  assert.equal(googleIntegrationState({ sync_status: 'success' }), 'connected');
+  assert.equal(googleIntegrationState({ sync_status: 'syncing' }), 'syncing');
+  assert.equal(googleIntegrationState({ sync_status: 'auth_required' }), 'reconnect_required');
+  assert.equal(googleIntegrationState({ sync_status: 'error' }), 'error');
+  assert.equal(googleIntegrationState({ sync_status: 'unknown' }), 'connected');
 });
 
 test('Evolution QA adapter is fail-closed while covering app read routes', async () => {

@@ -162,7 +162,7 @@ The schema is company-scoped. The important tables are:
 | Contact operations | `contact_tags`, `contact_tag_links`, `contact_duplicate_decisions`, `contact_merge_operations`, `contact_merge_conversations`, `contact_audit_logs`, `contact_import_jobs`, `contact_import_rows` | Migration 016 adds persistent tags, archive/merge lineage, append-only audit records and resumable CSV import records. Administrative operations remain company-scoped and backend-enforced. |
 | Message history | `messages` | Provider message ID is unique per company; `metadata` is JSONB for message-scoped details. |
 | Provider webhook processing | `webhook_events` | Deduplicates provider event keys. |
-| Google Contacts | `google_connections` and Google-related fields on `contacts` | OAuth token material is stored encrypted by the backend integration. |
+| Google Contacts | `google_connections` and Google-related fields on `contacts` | OAuth token material is stored encrypted by the backend integration; migration 017 adds persisted sync state, last-sync summary and a safe error message for the administrative integration card. |
 | Operational conversation state | `conversation_assignments`, `conversation_statuses`, `conversation_read_states`, `conversation_daily_responders`, `conversation_notes`, `conversation_leases` | These are scoped by company and Evolution JID or conversation. |
 | Provider contact cache | `whatsapp_contact_names` | Stores provider names and avatars independently of Google contact data. |
 
@@ -423,7 +423,7 @@ Reactions belong to the original message, not to an independent timeline row. Re
 
 ## 17. Google Contacts and Contact Presentation
 
-`server/src/google-contacts.ts` manages OAuth connection state, synchronization, contact lookup and contact writes. Full Google data is retained in `contacts.google_data` with fields such as resource name, etag, sync time, additional phones and profile information represented by migrations 002, 003, 012 and 016. A Google Person is reconciled into one local Contact; additional values are stored in `contact_phones` and `contact_emails` rather than creating one Contact per phone.
+`server/src/google-contacts.ts` manages OAuth connection state, synchronization, contact lookup and contact writes. Full Google data is retained in `contacts.google_data` with fields such as resource name, etag, sync time, additional phones and profile information represented by migrations 002, 003, 012 and 016. Migration 017 stores the connection's sync state and last-sync summary without storing credentials in the frontend. A Google Person is reconciled into one local Contact; additional values are stored in `contact_phones` and `contact_emails` rather than creating one Contact per phone.
 
 `useContactPanel` loads a contact panel for the active private conversation. The Inbox can remember a higher-priority saved contact name locally so provider snapshots do not transiently replace a Google Contact name. Provider contact names and avatars are separately cached in `whatsapp_contact_names`.
 
@@ -439,7 +439,7 @@ Reactions belong to the original message, not to an independent timeline row. Re
 | Messages and media | `/api/evolution/messages`, `/messages/send`, `/messages/send-media`, `/messages/reaction`, `/media` |
 | Notes and business data | `/api/evolution/notes`, `/notes/list`, `/business-profile` |
 | Provider ingress | `POST /webhooks/evolution` |
-| Google/contacts | `/api/google/*`, `/api/contacts`, `/api/contact-tags` |
+| Google/contacts | `/api/google/status`, `/api/google/connect`, `/api/google/callback`, `/api/google/sync`, `/api/google/disconnect`, `/api/google/contact*`, `/api/contacts`, `/api/contact-tags` |
 
 Operational routes use the authenticated server boundary. The deliberately public entry points—login, the OAuth callback and the provider webhook—use their own route-specific validation.
 
@@ -535,5 +535,5 @@ The main sources used for this document were:
 - `src/utils/conversationReconciliation.ts`, `messageMerge.ts`, `realtimeUpdates.ts`, `requestCoordinator.ts`, `conversationMessagesCache.ts`, `scrollTrace.ts` and related media/reply/reaction helpers;
 - `src/components/conversations/*`;
 - `server/src/app.ts`, `index.ts`, `config.ts`, `db.ts`, `auth.ts`, `evolution.ts`, `realtime.ts`, `google-contacts.ts`, `contacts.ts`, `contactDomain.ts` and migration scripts;
-- `server/migrations/001_initial.sql` through `016_contacts_operational_v1.sql`;
+- `server/migrations/001_initial.sql` through `017_google_integration_status.sql`;
 - `server/railway.json`, `vercel.json`, package scripts, local-development script and `tests/core.test.ts`.

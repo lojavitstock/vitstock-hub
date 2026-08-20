@@ -120,6 +120,10 @@ function callbackUrl() {
     : 'https://vitstock-hub-api-production.up.railway.app/api/google/callback';
 }
 
+function settingsGoogleRedirect(result: 'connected' | 'error' | 'mock-connected') {
+  return `${config.FRONTEND_URL}/configuracoes?tab=integracoes&google=${result}`;
+}
+
 function signState(payload: object) {
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const signature = createHmac('sha256', config.SESSION_SECRET).update(body).digest('base64url');
@@ -591,6 +595,34 @@ export function googleSyncErrorResponse(error: unknown): GoogleSyncError {
   return { status: 502, error: 'Não foi possível concluir a sincronização com o Google Contacts.', code: 'GOOGLE_SYNC_FAILED', retryable: true };
 }
 
+export type GoogleIntegrationState = 'not_connected' | 'connected' | 'reconnect_required' | 'syncing' | 'error';
+
+export function googleIntegrationState(connection: { sync_status?: string } | null | undefined): GoogleIntegrationState {
+  if (!connection) return 'not_connected';
+  if (connection.sync_status === 'auth_required') return 'reconnect_required';
+  if (connection.sync_status === 'syncing') return 'syncing';
+  if (connection.sync_status === 'error') return 'error';
+  return 'connected';
+}
+
+async function updateGoogleSyncState(
+  companyId: string,
+  status: 'never' | 'syncing' | 'success' | 'auth_required' | 'error',
+  result?: { imported?: number; total?: number; error?: string },
+) {
+  await db.query(
+    `UPDATE google_connections
+     SET sync_status = $2,
+         last_sync_at = CASE WHEN $2 = 'success' THEN now() ELSE last_sync_at END,
+         last_sync_imported = CASE WHEN $2 = 'success' THEN $3 ELSE last_sync_imported END,
+         last_sync_total = CASE WHEN $2 = 'success' THEN $4 ELSE last_sync_total END,
+         last_sync_error = CASE WHEN $2 IN ('success', 'syncing') THEN NULL ELSE $5 END,
+         updated_at = now()
+     WHERE company_id = $1`,
+    [companyId, status, result?.imported ?? null, result?.total ?? null, result?.error ?? null],
+  );
+}
+
 function buildGooglePersonPayload(contact: z.infer<typeof googleContactFormSchema>) {
   const phoneValues = Array.from(new Set([
     normalizePhone(contact.phone),
@@ -635,10 +667,25 @@ function buildGooglePersonPayload(contact: z.infer<typeof googleContactFormSchem
 
 export async function registerGoogleContactRoutes(app: FastifyInstance) {
   app.get('/api/google/status', { preHandler: requireUser }, async (request) => {
-    const result = await db.query<{ google_email: string | null; connected_at: Date }>(
-      'SELECT google_email, connected_at FROM google_connections WHERE company_id = $1', [request.user!.companyId],
+    const result = await db.query<{
+      google_email: string | null;
+      connected_at: Date;
+      sync_status: string;
+      last_sync_at: Date | null;
+      last_sync_imported: number | null;
+      last_sync_total: number | null;
+      last_sync_error: string | null;
+    }>(
+      `SELECT google_email, connected_at, sync_status, last_sync_at,
+              last_sync_imported, last_sync_total, last_sync_error
+       FROM google_connections WHERE company_id = $1`, [request.user!.companyId],
     );
-    return { connected: Boolean(result.rows[0]), connection: result.rows[0] || null };
+    const connection = result.rows[0] || null;
+    return {
+      connected: Boolean(connection),
+      state: googleIntegrationState(connection),
+      connection,
+    };
   });
 
   app.get('/api/google/connect', { preHandler: requireAdmin }, async (request, reply) => {
@@ -646,10 +693,10 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
       await db.query(
         `INSERT INTO google_connections (company_id, google_email, refresh_token_encrypted, access_token_encrypted, access_token_expires_at, scopes)
          VALUES ($1, 'qa-google@example.test', $2, $3, now() + interval '1 day', $4)
-         ON CONFLICT (company_id) DO UPDATE SET google_email = EXCLUDED.google_email, updated_at = now()`,
+         ON CONFLICT (company_id) DO UPDATE SET google_email = EXCLUDED.google_email, sync_status = 'never', last_sync_error = NULL, updated_at = now()`,
         [request.user!.companyId, encryptSecret('qa-refresh-token'), encryptSecret('qa-access-token'), ['qa-mock']],
       );
-      return { url: `${config.FRONTEND_URL}/contatos?google=mock-connected` };
+      return { url: settingsGoogleRedirect('mock-connected') };
     }
     if (!ensureConfigured(reply)) return;
     const state = signState({ companyId: request.user!.companyId, exp: Date.now() + 10 * 60_000, nonce: randomBytes(16).toString('hex') });
@@ -661,67 +708,82 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/google/callback', async (request, reply) => {
-    if (isQaMode) return reply.redirect(`${config.FRONTEND_URL}/contatos?google=mock-connected`);
-    if (!ensureConfigured(reply)) return;
-    const parsed = z.object({ code: z.string(), state: z.string() }).safeParse(request.query);
-    if (!parsed.success) return reply.code(400).send({ error: 'Retorno OAuth inválido' });
-    const state = readState(parsed.data.state);
-    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      body: new URLSearchParams({ code: parsed.data.code, client_id: config.GOOGLE_CLIENT_ID!, client_secret: config.GOOGLE_CLIENT_SECRET!, redirect_uri: callbackUrl(), grant_type: 'authorization_code' }),
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!tokenResponse.ok) return reply.code(502).send({ error: 'Google recusou a autorização' });
-    const tokens = await tokenResponse.json() as { access_token: string; refresh_token?: string; expires_in: number; scope?: string };
-    if (!tokens.refresh_token) return reply.code(400).send({ error: 'Google não retornou acesso offline; autorize novamente' });
-    const profileResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', { headers: { Authorization: `Bearer ${tokens.access_token}` } });
-    const profile = profileResponse.ok ? await profileResponse.json() as { email?: string } : {};
-    await db.query(
-      `INSERT INTO google_connections (company_id, google_email, refresh_token_encrypted, access_token_encrypted, access_token_expires_at, scopes)
-       VALUES ($1, $2, $3, $4, now() + ($5 * interval '1 second'), $6)
-       ON CONFLICT (company_id) DO UPDATE SET google_email = EXCLUDED.google_email, refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
-         access_token_encrypted = EXCLUDED.access_token_encrypted, access_token_expires_at = EXCLUDED.access_token_expires_at,
-         scopes = EXCLUDED.scopes, updated_at = now()`,
-      [state.companyId, profile.email || null, encryptSecret(tokens.refresh_token), encryptSecret(tokens.access_token), tokens.expires_in, (tokens.scope || GOOGLE_SCOPE).split(' ')],
-    );
-    return reply.redirect(`${config.FRONTEND_URL}/contatos?google=connected`);
+    if (isQaMode) return reply.redirect(settingsGoogleRedirect('mock-connected'));
+    if (!config.GOOGLE_CLIENT_ID || !config.GOOGLE_CLIENT_SECRET) return reply.redirect(settingsGoogleRedirect('error'));
+    try {
+      const parsed = z.object({ code: z.string(), state: z.string() }).safeParse(request.query);
+      if (!parsed.success) return reply.redirect(settingsGoogleRedirect('error'));
+      const state = readState(parsed.data.state);
+      const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        body: new URLSearchParams({ code: parsed.data.code, client_id: config.GOOGLE_CLIENT_ID, client_secret: config.GOOGLE_CLIENT_SECRET, redirect_uri: callbackUrl(), grant_type: 'authorization_code' }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!tokenResponse.ok) return reply.redirect(settingsGoogleRedirect('error'));
+      const tokens = await tokenResponse.json() as { access_token: string; refresh_token?: string; expires_in: number; scope?: string };
+      if (!tokens.refresh_token) return reply.redirect(settingsGoogleRedirect('error'));
+      const profileResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', { headers: { Authorization: `Bearer ${tokens.access_token}` } });
+      const profile = profileResponse.ok ? await profileResponse.json() as { email?: string } : {};
+      await db.query(
+        `INSERT INTO google_connections (company_id, google_email, refresh_token_encrypted, access_token_encrypted, access_token_expires_at, scopes)
+         VALUES ($1, $2, $3, $4, now() + ($5 * interval '1 second'), $6)
+         ON CONFLICT (company_id) DO UPDATE SET google_email = EXCLUDED.google_email, refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
+           access_token_encrypted = EXCLUDED.access_token_encrypted, access_token_expires_at = EXCLUDED.access_token_expires_at,
+           scopes = EXCLUDED.scopes, sync_status = CASE WHEN google_connections.sync_status = 'success' THEN 'success' ELSE 'never' END,
+           last_sync_error = NULL, updated_at = now()`,
+        [state.companyId, profile.email || null, encryptSecret(tokens.refresh_token), encryptSecret(tokens.access_token), tokens.expires_in, (tokens.scope || GOOGLE_SCOPE).split(' ')],
+      );
+      return reply.redirect(settingsGoogleRedirect('connected'));
+    } catch (error) {
+      request.log.warn({ err: error }, 'Google OAuth callback failed');
+      return reply.redirect(settingsGoogleRedirect('error'));
+    }
   });
 
   app.post('/api/google/sync', { preHandler: requireAdmin }, async (request, reply) => {
-    if (isQaMode) {
-      const failure = qaGoogleFailure();
-      if (failure) return reply.code(failure.status || 504).send({ error: failure.message, qaMock: true });
-      const people = qaGooglePeople() as GooglePerson[];
-      const scenario = currentQaGoogleScenario();
-      const importedPeople = scenario === 'partial' ? people.slice(0, 1) : people;
-      const imported = await upsertFullLocalContacts(request.user!.companyId, importedPeople);
-      const resourceNames = importedPeople
-        .map((person) => person.resourceName)
-        .filter((value): value is string => Boolean(value));
-      await db.query(
-        `UPDATE contacts
-         SET google_resource_name = NULL, google_etag = NULL, google_data = '{}'::jsonb,
-             google_synced_at = NULL,
-             source = CASE WHEN source = 'google' THEN 'hub' ELSE source END,
-             updated_at = now()
-         WHERE company_id = $1
-           AND google_resource_name IS NOT NULL
-           AND NOT (google_resource_name = ANY($2::text[]))`,
-        [request.user!.companyId, resourceNames],
-      );
-      return {
-        imported,
-        total: people.length,
-        scenario,
-        fullSync: scenario === 'sync-token-expired' || scenario === 'external-delete',
-        partial: scenario === 'partial',
-        errors: scenario === 'partial' ? [{ resourceName: people[1]?.resourceName || 'people/qa-new', error: 'Contato QA rejeitado parcialmente' }] : [],
-      };
-    }
     try {
-      return await syncGoogleContactsForCompany(request.user!.companyId);
+      await updateGoogleSyncState(request.user!.companyId, 'syncing');
+      if (isQaMode) {
+        const failure = qaGoogleFailure();
+        if (failure) {
+          await updateGoogleSyncState(request.user!.companyId, failure.status === 401 ? 'auth_required' : 'error', { error: failure.message });
+          return reply.code(failure.status || 504).send({ error: failure.message, qaMock: true });
+        }
+        const people = qaGooglePeople() as GooglePerson[];
+        const scenario = currentQaGoogleScenario();
+        const importedPeople = scenario === 'partial' ? people.slice(0, 1) : people;
+        const imported = await upsertFullLocalContacts(request.user!.companyId, importedPeople);
+        const resourceNames = importedPeople
+          .map((person) => person.resourceName)
+          .filter((value): value is string => Boolean(value));
+        await db.query(
+          `UPDATE contacts
+           SET google_resource_name = NULL, google_etag = NULL, google_data = '{}'::jsonb,
+               google_synced_at = NULL,
+               source = CASE WHEN source = 'google' THEN 'hub' ELSE source END,
+               updated_at = now()
+           WHERE company_id = $1
+             AND google_resource_name IS NOT NULL
+             AND NOT (google_resource_name = ANY($2::text[]))`,
+          [request.user!.companyId, resourceNames],
+        );
+        const result = {
+          imported,
+          total: people.length,
+          scenario,
+          fullSync: scenario === 'sync-token-expired' || scenario === 'external-delete',
+          partial: scenario === 'partial',
+          errors: scenario === 'partial' ? [{ resourceName: people[1]?.resourceName || 'people/qa-new', error: 'Contato QA rejeitado parcialmente' }] : [],
+        };
+        await updateGoogleSyncState(request.user!.companyId, 'success', result);
+        return result;
+      }
+      const result = await syncGoogleContactsForCompany(request.user!.companyId);
+      await updateGoogleSyncState(request.user!.companyId, 'success', result);
+      return result;
     } catch (error) {
       const response = googleSyncErrorResponse(error);
+      await updateGoogleSyncState(request.user!.companyId, response.code === 'GOOGLE_AUTH_REQUIRED' ? 'auth_required' : 'error', { error: response.error }).catch((statusError) => request.log.warn({ err: statusError }, 'Google sync status update failed'));
       request.log.warn({
         code: response.code,
         providerStatus: typeof (error as { status?: unknown })?.status === 'number' ? (error as { status: number }).status : undefined,
@@ -729,6 +791,12 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
       }, 'Google Contacts sync failed');
       return reply.code(response.status).send(response);
     }
+  });
+
+  app.delete('/api/google/disconnect', { preHandler: requireAdmin }, async (request) => {
+    await db.query('DELETE FROM google_connections WHERE company_id = $1', [request.user!.companyId]);
+    googleContactsCache.delete(request.user!.companyId);
+    return { disconnected: true };
   });
 
   app.post('/api/google/contact-status', { preHandler: requireUser }, async (request, reply) => {
