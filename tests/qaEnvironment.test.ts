@@ -46,6 +46,11 @@ test('Google QA scenarios expose deterministic people and failures', () => {
 test('Google sync exposes actionable errors instead of generic internal failures', () => {
   assert.equal(googleSyncErrorResponse({ code: '42703' }).code, 'GOOGLE_SCHEMA_OUTDATED');
   assert.equal(googleSyncErrorResponse({ status: 401 }).status, 401);
+  const reconnect = googleSyncErrorResponse({ status: 400, providerCode: 'invalid_grant' });
+  assert.equal(reconnect.status, 401);
+  assert.equal(reconnect.code, 'GOOGLE_AUTH_REQUIRED');
+  assert.match(reconnect.error, /conexão com o Google precisa ser renovada/i);
+  assert.equal(reconnect.retryable, false);
   assert.equal(googleSyncErrorResponse({ status: 429 }).retryable, true);
   assert.equal(googleSyncErrorResponse(new Error('The operation was aborted due to timeout')).status, 504);
 });

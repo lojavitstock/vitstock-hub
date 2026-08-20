@@ -173,7 +173,13 @@ async function accessTokenForCompany(companyId: string) {
     grant_type: 'refresh_token',
   });
   const response = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', body, signal: AbortSignal.timeout(20_000) });
-  if (!response.ok) throw new Error('Não foi possível renovar o acesso ao Google');
+  if (!response.ok) {
+    const provider = await response.json().catch(() => null) as { error?: unknown } | null;
+    const error = new Error('Não foi possível renovar o acesso ao Google') as Error & { status: number; providerCode?: string };
+    error.status = response.status;
+    if (typeof provider?.error === 'string') error.providerCode = provider.error;
+    throw error;
+  }
   const tokens = await response.json() as { access_token: string; expires_in: number };
   await db.query(
     'UPDATE google_connections SET access_token_encrypted = $2, access_token_expires_at = now() + ($3 * interval \'1 second\'), updated_at = now() WHERE company_id = $1',
@@ -559,10 +565,11 @@ type GoogleSyncError = {
 
 /** Keeps provider/schema failures actionable without exposing internal errors. */
 export function googleSyncErrorResponse(error: unknown): GoogleSyncError {
-  const details = (error || {}) as { code?: unknown; status?: unknown; message?: unknown };
+  const details = (error || {}) as { code?: unknown; status?: unknown; message?: unknown; providerCode?: unknown };
   const code = typeof details.code === 'string' ? details.code : '';
   const status = typeof details.status === 'number' ? details.status : 0;
   const message = typeof details.message === 'string' ? details.message.toLowerCase() : '';
+  const providerCode = typeof details.providerCode === 'string' ? details.providerCode : '';
 
   if (code === '42703' || code === '42P01') {
     return {
@@ -572,8 +579,8 @@ export function googleSyncErrorResponse(error: unknown): GoogleSyncError {
       retryable: false,
     };
   }
-  if (status === 401 || status === 403 || message.includes('não conectado')) {
-    return { status: 401, error: 'Reconecte o Google Contacts para sincronizar.', code: 'GOOGLE_AUTH_REQUIRED', retryable: false };
+  if (providerCode === 'invalid_grant' || status === 401 || status === 403 || message.includes('não conectado')) {
+    return { status: 401, error: 'Sua conexão com o Google precisa ser renovada. Reconecte sua conta para continuar.', code: 'GOOGLE_AUTH_REQUIRED', retryable: false };
   }
   if (status === 429) {
     return { status: 429, error: 'O Google limitou temporariamente a sincronização. Tente novamente em alguns instantes.', code: 'GOOGLE_RATE_LIMITED', retryable: true };
@@ -715,7 +722,11 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
       return await syncGoogleContactsForCompany(request.user!.companyId);
     } catch (error) {
       const response = googleSyncErrorResponse(error);
-      request.log.warn({ code: response.code, providerStatus: typeof (error as { status?: unknown })?.status === 'number' ? (error as { status: number }).status : undefined }, 'Google Contacts sync failed');
+      request.log.warn({
+        code: response.code,
+        providerStatus: typeof (error as { status?: unknown })?.status === 'number' ? (error as { status: number }).status : undefined,
+        providerCode: typeof (error as { providerCode?: unknown })?.providerCode === 'string' ? (error as { providerCode: string }).providerCode : undefined,
+      }, 'Google Contacts sync failed');
       return reply.code(response.status).send(response);
     }
   });
