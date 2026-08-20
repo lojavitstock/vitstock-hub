@@ -31,9 +31,17 @@ export const AppLayout: React.FC = () => {
     window.addEventListener('vitstock:whatsapp-status', syncSharedStatus);
     checkConnection();
     const interval = setInterval(checkConnection, 30000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void checkConnection();
+    };
+    const handleOnline = () => { void checkConnection(); };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('online', handleOnline);
     return () => {
       window.removeEventListener('vitstock:whatsapp-status', syncSharedStatus);
       clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('online', handleOnline);
     };
   }, [instanceName]);
 

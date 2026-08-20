@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { mockConversations } from '../services/mockData';
 import { EvolutionApiService } from '../services/evolutionApi';
-import { ChatStatus, Conversation } from '../types';
+import { ChatStatus, Conversation, WhatsappInstance } from '../types';
 import { ConversationFilter } from '../components/conversations/ConversationFilters';
 import { phoneVariants } from '../utils/phone';
+import { reconcileConversations, reconcileConversationsMonotonic } from '../utils/conversationReconciliation';
+import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
+import { reconcileRealtimeConversation } from '../utils/realtimeUpdates';
+import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../utils/realtimeConfig';
+import { createMessageNotificationDeduper } from '../utils/messageNotification';
+import { playNotificationSound } from '../utils/notificationSound';
+import { conversationNeedsResponse } from '../utils/conversationState';
 
-export const conversationNeedsResponse = (conversation: Conversation) => (
-  conversation.needsResponse
-  ?? (conversation.status !== 'resolved' && !conversation.lastMessageFromMe && conversation.unreadCount > 0)
-);
+export { conversationNeedsResponse } from '../utils/conversationState';
 
 const UNANSWERED_ALERT_MS = 20 * 60 * 1000;
 
@@ -27,13 +31,26 @@ const isPhoneOnlyName = (value?: string | null) => !value || /^\+?[\d\s().-]+$/.
 type UseConversationInboxOptions = {
   instanceName: string;
   isMock: boolean;
+  connectionStatus: WhatsappInstance['status'];
   userId?: string;
   userRole?: string;
+};
+
+type ConversationActivityPatch = {
+  lastMessage: string;
+  lastMessageTimestamp: string;
+  lastMessageAt: number;
+  lastMessageFromMe: boolean;
+  lastMessageKey?: Conversation['lastMessageKey'];
+  unreadCount?: number;
+  needsResponse?: boolean;
+  moveToFront?: boolean;
 };
 
 export const useConversationInbox = ({
   instanceName,
   isMock,
+  connectionStatus,
   userId,
   userRole,
 }: UseConversationInboxOptions) => {
@@ -50,7 +67,9 @@ export const useConversationInbox = ({
   const activeConversationIdRef = useRef('');
   const readOverridesRef = useRef(new Map<string, number>());
   const contactNameOverridesRef = useRef(new Map<string, string>());
-  const loadingChatsRef = useRef(false);
+  const inboxRequestsRef = useRef(createInFlightRequestCoordinator<void>());
+  const whatsappStatusRef = useRef<'connected' | 'connecting' | 'disconnected'>('connecting');
+  const messageNotificationDeduperRef = useRef(createMessageNotificationDeduper());
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -65,16 +84,21 @@ export const useConversationInbox = ({
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
 
-  const loadChats = useCallback(async (showLoading = true) => {
+  const loadChats = useCallback((showLoading = true) => {
+    if (!isMock && connectionStatus !== 'connected') return Promise.resolve();
+    return inboxRequestsRef.current.run('inbox', async () => {
     // A Evolution pode levar vários segundos para responder. Não iniciamos
     // outra sincronização enquanto a anterior ainda está em andamento.
-    if (loadingChatsRef.current) return;
-    loadingChatsRef.current = true;
     if (showLoading) setLoadingChats(true);
 
     try {
       if (isMock) {
-        setConversations(mockConversations);
+        const previousConversations = conversationsRef.current;
+        const reconciledConversations = reconcileConversations(previousConversations, mockConversations);
+        if (reconciledConversations !== previousConversations) {
+          conversationsRef.current = reconciledConversations;
+          setConversations(reconciledConversations);
+        }
         setActiveConversationId((previousId) => (
           mockConversations.some((conversation) => conversation.id === previousId)
             ? previousId
@@ -90,13 +114,16 @@ export const useConversationInbox = ({
         return;
       }
 
-      const previousActiveConversation = conversationsRef.current.find(
+      const previousConversations = conversationsRef.current;
+      const previousActiveConversation = previousConversations.find(
         (conversation) => conversation.id === activeConversationIdRef.current,
       );
-      const previousActivePhone = previousActiveConversation?.contact.phone.replace(/\D/g, '');
+      const previousActivePhone = previousActiveConversation && !previousActiveConversation.isGroup
+        ? previousActiveConversation.contact.phone.replace(/\D/g, '')
+        : undefined;
       const mergedChats = realChats.map((conversation) => {
         const locallyReadAt = readOverridesRef.current.get(conversation.id);
-        const phone = conversation.contact.phone.replace(/\D/g, '');
+        const phone = conversation.isGroup ? '' : conversation.contact.phone.replace(/\D/g, '');
         const savedName = phoneVariants(phone)
           .map((variant) => contactNameOverridesRef.current.get(variant))
           .find(Boolean);
@@ -108,7 +135,11 @@ export const useConversationInbox = ({
           : withNameOverride;
       });
 
-      setConversations(mergedChats);
+      const reconciledConversations = reconcileConversationsMonotonic(previousConversations, mergedChats);
+      if (reconciledConversations !== previousConversations) {
+        conversationsRef.current = reconciledConversations;
+        setConversations(reconciledConversations);
+      }
       setActiveConversationId((previousId) => {
         if (mergedChats.some((conversation) => conversation.id === previousId)) return previousId;
         const replacement = previousActivePhone
@@ -120,23 +151,81 @@ export const useConversationInbox = ({
       // Uma falha temporária não deve apagar a lista já renderizada.
       console.warn('[Atendimento] Não foi possível atualizar as conversas:', error);
     } finally {
-      loadingChatsRef.current = false;
       if (showLoading) setLoadingChats(false);
     }
-  }, [instanceName, isMock]);
+    });
+  }, [connectionStatus, instanceName, isMock]);
+
+  const updateConversationActivity = useCallback((conversationId: string, activity: ConversationActivityPatch) => {
+    const previous = conversationsRef.current;
+    const index = previous.findIndex((conversation) => conversation.id === conversationId);
+    if (index < 0) return;
+
+    const { moveToFront, ...conversationFields } = activity;
+    const nextConversation = { ...previous[index], ...conversationFields };
+    const next = previous.slice();
+    next[index] = nextConversation;
+    if (moveToFront && index > 0) {
+      next.splice(index, 1);
+      next.unshift(nextConversation);
+    }
+
+    const reconciled = reconcileConversations(previous, next);
+    if (reconciled === previous) return;
+    conversationsRef.current = reconciled;
+    setConversations(reconciled);
+  }, []);
 
   useEffect(() => {
+    if (!isMock && connectionStatus !== 'connected') return undefined;
     void loadChats();
     if (isMock) return undefined;
 
     const unsubscribe = EvolutionApiService.subscribeToRealtimeEvents((event) => {
-      if (event.type === 'message.upsert' || event.type === 'message.status' || event.type === 'conversation.updated') {
+      if (event.type === 'message.upsert'
+        && event.reaction !== true
+        && messageNotificationDeduperRef.current.shouldNotify(event.message)) {
+        playNotificationSound();
+      }
+      if (event.type === REALTIME_RECONNECTED_EVENT) {
+        if (document.visibilityState === 'visible') {
+          void EvolutionApiService.getInstanceStatus(instanceName);
+          void loadChats(false);
+        }
+        return;
+      }
+      // Statuses only affect the active timeline. The inbox has no message
+      // delivery state to render, so refetching the complete list is wasted.
+      if (event.type === 'message.status') return;
+      if (event.type !== 'message.upsert' && event.type !== 'conversation.updated') return;
+
+      const previousConversations = conversationsRef.current;
+      const reconciledConversations = reconcileRealtimeConversation(previousConversations, event);
+      if (reconciledConversations) {
+        if (reconciledConversations !== previousConversations) {
+          conversationsRef.current = reconciledConversations;
+          setConversations(reconciledConversations);
+        }
+        return;
+      }
+
+      // Events without enough fields (or for a conversation not currently in
+      // the list) retain the existing polling/refetch safety net.
+      void loadChats(false);
+    });
+    const handleWhatsAppStatus = (event: Event) => {
+      const status = (event as CustomEvent<'connected' | 'connecting' | 'disconnected'>).detail;
+      if (status !== 'connected' && status !== 'connecting' && status !== 'disconnected') return;
+      const previousStatus = whatsappStatusRef.current;
+      whatsappStatusRef.current = status;
+      if (status === 'connected' && previousStatus !== 'connected' && document.visibilityState === 'visible') {
         void loadChats(false);
       }
-    });
+    };
+    window.addEventListener('vitstock:whatsapp-status', handleWhatsAppStatus);
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') void loadChats(false);
-    }, 15000);
+    }, REALTIME_SAFETY_INTERVAL_MS);
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') void loadChats(false);
     };
@@ -144,40 +233,45 @@ export const useConversationInbox = ({
     return () => {
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('vitstock:whatsapp-status', handleWhatsAppStatus);
       unsubscribe();
     };
-  }, [isMock, loadChats]);
+  }, [connectionStatus, isMock, loadChats]);
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === activeConversationId),
     [activeConversationId, conversations],
   );
 
-  const activeChatLocked = Boolean(
-    activeConversation?.assignedAttendant
-      && activeConversation.assignedAttendant.id !== userId
-      && userRole !== 'admin',
-  );
+  const activeLease = activeConversation?.lease && activeConversation.lease.expiresAt > now
+    ? activeConversation.lease
+    : undefined;
+  const activeChatLocked = Boolean(activeLease && activeLease.ownerUserId !== userId);
 
   const normalizedConversationSearch = normalizeSearchText(conversationSearch.trim());
   const visibleConversations = useMemo(() => conversations.filter((conversation) => {
     const matchesFilter = filterTab === 'all'
       || (filterTab === 'unread' && conversation.unreadCount > 0)
       || (filterTab === 'unanswered' && conversationNeedsResponse(conversation))
+      || (filterTab === 'groups' && conversation.isGroup === true)
       || (filterTab === 'delivery' && conversation.status === 'pending')
       || (filterTab === 'resolved' && conversation.status === 'resolved');
     if (!matchesFilter) return false;
     if (!normalizedConversationSearch) return true;
-    return [conversation.contact.name, conversation.contact.phone]
+    return [conversation.contact.name, conversation.groupName || '', conversation.contact.phone]
       .some((value) => normalizeSearchText(value).includes(normalizedConversationSearch));
   }), [conversations, filterTab, normalizedConversationSearch]);
 
   const needsAttention = useCallback((conversation: Conversation) => conversationNeedsAttention(conversation, now), [now]);
 
   const markConversationAsRead = useCallback(async (conversation: Conversation) => {
-    setConversations((previous) => previous.map((item) => item.id === conversation.id
-      ? { ...item, unreadCount: 0 }
-      : item));
+    setConversations((previous) => {
+      const next = previous.map((item) => item.id === conversation.id
+        ? { ...item, unreadCount: 0 }
+        : item);
+      conversationsRef.current = next;
+      return next;
+    });
     if (!conversation.lastMessageAt) return;
 
     readOverridesRef.current.set(conversation.id, conversation.lastMessageAt);
@@ -189,6 +283,7 @@ export const useConversationInbox = ({
   }, []);
 
   const rememberContactName = useCallback((phone: string, name: string) => {
+    if (phone.toLowerCase().endsWith('@g.us')) return;
     const normalizedPhone = phone.replace(/\D/g, '');
     const normalizedName = name.trim();
     if (!normalizedPhone || isPhoneOnlyName(normalizedName)) return;
@@ -244,6 +339,30 @@ export const useConversationInbox = ({
     }
   }, [activeConversation, isMock]);
 
+  const pullActiveConversationLease = useCallback(async () => {
+    if (!activeConversation || isMock) return;
+    setCapturingChat(true);
+    setAssignmentFeedback('');
+    try {
+      const result = await EvolutionApiService.pullConversationLease(activeConversation.id, activeConversation.contact.phone);
+      const expiresAt = Date.parse(result.lease.expiresAt);
+      setConversations((previous) => previous.map((conversation) => conversation.id === activeConversation.id ? {
+        ...conversation,
+        lease: {
+          ownerUserId: result.lease.ownerUserId,
+          ownerName: result.lease.ownerName,
+          expiresAt,
+        },
+      } : conversation));
+      setAssignmentFeedback('Conversa puxada para voc\u00ea.');
+    } catch (error) {
+      setAssignmentFeedback(error instanceof Error ? error.message : 'N\u00e3o foi poss\u00edvel puxar a conversa');
+      await loadChats(false);
+    } finally {
+      setCapturingChat(false);
+    }
+  }, [activeConversation, isMock, loadChats]);
+
   const updateActiveChatStatus = useCallback(async (status: ChatStatus) => {
     if (!activeConversation) return;
 
@@ -256,7 +375,7 @@ export const useConversationInbox = ({
         ? false
         : conversation.lastMessageFromMe
           ? false
-          : conversation.needsResponse ?? conversation.unreadCount > 0,
+          : conversation.needsResponse ?? conversation.lastMessageFromMe === false,
     } : conversation));
     setAssignmentFeedback('');
 
@@ -291,6 +410,7 @@ export const useConversationInbox = ({
     activeConversationId,
     setActiveConversationId,
     activeChatLocked,
+    activeLease,
     filterTab,
     setFilterTab,
     conversationSearch,
@@ -298,6 +418,7 @@ export const useConversationInbox = ({
     visibleConversations,
     loadingChats,
     loadChats,
+    updateConversationActivity,
     markConversationAsRead,
     rememberContactName,
     capturingChat,
@@ -305,6 +426,7 @@ export const useConversationInbox = ({
     setAssignmentFeedback,
     captureActiveChat,
     releaseActiveChat,
+    pullActiveConversationLease,
     updateActiveChatStatus,
     needsAttention,
   };

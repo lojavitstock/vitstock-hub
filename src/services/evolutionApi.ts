@@ -1,8 +1,12 @@
 import { ChatStatus, WhatsappInstance, Conversation, Message } from '../types';
 import { mockInstances, mockConversations } from './mockData';
-import { evolutionMessagePreview, normalizeEvolutionMessage } from './evolutionMessageAdapter';
+import { evolutionMessagePreview, isEvolutionReactionEvent, normalizeEvolutionMessage } from './evolutionMessageAdapter';
 import { phoneVariants } from '../utils/phone';
 import { callMessageInfo } from '../utils/callMessage';
+import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
+import type { RealtimeEventPayload } from '../utils/realtimeUpdates';
+import { REALTIME_RECONNECTED_EVENT } from '../utils/realtimeConfig';
+import type { QuotedMessage } from '../utils/quotedMessage';
 
 const unwrapEvolutionMessage = (message: any) => {
   let current = message || {};
@@ -210,6 +214,10 @@ const extractEvolutionButtons = (message: any): NonNullable<Message['interactive
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 const USE_MOCK = import.meta.env.VITE_USE_MOCK_DATA === 'true';
 const API_TIMEOUT_MS = 30_000;
+const conversationMessageRequests = createInFlightRequestCoordinator<{
+  messages: Message[];
+  hasMore: boolean;
+}>();
 
 const apiFetch = (path: string, init?: RequestInit) => fetch(`${API_URL}${path}`, {
   ...init,
@@ -221,16 +229,7 @@ const apiFetch = (path: string, init?: RequestInit) => fetch(`${API_URL}${path}`
   },
 });
 
-export type EvolutionRealtimeEvent = {
-  type: string;
-  remoteJid?: string;
-  phone?: string;
-  messageId?: string;
-  timestampMs?: number;
-  fromMe?: boolean;
-  status?: string;
-  [key: string]: unknown;
-};
+export type EvolutionRealtimeEvent = RealtimeEventPayload;
 
 export class EvolutionApiService {
   private static lastKnownStatus: WhatsappInstance['status'] = 'connecting';
@@ -243,6 +242,8 @@ export class EvolutionApiService {
   private static realtimeSource: EventSource | null = null;
   private static realtimeListeners = new Set<(event: EvolutionRealtimeEvent) => void>();
   private static realtimeOnlineHandler: (() => void) | null = null;
+  private static realtimeHasConnected = false;
+  private static realtimeNeedsReconciliation = false;
 
   static subscribeToRealtimeEvents(listener: (event: EvolutionRealtimeEvent) => void) {
     if (USE_MOCK || typeof window === 'undefined' || typeof EventSource === 'undefined') return () => undefined;
@@ -269,6 +270,17 @@ export class EvolutionApiService {
       };
       source.addEventListener('evolution', handleMessage as EventListener);
       source.onmessage = handleMessage;
+      source.onopen = () => {
+        const shouldReconcile = this.realtimeHasConnected && this.realtimeNeedsReconciliation;
+        this.realtimeHasConnected = true;
+        this.realtimeNeedsReconciliation = false;
+        if (shouldReconcile) {
+          this.realtimeListeners.forEach((listener) => listener({ type: REALTIME_RECONNECTED_EVENT }));
+        }
+      };
+      source.onerror = () => {
+        this.realtimeNeedsReconciliation = true;
+      };
       this.realtimeSource = source;
       this.realtimeOnlineHandler = () => {
         if (this.realtimeSource?.readyState === EventSource.CLOSED) {
@@ -343,10 +355,11 @@ export class EvolutionApiService {
       };
     } catch (err) {
       console.warn('Evolution API indisponível ou em criação:', err);
+      this.publishStatus('disconnected');
       return {
         id: instanceName,
         name: instanceName,
-        status: this.lastKnownStatus
+        status: 'disconnected'
       };
     }
   }
@@ -416,6 +429,8 @@ export class EvolutionApiService {
       const whatsappNamesMap = new Map<string, { name: string; avatar?: string }>();
       const assignmentsMap = new Map<string, { id: string; name: string }>();
       const assignmentsByNumber = new Map<string, { id: string; name: string }>();
+      const leasesMap = new Map<string, { ownerUserId: string; ownerName: string; expiresAt: number }>();
+      const leasesByNumber = new Map<string, { ownerUserId: string; ownerName: string; expiresAt: number }>();
       const dailyRespondersByNumber = new Map<string, { id: string; name: string; date: string }>();
       const statusesMap = new Map<string, { status: ChatStatus; updatedAt: number }>();
       const statusesByNumber = new Map<string, { status: ChatStatus; updatedAt: number }>();
@@ -429,6 +444,22 @@ export class EvolutionApiService {
             const number = assignment.evolution_remote_jid.split('@')[0].replace(/\D/g, '');
             if (number) assignmentsByNumber.set(number, value);
           }
+        });
+      }
+
+      if (Array.isArray(payload.leases)) {
+        payload.leases.forEach((lease: any) => {
+          const expiresAt = Date.parse(String(lease?.expires_at || ''));
+          if (!lease?.evolution_remote_jid || !lease?.owner_user_id || !lease?.owner_name || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) return;
+          const value = {
+            ownerUserId: lease.owner_user_id,
+            ownerName: lease.owner_name,
+            expiresAt,
+          };
+          leasesMap.set(lease.evolution_remote_jid, value);
+          phoneVariants(lease.phone || lease.evolution_remote_jid.split('@')[0]).forEach((phone) => {
+            if (phone) leasesByNumber.set(phone, value);
+          });
         });
       }
 
@@ -517,24 +548,33 @@ export class EvolutionApiService {
       const conversationsMap = new Map<string, Conversation>();
 
       rawChats.forEach((item: any, index: number) => {
-        // Ignora chats de grupos por enquanto se necessário, ou inclui se tiver remoteJid
-        const isGroup = item.remoteJid?.includes('@g.us') || item.id?.includes('@g.us');
-        if (isGroup) return; // Filtra grupos da aba principal de atendimento individual
+        // Grupos usam o JID @g.us; individuais continuam deduplicados por telefone.
+        const isGroup = String(item.remoteJid || item.id || '').toLowerCase().endsWith('@g.us');
         
         // Usa o remoteJid exato com que a Evolution API gravou o chat no banco do Railway
         const rawRemoteJid = item.remoteJid || item.id || `chat-${index}`;
         const altJid = item.lastMessage?.key?.remoteJidAlt;
-        const cleanNumber = (altJid || rawRemoteJid).split('@')[0].replace(/\D/g, '');
+        const cleanNumber = isGroup ? '' : (altJid || rawRemoteJid).split('@')[0].replace(/\D/g, '');
+        const conversationKey = isGroup ? rawRemoteJid : cleanNumber;
         const assignment = assignmentsMap.get(rawRemoteJid)
           || (altJid ? assignmentsMap.get(altJid) : undefined)
-          || phoneVariants(cleanNumber).map((phone) => assignmentsByNumber.get(phone)).find(Boolean);
-        const dailyResponder = phoneVariants(cleanNumber)
-          .map((phone) => dailyRespondersByNumber.get(phone))
-          .find(Boolean);
-        const lastMessageFromMe = Boolean(item.lastMessage?.key?.fromMe);
-        const lastMessageAt = item.lastMessage?.messageTimestamp
-          ? Number(item.lastMessage.messageTimestamp) * 1000
-          : item.updatedAt
+          || (!isGroup ? phoneVariants(cleanNumber).map((phone) => assignmentsByNumber.get(phone)).find(Boolean) : undefined);
+        const lease = leasesMap.get(rawRemoteJid)
+          || (altJid ? leasesMap.get(altJid) : undefined)
+          || (!isGroup ? phoneVariants(cleanNumber).map((phone) => leasesByNumber.get(phone)).find(Boolean) : undefined);
+        const dailyResponder = !isGroup
+          ? phoneVariants(cleanNumber).map((phone) => dailyRespondersByNumber.get(phone)).find(Boolean)
+          : undefined;
+        // Defensive guard for stale backends/snapshots: a reaction must never
+        // become inbox activity even before the backend replaces it with the
+        // last persisted real message.
+        const lastMessage = isEvolutionReactionEvent(item.lastMessage)
+          ? undefined
+          : item.lastMessage;
+        const lastMessageFromMe = Boolean(lastMessage?.key?.fromMe);
+        const lastMessageAt = lastMessage?.messageTimestamp
+          ? Number(lastMessage.messageTimestamp) * 1000
+          : lastMessage && item.updatedAt
             ? Date.parse(item.updatedAt)
             : 0;
         const rawUnreadCount = Number(item.unreadCount) || 0;
@@ -547,7 +587,7 @@ export class EvolutionApiService {
             : rawUnreadCount;
         const storedStatus = statusesMap.get(rawRemoteJid)
           || (altJid ? statusesMap.get(altJid) : undefined)
-          || phoneVariants(cleanNumber).map((phone) => statusesByNumber.get(phone)).find(Boolean);
+          || (!isGroup ? phoneVariants(cleanNumber).map((phone) => statusesByNumber.get(phone)).find(Boolean) : undefined);
         const status = storedStatus?.status || 'open';
         const hasNewIncomingMessage = !lastMessageFromMe
           && lastMessageAt > 0
@@ -555,43 +595,52 @@ export class EvolutionApiService {
         const effectiveStatus = status === 'resolved' && hasNewIncomingMessage ? 'open' : status;
         const needsResponse = effectiveStatus !== 'resolved' && hasNewIncomingMessage;
 
-        if (!cleanNumber) return;
+        if (!conversationKey) return;
 
         // Resolve o Nome Salvo (Prioridade: Mapa de Contatos > pushName da Mensagem > Nome do Chat > Número)
-        const savedContact = contactsMap.get(cleanNumber);
-        const storedContact = phoneVariants(cleanNumber)
-          .map((phone) => storedContactsMap.get(phone))
-          .find(Boolean);
+        const savedContact = !isGroup ? contactsMap.get(cleanNumber) : undefined;
+        const storedContact = !isGroup
+          ? phoneVariants(cleanNumber).map((phone) => storedContactsMap.get(phone)).find(Boolean)
+          : undefined;
         const savedName = storedContact?.name && !/^\+?[\d\s().-]+$/.test(storedContact.name.trim())
           ? storedContact.name
           : undefined;
-        const whatsappContact = phoneVariants(cleanNumber)
-          .map((phone) => whatsappNamesMap.get(phone))
-          .find(Boolean);
-        let displayName = savedName ||
-                          savedContact?.name ||
-                          whatsappContact?.name ||
-                          item.lastMessage?.pushName || 
-                          item.pushName || 
-                          item.name || 
-                          item.verifiedName;
+        const whatsappContact = !isGroup
+          ? phoneVariants(cleanNumber).map((phone) => whatsappNamesMap.get(phone)).find(Boolean)
+          : undefined;
+        const groupName = isGroup
+          ? [item.groupName, item.subject, item.groupMetadata?.subject, item.chatName, item.name, item.notify, item.verifiedName]
+            .find((value: any) => typeof value === 'string' && value.trim() && !/^\+?[\d\s().-]+$/.test(value.trim()))
+          : undefined;
+        let displayName = isGroup
+          ? (groupName || `Grupo ${rawRemoteJid.split('@')[0]}`)
+          : (savedName || savedContact?.name || whatsappContact?.name || lastMessage?.pushName || item.pushName || item.name || item.verifiedName);
 
         if (!displayName || displayName === 'Você' || displayName === 'WhatsApp Business') {
-          displayName = `+${cleanNumber}`;
+          displayName = isGroup ? `Grupo ${rawRemoteJid.split('@')[0]}` : `+${cleanNumber}`;
         }
 
-        const messageContent = evolutionMessagePreview(item.lastMessage) || 'Conversa iniciada';
+        const rawMessageContent = evolutionMessagePreview(lastMessage) || 'Conversa iniciada';
+        const participantName = lastMessage?.participantName || lastMessage?.pushName || item.lastMessage?.participantName || item.lastMessage?.pushName || 'Participante';
+        const messageContent = isGroup
+          ? item.lastMessage?.previewIsPrefixed
+            ? rawMessageContent
+            : `${lastMessageFromMe ? (lastMessage?.metadata?.sentByUserName || item.lastMessage?.pushName || 'Atendente') : participantName}: ${rawMessageContent}`
+          : rawMessageContent;
 
-        const timestampStr = item.updatedAt || item.lastMessage?.messageTimestamp
-          ? new Date(item.updatedAt || Number(item.lastMessage?.messageTimestamp) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        const timestampStr = lastMessage && (item.updatedAt || lastMessage.messageTimestamp)
+          ? new Date(item.updatedAt || Number(lastMessage.messageTimestamp) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
           : 'Hoje';
 
         const conversationObj: Conversation = {
           id: rawRemoteJid, // ID real para findMessages no Railway (ex: 267877160644613@lid)
+          isGroup,
+          groupName: isGroup ? displayName : undefined,
+          groupAvatar: isGroup ? (item.profilePicUrl || item.profilePictureUrl || item.profilePicture || '') : undefined,
           contact: {
             id: rawRemoteJid,
             name: displayName,
-            phone: `+${cleanNumber}`,
+            phone: isGroup ? rawRemoteJid : `+${cleanNumber}`,
             avatar: savedContact?.avatar || whatsappContact?.avatar || item.profilePicUrl || item.profilePictureUrl || '',
             tags: dailyResponder
               ? [{ id: `daily-responder-${dailyResponder.id}`, name: `👤 ${dailyResponder.name}`, color: '#A78BFA' }]
@@ -602,22 +651,23 @@ export class EvolutionApiService {
           lastMessageTimestamp: timestampStr,
           lastMessageAt,
           lastMessageFromMe,
-          lastMessageKey: item.lastMessage?.key,
+          lastMessageKey: lastMessage?.key,
           unreadCount,
           status: effectiveStatus,
           needsResponse,
           department: 'Atendimento Geral',
           assignedAttendant: assignment ? { id: assignment.id, name: assignment.name } : undefined,
+          lease,
         };
 
         // Se o mapa já tiver este número, atualiza apenas se a mensagem for mais recente ou se o nome for melhor que a entrada existente
-        if (conversationsMap.has(cleanNumber)) {
-          const existing = conversationsMap.get(cleanNumber)!;
+        if (conversationsMap.has(conversationKey)) {
+          const existing = conversationsMap.get(conversationKey)!;
           if (existing.contact.name.startsWith('+') && !displayName.startsWith('+')) {
             existing.contact.name = displayName;
           }
         } else {
-          conversationsMap.set(cleanNumber, conversationObj);
+          conversationsMap.set(conversationKey, conversationObj);
         }
       });
 
@@ -700,6 +750,51 @@ export class EvolutionApiService {
     afterTimestamp?: number,
     limit = 100,
   ) {
+    const requestKey = JSON.stringify({
+      instanceName,
+      remoteJid,
+      phone: phone.replace(/\D/g, ''),
+      attendantLabel,
+      reconcile,
+      beforeTimestamp: beforeTimestamp ?? null,
+      afterTimestamp: afterTimestamp ?? null,
+      limit,
+    });
+    return conversationMessageRequests.run(requestKey, () => this.fetchConversationMessagesPageUncoordinated(
+      instanceName,
+      remoteJid,
+      phone,
+      attendantLabel,
+      reconcile,
+      beforeTimestamp,
+      afterTimestamp,
+      limit,
+    ));
+  }
+
+  static async pullConversationLease(remoteJid: string, phone?: string) {
+    const response = await apiFetch('/api/evolution/chats/pull-lease', {
+      method: 'POST',
+      body: JSON.stringify({ remoteJid, phone }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body?.error || 'N\u00e3o foi poss\u00edvel puxar a conversa');
+    return body as {
+      remoteJid: string;
+      lease: { ownerUserId: string; ownerName: string; expiresAt: string };
+    };
+  }
+
+  private static async fetchConversationMessagesPageUncoordinated(
+    instanceName: string,
+    remoteJid: string,
+    phone: string,
+    attendantLabel = 'Atendente',
+    reconcile = false,
+    beforeTimestamp?: number,
+    afterTimestamp?: number,
+    limit = 100,
+  ) {
     const [evolutionMessages, internalNotes] = await Promise.all([
       this.fetchMessagesPage(instanceName, remoteJid, phone, attendantLabel, reconcile, beforeTimestamp, afterTimestamp, limit),
       this.fetchInternalNotes(remoteJid, phone),
@@ -719,13 +814,15 @@ export class EvolutionApiService {
   /**
    * Enviar mensagem de texto diretamente via Evolution API no Railway
    */
-  static async sendTextMessage(instanceName: string, number: string, text: string, remoteJid?: string) {
+  static async sendTextMessage(instanceName: string, number: string, text: string, remoteJid?: string, clientMessageId?: string, quotedMessage?: QuotedMessage) {
     if (USE_MOCK) {
       console.log(`[MOCK EVOLUTION API] Enviar para ${number}: "${text}"`);
       return { status: 'SUCCESS', messageId: `msg-${Date.now()}` };
     }
 
-    const cleanNumber = number.replace(/\D/g, '');
+    const cleanNumber = remoteJid?.toLowerCase().endsWith('@g.us')
+      ? remoteJid
+      : number.replace(/\D/g, '');
 
     try {
       const res = await apiFetch('/api/evolution/messages/send', {
@@ -734,6 +831,8 @@ export class EvolutionApiService {
           number: cleanNumber,
           text,
           remoteJid,
+          clientMessageId,
+          quotedMessage,
         })
       });
 
@@ -745,6 +844,29 @@ export class EvolutionApiService {
       console.error('[EvolutionAPI] Erro ao enviar mensagem:', err);
       throw err;
     }
+  }
+
+  static async sendMessageReaction(input: {
+    number: string;
+    remoteJid: string;
+    messageId: string;
+    emoji: '👍' | '❤️' | '😂' | '😮' | '😢' | '🙏' | null;
+  }): Promise<{ message: Message }> {
+    if (USE_MOCK) {
+      return { message: {} as Message };
+    }
+    const response = await apiFetch('/api/evolution/messages/reaction', {
+      method: 'POST',
+      body: JSON.stringify({
+        number: input.remoteJid.toLowerCase().endsWith('@g.us') ? input.remoteJid : input.number.replace(/\D/g, ''),
+        remoteJid: input.remoteJid,
+        messageId: input.messageId,
+        emoji: input.emoji,
+      }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body?.error || 'Não foi possível enviar a reação');
+    return body;
   }
 
 
@@ -780,7 +902,9 @@ export class EvolutionApiService {
       }
 
       // A Evolution API retorna do mais recente para o mais antigo. Invertemos para exibir cronologicamente.
-      const chronologicalMsgs = [...rawMsgs].reverse();
+      const chronologicalMsgs = [...rawMsgs]
+        .reverse()
+        .filter((record: any) => !isEvolutionReactionEvent(record));
 
       return {
         messages: chronologicalMsgs.map((m: any, idx: number) => normalizeEvolutionMessage(m, idx, remoteJid, attendantLabel)),
@@ -937,6 +1061,8 @@ export class EvolutionApiService {
     media: string;
     fileName?: string;
     caption?: string;
+    clientMessageId?: string;
+    quotedMessage?: QuotedMessage;
   }) {
     if (USE_MOCK) {
       return { status: 'SUCCESS', message: { id: `media-${Date.now()}`, status: 'sent' } };
@@ -944,13 +1070,15 @@ export class EvolutionApiService {
     const response = await apiFetch('/api/evolution/messages/send-media', {
       method: 'POST',
       body: JSON.stringify({
-        number: input.number.replace(/\D/g, ''),
+        number: input.remoteJid?.toLowerCase().endsWith('@g.us') ? input.remoteJid : input.number.replace(/\D/g, ''),
         remoteJid: input.remoteJid,
         mediatype: input.mediatype,
         mimetype: input.mimetype,
         media: input.media,
         fileName: input.fileName,
         caption: input.caption,
+        clientMessageId: input.clientMessageId,
+        quotedMessage: input.quotedMessage,
       }),
     });
     const body = await response.json().catch(() => ({}));

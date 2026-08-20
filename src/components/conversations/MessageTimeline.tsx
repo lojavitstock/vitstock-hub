@@ -1,9 +1,15 @@
 import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   CheckCheck,
+  ChevronDown,
   Copy,
   Download,
   ExternalLink,
+  File,
+  FileArchive,
+  FileSpreadsheet,
+  FileText,
   Image as ImageIcon,
   Lock,
   MapPin,
@@ -14,14 +20,22 @@ import {
   PhoneMissed,
   PhoneOutgoing,
   Play,
-  Paperclip,
   RefreshCw,
+  Reply,
+  SmilePlus,
   UserRound,
 } from 'lucide-react';
 import { Conversation, Message } from '../../types';
 import { EvolutionApiService } from '../../services/evolutionApi';
 import { ContactPhoto } from './ContactPhoto';
+import { MediaViewer } from './MediaViewer';
 import { formatMessageDay, formatMessageTimestamp } from './conversationFormatters';
+import { quotedMediaLabel, quotedMessageExcerpt } from '../../utils/quotedMessage';
+import { getDocumentPresentation } from '../../utils/documentMedia';
+import { mediaViewerItemFrom, type MediaViewerItem } from '../../utils/mediaViewer';
+import { canDownloadMessageMedia, messageCopyText } from '../../utils/messageActions';
+import { COMMON_REACTION_EMOJIS, canReactToMessage, type CommonReactionEmoji } from '../../utils/messageReactionActions';
+import { positionMessageActionMenu, positionReactionPalette, type PopoverPosition } from '../../utils/messagePopoverPosition';
 
 type MessageTimelineProps = {
   messages: Message[];
@@ -32,8 +46,13 @@ type MessageTimelineProps = {
   loadingOlderMessages?: boolean;
   loadingMessages?: boolean;
   historyExpanded?: boolean;
+  newMessagesCount?: number;
   onLoadOlder?: () => void;
+  onJumpToLatest?: () => void;
   onRetryMessage: (message: Message) => void;
+  onReplyMessage: (message: Message) => void;
+  onReactMessage: (message: Message, emoji: CommonReactionEmoji) => void;
+  onLayoutChange?: (reason: string, messageId?: string) => void;
 };
 
 const formatAudioTime = (seconds: number) => {
@@ -49,6 +68,172 @@ const isMediaPlaceholder = (message: Message) => {
   if (message.mediaType === 'document') return content === '[documento]' || content === '[document]';
   if (message.mediaType === 'audio') return content === '[mensagem de áudio]' || content === '[audio]';
   return message.mediaType === 'sticker' && (content === '[figurinha]' || content === '[sticker]' || !content);
+};
+
+const ReactionBadges: React.FC<{ reactions: NonNullable<NonNullable<Message['metadata']>['reactions']>; align: 'left' | 'right' }> = ({ reactions, align }) => {
+  const grouped = reactions.reduce<Array<{ emoji: string; count: number }>>((groups, reaction) => {
+    const current = groups.find((group) => group.emoji === reaction.emoji);
+    if (current) current.count += 1;
+    else groups.push({ emoji: reaction.emoji, count: 1 });
+    return groups;
+  }, []);
+  if (!grouped.length) return null;
+
+  return (
+    <span className={`absolute -bottom-3 z-10 inline-flex min-h-5 max-w-[170px] items-center gap-1 rounded-full border border-white/15 bg-[#20292f] px-1.5 py-0.5 text-[12px] leading-none shadow-md ${align === 'right' ? 'right-2' : 'left-2'}`} aria-label="Reações da mensagem">
+      {grouped.map((reaction) => <span key={reaction.emoji}>{reaction.emoji}{reaction.count > 1 ? <sup className="ml-0.5 text-[9px] font-bold text-slate-200">{reaction.count}</sup> : null}</span>)}
+    </span>
+  );
+};
+
+const QuotedMessageBlock: React.FC<{
+  message: Message;
+  onOpenOriginal: (messageId: string) => void;
+  onLayoutChange?: (reason: string, messageId: string) => void;
+}> = ({ message, onOpenOriginal, onLayoutChange }) => {
+  const quoted = message.metadata?.quotedMessage;
+  useEffect(() => {
+    if (quoted) onLayoutChange?.('quoted-message.rendered', message.id);
+  }, [message.id, onLayoutChange, quoted]);
+  if (!quoted) return null;
+  const mediaLabel = quotedMediaLabel(quoted.mediaType);
+  const excerpt = quotedMessageExcerpt(quoted);
+  const hasOnlyMediaPlaceholder = /^\[(imagem|image|vídeo|video|documento|document|mensagem de áudio|audio|figurinha|sticker)\]$/i.test(quoted.content?.trim() || '');
+
+  return (
+    <button
+      type="button"
+      onClick={() => onOpenOriginal(quoted.messageId)}
+      className="mb-2 block w-full border-l-2 border-emerald-300/70 bg-black/15 px-2.5 py-2 text-left transition-colors hover:bg-black/25"
+      title="Ir para a mensagem citada"
+    >
+      <span className="block truncate text-xs font-bold text-emerald-200">{quoted.authorName || 'Mensagem citada'}</span>
+      <span className="mt-0.5 block truncate text-xs text-slate-200/80">{mediaLabel ? `${mediaLabel}${quoted.content && !hasOnlyMediaPlaceholder ? ` · ${quoted.content}` : ''}` : excerpt}</span>
+    </button>
+  );
+};
+
+const MessageActionMenu: React.FC<{
+  message: Message;
+  isOpen: boolean;
+  align: 'left' | 'right';
+  triggerRef: React.RefObject<HTMLButtonElement>;
+  onClose: () => void;
+  onReply: () => void;
+  onReact: (emoji: CommonReactionEmoji) => void;
+  onCopy: () => void;
+  onDownload?: () => void;
+}> = ({ message, isOpen, align, triggerRef, onClose, onReply, onReact, onCopy, onDownload }) => {
+  const menuRef = React.useRef<HTMLDivElement>(null);
+  const paletteRef = React.useRef<HTMLDivElement>(null);
+  const reactionTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const [reactionPaletteOpen, setReactionPaletteOpen] = useState(false);
+  const fallbackMenuSize = { width: 176, height: 172 };
+  const fallbackPaletteSize = { width: 260, height: 48 };
+  const initialMenuPosition = (): PopoverPosition => {
+    if (typeof window === 'undefined') return { top: 8, left: 8 };
+    const anchor = triggerRef.current?.getBoundingClientRect();
+    if (!anchor) return { top: 8, left: 8 };
+    return positionMessageActionMenu(anchor, fallbackMenuSize, { width: window.innerWidth, height: window.innerHeight }, align);
+  };
+  const [menuPosition, setMenuPosition] = useState<PopoverPosition>(initialMenuPosition);
+  const [palettePosition, setPalettePosition] = useState<PopoverPosition | null>(null);
+
+  const updatePositions = React.useCallback(() => {
+    const anchor = triggerRef.current?.getBoundingClientRect();
+    if (!anchor) return;
+    const menuRect = menuRef.current?.getBoundingClientRect();
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    setMenuPosition(positionMessageActionMenu(anchor, menuRect || fallbackMenuSize, viewport, align));
+
+    if (!reactionPaletteOpen) {
+      setPalettePosition(null);
+      return;
+    }
+    const paletteAnchor = reactionTriggerRef.current?.getBoundingClientRect();
+    if (!paletteAnchor) return;
+    const paletteRect = paletteRef.current?.getBoundingClientRect();
+    setPalettePosition(positionReactionPalette(paletteAnchor, paletteRect || fallbackPaletteSize, viewport));
+  }, [align, reactionPaletteOpen, triggerRef]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const closeOnOutside = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!menuRef.current?.contains(target) && !paletteRef.current?.contains(target) && !triggerRef.current?.contains(target)) onClose();
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      setReactionPaletteOpen(false);
+      onClose();
+      window.requestAnimationFrame(() => triggerRef.current?.focus());
+    };
+    window.addEventListener('pointerdown', closeOnOutside, true);
+    window.addEventListener('keydown', closeOnEscape, true);
+    return () => {
+      window.removeEventListener('pointerdown', closeOnOutside, true);
+      window.removeEventListener('keydown', closeOnEscape, true);
+    };
+  }, [isOpen, onClose, triggerRef]);
+
+  React.useLayoutEffect(() => {
+    if (!isOpen) return;
+    updatePositions();
+    window.addEventListener('resize', updatePositions);
+    window.addEventListener('scroll', updatePositions, true);
+    return () => {
+      window.removeEventListener('resize', updatePositions);
+      window.removeEventListener('scroll', updatePositions, true);
+    };
+  }, [isOpen, updatePositions]);
+
+  if (!isOpen || typeof document === 'undefined') return null;
+  const itemClass = 'flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-semibold text-slate-200 transition-colors hover:bg-white/10 focus:bg-white/10 focus:outline-none';
+  const reactionAvailable = canReactToMessage(message);
+
+  return createPortal(
+    <>
+    <div ref={menuRef} role="menu" aria-label="Ações da mensagem" className="fixed z-[60] w-44 rounded-lg border border-white/10 bg-[#243038] py-1 shadow-2xl" style={menuPosition}>
+      <button type="button" role="menuitem" onClick={onReply} className={itemClass}><Reply className="h-3.5 w-3.5 text-amber-300" /> Responder</button>
+      <button
+        ref={reactionTriggerRef}
+        type="button"
+        role="menuitem"
+        disabled={!reactionAvailable}
+        title={reactionAvailable ? 'Reagir à mensagem' : 'Aguarde a confirmação da mensagem para reagir'}
+        onClick={() => setReactionPaletteOpen((open) => !open)}
+        className={`${itemClass} disabled:cursor-not-allowed disabled:opacity-45`}
+      >
+        <SmilePlus className="h-3.5 w-3.5 text-amber-300" /> Reagir
+      </button>
+      {reactionPaletteOpen && reactionAvailable && palettePosition && (
+        <div ref={paletteRef} role="menu" aria-label="Escolher reação" className="fixed z-[61] flex gap-1 rounded-xl border border-white/10 bg-[#1a242a] p-1.5 shadow-2xl" style={palettePosition || undefined}>
+          {COMMON_REACTION_EMOJIS.map((emoji) => (
+            <button
+              key={emoji}
+              type="button"
+              role="menuitem"
+              aria-label={`Reagir com ${emoji}`}
+              onClick={() => {
+                onReact(emoji);
+                setReactionPaletteOpen(false);
+                onClose();
+              }}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-lg transition-colors hover:bg-white/10 focus:bg-white/10 focus:outline-none"
+            >
+              {emoji}
+            </button>
+          ))}
+        </div>
+      )}
+      {messageCopyText(message) && <button type="button" role="menuitem" onClick={onCopy} className={itemClass}><Copy className="h-3.5 w-3.5 text-slate-300" /> Copiar</button>}
+      {onDownload && canDownloadMessageMedia(message) && <button type="button" role="menuitem" onClick={onDownload} className={itemClass}><Download className="h-3.5 w-3.5 text-amber-300" /> Baixar</button>}
+    </div>
+    </>,
+    document.body,
+  );
 };
 
 const InteractiveMessageContent: React.FC<{ message: Message }> = ({ message }) => {
@@ -194,17 +379,109 @@ const AudioMessagePlayer: React.FC<{ src: string; durationHint?: number }> = ({ 
   );
 };
 
-const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> = ({ message, instanceName }) => {
+const DocumentMessageContent: React.FC<{
+  message: Message;
+  source: string | null;
+  loading: boolean;
+  canLoadSource: boolean;
+  onLoadSource: () => void;
+  onOpenViewer: (item: MediaViewerItem, trigger: HTMLElement) => void;
+  onLayoutChange?: (reason: string, messageId: string) => void;
+}> = ({ message, source, loading, canLoadSource, onLoadSource, onOpenViewer, onLayoutChange }) => {
+  const [openRequested, setOpenRequested] = useState(false);
+  const presentation = getDocumentPresentation(message);
+  const Icon = presentation.kind === 'pdf'
+    ? FileText
+    : presentation.kind === 'spreadsheet'
+      ? FileSpreadsheet
+      : presentation.kind === 'archive'
+        ? FileArchive
+        : presentation.kind === 'word' || presentation.kind === 'text'
+          ? FileText
+          : File;
+  const humanMetadata = presentation.kind === 'pdf'
+    ? ['PDF', presentation.formattedSize].filter(Boolean).join(' · ')
+    : [presentation.extension, presentation.formattedSize].filter(Boolean).join(' · ');
+
+  useEffect(() => {
+    if (!openRequested || !source) return;
+    const item = mediaViewerItemFrom(message, source);
+    if (item) onOpenViewer(item, document.activeElement as HTMLElement);
+    setOpenRequested(false);
+  }, [message, onOpenViewer, openRequested, source]);
+
+  useEffect(() => {
+    if (source) onLayoutChange?.('document.source.ready', message.id);
+  }, [message.id, onLayoutChange, source]);
+
+  const openPreview = (trigger: HTMLElement) => {
+    const item = mediaViewerItemFrom(message, source);
+    if (item) {
+      onOpenViewer(item, trigger);
+      return;
+    }
+    if (!loading && canLoadSource) {
+      setOpenRequested(true);
+      onLoadSource();
+    }
+  };
+
+  const downloadAction = source ? (
+    <a href={source} download={presentation.fileName} className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-bold text-amber-300 transition-colors hover:bg-white/5 hover:text-amber-200">
+      <Download className="h-3.5 w-3.5" /> Baixar
+    </a>
+  ) : canLoadSource ? (
+    <button type="button" onClick={onLoadSource} disabled={loading} className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-bold text-amber-300 transition-colors hover:bg-white/5 hover:text-amber-200 disabled:cursor-wait disabled:text-slate-400">
+      {loading ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+      {loading ? 'Preparando...' : 'Baixar'}
+    </button>
+  ) : <span className="text-[11px] font-semibold text-slate-500">Arquivo indisponível</span>;
+
+  if (presentation.kind === 'pdf') {
+    return (
+      <div className="my-1 w-[320px] max-w-[58vw] overflow-hidden rounded-xl border border-white/10 bg-black/25 shadow-inner">
+        <button type="button" onClick={(event) => openPreview(event.currentTarget)} className="flex h-28 w-full items-center justify-center bg-gradient-to-br from-red-100 via-white to-slate-200 text-left transition-opacity hover:opacity-90" title="Abrir PDF">
+          <span className="flex h-16 w-12 flex-col items-center justify-center rounded-md border border-red-300/60 bg-white text-red-500 shadow-sm"><FileText className="h-6 w-6" /><span className="mt-1 text-[9px] font-extrabold">PDF</span></span>
+        </button>
+        <div className="flex items-center gap-2.5 border-t border-white/10 px-3 py-2.5">
+          <span className="flex h-8 w-7 flex-shrink-0 items-center justify-center rounded bg-red-500/15 text-red-300"><FileText className="h-4 w-4" /></span>
+          <span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold text-slate-100">{presentation.fileName}</span><span className="mt-0.5 block text-[10px] font-semibold text-slate-400">{humanMetadata}</span></span>
+          {downloadAction}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="my-1 flex w-[320px] max-w-[58vw] items-center gap-3 rounded-xl border border-white/10 bg-black/25 px-3 py-3 shadow-inner">
+      <span className="flex h-11 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-amber-400/10 text-amber-300"><Icon className="h-5 w-5" /></span>
+      <span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold text-slate-100">{presentation.fileName}</span><span className="mt-0.5 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">{humanMetadata}</span></span>
+      {downloadAction}
+    </div>
+  );
+};
+
+const MediaMessageContent: React.FC<{
+  message: Message;
+  instanceName: string;
+  onOpenViewer: (item: MediaViewerItem, trigger: HTMLElement) => void;
+  onLayoutChange?: (reason: string, messageId: string) => void;
+}> = ({ message, instanceName, onOpenViewer, onLayoutChange }) => {
   const isMedia = ['image', 'audio', 'video', 'document', 'sticker'].includes(message.mediaType || '');
   if (!isMedia) return null;
 
   const isDataUri = (url?: string | null) => !!url && url.startsWith('data:');
-  const [src, setSrc] = useState<string | null>(isDataUri(message.mediaUrl) ? message.mediaUrl! : null);
-  const [loadingMedia, setLoadingMedia] = useState(!isDataUri(message.mediaUrl) && !!message.rawKey);
-  const [showModal, setShowModal] = useState(false);
+  const isDocument = message.mediaType === 'document';
+  const isReusableDocumentUrl = isDocument
+    && !message.rawKey
+    && /^https?:\/\//i.test(message.mediaUrl || '');
+  const [src, setSrc] = useState<string | null>(isDataUri(message.mediaUrl) || isReusableDocumentUrl ? message.mediaUrl! : null);
+  const [documentSourceRequested, setDocumentSourceRequested] = useState(!isDocument);
+  const shouldLoadMedia = !isDocument || documentSourceRequested;
+  const [loadingMedia, setLoadingMedia] = useState(shouldLoadMedia && !isDataUri(message.mediaUrl) && !!message.rawKey);
 
   useEffect(() => {
-    if (!message.rawKey || src) return;
+    if (!shouldLoadMedia || !message.rawKey || src) return;
     let mounted = true;
     if (!src) setLoadingMedia(true);
     EvolutionApiService.getDecodedMedia(instanceName, message.rawKey).then((base64) => {
@@ -213,7 +490,11 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
       setLoadingMedia(false);
     });
     return () => { mounted = false; };
-  }, [instanceName, message.id, message.rawKey, src]);
+  }, [instanceName, message.id, message.rawKey, shouldLoadMedia, src]);
+
+  if (message.mediaType === 'document') {
+    return <DocumentMessageContent message={message} source={src} loading={loadingMedia} canLoadSource={Boolean(message.rawKey)} onLoadSource={() => setDocumentSourceRequested(true)} onOpenViewer={onOpenViewer} onLayoutChange={onLayoutChange} />;
+  }
 
   if (loadingMedia) {
     const mediaPlaceholderClass = message.mediaType === 'image'
@@ -230,52 +511,122 @@ const MediaMessageContent: React.FC<{ message: Message; instanceName: string }> 
 
     return (
       <>
-        <div className="group relative mb-2 max-w-xs overflow-hidden rounded-xl border border-black/20 shadow-xl">
-          <img src={finalImageSrc} alt="Imagem WhatsApp" className="max-h-72 w-full cursor-pointer rounded-lg object-cover transition-all hover:opacity-90" onClick={() => setShowModal(true)} />
+        <button type="button" onClick={(event) => {
+          const item = mediaViewerItemFrom(message, finalImageSrc);
+          if (item) onOpenViewer(item, event.currentTarget);
+        }} className="group relative mb-2 block max-w-xs overflow-hidden rounded-xl border border-black/20 text-left shadow-xl">
+          <img src={finalImageSrc} alt="Imagem WhatsApp" onLoad={() => onLayoutChange?.('image.loaded', message.id)} onError={() => onLayoutChange?.('image.failed', message.id)} className="max-h-72 w-full cursor-pointer rounded-lg object-cover transition-all hover:opacity-90" />
           <div className="absolute bottom-2 right-2 rounded bg-black/60 px-2 py-1 text-[10px] font-bold text-white opacity-0 backdrop-blur-md transition-opacity group-hover:opacity-100">Clique para ampliar</div>
-        </div>
-        {showModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4 backdrop-blur-md" onClick={() => setShowModal(false)}>
-            <div className="relative flex max-h-[90vh] w-full max-w-4xl flex-col items-center justify-center" onClick={(event) => event.stopPropagation()}>
-              <div className="absolute -top-12 right-0 flex items-center gap-3">
-                <a href={finalImageSrc} download="imagem-whatsapp.jpg" className="flex items-center gap-1 rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-bold text-zinc-950 transition-colors hover:bg-amber-300">Download HD</a>
-                <button type="button" onClick={() => setShowModal(false)} className="flex h-8 w-8 items-center justify-center rounded-full border border-zinc-700 bg-zinc-800 font-bold text-zinc-200 hover:text-white">×</button>
-              </div>
-              <img src={finalImageSrc} alt="Imagem ampliada" className="max-h-[85vh] max-w-full rounded-xl border border-zinc-800 object-contain shadow-2xl" />
-            </div>
-          </div>
-        )}
+        </button>
       </>
     );
   }
 
   if (message.mediaType === 'audio' && src) return <AudioMessagePlayer src={src} durationHint={message.mediaDuration} />;
   if (message.mediaType === 'video' && src) {
-    return <div className="max-w-sm overflow-hidden rounded-xl border border-white/10 bg-black/30 shadow-xl"><video src={src} controls preload="metadata" className="max-h-80 w-full bg-black object-contain" aria-label="Vídeo recebido no WhatsApp" /><a href={src} download="video-whatsapp.mp4" className="block px-3 py-2 text-center text-[11px] font-bold text-amber-300 hover:bg-white/5">Baixar vídeo</a></div>;
+    return <div className="max-w-sm overflow-hidden rounded-xl border border-white/10 bg-black/30 shadow-xl"><video src={src} controls preload="metadata" className="max-h-80 w-full bg-black object-contain" aria-label="Vídeo recebido no WhatsApp" /><div className="flex items-center justify-between px-3 py-2"><button type="button" onClick={(event) => { const item = mediaViewerItemFrom(message, src); if (item) onOpenViewer(item, event.currentTarget); }} className="text-[11px] font-bold text-amber-300 hover:text-amber-200">Abrir visualizador</button><a href={src} download="video-whatsapp.mp4" className="text-[11px] font-bold text-amber-300 hover:text-amber-200">Baixar vídeo</a></div></div>;
   }
   if (message.mediaType === 'sticker') return src ? <img src={src} alt="Figurinha do WhatsApp" className="h-40 w-40 object-contain drop-shadow-lg" /> : <div className="text-[11px] text-slate-400">Figurinha indisponível</div>;
   if (message.mediaType === 'audio') return <div className="w-[310px] max-w-[58vw] rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-[11px] text-slate-400">Áudio indisponível para reprodução</div>;
   if (message.mediaType === 'video') return <div className="w-[310px] max-w-[58vw] rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-[11px] text-slate-400">Vídeo indisponível para reprodução</div>;
-  if (message.mediaType === 'document' && src) {
-    return <div className="my-1 flex max-w-xs items-center gap-2.5 rounded-xl border border-white/10 bg-black/30 p-2.5 shadow-inner"><Paperclip className="h-4 w-4 flex-shrink-0 text-amber-400" /><span className="flex-1 truncate text-xs font-bold">{message.content || 'Documento'}</span><a href={src} download="documento.pdf" className="rounded bg-amber-400 px-2.5 py-1 text-[11px] font-bold text-zinc-950 transition-colors hover:bg-amber-300">Baixar</a></div>;
-  }
   return null;
 };
 
-export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, onLoadOlder, onRetryMessage }) => {
+export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage, onReplyMessage, onReactMessage, onLayoutChange }) => {
+  const shouldShowIndicator = newMessagesCount > 0 && Boolean(onJumpToLatest);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const [viewerItem, setViewerItem] = useState<MediaViewerItem | null>(null);
+  const [openMenuMessageId, setOpenMenuMessageId] = useState<string | null>(null);
+  const [messageActionError, setMessageActionError] = useState<string | null>(null);
+  const highlightTimeoutRef = React.useRef<number | undefined>();
+  const viewerTriggerRef = React.useRef<HTMLElement | null>(null);
+  const menuTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const actionErrorTimeoutRef = React.useRef<number | undefined>();
+
+  useEffect(() => () => {
+    if (highlightTimeoutRef.current) window.clearTimeout(highlightTimeoutRef.current);
+    if (actionErrorTimeoutRef.current) window.clearTimeout(actionErrorTimeoutRef.current);
+  }, []);
+
+  const openQuotedMessage = (messageId: string) => {
+    const container = containerRef.current;
+    const target = Array.from(container?.querySelectorAll<HTMLElement>('[data-message-id]') || [])
+      .find((element) => element.dataset.messageId === messageId);
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightedMessageId(messageId);
+    if (highlightTimeoutRef.current) window.clearTimeout(highlightTimeoutRef.current);
+    highlightTimeoutRef.current = window.setTimeout(() => setHighlightedMessageId(null), 1_600);
+  };
+
+  const openMediaViewer = React.useCallback((item: MediaViewerItem, trigger: HTMLElement) => {
+    viewerTriggerRef.current = trigger;
+    setViewerItem(item);
+  }, []);
+
+  const closeMediaViewer = React.useCallback(() => {
+    setViewerItem(null);
+    window.requestAnimationFrame(() => viewerTriggerRef.current?.focus());
+  }, []);
+
+  const showMessageActionError = React.useCallback((messageId: string) => {
+    setMessageActionError(messageId);
+    if (actionErrorTimeoutRef.current) window.clearTimeout(actionErrorTimeoutRef.current);
+    actionErrorTimeoutRef.current = window.setTimeout(() => setMessageActionError(null), 3_000);
+  }, []);
+
+  const copyMessage = React.useCallback(async (message: Message) => {
+    const text = messageCopyText(message);
+    setOpenMenuMessageId(null);
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const fallback = document.createElement('textarea');
+        fallback.value = text;
+        fallback.setAttribute('readonly', '');
+        fallback.style.position = 'fixed';
+        fallback.style.opacity = '0';
+        document.body.appendChild(fallback);
+        fallback.select();
+        const copied = document.execCommand('copy');
+        fallback.remove();
+        if (!copied) throw new Error('copy_failed');
+      }
+    } catch {
+      showMessageActionError(message.id);
+    }
+  }, [showMessageActionError]);
+
+  const downloadMessage = React.useCallback(async (message: Message) => {
+    setOpenMenuMessageId(null);
+    try {
+      const directSource = message.mediaUrl?.startsWith('data:') ? message.mediaUrl : undefined;
+      const decodedSource = !directSource && message.rawKey
+        ? await EvolutionApiService.getDecodedMedia(instanceName, message.rawKey)
+        : undefined;
+      const source = directSource || decodedSource || message.mediaUrl;
+      if (!source) throw new Error('media_unavailable');
+      const presentation = message.mediaType === 'document' ? getDocumentPresentation(message) : undefined;
+      const fileName = presentation?.fileName
+        || (message.mediaType === 'image' ? 'imagem-whatsapp.jpg' : message.mediaType === 'video' ? 'video-whatsapp.mp4' : 'arquivo-whatsapp');
+      const anchor = document.createElement('a');
+      anchor.href = source;
+      anchor.download = fileName;
+      anchor.style.display = 'none';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    } catch {
+      showMessageActionError(message.id);
+    }
+  }, [instanceName, showMessageActionError]);
+
   let previousDay = '';
   return (
-  <div ref={containerRef} style={{ overflowAnchor: 'none' }} className="chat-wallpaper relative flex-1 space-y-3 overflow-y-auto px-6 py-5 text-[15px]">
-    {loadingMessages && (
-      <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#152027]/85 backdrop-blur-[1px]">
-        <div className="flex flex-col items-center gap-3 rounded-2xl border border-amber-300/20 bg-[#20292f]/95 px-8 py-7 text-center shadow-2xl">
-          <RefreshCw className="h-7 w-7 animate-spin text-amber-300" />
-          <p className="text-sm font-bold text-slate-100">Carregando mensagens...</p>
-          <span className="text-xs text-slate-400">Buscando as mensagens mais recentes</span>
-          <span className="h-1.5 w-48 overflow-hidden rounded-full bg-slate-700"><span className="block h-full w-2/3 animate-pulse rounded-full bg-amber-400" /></span>
-        </div>
-      </div>
-    )}
+  <div className="relative min-h-0 flex-1">
+  <div ref={containerRef} style={{ overflowAnchor: 'none' }} className="chat-wallpaper relative h-full space-y-3 overflow-y-auto px-6 py-5 text-[15px]">
+    {loadingMessages && <div aria-label="Carregando mensagens" className="pointer-events-none absolute left-1/2 top-4 z-10 flex -translate-x-1/2 items-center justify-center rounded-full border border-white/10 bg-[#243038]/95 px-3 py-2 shadow-lg"><RefreshCw className="h-4 w-4 animate-spin text-amber-300" /></div>}
     {!loadingMessages && hasMoreMessages && !historyExpanded && onLoadOlder && (
       <div className="flex min-h-[180px] items-center justify-center py-4">
         <button type="button" onClick={onLoadOlder} disabled={loadingOlderMessages} className="rounded-full border border-amber-400/40 bg-amber-400/10 px-5 py-3 text-sm font-bold text-amber-200 shadow-lg transition-colors hover:bg-amber-400/20 disabled:cursor-wait disabled:opacity-60">
@@ -302,28 +653,67 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
       return (
         <React.Fragment key={message.id}>
         {showDay && <DaySeparator label={messageDay} />}
-        <div className={`flex max-w-[78%] gap-2 ${isMe ? 'ml-auto flex-row-reverse' : ''}`}>
-          {!isMe && <ContactPhoto name={activeConversation.contact.name} avatar={activeConversation.contact.avatar} size="small" />}
+        <div data-message-id={message.id} className={`flex max-w-[78%] gap-2 rounded-xl transition-shadow ${highlightedMessageId === message.id ? 'ring-2 ring-emerald-300/80 ring-offset-2 ring-offset-[#152027]' : ''} ${isMe ? 'ml-auto flex-row-reverse' : ''}`}>
+          {!isMe && <ContactPhoto name={activeConversation.isGroup ? (activeConversation.groupName || activeConversation.contact.name) : activeConversation.contact.name} avatar={activeConversation.contact.avatar} size="small" />}
           <div>
-            <div className={`space-y-2 rounded-lg px-3.5 py-3 text-[15px] leading-relaxed shadow-sm ${isMe ? 'rounded-tr-none border border-amber-300/15 bg-[#5b4b20] font-medium text-[#fff8df]' : 'rounded-tl-none border border-white/5 bg-[#273238] text-slate-100'}`}>
-              {isMe && <p className="mb-1 text-xs font-bold text-amber-200/75">{message.senderName}</p>}
-              <MediaMessageContent message={message} instanceName={instanceName} />
-              <SpecialMessageContent message={message} contactPhone={activeConversation.contact.phone} />
+            {activeConversation.isGroup && !isMe && message.senderName && (
+              <p className="mb-1 px-1 text-[11px] font-extrabold text-emerald-300">{message.senderName}</p>
+            )}
+            <div className={`group/message relative space-y-2 rounded-lg px-3.5 py-3 text-[15px] leading-relaxed shadow-sm ${isMe ? 'rounded-tr-none border border-amber-300/15 bg-[#5b4b20] font-medium text-[#fff8df]' : 'rounded-tl-none border border-white/5 bg-[#273238] text-slate-100'}`}>
+              <button
+                ref={openMenuMessageId === message.id ? menuTriggerRef : undefined}
+                type="button"
+                aria-label="Abrir ações da mensagem"
+                aria-haspopup="menu"
+                aria-expanded={openMenuMessageId === message.id}
+                onClick={(event) => setOpenMenuMessageId((current) => current === message.id ? null : message.id)}
+                className={`absolute top-1 z-20 flex h-6 w-6 items-center justify-center rounded-md bg-black/20 text-slate-300 opacity-55 transition-opacity hover:bg-black/35 hover:text-white md:opacity-0 md:group-hover/message:opacity-100 ${isMe ? 'left-1' : 'right-1'}`}
+              >
+                <ChevronDown className="h-4 w-4" />
+              </button>
+              {openMenuMessageId === message.id && <MessageActionMenu
+                message={message}
+                isOpen
+                align={isMe ? 'left' : 'right'}
+                triggerRef={menuTriggerRef}
+                onClose={() => setOpenMenuMessageId(null)}
+                onReply={() => { setOpenMenuMessageId(null); onReplyMessage(message); }}
+                onReact={(emoji) => onReactMessage(message, emoji)}
+                onCopy={() => void copyMessage(message)}
+                onDownload={canDownloadMessageMedia(message) ? () => void downloadMessage(message) : undefined}
+              />}
+              {isMe && <p className="mb-1 text-xs font-bold text-amber-200/75">{message.metadata?.sentOutsideHub ? 'Enviado fora do Vitstock Hub' : message.senderName}</p>}
+              <QuotedMessageBlock message={message} onOpenOriginal={openQuotedMessage} onLayoutChange={onLayoutChange} />
+              <MediaMessageContent message={message} instanceName={instanceName} onOpenViewer={openMediaViewer} onLayoutChange={onLayoutChange} />
+              <SpecialMessageContent message={message} contactPhone={activeConversation.isGroup ? undefined : activeConversation.contact.phone} />
               <InteractiveMessageContent message={message} />
               {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap">{message.content}</p>}
+              {message.metadata?.reactions?.length ? <ReactionBadges reactions={message.metadata.reactions} align={isMe ? 'right' : 'left'} /> : null}
             </div>
-            <div className={`mt-1 flex items-center gap-1 text-xs text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
+            <div className={`mt-4 flex items-center gap-1 text-xs text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
               <span>{formatMessageTimestamp(message.timestampMs, message.timestamp)}</span>
               {isMe && message.status === 'failed' && <span className="font-bold text-red-300">Falha no envio</span>}
-              {isMe && message.status === 'pending' && <span className="font-semibold text-amber-300">Enviando...</span>}
+              {isMe && message.status === 'pending' && <RefreshCw className="h-3.5 w-3.5 animate-spin text-amber-300" aria-label="Enviando" />}
               {isMe && message.status !== 'failed' && message.status !== 'pending' && <CheckCheck className={`h-3.5 w-3.5 ${message.status === 'read' ? 'text-emerald-400' : message.status === 'delivered' ? 'text-amber-400' : 'text-slate-400'}`} />}
               {isMe && message.status === 'failed' && <button type="button" onClick={() => onRetryMessage(message)} className="ml-1 font-bold text-amber-300 underline decoration-amber-300/50 underline-offset-2 hover:text-amber-200">Tentar novamente</button>}
             </div>
+            {messageActionError === message.id && <span className={`mt-1 block text-[11px] font-semibold text-red-300 ${isMe ? 'text-right' : ''}`}>Não foi possível concluir esta ação.</span>}
           </div>
         </div>
         </React.Fragment>
       );
     })}
+  </div>
+  {viewerItem && <MediaViewer item={viewerItem} onClose={closeMediaViewer} />}
+  {shouldShowIndicator && onJumpToLatest && (
+    <button
+      type="button"
+      onClick={onJumpToLatest}
+      className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border border-emerald-300/40 bg-[#1f8f70] px-4 py-2 text-xs font-bold text-white shadow-lg transition-colors hover:bg-[#27a77f]"
+    >
+      ↓ {newMessagesCount} nova {newMessagesCount === 1 ? 'mensagem' : 'mensagens'}
+    </button>
+  )}
   </div>
   );
 });

@@ -1,5 +1,5 @@
-import React, { useCallback, useState, useEffect } from 'react';
-import { useLocation } from 'react-router-dom';
+import React, { useCallback, useRef, useState, useEffect } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { 
   Search, 
   Send, 
@@ -13,6 +13,7 @@ import {
   Zap, 
   Kanban,
   RefreshCw,
+  WifiOff,
   MessageSquare,
   Plus,
   Phone,
@@ -24,41 +25,67 @@ import {
   Globe,
   Archive,
 } from 'lucide-react';
-import { Conversation, Message } from '../types';
+import { Conversation, Message, WhatsappInstance } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { useAuth } from '../auth/AuthContext';
 import { ConversationFilters } from '../components/conversations/ConversationFilters';
 import { ConversationList } from '../components/conversations/ConversationList';
 import { ContactPhoto } from '../components/conversations/ContactPhoto';
 import { MessageTimeline } from '../components/conversations/MessageTimeline';
-import { MessageComposer } from '../components/conversations/MessageComposer';
+import { MessageComposer, MessageComposerHandle } from '../components/conversations/MessageComposer';
 import { formatMessageTimestamp } from '../components/conversations/conversationFormatters';
 import { useConversationMessages } from '../hooks/useConversationMessages';
-import { mergeConversationMessages } from '../utils/messageMerge';
 import { conversationNeedsResponse, useConversationInbox } from '../hooks/useConversationInbox';
 import { useContactPanel } from '../hooks/useContactPanel';
+import { toQuotedMessage } from '../utils/quotedMessage';
+import { canRestoreComposerDraft, captureComposerSubmission, readConversationDraft, scheduleComposerFocus, writeConversationDraft } from '../utils/composerSubmission';
+import { createOutboundTrace } from '../utils/outboundTrace';
+import { findConversationForContactChat, normalizeContactChatPhone } from '../utils/contactChatNavigation';
+import {
+  canReactToMessage,
+  nextHubReactionEmoji,
+  withOptimisticHubReaction,
+  type CommonReactionEmoji,
+} from '../utils/messageReactionActions';
 
 
 export const AtendimentoPage: React.FC = () => {
   const instanceName = 'vitstock_atendimento';
   const isMock = import.meta.env.VITE_USE_MOCK_DATA === 'true';
   const location = useLocation();
+  const navigate = useNavigate();
   const { user } = useAuth();
   const attendantLabel = user
     ? `${user.name} • ${user.companyName || 'Vitstock'}`
     : 'Atendente • Vitstock';
 
   const attendantName = user?.name || 'Atendente';
-  const [inputText, setInputText] = useState('');
+  const [whatsappStatus, setWhatsappStatus] = useState<WhatsappInstance['status']>('connecting');
+  const composerRef = useRef<MessageComposerHandle>(null);
+  const composerTextRef = useRef('');
+  const composerDraftsRef = useRef(new Map<string, string>());
+  const composerDraftRevisionRef = useRef(0);
+  const activeConversationIdRef = useRef<string | null>(null);
+  const autoReadMarkersRef = useRef(new Map<string, string>());
+  const handleComposerTextChange = useCallback((value: string) => {
+    composerTextRef.current = value;
+    composerDraftRevisionRef.current += 1;
+    const conversationId = activeConversationIdRef.current;
+    if (!conversationId) return;
+    writeConversationDraft(composerDraftsRef.current, conversationId, value);
+  }, []);
   const [sendingMedia, setSendingMedia] = useState(false);
   const [isInternalNote, setIsInternalNote] = useState(false);
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
+  const [replyTo, setReplyTo] = useState<Message | null>(null);
   // Estado para Nova Conversa por Telefone
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [newChatNumber, setNewChatNumber] = useState('');
   const [newChatName, setNewChatName] = useState('');
   const [newChatMessage, setNewChatMessage] = useState('');
   const [startingNewChat, setStartingNewChat] = useState(false);
+  const [pendingContactChatId, setPendingContactChatId] = useState<string | null>(null);
+  const pendingContactChatRef = useRef<Conversation | null>(null);
 
   const {
     conversations,
@@ -67,6 +94,7 @@ export const AtendimentoPage: React.FC = () => {
     activeConversationId: activeConvId,
     setActiveConversationId: setActiveConvId,
     activeChatLocked,
+    activeLease,
     filterTab,
     setFilterTab,
     conversationSearch,
@@ -74,21 +102,46 @@ export const AtendimentoPage: React.FC = () => {
     visibleConversations,
     loadingChats,
     loadChats,
+    updateConversationActivity,
     markConversationAsRead,
     capturingChat,
     assignmentFeedback,
     setAssignmentFeedback,
     captureActiveChat,
     releaseActiveChat,
+    pullActiveConversationLease,
     updateActiveChatStatus,
     needsAttention,
     rememberContactName,
   } = useConversationInbox({
     instanceName,
     isMock,
+    connectionStatus: whatsappStatus,
     userId: user?.id,
     userRole: user?.role,
   });
+
+  useEffect(() => {
+    const previousConversationId = activeConversationIdRef.current;
+    if (previousConversationId && previousConversationId !== activeConvId) {
+      writeConversationDraft(composerDraftsRef.current, previousConversationId, composerTextRef.current);
+    }
+    activeConversationIdRef.current = activeConvId;
+    setReplyTo(null);
+  }, [activeConvId]);
+
+  useEffect(() => {
+    if (!activeConvId || whatsappStatus !== 'connected') return;
+    composerRef.current?.setText(readConversationDraft(composerDraftsRef.current, activeConvId));
+  }, [activeConvId, whatsappStatus]);
+
+  useEffect(() => {
+    if (!activeConv || activeConv.unreadCount <= 0) return;
+    const marker = activeConv.lastMessageKey?.id || String(activeConv.lastMessageAt || 'unknown');
+    if (autoReadMarkersRef.current.get(activeConv.id) === marker) return;
+    autoReadMarkersRef.current.set(activeConv.id, marker);
+    void markConversationAsRead(activeConv);
+  }, [activeConv, markConversationAsRead]);
 
   const {
     showContactInfo,
@@ -113,14 +166,93 @@ export const AtendimentoPage: React.FC = () => {
   });
 
   useEffect(() => {
-    const state = location.state as { startChat?: { phone?: string; name?: string } } | null;
-    if (!state?.startChat?.phone) return;
-    setNewChatNumber(state.startChat.phone.replace(/\D/g, ''));
-    setNewChatName(state.startChat.name || '');
-    setNewChatMessage('');
-    setAssignmentFeedback('');
-    setShowNewChatModal(true);
-  }, [location.state]);
+    let mounted = true;
+    const syncStatus = (event: Event) => {
+      const status = (event as CustomEvent<WhatsappInstance['status']>).detail;
+      if (status === 'connected' || status === 'connecting' || status === 'disconnected') {
+        setWhatsappStatus(status);
+      }
+    };
+    const refreshStatus = () => {
+      void EvolutionApiService.getInstanceStatus(instanceName)
+        .then((status) => {
+          if (mounted) setWhatsappStatus(status.status);
+        })
+        .catch(() => undefined);
+    };
+    window.addEventListener('vitstock:whatsapp-status', syncStatus);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') refreshStatus();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    refreshStatus();
+    return () => {
+      mounted = false;
+      window.removeEventListener('vitstock:whatsapp-status', syncStatus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [instanceName]);
+
+  useEffect(() => {
+    const startChat = (location.state as { startChat?: { phone?: string; name?: string; remoteJid?: string; contactId?: string } } | null)?.startChat;
+    if ((!startChat?.phone && !startChat?.remoteJid) || whatsappStatus !== 'connected' || loadingChats) return;
+    const existing = findConversationForContactChat(conversations, startChat);
+    if (existing) {
+      pendingContactChatRef.current = null;
+      setPendingContactChatId(null);
+      setActiveConvId(existing.id);
+      void markConversationAsRead(existing);
+      navigate(location.pathname, { replace: true, state: null });
+      return;
+    }
+    if (!startChat.phone) return;
+    const cleanPhone = normalizeContactChatPhone(startChat.phone);
+    if (cleanPhone.length < 8) {
+      pendingContactChatRef.current = null;
+      setPendingContactChatId(null);
+      setAssignmentFeedback('O contato não possui um número de WhatsApp válido.');
+      navigate(location.pathname, { replace: true, state: null });
+      return;
+    }
+    const jid = startChat.remoteJid || `${cleanPhone}@s.whatsapp.net`;
+    const pendingConversation: Conversation = {
+      id: jid,
+      contact: {
+        id: startChat.contactId || jid,
+        name: startChat.name?.trim() || `+${cleanPhone}`,
+        phone: `+${cleanPhone}`,
+        avatar: '',
+        tags: [],
+        createdAt: new Date().toISOString().split('T')[0],
+      },
+      lastMessage: 'Nenhuma mensagem ainda',
+      lastMessageTimestamp: '',
+      lastMessageAt: 0,
+      lastMessageFromMe: false,
+      unreadCount: 0,
+      needsResponse: false,
+      status: 'open',
+      department: '',
+    };
+    pendingContactChatRef.current = pendingConversation;
+    setConversations((previous) => previous.some((conversation) => conversation.id === jid)
+      ? previous
+      : [pendingConversation, ...previous]);
+    setPendingContactChatId(jid);
+    setActiveConvId(jid);
+    setAssignmentFeedback('Nova conversa pronta. Digite uma mensagem para iniciar o atendimento.');
+    navigate(location.pathname, { replace: true, state: null });
+  }, [conversations, loadingChats, location.pathname, location.state, markConversationAsRead, navigate, setActiveConvId, setAssignmentFeedback, setConversations, whatsappStatus]);
+
+  useEffect(() => {
+    if (!pendingContactChatId || conversations.some((conversation) => conversation.id === pendingContactChatId)) return;
+    const pendingConversation = pendingContactChatRef.current;
+    if (pendingConversation?.id === pendingContactChatId) {
+      setConversations((previous) => previous.some((conversation) => conversation.id === pendingContactChatId)
+        ? previous
+        : [pendingConversation, ...previous]);
+    }
+  }, [conversations, pendingContactChatId, setConversations]);
 
 
   /* // Carregar conversas ao iniciar e manter atualizado a cada 4 segundos
@@ -147,13 +279,18 @@ export const AtendimentoPage: React.FC = () => {
     loadOlderMessages,
     messagesContainerRef,
     scrollToBottom,
+    captureScrollState,
+    traceTimelineLayoutChange,
+    newMessagesCount,
   } = useConversationMessages({
     activeConversationId: activeConvId,
     conversations,
     instanceName,
     attendantLabel,
     isMock,
+    connectionStatus: whatsappStatus,
   });
+
 
   // Rolar para a última mensagem automaticamente quando a conversa mudar ou chegar mensagem nova
   /* const loadChats = async (showLoading = true) => {
@@ -409,50 +546,204 @@ export const AtendimentoPage: React.FC = () => {
   }, [showContactInfo, activeConvId]);
 
   */
+  const restoreFailedOptimisticActivity = (conversation: Conversation, optimisticMessageId: string) => {
+    setConversations((previous) => previous.map((item) => {
+      if (item.id !== conversation.id || item.lastMessageKey?.id !== optimisticMessageId) return item;
+      return {
+        ...item,
+        lastMessage: conversation.lastMessage,
+        lastMessageTimestamp: conversation.lastMessageTimestamp,
+        lastMessageAt: conversation.lastMessageAt,
+        lastMessageFromMe: conversation.lastMessageFromMe,
+        lastMessageKey: conversation.lastMessageKey,
+        unreadCount: conversation.unreadCount,
+        needsResponse: conversation.needsResponse,
+        status: conversation.status,
+      };
+    }));
+  };
+
+  const handleReplyMessage = useCallback((message: Message) => {
+    if (message.isInternalNote) return;
+    setReplyTo(message);
+    setIsInternalNote(false);
+    setQuickReplyOpen(false);
+    scheduleComposerFocus(() => composerRef.current?.focus());
+  }, []);
+
+  const handleReactMessage = useCallback(async (message: Message, emoji: CommonReactionEmoji) => {
+    if (!activeConv || !canReactToMessage(message)) {
+      setAssignmentFeedback('Aguarde a confirmação da mensagem antes de reagir.');
+      return;
+    }
+    if (activeChatLocked) {
+      setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
+      return;
+    }
+    if (!isMock && whatsappStatus !== 'connected') {
+      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de reagir.');
+      return;
+    }
+
+    const reactionToSend = nextHubReactionEmoji(message, emoji);
+    const optimisticUpdatedAt = Date.now();
+    const targetMessageId = message.id;
+    const providerMessageId = message.rawKey.id.trim();
+    const originalMetadata = message.metadata;
+    setAssignmentFeedback('');
+    setMessages((previous) => previous.map((item) => (
+      item.id === targetMessageId
+        ? withOptimisticHubReaction(item, reactionToSend, {
+            actorId: user?.id,
+            actorName: attendantName,
+            updatedAt: optimisticUpdatedAt,
+          })
+        : item
+    )));
+
+    if (isMock) return;
+    try {
+      const result = await EvolutionApiService.sendMessageReaction({
+        number: activeConv.contact.phone,
+        remoteJid: activeConv.id,
+        messageId: providerMessageId,
+        emoji: reactionToSend,
+      });
+      if (activeConversationIdRef.current !== activeConv.id || !result.message?.metadata) return;
+      setMessages((previous) => previous.map((item) => (
+        item.id === targetMessageId
+          ? { ...item, metadata: result.message.metadata }
+          : item
+      )));
+    } catch (error) {
+      if (activeConversationIdRef.current === activeConv.id) {
+        setMessages((previous) => previous.map((item) => {
+          const optimisticReaction = item.metadata?.reactions?.find((reaction) => (
+            reaction.reactorKey === '__vitstock_self__' && reaction.updatedAt === optimisticUpdatedAt
+          ));
+          const optimisticRemoval = reactionToSend === null && !item.metadata?.reactions?.some((reaction) => (
+            reaction.reactorKey === '__vitstock_self__'
+          ));
+          if (item.id !== targetMessageId || (!optimisticReaction && !optimisticRemoval)) return item;
+          return { ...item, metadata: originalMetadata };
+        }));
+      }
+      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar a reação.');
+    }
+  }, [activeChatLocked, activeConv, activeLease?.ownerName, attendantName, isMock, setAssignmentFeedback, setMessages, user?.id, whatsappStatus]);
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim() || !activeConv || activeChatLocked) return;
+    if (!composerTextRef.current.trim() || !activeConv) return;
+    if (activeChatLocked) {
+      setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
+      return;
+    }
+    if (!isInternalNote && !isMock && whatsappStatus !== 'connected') {
+      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de enviar mensagens.');
+      return;
+    }
 
-    const newMsgText = inputText.trim();
-    const outboundText = `*${attendantName}*\n${newMsgText}`;
-    setInputText('');
+    const submission = captureComposerSubmission({
+      text: composerTextRef.current,
+      replyTarget: replyTo,
+      isInternalNote,
+    });
+    const newMsgText = submission.text;
+    const isInternalNoteToSend = submission.isInternalNote;
+    const quotedMessage = submission.replyTarget ? toQuotedMessage(submission.replyTarget) : undefined;
+    const clientMessageId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setReplyTo(null);
+    composerRef.current?.clear();
+    const clearedDraftRevision = composerDraftRevisionRef.current;
+
+    const restoreFailedDraft = () => {
+      if (activeConversationIdRef.current === activeConv.id && canRestoreComposerDraft(composerDraftRevisionRef.current, clearedDraftRevision)) {
+        composerRef.current?.setText(newMsgText);
+      } else if (!readConversationDraft(composerDraftsRef.current, activeConv.id)) {
+        writeConversationDraft(composerDraftsRef.current, activeConv.id, newMsgText);
+      }
+    };
 
     const newMsg: Message = {
-      id: `msg-${Date.now()}`,
+      id: clientMessageId,
       conversationId: activeConv.id,
       sender: 'attendant',
       senderName: attendantName,
       content: newMsgText,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       timestampMs: Date.now(),
-      status: isInternalNote ? 'sent' : 'pending',
-      isInternalNote
+      status: isInternalNoteToSend ? 'sent' : 'pending',
+      metadata: isInternalNoteToSend ? undefined : {
+        sentByHub: true,
+        sentByUserId: user?.id,
+        sentByUserName: attendantName,
+        clientMessageId,
+        ...(quotedMessage ? { quotedMessage } : {}),
+      },
+      isInternalNote: isInternalNoteToSend
     };
 
+    const submitter = (e.nativeEvent as SubmitEvent).submitter;
+    const traceOutbound = !isInternalNoteToSend && !isMock
+      ? createOutboundTrace({
+        clientMessageId: newMsg.id,
+        conversationId: activeConv.id,
+        kind: 'text',
+        submitSource: submitter ? 'click' : 'keyboard',
+      })
+      : null;
+    traceOutbound?.('submit');
+
     setMessages(prev => [...prev, newMsg]);
-    window.setTimeout(scrollToBottom, 0);
+    traceOutbound?.('optimistic.rendered');
+    window.setTimeout(() => scrollToBottom('outbound.text.optimistic'), 0);
+
+    if (!isInternalNoteToSend) {
+      updateConversationActivity(activeConv.id, {
+        lastMessage: activeConv.isGroup ? `${attendantName}: ${newMsgText}` : newMsgText,
+        lastMessageTimestamp: formatMessageTimestamp(newMsg.timestampMs, 'Agora'),
+        lastMessageAt: newMsg.timestampMs || Date.now(),
+        lastMessageFromMe: true,
+        lastMessageKey: { id: newMsg.id, remoteJid: activeConv.id, fromMe: true },
+        unreadCount: 0,
+        needsResponse: false,
+        moveToFront: true,
+      });
+    }
 
     // Se NÃO for nota interna e NÃO for mock, envia mensagem real no WhatsApp via Evolution API!
-    if (isInternalNote && !isMock) {
+    if (isInternalNoteToSend && !isMock) {
       try {
         const savedNote = await EvolutionApiService.saveInternalNote(activeConv.id, activeConv.contact.phone, newMsgText);
-        setMessages((previous) => previous.map((message) => message.id === newMsg.id ? savedNote : message));
+        if (activeConversationIdRef.current === activeConv.id) {
+          setMessages((previous) => previous.map((message) => message.id === newMsg.id ? savedNote : message));
+        }
       } catch (error) {
-        setMessages((previous) => previous.filter((message) => message.id !== newMsg.id));
-        setInputText(newMsgText);
+        if (activeConversationIdRef.current === activeConv.id) {
+          setMessages((previous) => previous.filter((message) => message.id !== newMsg.id));
+        }
+        restoreFailedDraft();
         setAssignmentFeedback(error instanceof Error ? error.message : 'NÃ£o foi possÃ­vel salvar a nota interna.');
         return;
       }
     }
 
-    if (!isInternalNote && !isMock) {
+    if (!isInternalNoteToSend && !isMock) {
       try {
-      const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, outboundText, activeConv.id);
-      setMessages((previous) => previous.map((message) => message.id === newMsg.id ? {
-        ...message,
-        id: result?.message?.evolutionMessageId || result?.message?.id || message.id,
-        status: 'sent',
-      } : message));
+      traceOutbound?.('http.started');
+      const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, newMsgText, activeConv.id, newMsg.id, quotedMessage);
+      traceOutbound?.('http.completed', { ok: true, evolutionMessageId: result?.message?.evolutionMessageId || result?.message?.id || null });
+      if (activeConversationIdRef.current === activeConv.id) {
+        const providerMessageId = result?.message?.evolutionMessageId || result?.message?.id;
+        setMessages((previous) => previous.map((message) => message.id === newMsg.id ? {
+          ...message,
+          id: providerMessageId || message.id,
+          status: result?.message?.status || result?.status || 'sent',
+          ...(providerMessageId ? { rawKey: { id: providerMessageId, remoteJid: activeConv.id, fromMe: true } } : {}),
+        } : message));
+        traceOutbound?.('optimistic.acknowledged', { status: result?.message?.status || result?.status || 'sent' });
+      }
       const dailyResponder = result?.dailyResponder;
       if (dailyResponder?.id && dailyResponder?.name) {
         setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
@@ -463,34 +754,46 @@ export const AtendimentoPage: React.FC = () => {
           },
         } : conversation));
       }
-      
-      // Busca atualizada do backend imediatamente apos enviar
-      setTimeout(async () => {
-        const updatedMsgs = await EvolutionApiService.fetchConversationMessages(instanceName, activeConv.id, activeConv.contact.phone, attendantLabel, true);
-        if (updatedMsgs.length > 0) setMessages((previous) => mergeConversationMessages(previous, updatedMsgs));
-        loadChats(false);
-      }, 800);
       } catch (error) {
-        setMessages((previous) => previous.map((message) => message.id === newMsg.id ? { ...message, status: 'failed' } : message));
-        setInputText(newMsgText);
+        traceOutbound?.('http.completed', { ok: false });
+        if (activeConversationIdRef.current === activeConv.id) {
+          setMessages((previous) => previous.map((message) => message.id === newMsg.id ? { ...message, status: 'failed' } : message));
+        }
+        restoreFailedDraft();
+        restoreFailedOptimisticActivity(activeConv, newMsg.id);
         setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar a mensagem.');
         return;
       }
     }
 
+    if (!isInternalNoteToSend && pendingContactChatId === activeConv.id) {
+      pendingContactChatRef.current = null;
+      setPendingContactChatId(null);
+    }
+
     // Atualiza última mensagem na lista lateral
-    setConversations(prev => prev.map(c => c.id === activeConv.id ? {
-      ...c,
-      lastMessage: isInternalNote ? `[Nota Interna]: ${newMsgText}` : newMsgText,
-      lastMessageTimestamp: 'Agora',
-      unreadCount: 0,
-      lastMessageFromMe: !isInternalNote,
-      needsResponse: false,
-    } : c));
+    if (isInternalNoteToSend) {
+      setConversations(prev => prev.map(c => c.id === activeConv.id ? {
+        ...c,
+        lastMessage: `[Nota Interna]: ${newMsgText}`,
+        lastMessageTimestamp: 'Agora',
+        unreadCount: 0,
+        lastMessageFromMe: c.lastMessageFromMe,
+        needsResponse: c.needsResponse,
+      } : c));
+    }
   };
 
   const handleAttachmentFile = async (file: File) => {
-    if (!file || !activeConv || activeChatLocked || isInternalNote || sendingMedia) return;
+    if (!file || !activeConv || isInternalNote || sendingMedia) return;
+    if (activeChatLocked) {
+      setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
+      return;
+    }
+    if (!isMock && whatsappStatus !== 'connected') {
+      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de enviar anexos.');
+      return;
+    }
     if (file.size > 10 * 1024 * 1024) {
       setAssignmentFeedback('O anexo deve ter no máximo 10 MB.');
       return;
@@ -509,7 +812,24 @@ export const AtendimentoPage: React.FC = () => {
 
     const mediatype: 'image' | 'video' | 'document' = isImage ? 'image' : isVideo ? 'video' : 'document';
     const label = mediatype === 'image' ? '[Imagem]' : mediatype === 'video' ? '[Vídeo]' : '[Documento]';
-    const caption = inputText.trim();
+    const submission = captureComposerSubmission({
+      text: composerTextRef.current,
+      replyTarget: replyTo,
+      isInternalNote: false,
+    });
+    const caption = submission.text;
+    const quotedMessage = submission.replyTarget ? toQuotedMessage(submission.replyTarget) : undefined;
+    setReplyTo(null);
+    setSendingMedia(true);
+    composerRef.current?.clear();
+    const clearedDraftRevision = composerDraftRevisionRef.current;
+    const restoreFailedDraft = () => {
+      if (activeConversationIdRef.current === activeConv.id && canRestoreComposerDraft(composerDraftRevisionRef.current, clearedDraftRevision)) {
+        composerRef.current?.setText(caption);
+      } else if (caption && !readConversationDraft(composerDraftsRef.current, activeConv.id)) {
+        writeConversationDraft(composerDraftsRef.current, activeConv.id, caption);
+      }
+    };
     const dataUrl = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result));
@@ -519,11 +839,20 @@ export const AtendimentoPage: React.FC = () => {
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível ler o anexo.');
       return '';
     });
-    if (!dataUrl) return;
+    if (!dataUrl) {
+      restoreFailedDraft();
+      setSendingMedia(false);
+      return;
+    }
     const media = dataUrl.split(',')[1];
-    if (!media) return;
+    if (!media) {
+      restoreFailedDraft();
+      setSendingMedia(false);
+      return;
+    }
+    const clientMessageId = `media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const localMessage: Message = {
-      id: `media-${Date.now()}`,
+      id: clientMessageId,
       conversationId: activeConv.id,
       sender: 'attendant',
       senderName: attendantName,
@@ -533,13 +862,35 @@ export const AtendimentoPage: React.FC = () => {
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       timestampMs: Date.now(),
       status: 'pending',
+      metadata: {
+        sentByHub: true,
+        sentByUserId: user?.id,
+        sentByUserName: attendantName,
+        clientMessageId,
+        ...(mediatype === 'document'
+          ? { document: { fileName: file.name, mimeType: file.type || undefined, fileSize: file.size } }
+          : {}),
+        ...(quotedMessage ? { quotedMessage } : {}),
+      },
     };
+    const traceOutbound = createOutboundTrace({ clientMessageId: localMessage.id, conversationId: activeConv.id, kind: 'media' });
+    traceOutbound('submit');
     setAssignmentFeedback('');
-    setSendingMedia(true);
-    setInputText('');
     setMessages((previous) => [...previous, localMessage]);
-    window.setTimeout(scrollToBottom, 0);
+    traceOutbound('optimistic.rendered');
+    window.setTimeout(() => scrollToBottom('outbound.media.optimistic'), 0);
+    updateConversationActivity(activeConv.id, {
+      lastMessage: activeConv.isGroup ? `${attendantName}: ${caption || label}` : (caption || label),
+      lastMessageTimestamp: formatMessageTimestamp(localMessage.timestampMs, 'Agora'),
+      lastMessageAt: localMessage.timestampMs || Date.now(),
+      lastMessageFromMe: true,
+      lastMessageKey: { id: localMessage.id, remoteJid: activeConv.id, fromMe: true },
+      unreadCount: 0,
+      needsResponse: false,
+      moveToFront: true,
+    });
     try {
+      traceOutbound('http.started');
       const result = await EvolutionApiService.sendMediaMessage({
         instanceName,
         number: activeConv.contact.phone,
@@ -549,14 +900,22 @@ export const AtendimentoPage: React.FC = () => {
         media,
         fileName: file.name,
         caption: caption || undefined,
+        clientMessageId: localMessage.id,
+        quotedMessage,
       });
-      setMessages((previous) => previous.map((message) => message.id === localMessage.id ? {
-        ...message,
-        id: result?.message?.evolutionMessageId || result?.message?.id || message.id,
-        status: 'sent',
-      } : message));
+      traceOutbound('http.completed', { ok: true, evolutionMessageId: result?.message?.evolutionMessageId || result?.message?.id || null });
+      if (activeConversationIdRef.current === activeConv.id) {
+        const providerMessageId = result?.message?.evolutionMessageId || result?.message?.id;
+        setMessages((previous) => previous.map((message) => message.id === localMessage.id ? {
+          ...message,
+          id: providerMessageId || message.id,
+          status: result?.message?.status || result?.status || 'sent',
+          ...(providerMessageId ? { rawKey: { id: providerMessageId, remoteJid: activeConv.id, fromMe: true } } : {}),
+        } : message));
+        traceOutbound('optimistic.acknowledged', { status: result?.message?.status || result?.status || 'sent' });
+      }
       const dailyResponder = result?.dailyResponder;
-      setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
+      if (dailyResponder?.id && dailyResponder?.name) setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
         ...conversation,
         contact: dailyResponder?.id && dailyResponder?.name
           ? {
@@ -564,15 +923,18 @@ export const AtendimentoPage: React.FC = () => {
               tags: [{ id: `daily-responder-${dailyResponder.id}`, name: `👤 ${dailyResponder.name}`, color: '#A78BFA' }],
             }
           : conversation.contact,
-        lastMessage: caption || label,
-        lastMessageTimestamp: 'Agora',
-        lastMessageFromMe: true,
-        needsResponse: false,
       } : conversation));
-      window.setTimeout(() => { void loadChats(false); }, 800);
+      if (pendingContactChatId === activeConv.id) {
+        pendingContactChatRef.current = null;
+        setPendingContactChatId(null);
+      }
     } catch (error) {
-      setMessages((previous) => previous.map((message) => message.id === localMessage.id ? { ...message, status: 'failed' } : message));
-      setInputText(caption);
+      traceOutbound('http.completed', { ok: false });
+      if (activeConversationIdRef.current === activeConv.id) {
+        setMessages((previous) => previous.map((message) => message.id === localMessage.id ? { ...message, status: 'failed' } : message));
+      }
+      restoreFailedDraft();
+      restoreFailedOptimisticActivity(activeConv, localMessage.id);
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar o anexo.');
     } finally {
       setSendingMedia(false);
@@ -586,7 +948,15 @@ export const AtendimentoPage: React.FC = () => {
   };
 
   const handleInputPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!activeConv || activeChatLocked || isInternalNote || sendingMedia) return;
+    if (!activeConv || isInternalNote || sendingMedia) return;
+    if (activeChatLocked) {
+      setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
+      return;
+    }
+    if (!isMock && whatsappStatus !== 'connected') {
+      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de enviar imagens.');
+      return;
+    }
     const imageItem = Array.from(event.clipboardData.items).find((item) => item.kind === 'file' && item.type.startsWith('image/'));
     const file = imageItem?.getAsFile()
       || Array.from(event.clipboardData.files).find((candidate) => candidate.type.startsWith('image/'));
@@ -597,20 +967,73 @@ export const AtendimentoPage: React.FC = () => {
 
   const retryFailedMessage = useCallback(async (message: Message) => {
     if (!activeConv || isMock || message.status !== 'failed' || message.isInternalNote) return;
+    if (activeChatLocked) {
+      setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
+      return;
+    }
+    if (whatsappStatus !== 'connected') {
+      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de tentar novamente.');
+      return;
+    }
 
+    const conversationId = activeConv.id;
     const retryText = message.content.trim();
-    if (!retryText) return;
-    const outboundText = `*${attendantName}*\n${retryText}`;
+    const clientMessageId = message.metadata?.sentByHub === true
+      && typeof message.metadata.clientMessageId === 'string'
+      && message.metadata.clientMessageId.trim()
+      ? message.metadata.clientMessageId
+      : message.id;
+    if (!retryText && !message.mediaUrl) return;
     setAssignmentFeedback('');
     setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'pending' } : item));
+    const retryTimestampMs = Date.now();
+    updateConversationActivity(activeConv.id, {
+      lastMessage: message.content || (message.mediaType ? `[${message.mediaType}]` : retryText),
+      lastMessageTimestamp: formatMessageTimestamp(retryTimestampMs, 'Agora'),
+      lastMessageAt: retryTimestampMs,
+      lastMessageFromMe: true,
+      lastMessageKey: { id: message.id, remoteJid: activeConv.id, fromMe: true },
+      unreadCount: 0,
+      needsResponse: false,
+      moveToFront: true,
+    });
 
     try {
-      const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, outboundText, activeConv.id);
-      setMessages((previous) => previous.map((item) => item.id === message.id ? {
-        ...item,
-        id: result?.message?.evolutionMessageId || result?.message?.id || item.id,
-        status: 'sent',
-      } : item));
+      let result: any;
+      if ((message.mediaType === 'image' || message.mediaType === 'video' || message.mediaType === 'document')
+        && message.mediaUrl?.startsWith('data:')) {
+        const [dataHeader, media] = message.mediaUrl.split(',', 2);
+        if (!media) throw new Error('O anexo original não está disponível para nova tentativa.');
+        const mimetype = dataHeader.match(/^data:([^;]+)/)?.[1]
+          || (message.mediaType === 'image' ? 'image/jpeg' : message.mediaType === 'video' ? 'video/mp4' : 'application/pdf');
+        result = await EvolutionApiService.sendMediaMessage({
+          instanceName,
+          number: activeConv.contact.phone,
+          remoteJid: activeConv.id,
+          mediatype: message.mediaType,
+          mimetype,
+          media,
+          caption: retryText || undefined,
+          clientMessageId,
+          quotedMessage: message.metadata?.quotedMessage,
+        });
+      } else if (message.mediaType) {
+        throw new Error('O arquivo original não está disponível para nova tentativa.');
+      } else {
+        result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, retryText, activeConv.id, clientMessageId, message.metadata?.quotedMessage);
+      }
+      if (activeConversationIdRef.current === conversationId) {
+        const providerMessageId = result?.message?.evolutionMessageId || result?.message?.id;
+        setMessages((previous) => previous.map((item) => item.id === message.id ? {
+          ...item,
+          id: providerMessageId || item.id,
+          status: result?.message?.status || result?.status || 'sent',
+          ...(providerMessageId ? { rawKey: { id: providerMessageId, remoteJid: activeConv.id, fromMe: true } } : {}),
+          metadata: item.metadata?.sentByHub === true
+            ? { ...item.metadata, clientMessageId: item.metadata.clientMessageId || clientMessageId }
+            : item.metadata,
+        } : item));
+      }
       const dailyResponder = result?.dailyResponder;
       if (dailyResponder?.id && dailyResponder?.name) {
         setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
@@ -621,17 +1044,19 @@ export const AtendimentoPage: React.FC = () => {
           },
         } : conversation));
       }
-      window.setTimeout(() => { void loadChats(false); }, 800);
     } catch (error) {
-      setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'failed' } : item));
-      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível reenviar a mensagem.');
+      if (activeConversationIdRef.current === conversationId) {
+        setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'failed' } : item));
+        setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível reenviar a mensagem.');
+      }
     }
-  }, [activeConv, attendantName, instanceName, isMock, loadChats]);
+  }, [activeChatLocked, activeConv, activeLease?.ownerName, attendantName, instanceName, isMock, updateConversationActivity, whatsappStatus]);
 
   const handleSelectConversation = useCallback((conversation: Conversation) => {
+    captureScrollState(activeConvId);
     setActiveConvId(conversation.id);
     void markConversationAsRead(conversation);
-  }, [markConversationAsRead, setActiveConvId]);
+  }, [activeConvId, captureScrollState, markConversationAsRead, setActiveConvId]);
 
   const handleLoadOlderMessages = useCallback(() => {
     void loadOlderMessages();
@@ -644,6 +1069,10 @@ export const AtendimentoPage: React.FC = () => {
   const handleStartNewChat = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newChatNumber.trim() || !newChatMessage.trim() || startingNewChat) return;
+    if (!isMock && whatsappStatus !== 'connected') {
+      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de iniciar uma conversa.');
+      return;
+    }
 
     const cleanNum = newChatNumber.replace(/\D/g, '');
     if (cleanNum.length < 8) {
@@ -653,14 +1082,14 @@ export const AtendimentoPage: React.FC = () => {
     const jid = `${cleanNum}@s.whatsapp.net`;
     const contactName = newChatName.trim() || `+${cleanNum}`;
     const messageText = newChatMessage.trim();
-    const outboundText = `*${attendantName}*\n${messageText}`;
+    const clientMessageId = `new-chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     setStartingNewChat(true);
     setAssignmentFeedback('');
     let result: any = null;
     if (!isMock) {
       try {
-        result = await EvolutionApiService.sendTextMessage(instanceName, cleanNum, outboundText, jid);
+        result = await EvolutionApiService.sendTextMessage(instanceName, cleanNum, messageText, jid, clientMessageId);
       } catch (error) {
         setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível iniciar a conversa.');
         setStartingNewChat(false);
@@ -688,35 +1117,37 @@ export const AtendimentoPage: React.FC = () => {
     };
 
     setConversations(prev => [newConv, ...prev]);
+    captureScrollState(activeConvId);
     setActiveConvId(jid);
     setMessages([{
-      id: result?.message?.id || `new-chat-${Date.now()}`,
+      id: result?.message?.evolutionMessageId || result?.message?.id || clientMessageId,
       conversationId: jid,
       sender: 'attendant',
       senderName: attendantName,
       content: messageText,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       timestampMs: Date.now(),
-      status: 'sent',
+      status: result?.message?.status || result?.status || 'sent',
+      metadata: {
+        sentByHub: true,
+        sentByUserId: user?.id,
+        sentByUserName: attendantName,
+        clientMessageId,
+      },
     }]);
     setShowNewChatModal(false);
     setNewChatNumber('');
     setNewChatName('');
     setNewChatMessage('');
     setStartingNewChat(false);
-    window.setTimeout(() => { void loadChats(false); }, 800);
   };
 
-  const insertQuickReply = (text: string) => {
-    setInputText(text);
-    setQuickReplyOpen(false);
-  };
-
+  const whatsappConnected = whatsappStatus === 'connected';
   return (
     <div className="flex h-full w-full bg-[#11181d] overflow-hidden text-slate-100 font-overpass relative">
       
       {/* Modal para Nova Conversa Directa */}
-      {showNewChatModal && (
+      {whatsappConnected && showNewChatModal && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
           <div className="bg-[#121215] border border-zinc-800 rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl">
             <h2 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
@@ -789,6 +1220,7 @@ export const AtendimentoPage: React.FC = () => {
             <div className="flex items-center gap-1.5">
               <button 
                 onClick={() => setShowNewChatModal(true)}
+                disabled={!whatsappConnected}
                 className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-400 text-zinc-950 shadow-[0_4px_12px_rgba(238,187,44,0.2)] transition-colors hover:bg-amber-300"
                 title="Nova Conversa"
               >
@@ -796,6 +1228,7 @@ export const AtendimentoPage: React.FC = () => {
               </button>
               <button 
                 onClick={() => loadChats(true)} 
+                disabled={!whatsappConnected}
                 className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#46535a] bg-[#2a343a] text-slate-300 transition-colors hover:border-amber-300/50 hover:text-amber-300"
                 title="Sincronizar Mensagens"
               >
@@ -804,6 +1237,7 @@ export const AtendimentoPage: React.FC = () => {
             </div>
           </div>
 
+          {whatsappConnected ? <>
           {/* Campo de Busca */}
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
@@ -886,85 +1320,50 @@ export const AtendimentoPage: React.FC = () => {
             onFilterChange={setFilterTab}
             needsResponse={conversationNeedsResponse}
           />
-        </div>
-
-        {/* Lista de Conversas com Scroll */}
-        <div className="hidden flex-1 overflow-y-auto divide-y divide-[#273239]">
-          {conversations.length === 0 ? (
-            <div className="p-8 text-center space-y-2">
-              <MessageSquare className="w-8 h-8 text-zinc-600 mx-auto" />
-              <p className="text-xs font-bold text-zinc-400">Nenhuma conversa encontrada</p>
-              <p className="text-[11px] text-zinc-500">Assim que um cliente enviar mensagem no seu WhatsApp, ela aparecerá aqui em tempo real.</p>
+          </> : (
+            <div className="flex flex-col items-center gap-3 rounded-xl border border-red-400/25 bg-red-400/10 px-4 py-6 text-center">
+              {whatsappStatus === 'connecting' ? (
+                <RefreshCw className="h-7 w-7 animate-spin text-amber-300" aria-hidden="true" />
+              ) : (
+                <WifiOff className="h-7 w-7 text-red-300" aria-hidden="true" />
+              )}
+              <div>
+                <p className="text-sm font-bold text-slate-100">
+                  {whatsappStatus === 'connecting' ? 'Reconectando ao WhatsApp...' : 'WhatsApp desconectado'}
+                </p>
+                <p className="mt-1 text-xs leading-5 text-slate-300/80">
+                  {whatsappStatus === 'connecting'
+                    ? 'A caixa de entrada ficará disponível assim que a conexão for restabelecida.'
+                    : 'Reconecte sua conta para voltar a receber e enviar mensagens.'}
+                </p>
+              </div>
+              {whatsappStatus === 'disconnected' && (
+                <button type="button" onClick={() => navigate('/configuracoes?tab=connections')} className="rounded-lg border border-amber-300/40 bg-amber-300 px-3 py-2 text-xs font-bold text-zinc-950 hover:bg-amber-200">
+                  Reconectar WhatsApp
+                </button>
+              )}
             </div>
-           ) : visibleConversations.length === 0 ? (
-             <div className="p-8 text-center space-y-2">
-               <Search className="w-8 h-8 text-zinc-600 mx-auto" />
-               <p className="text-xs font-bold text-zinc-400">Nenhum atendimento corresponde à busca</p>
-               <p className="text-[11px] text-zinc-500">Tente outro nome ou número de telefone.</p>
-             </div>
-           ) : (
-             visibleConversations.map(conv => {
-                const isSelected = conv.id === activeConvId;
-                const needsResponse = conversationNeedsResponse(conv);
-                return (
-                  <div
-                    key={conv.id}
-                    onClick={() => {
-                      setActiveConvId(conv.id);
-                      void markConversationAsRead(conv);
-                    }}
-                    className={`p-3.5 cursor-pointer transition-colors relative flex items-start gap-3 ${
-                      isSelected ? 'bg-[#2b353b] border-l-4 border-amber-400' : needsResponse ? 'bg-[#24383d] border-l-4 border-emerald-400 hover:bg-[#2a4247]' : 'border-l-4 border-transparent hover:bg-[#222d33]'
-                    }`}
-                  >
-                    <div className="relative flex-shrink-0">
-                      <ContactPhoto name={conv.contact.name} avatar={conv.contact.avatar} />
-                    </div>
-
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between mb-1 gap-2">
-                        <p className={`text-xs truncate ${needsResponse ? 'font-extrabold text-white' : 'font-bold text-zinc-100'}`}>{conv.contact.name}</p>
-                        <span className="text-[10px] font-semibold text-zinc-500">{formatMessageTimestamp(conv.lastMessageAt, conv.lastMessageTimestamp)}</span>
-                      </div>
-
-                      <p className={`text-xs truncate mb-1.5 ${needsResponse ? 'font-bold text-slate-200' : 'text-zinc-400'}`}>{conv.lastMessage}</p>
-
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700">
-                          {conv.department}
-                        </span>
-                        {conv.contact.tags.map(tag => (
-                          <span 
-                            key={tag.id}
-                            className="text-[9px] font-bold px-1.5 py-0.5 rounded"
-                            style={{ backgroundColor: `${tag.color}20`, color: tag.color, border: `1px solid ${tag.color}40` }}
-                          >
-                            {tag.name}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })
           )}
         </div>
 
+        {/* Lista de Conversas com Scroll */}
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <ConversationList
-            conversations={conversations}
-            visibleConversations={visibleConversations}
-            activeConversationId={activeConvId}
-            needsResponse={conversationNeedsResponse}
-            needsAttention={needsAttention}
-            onSelectConversation={handleSelectConversation}
-          />
+          {whatsappConnected && (
+            <ConversationList
+              conversations={conversations}
+              visibleConversations={visibleConversations}
+              activeConversationId={activeConvId}
+              needsResponse={conversationNeedsResponse}
+              needsAttention={needsAttention}
+              onSelectConversation={handleSelectConversation}
+            />
+          )}
         </div>
       </div>
 
       {/* Coluna 2: Chat Principal (Bate-Papo Central) */}
       <div className="flex-1 flex flex-col bg-[#152027] overflow-hidden">
-        {activeConv ? (
+        {whatsappConnected && activeConv ? (
           <>
             {/* Cabeçalho do Chat */}
             <div className="h-16 px-5 border-b border-[#344047] bg-[#20292f] flex items-center justify-between flex-shrink-0">
@@ -973,11 +1372,8 @@ export const AtendimentoPage: React.FC = () => {
                 <div>
                   <h2 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
                     {activeConv.contact.name}
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-semibold">
-                      WhatsApp Conectado
-                    </span>
                   </h2>
-                  <p className="text-xs text-zinc-400 font-mono">{activeConv.contact.phone}</p>
+                  <p className="text-xs text-zinc-400 font-mono">{activeConv.isGroup ? 'Grupo WhatsApp' : activeConv.contact.phone}</p>
                 </div>
               </button>
 
@@ -1029,31 +1425,61 @@ export const AtendimentoPage: React.FC = () => {
               loadingMessages={loadingMessages}
               historyExpanded={historyExpanded}
               loadingOlderMessages={loadingOlderMessages}
+              newMessagesCount={newMessagesCount}
               onLoadOlder={handleLoadOlderMessages}
+              onJumpToLatest={scrollToBottom}
+              onLayoutChange={traceTimelineLayoutChange}
               onRetryMessage={handleRetryMessage}
+              onReplyMessage={handleReplyMessage}
+              onReactMessage={handleReactMessage}
             />
 
             <MessageComposer
-              inputText={inputText}
+              ref={composerRef}
               isInternalNote={isInternalNote}
               quickReplyOpen={quickReplyOpen}
               activeChatLocked={activeChatLocked}
-              assignedAttendantName={activeConv.assignedAttendant?.name}
+              whatsappConnected={whatsappConnected}
+              leaseOwnerName={activeLease?.ownerName}
+              onPullConversation={pullActiveConversationLease}
+              pullingConversation={capturingChat}
               sendingMedia={sendingMedia}
               attachmentInputRef={attachmentInputRef}
               onSubmit={handleSendMessage}
-              onInputChange={setInputText}
+              onTextChange={handleComposerTextChange}
               onToggleInternalNote={setIsInternalNote}
               onToggleQuickReply={() => setQuickReplyOpen((open) => !open)}
               onAttachmentChange={handleAttachmentChange}
               onInputPaste={handleInputPaste}
-              onInsertQuickReply={insertQuickReply}
+              replyTo={replyTo}
+              onCancelReply={() => setReplyTo(null)}
             />
           </>
+        ) : !whatsappConnected ? (
+          <div className="flex flex-1 flex-col items-center justify-center px-8 text-center text-zinc-500">
+            {whatsappStatus === 'connecting' ? (
+              <RefreshCw className="mb-4 h-12 w-12 animate-spin text-amber-300" aria-hidden="true" />
+            ) : (
+              <WifiOff className="mb-4 h-12 w-12 text-red-300" aria-hidden="true" />
+            )}
+            <h3 className="text-lg font-bold text-zinc-100">
+              {whatsappStatus === 'connecting' ? 'Reconectando ao WhatsApp...' : 'WhatsApp desconectado'}
+            </h3>
+            <p className="mt-2 max-w-md text-sm leading-6 text-zinc-400">
+              {whatsappStatus === 'connecting'
+                ? 'O Atendimento está aguardando a conexão ser restabelecida.'
+                : 'O Atendimento está offline. Reconecte sua conta para voltar a receber e enviar mensagens.'}
+            </p>
+            {whatsappStatus === 'disconnected' && (
+              <button type="button" onClick={() => navigate('/configuracoes?tab=connections')} className="mt-5 rounded-lg border border-amber-300/40 bg-amber-300 px-4 py-2.5 text-sm font-bold text-zinc-950 transition-colors hover:bg-amber-200">
+                Reconectar WhatsApp
+              </button>
+            )}
+          </div>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center text-center p-8 text-zinc-500">
             <MessageSquare className="w-12 h-12 mb-3 text-zinc-700 animate-pulse" />
-            <h3 className="text-sm font-bold text-zinc-300 mb-1">Seu WhatsApp está 100% Conectado!</h3>
+            <h3 className="text-sm font-bold text-zinc-300 mb-1">Seu WhatsApp está conectado.</h3>
             <p className="text-xs max-w-sm text-zinc-500">
               As mensagens enviadas para o seu número aparecerão aqui automaticamente.
             </p>
@@ -1062,7 +1488,7 @@ export const AtendimentoPage: React.FC = () => {
       </div>
 
       {/* Coluna 3: Ficha CRM */}
-      {activeConv && (
+      {whatsappConnected && activeConv && (
         <div className="hidden 2xl:flex w-64 border-l border-[#344047] bg-[#182126] p-5 flex-col justify-between flex-shrink-0 overflow-y-auto">
           <div>
             <div className="text-center pb-5 border-b border-zinc-800/80">
@@ -1099,7 +1525,7 @@ export const AtendimentoPage: React.FC = () => {
         </div>
       )}
 
-      {showContactInfo && activeConv && (
+      {whatsappConnected && showContactInfo && activeConv && (
         <div className="absolute inset-y-0 right-0 z-40 w-[340px] max-w-[90vw] bg-[#182126] border-l border-[#344047] shadow-2xl flex flex-col animate-fade-in">
           <div className="h-16 px-4 border-b border-[#344047] bg-[#20292f] flex items-center justify-between">
             <h3 className="font-extrabold text-sm text-slate-100">Informações do contato</h3>
@@ -1166,7 +1592,7 @@ export const AtendimentoPage: React.FC = () => {
         </div>
       )}
 
-      {showGoogleContactForm && activeConv && (
+      {whatsappConnected && showGoogleContactForm && activeConv && (
         <div className="absolute inset-y-0 right-0 z-[70] w-[340px] max-w-[90vw] bg-[#182126] border-l border-[#344047] shadow-2xl animate-fade-in">
           <form onSubmit={saveGoogleContactForm} className="flex h-full flex-col gap-4 overflow-y-auto p-5">
             <div className="flex items-start justify-between gap-4 border-b border-[#344047] pb-3">

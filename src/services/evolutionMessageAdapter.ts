@@ -7,12 +7,24 @@ type ProviderRecord = {
   message?: any;
   messageType?: string;
   contextInfo?: any;
+  messageContextScope?: 'webhook';
   metadata?: Message['metadata'];
+  metadataScope?: 'persisted_message';
   messageTimestamp?: number | string;
   pushName?: string;
+  participant?: string;
+  participantPn?: string;
+  senderPn?: string;
+  participantName?: string;
+  senderName?: string;
   status?: unknown;
   update?: { status?: unknown };
 };
+
+/** WhatsApp group chats use the full `number@g.us` JID as remoteJid. */
+export const isWhatsAppGroupJid = (value?: string | null) => (
+  typeof value === 'string' && value.trim().toLowerCase().endsWith('@g.us')
+);
 
 const unwrapMessage = (message: any) => {
   let current = message || {};
@@ -111,30 +123,122 @@ const messageText = (message: any, record: any = {}): string | undefined => {
 };
 
 export const evolutionMessagePreview = (record: any): string | undefined => (
-  messageText(record?.message || record, record)
+  isEvolutionReactionEvent(record)
+    ? undefined
+    : messageText(record?.message || record, record)
 );
+
+/**
+ * A reaction is an update to the message referenced by reactionMessage.key,
+ * not a standalone timeline message. The backend persists that update on the
+ * original message; this guard also protects the client from legacy/raw rows.
+ */
+export const isEvolutionReactionEvent = (record: ProviderRecord | any): boolean => Boolean(
+  unwrapMessage(record?.message || record)?.reactionMessage,
+);
+
+const quotedMessageFromContext = (context: any): NonNullable<NonNullable<Message['metadata']>['quotedMessage']> | undefined => {
+  const messageId = firstText(context?.stanzaId, context?.stanzaID, context?.quotedMessage?.key?.id);
+  if (!messageId) return undefined;
+
+  const quoted = unwrapMessage(context?.quotedMessage || {});
+  const mediaType = quoted.imageMessage ? 'image'
+    : quoted.videoMessage ? 'video'
+      : quoted.audioMessage ? 'audio'
+        : quoted.documentMessage ? 'document'
+          : quoted.stickerMessage ? 'sticker'
+            : undefined;
+  const participant = firstText(context?.participant, context?.participantPn, context?.quotedParticipant);
+
+  return {
+    messageId,
+    content: messageText(quoted),
+    mediaType,
+    key: {
+      id: messageId,
+      ...(participant ? { participant } : {}),
+    },
+  };
+};
+
+const documentMetadataFromMessage = (message: any): NonNullable<Message['metadata']>['document'] | undefined => {
+  const document = message?.documentMessage;
+  if (!document) return undefined;
+  const fileName = firstText(document.fileName, document.file_name, document.title);
+  const mimeType = firstText(document.mimetype, document.mimeType);
+  const rawSize = Number(document.fileLength ?? document.fileSize ?? document.file_length);
+  const fileSize = Number.isFinite(rawSize) && rawSize >= 0 ? Math.floor(rawSize) : undefined;
+  if (!fileName && !mimeType && fileSize === undefined) return undefined;
+  return {
+    ...(fileName ? { fileName } : {}),
+    ...(mimeType ? { mimeType } : {}),
+    ...(fileSize !== undefined ? { fileSize } : {}),
+  };
+};
 
 const messageMetadata = (record: ProviderRecord, message: any): Message['metadata'] => {
   const msg = unwrapMessage(message);
-  const context = record.contextInfo
-    || msg.contextInfo
+  // The record-level context can describe the chat snapshot. An ad card is
+  // valid only when its evidence is attached to this message payload.
+  const embeddedContext = msg.contextInfo
     || msg.extendedTextMessage?.contextInfo
     || msg.imageMessage?.contextInfo
     || msg.videoMessage?.contextInfo
     || msg.documentMessage?.contextInfo
     || {};
+  const webhookContext = record.messageContextScope === 'webhook'
+    ? record.contextInfo
+    : undefined;
+  const context = Object.keys(embeddedContext).length > 0
+    ? embeddedContext
+    : (webhookContext || {});
   const metadata: NonNullable<Message['metadata']> = { ...(record.metadata || {}) };
+  // Metadata returned from the local PostgreSQL representation was already
+  // derived by the backend per message. Raw Evolution records must derive ad
+  // fields only from their own message payload below.
+  if (record.metadataScope !== 'persisted_message') {
+    delete metadata.trafficSource;
+    delete metadata.trafficTitle;
+    delete metadata.trafficUrl;
+    delete metadata.quotedMessage;
+  }
+  if (!metadata.quotedMessage) {
+    const quotedMessage = quotedMessageFromContext(context);
+    if (quotedMessage) metadata.quotedMessage = quotedMessage;
+  }
+  if (!metadata.document) {
+    const document = documentMetadataFromMessage(msg);
+    if (document) metadata.document = document;
+  }
   const fromMe = record.key?.fromMe === true;
+  const participantJid = firstText(
+    record.key?.participant,
+    record.key?.participantPn,
+    record.participant,
+    record.participantPn,
+    record.senderPn,
+    record.key?.senderPn,
+  );
+  if (participantJid) metadata.participantJid = participantJid;
+  const participantName = firstText(record.pushName, record.participantName, record.senderName);
+  if (!fromMe && participantName) metadata.participantName = participantName;
   const callInfo = callMessageInfo(record, msg, String(record.messageType || metadata.providerType || ''), fromMe);
-  if (!fromMe) {
-    const externalAd = context?.externalAdReply || msg.extendedTextMessage?.contextInfo?.externalAdReply;
+  const externalAd = context?.externalAdReply;
+  const hasMessageBoundAdContext = Boolean(
+    Object.keys(embeddedContext).length > 0
+    && (externalAd
+    || context?.ctwaSignals
+    || context?.conversionData
+    || context?.conversion_data),
+  );
+  if (!fromMe && hasMessageBoundAdContext) {
     const trafficSource = context?.conversionSource
       || context?.conversion_source
-      || (context?.ctwaSignals || context?.conversionData || context?.conversion_data ? 'FB_Ads' : undefined);
+      || 'FB_Ads';
     if (!metadata.trafficSource && typeof trafficSource === 'string' && trafficSource.trim()) metadata.trafficSource = trafficSource.trim();
     if (!metadata.trafficTitle && typeof externalAd?.title === 'string' && externalAd.title.trim()) metadata.trafficTitle = externalAd.title.trim();
     if (!metadata.trafficUrl && typeof (externalAd?.sourceUrl || externalAd?.sourceURL) === 'string') metadata.trafficUrl = externalAd.sourceUrl || externalAd.sourceURL;
-  } else {
+  } else if (fromMe) {
     delete metadata.trafficSource;
     delete metadata.trafficTitle;
     delete metadata.trafficUrl;
@@ -225,10 +329,16 @@ export const normalizeEvolutionMessage = (
   const rawMessage = record.message || {};
   const msg = unwrapMessage(rawMessage);
   const media = mediaForMessage(rawMessage);
-  const metadata = messageMetadata(record, rawMessage);
+  const metadata = messageMetadata(record, rawMessage) || {};
   const interactive = interactiveMessage(msg);
   const content = messageText(rawMessage, record);
   const signed = fromMe ? parseSignature(content || '[Mensagem não identificada]') : { senderName: undefined, content: content || '[Mensagem não identificada]' };
+  const sentByHub = fromMe
+    && metadata.sentByHub === true
+    && typeof metadata.sentByUserName === 'string'
+    && metadata.sentByUserName.trim().length > 0;
+  if (fromMe && !sentByHub) metadata.sentOutsideHub = true;
+  if (sentByHub) delete metadata.sentOutsideHub;
   const timestampMs = record.messageTimestamp ? Number(record.messageTimestamp) * 1000 : undefined;
   const timestamp = timestampMs ? new Date(timestampMs).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : 'Agora';
   const durationValue = media.type === 'audio' ? msg.audioMessage?.seconds : media.type === 'video' ? msg.videoMessage?.seconds : undefined;
@@ -237,8 +347,10 @@ export const normalizeEvolutionMessage = (
     id: record.key?.id || record.id || `real-msg-${index}`,
     conversationId,
     sender: fromMe ? 'attendant' : 'contact',
-    senderName: fromMe ? (signed.senderName || attendantLabel) : (record.pushName || 'Contato'),
-    content: signed.content,
+    senderName: fromMe
+      ? (sentByHub ? metadata.sentByUserName!.trim() : undefined)
+      : (metadata.participantName || record.pushName || 'Contato'),
+    content: fromMe && sentByHub ? signed.content : (content || '[Mensagem não identificada]'),
     mediaUrl: media.url,
     mediaType: media.type,
     mediaDuration: durationValue ? Number(durationValue) : undefined,

@@ -64,6 +64,29 @@ export interface Message {
     trafficSource?: string;
     trafficTitle?: string;
     trafficUrl?: string;
+    sentByHub?: boolean;
+    sentByUserId?: string;
+    sentByUserName?: string;
+    sentOutsideHub?: boolean;
+    clientMessageId?: string;
+    quotedMessage?: {
+      messageId: string;
+      authorName?: string;
+      sender?: 'contact' | 'attendant' | 'system';
+      content?: string;
+      mediaType?: 'image' | 'audio' | 'video' | 'document' | 'sticker';
+      key?: {
+        id: string;
+        remoteJid?: string;
+        fromMe?: boolean;
+        participant?: string;
+      };
+    };
+    document?: {
+      fileName?: string;
+      mimeType?: string;
+      fileSize?: number;
+    };
     location?: {
       latitude: number;
       longitude: number;
@@ -75,6 +98,18 @@ export interface Message {
       displayName: string;
       phone?: string;
     };
+    reactions?: Array<{
+      emoji: string;
+      reactorKey: string;
+      actorId: string;
+      actorName?: string;
+      participant?: string;
+      fromMe?: boolean;
+      updatedAt: number;
+    }>;
+    /** Participant identity used by WhatsApp group messages/replies. */
+    participantJid?: string;
+    participantName?: string;
     reaction?: string;
     systemLabel?: string;
     forwarded?: boolean;
@@ -88,6 +123,9 @@ export interface Message {
 
 export interface Conversation {
   id: string;
+  isGroup?: boolean;
+  groupName?: string;
+  groupAvatar?: string;
   contact: Contact;
   lastMessage: string;
   lastMessageTimestamp: string;
@@ -103,6 +141,11 @@ export interface Conversation {
   needsResponse?: boolean;
   status: ChatStatus;
   assignedAttendant?: Pick<Attendant, 'id' | 'name'>;
+  lease?: {
+    ownerUserId: string;
+    ownerName: string;
+    expiresAt: number;
+  };
   department: string;
 }
 

@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Users, Zap, Layers, Plus, KeyRound, Loader2, QrCode, UserPlus, Power, Save, X, PencilLine } from 'lucide-react';
+import { Users, Zap, Layers, Plus, KeyRound, Loader2, QrCode, UserPlus, Power, Save, X, PencilLine, Plug } from 'lucide-react';
 import { Attendant } from '../types';
 import { apiRequest } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
 import { mockAttendants } from '../services/mockData';
 import { ConexoesPage } from './ConexoesPage';
+import { GoogleContactsIntegrationCard } from '../components/settings/GoogleContactsIntegrationCard';
 
-type SettingsTab = 'attendants' | 'departments' | 'quickReplies' | 'security' | 'connections';
+type SettingsTab = 'attendants' | 'departments' | 'quickReplies' | 'security' | 'connections' | 'integracoes';
 type AttendantFormState = {
   name: string;
   email: string;
@@ -21,6 +22,7 @@ const isSettingsTab = (value: string | null): value is SettingsTab => (
   || value === 'quickReplies'
   || value === 'security'
   || value === 'connections'
+  || value === 'integracoes'
 );
 
 export const ConfiguracoesPage: React.FC = () => {
@@ -222,6 +224,7 @@ export const ConfiguracoesPage: React.FC = () => {
           { id: 'attendants', label: 'Equipe de Atendimentos', icon: Users },
           { id: 'departments', label: 'Setores & Filas', icon: Layers },
           { id: 'quickReplies', label: 'Respostas Rápidas', icon: Zap },
+          { id: 'integracoes', label: 'Integrações', icon: Plug },
           { id: 'connections', label: 'Conexão WhatsApp', icon: QrCode },
         ].map(tab => {
           const Icon = tab.icon;
@@ -430,6 +433,8 @@ export const ConfiguracoesPage: React.FC = () => {
       )}
 
       {activeTab === 'connections' && <ConexoesPage embedded />}
+
+      {activeTab === 'integracoes' && <GoogleContactsIntegrationCard />}
 
       {activeTab === 'departments' && (
         <div className="max-w-3xl space-y-4">

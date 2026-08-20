@@ -187,3 +187,21 @@ select:focus-visible {
   border-color: var(--vitstock-gold);
   color: var(--vitstock-gold);
 }
+
+.field {
+  display: block;
+  width: 100%;
+  margin-top: 0.35rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface-hover);
+  color: var(--text-main);
+  padding: 0.6rem 0.75rem;
+  font-size: 0.78rem;
+  outline: none;
+}
+
+.field:focus {
+  border-color: var(--vitstock-gold);
+  box-shadow: 0 0 0 1px var(--vitstock-gold-glow);
+}

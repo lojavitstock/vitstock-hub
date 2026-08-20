@@ -1,21 +1,32 @@
-import React from 'react';
-import { Paperclip, Send, Zap } from 'lucide-react';
+import React, { forwardRef, useImperativeHandle, useRef, useState } from 'react';
+import { Paperclip, Reply, Send, X, Zap } from 'lucide-react';
+import { Message } from '../../types';
+import { quotedMediaLabel, toQuotedMessage } from '../../utils/quotedMessage';
 
 type MessageComposerProps = {
-  inputText: string;
   isInternalNote: boolean;
   quickReplyOpen: boolean;
   activeChatLocked: boolean;
-  assignedAttendantName?: string;
+  whatsappConnected: boolean;
+  leaseOwnerName?: string;
+  onPullConversation?: () => void;
+  pullingConversation?: boolean;
   sendingMedia: boolean;
   attachmentInputRef: React.RefObject<HTMLInputElement>;
   onSubmit: (event: React.FormEvent) => void;
-  onInputChange: (value: string) => void;
+  onTextChange?: (value: string) => void;
   onToggleInternalNote: (value: boolean) => void;
   onToggleQuickReply: () => void;
   onAttachmentChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onInputPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => void;
-  onInsertQuickReply: (text: string) => void;
+  replyTo?: Message | null;
+  onCancelReply?: () => void;
+};
+
+export type MessageComposerHandle = {
+  clear: () => void;
+  setText: (value: string) => void;
+  focus: () => void;
 };
 
 const QUICK_REPLIES = [
@@ -23,22 +34,66 @@ const QUICK_REPLIES = [
   { command: '/frete', label: 'Prazo de Entrega', text: 'O prazo de entrega para Curitiba é de 2 a 3 dias úteis após a confirmação do pagamento.' },
 ];
 
-export const MessageComposer: React.FC<MessageComposerProps> = ({
-  inputText,
+export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposerProps>((props, ref) => {
+  const [inputText, setInputText] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const {
   isInternalNote,
   quickReplyOpen,
   activeChatLocked,
-  assignedAttendantName,
+  whatsappConnected,
+  leaseOwnerName,
+  onPullConversation,
+  pullingConversation,
   sendingMedia,
   attachmentInputRef,
   onSubmit,
-  onInputChange,
+  onTextChange,
   onToggleInternalNote,
   onToggleQuickReply,
   onAttachmentChange,
   onInputPaste,
-  onInsertQuickReply,
-}) => (
+  replyTo,
+  onCancelReply,
+  } = props;
+  const replyPreview = replyTo ? toQuotedMessage(replyTo) : undefined;
+  useImperativeHandle(ref, () => ({
+    clear: () => {
+      setInputText('');
+      onTextChange?.('');
+    },
+    setText: (value: string) => {
+      setInputText(value);
+      onTextChange?.(value);
+    },
+    focus: () => textareaRef.current?.focus(),
+  }), [onTextChange]);
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
+
+    if (event.ctrlKey) {
+      event.preventDefault();
+      const textarea = event.currentTarget;
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const nextValue = `${inputText.slice(0, start)}\n${inputText.slice(end)}`;
+      setInputText(nextValue);
+      onTextChange?.(nextValue);
+      window.requestAnimationFrame(() => {
+        textarea.selectionStart = start + 1;
+        textarea.selectionEnd = start + 1;
+      });
+      return;
+    }
+
+    if (event.shiftKey) return;
+    event.preventDefault();
+    if (!inputText.trim() || activeChatLocked || sendingMedia || (!isInternalNote && !whatsappConnected)) return;
+    event.currentTarget.form?.requestSubmit();
+  };
+
+  return (
   <>
     {quickReplyOpen && (
       <div className="mx-5 space-y-2 rounded-lg border border-amber-400/30 bg-zinc-900 p-3 shadow-2xl animate-fade-in">
@@ -48,7 +103,7 @@ export const MessageComposer: React.FC<MessageComposerProps> = ({
         </div>
         <div className="grid grid-cols-2 gap-2 text-xs">
           {QUICK_REPLIES.map((reply) => (
-            <button key={reply.command} type="button" onClick={() => onInsertQuickReply(reply.text)} className="rounded border border-zinc-700/60 bg-zinc-800/80 p-2 text-left text-zinc-300 hover:bg-amber-400/20 hover:text-amber-300">
+            <button key={reply.command} type="button" onClick={() => { setInputText(reply.text); onTextChange?.(reply.text); onToggleQuickReply(); }} className="rounded border border-zinc-700/60 bg-zinc-800/80 p-2 text-left text-zinc-300 hover:bg-amber-400/20 hover:text-amber-300">
               <span className="block font-bold text-amber-400">{reply.command}</span> {reply.label}
             </button>
           ))}
@@ -57,9 +112,26 @@ export const MessageComposer: React.FC<MessageComposerProps> = ({
     )}
 
     <form onSubmit={onSubmit} className="border-t border-[#344047] bg-[#20292f] p-4">
+      {replyPreview && !isInternalNote && (
+        <div className="mb-3 flex items-start gap-2 rounded-lg border-l-2 border-emerald-300 bg-[#28343a] px-3 py-2 text-left shadow-sm">
+          <Reply className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-bold text-emerald-200">Respondendo a {replyPreview.authorName || 'mensagem'}</p>
+            <p className="truncate text-xs text-slate-300">{quotedMediaLabel(replyPreview.mediaType) || replyPreview.content || 'Mensagem'}</p>
+          </div>
+          <button type="button" onClick={onCancelReply} className="rounded p-1 text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100" title="Cancelar resposta">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
       {activeChatLocked && (
-        <div className="mb-2 rounded-lg border border-violet-300/20 bg-violet-300/10 px-3 py-2 text-[11px] font-semibold text-violet-200">
-          Este atendimento está capturado por {assignedAttendantName || 'outro atendente'}.
+        <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-violet-300/20 bg-violet-300/10 px-3 py-2 text-xs font-semibold text-violet-200">
+          <span>Atendimento em andamento por {leaseOwnerName || 'outro atendente'}.</span>
+          {onPullConversation && (
+            <button type="button" onClick={onPullConversation} disabled={pullingConversation} className="shrink-0 rounded-md border border-violet-300/40 px-2.5 py-1 text-[11px] font-bold text-violet-100 transition-colors hover:bg-violet-300 hover:text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60">
+              {pullingConversation ? 'Puxando...' : 'Puxar conversa para você'}
+            </button>
+          )}
         </div>
       )}
       <div className="mb-2 flex items-center gap-2">
@@ -74,16 +146,25 @@ export const MessageComposer: React.FC<MessageComposerProps> = ({
         </button>
       </div>
 
+      {!isInternalNote && !whatsappConnected && (
+        <div className="mb-2 rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs font-semibold text-red-200">
+          WhatsApp desconectado. Reconecte o WhatsApp para enviar novas mensagens.
+        </div>
+      )}
+
       <div className="flex items-center gap-2">
         <input ref={attachmentInputRef} type="file" accept="image/*,video/*,application/pdf,.doc,.docx" className="hidden" onChange={onAttachmentChange} />
-        <button type="button" onClick={() => attachmentInputRef.current?.click()} disabled={activeChatLocked || isInternalNote || sendingMedia} title="Enviar imagem, vídeo ou documento" className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40">
+        <button type="button" onClick={() => attachmentInputRef.current?.click()} disabled={activeChatLocked || isInternalNote || sendingMedia || !whatsappConnected} title="Enviar imagem, vídeo ou documento" className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40">
           <Paperclip className="h-4 w-4" />
         </button>
-        <textarea rows={1} value={inputText} onChange={(event) => onInputChange(event.target.value)} onPaste={onInputPaste} disabled={activeChatLocked || sendingMedia} placeholder={isInternalNote ? 'Digite uma nota interna para a equipe...' : 'Digite sua mensagem para o WhatsApp...'} title={!isInternalNote ? 'Cole uma imagem com Ctrl+V para enviar' : undefined} className={`max-h-32 min-h-12 flex-1 resize-y rounded-2xl border bg-[#2a343a] px-4 py-3 text-base leading-6 text-slate-100 placeholder-slate-400 transition-colors focus:outline-none ${isInternalNote ? 'border-amber-400/50 bg-amber-400/5 focus:border-amber-400' : 'border-transparent focus:border-amber-400/70'}`} />
-        <button type="submit" disabled={activeChatLocked || sendingMedia} className={`flex items-center justify-center rounded-full p-3 font-bold transition-all ${isInternalNote ? 'bg-amber-500 text-zinc-950 hover:bg-amber-400' : 'bg-amber-400 text-zinc-950 shadow-[0_0_12px_rgba(238,187,44,0.3)] hover:bg-amber-300'} disabled:cursor-not-allowed disabled:opacity-40`}>
+        <textarea ref={textareaRef} rows={1} value={inputText} onChange={(event) => { setInputText(event.target.value); onTextChange?.(event.target.value); }} onKeyDown={handleKeyDown} onPaste={onInputPaste} disabled={activeChatLocked || sendingMedia} placeholder={isInternalNote ? 'Digite uma nota interna para a equipe...' : 'Digite sua mensagem para o WhatsApp...'} title={!isInternalNote ? 'Cole uma imagem com Ctrl+V para enviar' : undefined} className={`max-h-32 min-h-12 flex-1 resize-y rounded-2xl border bg-[#2a343a] px-4 py-3 text-base leading-6 text-slate-100 placeholder-slate-400 transition-colors focus:outline-none ${isInternalNote ? 'border-amber-400/50 bg-amber-400/5 focus:border-amber-400' : 'border-transparent focus:border-amber-400/70'}`} />
+        <button type="submit" disabled={activeChatLocked || sendingMedia || (!isInternalNote && !whatsappConnected)} className={`flex items-center justify-center rounded-full p-3 font-bold transition-all ${isInternalNote ? 'bg-amber-500 text-zinc-950 hover:bg-amber-400' : 'bg-amber-400 text-zinc-950 shadow-[0_0_12px_rgba(238,187,44,0.3)] hover:bg-amber-300'} disabled:cursor-not-allowed disabled:opacity-40`}>
           <Send className="h-4 w-4" />
         </button>
       </div>
     </form>
   </>
-);
+  );
+});
+
+MessageComposer.displayName = 'MessageComposer';

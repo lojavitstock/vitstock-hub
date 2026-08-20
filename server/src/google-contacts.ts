@@ -1,10 +1,11 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { config } from './config.js';
+import { config, isQaMode } from './config.js';
 import { db } from './db.js';
-import { requireUser } from './auth.js';
+import { requireAdmin, requireUser } from './auth.js';
 import { decryptSecret, encryptSecret } from './security/encryption.js';
+import { currentQaGoogleScenario, qaGoogleFailure, qaGooglePeople } from './qa.js';
 
 const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/contacts';
 const GOOGLE_PERSON_FIELDS = [
@@ -119,6 +120,10 @@ function callbackUrl() {
     : 'https://vitstock-hub-api-production.up.railway.app/api/google/callback';
 }
 
+function settingsGoogleRedirect(result: 'connected' | 'error' | 'mock-connected') {
+  return `${config.FRONTEND_URL}/configuracoes?tab=integracoes&google=${result}`;
+}
+
 function signState(payload: object) {
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const signature = createHmac('sha256', config.SESSION_SECRET).update(body).digest('base64url');
@@ -137,16 +142,22 @@ function readState(value: string) {
 }
 
 async function googleFetch(path: string, accessToken: string, init?: RequestInit) {
+  if (isQaMode) throw new Error('QA_MODE bloqueou chamada Google externa');
   const response = await fetch(`https://people.googleapis.com/v1${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', ...init?.headers },
     signal: AbortSignal.timeout(20_000),
   });
-  if (!response.ok) throw new Error(`Google People API respondeu ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(`Google People API respondeu ${response.status}`) as Error & { status: number };
+    error.status = response.status;
+    throw error;
+  }
   return response;
 }
 
 async function accessTokenForCompany(companyId: string) {
+  if (isQaMode) throw new Error('QA_MODE usa somente o mock local do Google');
   const result = await db.query<{
     refresh_token_encrypted: string;
     access_token_encrypted: string | null;
@@ -166,7 +177,13 @@ async function accessTokenForCompany(companyId: string) {
     grant_type: 'refresh_token',
   });
   const response = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', body, signal: AbortSignal.timeout(20_000) });
-  if (!response.ok) throw new Error('Não foi possível renovar o acesso ao Google');
+  if (!response.ok) {
+    const provider = await response.json().catch(() => null) as { error?: unknown } | null;
+    const error = new Error('Não foi possível renovar o acesso ao Google') as Error & { status: number; providerCode?: string };
+    error.status = response.status;
+    if (typeof provider?.error === 'string') error.providerCode = provider.error;
+    throw error;
+  }
   const tokens = await response.json() as { access_token: string; expires_in: number };
   await db.query(
     'UPDATE google_connections SET access_token_encrypted = $2, access_token_expires_at = now() + ($3 * interval \'1 second\'), updated_at = now() WHERE company_id = $1',
@@ -452,71 +469,75 @@ async function upsertLocalContacts(companyId: string, people: GooglePerson[]) {
 }
 
 async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]) {
-  const unique = new Map<string, ReturnType<typeof contactFieldsFromPerson>>();
+  let imported = 0;
   for (const person of people) {
     const fields = contactFieldsFromPerson(person);
     if (!fields.name || !fields.phone) continue;
-    for (const phone of [fields.phone, ...fields.otherPhones]) {
-      unique.set(phone, { ...fields, phone });
+    const existing = await db.query<{ id: string; phone: string; manual_override: Record<string, string> }>(
+      `SELECT id, phone, manual_override FROM contacts
+       WHERE company_id = $1 AND (google_resource_name = $2 OR phone = $3)
+       ORDER BY CASE WHEN google_resource_name = $2 THEN 0 ELSE 1 END LIMIT 1`,
+      [companyId, person.resourceName || '', fields.phone],
+    );
+    const row = existing.rows[0];
+    let contactId = row?.id;
+    if (!contactId) {
+      const created = await db.query<{ id: string }>(
+        `INSERT INTO contacts (company_id, name, phone, email, avatar_url, cpf, address, secondary_phone,
+          google_resource_name, source, nickname, birthday, company, job_title, website, notes,
+          google_etag, google_data, google_synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'google', $10, $11, $12, $13, $14, $15, $16, $17, now())
+         ON CONFLICT (company_id, phone) DO UPDATE SET google_resource_name = COALESCE(EXCLUDED.google_resource_name, contacts.google_resource_name), updated_at = now()
+         RETURNING id`,
+        [companyId, fields.name, fields.phone, fields.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, fields.otherPhones[0] || null, fields.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, fields.etag || null, fields.googleData],
+      );
+      contactId = created.rows[0]?.id;
     }
+    if (!contactId) continue;
+    const manualOverride = (row?.manual_override || {}) as Record<string, string>;
+    const preservePhone = manualOverride.phone === 'manual';
+    const preserveEmail = manualOverride.email === 'manual';
+    await db.query(
+      `UPDATE contacts SET
+         name = CASE WHEN manual_override ? 'name' THEN name ELSE $2 END,
+         phone = CASE WHEN manual_override ? 'phone' THEN phone ELSE $3 END,
+         email = CASE WHEN manual_override ? 'email' THEN email ELSE $4 END,
+         avatar_url = COALESCE($5, avatar_url), cpf = CASE WHEN manual_override ? 'cpf' THEN cpf ELSE $6 END,
+         address = CASE WHEN manual_override ? 'address' THEN address ELSE $7 END,
+         secondary_phone = CASE WHEN manual_override ? 'phone' THEN secondary_phone ELSE $8 END,
+         google_resource_name = $9, source = CASE WHEN source = 'hub' THEN source ELSE 'google' END,
+         nickname = CASE WHEN manual_override ? 'nickname' THEN nickname ELSE $10 END,
+         birthday = CASE WHEN manual_override ? 'birthday' THEN birthday ELSE $11 END,
+         company = CASE WHEN manual_override ? 'company' THEN company ELSE $12 END,
+         job_title = CASE WHEN manual_override ? 'jobTitle' THEN job_title ELSE $13 END,
+         website = CASE WHEN manual_override ? 'website' THEN website ELSE $14 END,
+         notes = CASE WHEN manual_override ? 'notes' THEN notes ELSE $15 END,
+         google_etag = $16, google_data = $17, google_synced_at = now(), updated_at = now(), version = version + 1
+       WHERE company_id = $1 AND id = $18`,
+      [companyId, fields.name, fields.phone, fields.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, fields.otherPhones[0] || null, fields.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, fields.etag || null, fields.googleData, contactId],
+    );
+    const phoneValues = [fields.phone, ...fields.otherPhones];
+    if (!preservePhone) await db.query('UPDATE contact_phones SET is_primary = false, updated_at = now() WHERE contact_id = $1', [contactId]);
+    if (!preserveEmail) await db.query('UPDATE contact_emails SET is_primary = false, updated_at = now() WHERE contact_id = $1', [contactId]);
+    for (const [index, phone] of phoneValues.entries()) {
+      await db.query(
+        `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
+         VALUES ($1, $2, $3, $4, $5, 'google')
+         ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET phone = EXCLUDED.phone, is_primary = EXCLUDED.is_primary, source = 'google', updated_at = now()`,
+        [companyId, contactId, phone, normalizePhone(phone), index === 0 && !preservePhone],
+      );
+    }
+    for (const [index, email] of fields.emails.entries()) {
+      await db.query(
+        `INSERT INTO contact_emails (company_id, contact_id, email, normalized_email, is_primary, source)
+         VALUES ($1, $2, $3, $4, $5, 'google')
+         ON CONFLICT (contact_id, normalized_email) DO UPDATE SET email = EXCLUDED.email, is_primary = EXCLUDED.is_primary, source = 'google', updated_at = now()`,
+        [companyId, contactId, email, email.toLowerCase(), index === 0 && !preserveEmail],
+      );
+    }
+    imported += 1;
   }
-  const contacts = Array.from(unique.values());
-  if (contacts.length === 0) return 0;
-
-  await db.query(
-    `INSERT INTO contacts (
-       company_id, name, phone, email, avatar_url, cpf, address, secondary_phone,
-       google_resource_name, source, nickname, birthday, company, job_title,
-       website, notes, google_etag, google_data, google_synced_at
-     )
-     SELECT $1, item.name, item.phone, item.email, item.avatar_url, item.cpf, item.address,
-            item.secondary_phone, item.resource_name, 'google', item.nickname, item.birthday,
-            item.company, item.job_title, item.website, item.notes, item.etag,
-            item.google_data, now()
-     FROM jsonb_to_recordset($2::jsonb) AS item(
-       name text, phone text, email text, avatar_url text, cpf text, address text,
-       secondary_phone text, resource_name text, nickname text, birthday text,
-       company text, job_title text, website text, notes text, etag text, google_data jsonb
-     )
-     ON CONFLICT (company_id, phone) DO UPDATE SET
-       name = EXCLUDED.name,
-       email = EXCLUDED.email,
-       avatar_url = EXCLUDED.avatar_url,
-       cpf = EXCLUDED.cpf,
-       address = EXCLUDED.address,
-       secondary_phone = EXCLUDED.secondary_phone,
-       google_resource_name = EXCLUDED.google_resource_name,
-       source = 'google',
-       nickname = EXCLUDED.nickname,
-       birthday = EXCLUDED.birthday,
-       company = EXCLUDED.company,
-       job_title = EXCLUDED.job_title,
-       website = EXCLUDED.website,
-       notes = EXCLUDED.notes,
-       google_etag = EXCLUDED.google_etag,
-       google_data = EXCLUDED.google_data,
-       google_synced_at = now(),
-       updated_at = now()`,
-    [companyId, JSON.stringify(contacts.map((contact) => ({
-      name: contact.name,
-      phone: contact.phone,
-      email: contact.email || null,
-      avatar_url: contact.avatarUrl || null,
-      cpf: contact.cpf || null,
-      address: contact.address || null,
-      secondary_phone: contact.otherPhones[0] || null,
-      resource_name: contact.resourceName || null,
-      nickname: contact.nickname || null,
-      birthday: contact.birthday || null,
-      company: contact.company || null,
-      job_title: contact.jobTitle || null,
-      website: contact.website || null,
-      notes: contact.notes || null,
-      etag: contact.etag || null,
-      google_data: contact.googleData,
-    })))],
-  );
-  return contacts.length;
+  return imported;
 }
 
 export async function syncGoogleContactsForCompany(companyId: string) {
@@ -537,6 +558,69 @@ export async function syncGoogleContactsForCompany(companyId: string) {
     [companyId, resourceNames],
   );
   return { imported, total: people.length };
+}
+
+type GoogleSyncError = {
+  status: number;
+  error: string;
+  code: string;
+  retryable: boolean;
+};
+
+/** Keeps provider/schema failures actionable without exposing internal errors. */
+export function googleSyncErrorResponse(error: unknown): GoogleSyncError {
+  const details = (error || {}) as { code?: unknown; status?: unknown; message?: unknown; providerCode?: unknown };
+  const code = typeof details.code === 'string' ? details.code : '';
+  const status = typeof details.status === 'number' ? details.status : 0;
+  const message = typeof details.message === 'string' ? details.message.toLowerCase() : '';
+  const providerCode = typeof details.providerCode === 'string' ? details.providerCode : '';
+
+  if (code === '42703' || code === '42P01') {
+    return {
+      status: 503,
+      error: 'O banco de contatos ainda não está atualizado para a sincronização Google.',
+      code: 'GOOGLE_SCHEMA_OUTDATED',
+      retryable: false,
+    };
+  }
+  if (providerCode === 'invalid_grant' || status === 401 || status === 403 || message.includes('não conectado')) {
+    return { status: 401, error: 'Sua conexão com o Google precisa ser renovada. Reconecte sua conta para continuar.', code: 'GOOGLE_AUTH_REQUIRED', retryable: false };
+  }
+  if (status === 429) {
+    return { status: 429, error: 'O Google limitou temporariamente a sincronização. Tente novamente em alguns instantes.', code: 'GOOGLE_RATE_LIMITED', retryable: true };
+  }
+  if (message.includes('timeout') || message.includes('timed out') || message.includes('aborted')) {
+    return { status: 504, error: 'A sincronização Google demorou mais que o esperado. Tente novamente.', code: 'GOOGLE_SYNC_TIMEOUT', retryable: true };
+  }
+  return { status: 502, error: 'Não foi possível concluir a sincronização com o Google Contacts.', code: 'GOOGLE_SYNC_FAILED', retryable: true };
+}
+
+export type GoogleIntegrationState = 'not_connected' | 'connected' | 'reconnect_required' | 'syncing' | 'error';
+
+export function googleIntegrationState(connection: { sync_status?: string } | null | undefined): GoogleIntegrationState {
+  if (!connection) return 'not_connected';
+  if (connection.sync_status === 'auth_required') return 'reconnect_required';
+  if (connection.sync_status === 'syncing') return 'syncing';
+  if (connection.sync_status === 'error') return 'error';
+  return 'connected';
+}
+
+async function updateGoogleSyncState(
+  companyId: string,
+  status: 'never' | 'syncing' | 'success' | 'auth_required' | 'error',
+  result?: { imported?: number; total?: number; error?: string },
+) {
+  await db.query(
+    `UPDATE google_connections
+     SET sync_status = $2,
+         last_sync_at = CASE WHEN $2 = 'success' THEN now() ELSE last_sync_at END,
+         last_sync_imported = CASE WHEN $2 = 'success' THEN $3 ELSE last_sync_imported END,
+         last_sync_total = CASE WHEN $2 = 'success' THEN $4 ELSE last_sync_total END,
+         last_sync_error = CASE WHEN $2 IN ('success', 'syncing') THEN NULL ELSE $5 END,
+         updated_at = now()
+     WHERE company_id = $1`,
+    [companyId, status, result?.imported ?? null, result?.total ?? null, result?.error ?? null],
+  );
 }
 
 function buildGooglePersonPayload(contact: z.infer<typeof googleContactFormSchema>) {
@@ -583,13 +667,37 @@ function buildGooglePersonPayload(contact: z.infer<typeof googleContactFormSchem
 
 export async function registerGoogleContactRoutes(app: FastifyInstance) {
   app.get('/api/google/status', { preHandler: requireUser }, async (request) => {
-    const result = await db.query<{ google_email: string | null; connected_at: Date }>(
-      'SELECT google_email, connected_at FROM google_connections WHERE company_id = $1', [request.user!.companyId],
+    const result = await db.query<{
+      google_email: string | null;
+      connected_at: Date;
+      sync_status: string;
+      last_sync_at: Date | null;
+      last_sync_imported: number | null;
+      last_sync_total: number | null;
+      last_sync_error: string | null;
+    }>(
+      `SELECT google_email, connected_at, sync_status, last_sync_at,
+              last_sync_imported, last_sync_total, last_sync_error
+       FROM google_connections WHERE company_id = $1`, [request.user!.companyId],
     );
-    return { connected: Boolean(result.rows[0]), connection: result.rows[0] || null };
+    const connection = result.rows[0] || null;
+    return {
+      connected: Boolean(connection),
+      state: googleIntegrationState(connection),
+      connection,
+    };
   });
 
-  app.get('/api/google/connect', { preHandler: requireUser }, async (request, reply) => {
+  app.get('/api/google/connect', { preHandler: requireAdmin }, async (request, reply) => {
+    if (isQaMode) {
+      await db.query(
+        `INSERT INTO google_connections (company_id, google_email, refresh_token_encrypted, access_token_encrypted, access_token_expires_at, scopes)
+         VALUES ($1, 'qa-google@example.test', $2, $3, now() + interval '1 day', $4)
+         ON CONFLICT (company_id) DO UPDATE SET google_email = EXCLUDED.google_email, sync_status = 'never', last_sync_error = NULL, updated_at = now()`,
+        [request.user!.companyId, encryptSecret('qa-refresh-token'), encryptSecret('qa-access-token'), ['qa-mock']],
+      );
+      return { url: settingsGoogleRedirect('mock-connected') };
+    }
     if (!ensureConfigured(reply)) return;
     const state = signState({ companyId: request.user!.companyId, exp: Date.now() + 10 * 60_000, nonce: randomBytes(16).toString('hex') });
     const query = new URLSearchParams({
@@ -600,33 +708,95 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/google/callback', async (request, reply) => {
-    if (!ensureConfigured(reply)) return;
-    const parsed = z.object({ code: z.string(), state: z.string() }).safeParse(request.query);
-    if (!parsed.success) return reply.code(400).send({ error: 'Retorno OAuth inválido' });
-    const state = readState(parsed.data.state);
-    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      body: new URLSearchParams({ code: parsed.data.code, client_id: config.GOOGLE_CLIENT_ID!, client_secret: config.GOOGLE_CLIENT_SECRET!, redirect_uri: callbackUrl(), grant_type: 'authorization_code' }),
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!tokenResponse.ok) return reply.code(502).send({ error: 'Google recusou a autorização' });
-    const tokens = await tokenResponse.json() as { access_token: string; refresh_token?: string; expires_in: number; scope?: string };
-    if (!tokens.refresh_token) return reply.code(400).send({ error: 'Google não retornou acesso offline; autorize novamente' });
-    const profileResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', { headers: { Authorization: `Bearer ${tokens.access_token}` } });
-    const profile = profileResponse.ok ? await profileResponse.json() as { email?: string } : {};
-    await db.query(
-      `INSERT INTO google_connections (company_id, google_email, refresh_token_encrypted, access_token_encrypted, access_token_expires_at, scopes)
-       VALUES ($1, $2, $3, $4, now() + ($5 * interval '1 second'), $6)
-       ON CONFLICT (company_id) DO UPDATE SET google_email = EXCLUDED.google_email, refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
-         access_token_encrypted = EXCLUDED.access_token_encrypted, access_token_expires_at = EXCLUDED.access_token_expires_at,
-         scopes = EXCLUDED.scopes, updated_at = now()`,
-      [state.companyId, profile.email || null, encryptSecret(tokens.refresh_token), encryptSecret(tokens.access_token), tokens.expires_in, (tokens.scope || GOOGLE_SCOPE).split(' ')],
-    );
-    return reply.redirect(`${config.FRONTEND_URL}/contatos?google=connected`);
+    if (isQaMode) return reply.redirect(settingsGoogleRedirect('mock-connected'));
+    if (!config.GOOGLE_CLIENT_ID || !config.GOOGLE_CLIENT_SECRET) return reply.redirect(settingsGoogleRedirect('error'));
+    try {
+      const parsed = z.object({ code: z.string(), state: z.string() }).safeParse(request.query);
+      if (!parsed.success) return reply.redirect(settingsGoogleRedirect('error'));
+      const state = readState(parsed.data.state);
+      const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        body: new URLSearchParams({ code: parsed.data.code, client_id: config.GOOGLE_CLIENT_ID, client_secret: config.GOOGLE_CLIENT_SECRET, redirect_uri: callbackUrl(), grant_type: 'authorization_code' }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!tokenResponse.ok) return reply.redirect(settingsGoogleRedirect('error'));
+      const tokens = await tokenResponse.json() as { access_token: string; refresh_token?: string; expires_in: number; scope?: string };
+      if (!tokens.refresh_token) return reply.redirect(settingsGoogleRedirect('error'));
+      const profileResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', { headers: { Authorization: `Bearer ${tokens.access_token}` } });
+      const profile = profileResponse.ok ? await profileResponse.json() as { email?: string } : {};
+      await db.query(
+        `INSERT INTO google_connections (company_id, google_email, refresh_token_encrypted, access_token_encrypted, access_token_expires_at, scopes)
+         VALUES ($1, $2, $3, $4, now() + ($5 * interval '1 second'), $6)
+         ON CONFLICT (company_id) DO UPDATE SET google_email = EXCLUDED.google_email, refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
+           access_token_encrypted = EXCLUDED.access_token_encrypted, access_token_expires_at = EXCLUDED.access_token_expires_at,
+           scopes = EXCLUDED.scopes, sync_status = CASE WHEN google_connections.sync_status = 'success' THEN 'success' ELSE 'never' END,
+           last_sync_error = NULL, updated_at = now()`,
+        [state.companyId, profile.email || null, encryptSecret(tokens.refresh_token), encryptSecret(tokens.access_token), tokens.expires_in, (tokens.scope || GOOGLE_SCOPE).split(' ')],
+      );
+      return reply.redirect(settingsGoogleRedirect('connected'));
+    } catch (error) {
+      request.log.warn({ err: error }, 'Google OAuth callback failed');
+      return reply.redirect(settingsGoogleRedirect('error'));
+    }
   });
 
-  app.post('/api/google/sync', { preHandler: requireUser }, async (request) => {
-    return syncGoogleContactsForCompany(request.user!.companyId);
+  app.post('/api/google/sync', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      await updateGoogleSyncState(request.user!.companyId, 'syncing');
+      if (isQaMode) {
+        const failure = qaGoogleFailure();
+        if (failure) {
+          await updateGoogleSyncState(request.user!.companyId, failure.status === 401 ? 'auth_required' : 'error', { error: failure.message });
+          return reply.code(failure.status || 504).send({ error: failure.message, qaMock: true });
+        }
+        const people = qaGooglePeople() as GooglePerson[];
+        const scenario = currentQaGoogleScenario();
+        const importedPeople = scenario === 'partial' ? people.slice(0, 1) : people;
+        const imported = await upsertFullLocalContacts(request.user!.companyId, importedPeople);
+        const resourceNames = importedPeople
+          .map((person) => person.resourceName)
+          .filter((value): value is string => Boolean(value));
+        await db.query(
+          `UPDATE contacts
+           SET google_resource_name = NULL, google_etag = NULL, google_data = '{}'::jsonb,
+               google_synced_at = NULL,
+               source = CASE WHEN source = 'google' THEN 'hub' ELSE source END,
+               updated_at = now()
+           WHERE company_id = $1
+             AND google_resource_name IS NOT NULL
+             AND NOT (google_resource_name = ANY($2::text[]))`,
+          [request.user!.companyId, resourceNames],
+        );
+        const result = {
+          imported,
+          total: people.length,
+          scenario,
+          fullSync: scenario === 'sync-token-expired' || scenario === 'external-delete',
+          partial: scenario === 'partial',
+          errors: scenario === 'partial' ? [{ resourceName: people[1]?.resourceName || 'people/qa-new', error: 'Contato QA rejeitado parcialmente' }] : [],
+        };
+        await updateGoogleSyncState(request.user!.companyId, 'success', result);
+        return result;
+      }
+      const result = await syncGoogleContactsForCompany(request.user!.companyId);
+      await updateGoogleSyncState(request.user!.companyId, 'success', result);
+      return result;
+    } catch (error) {
+      const response = googleSyncErrorResponse(error);
+      await updateGoogleSyncState(request.user!.companyId, response.code === 'GOOGLE_AUTH_REQUIRED' ? 'auth_required' : 'error', { error: response.error }).catch((statusError) => request.log.warn({ err: statusError }, 'Google sync status update failed'));
+      request.log.warn({
+        code: response.code,
+        providerStatus: typeof (error as { status?: unknown })?.status === 'number' ? (error as { status: number }).status : undefined,
+        providerCode: typeof (error as { providerCode?: unknown })?.providerCode === 'string' ? (error as { providerCode: string }).providerCode : undefined,
+      }, 'Google Contacts sync failed');
+      return reply.code(response.status).send(response);
+    }
+  });
+
+  app.delete('/api/google/disconnect', { preHandler: requireAdmin }, async (request) => {
+    await db.query('DELETE FROM google_connections WHERE company_id = $1', [request.user!.companyId]);
+    googleContactsCache.delete(request.user!.companyId);
+    return { disconnected: true };
   });
 
   app.post('/api/google/contact-status', { preHandler: requireUser }, async (request, reply) => {
@@ -659,6 +829,7 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
            AND (
              regexp_replace(phone, '\\D', '', 'g') = ANY($2::text[])
              OR regexp_replace(COALESCE(secondary_phone, ''), '\\D', '', 'g') = ANY($2::text[])
+             OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.contact_id = contacts.id AND cp.normalized_phone = ANY($2::text[]))
            )
          ORDER BY CASE WHEN source = 'google' OR google_resource_name IS NOT NULL THEN 0 ELSE 1 END
          LIMIT 1`,
@@ -724,6 +895,19 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
     const parsed = googleContactFormSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Preencha nome e telefone para salvar o contato' });
     const contact = parsed.data;
+    if (isQaMode) {
+      const failure = qaGoogleFailure();
+      if (failure) return reply.code(failure.status || 504).send({ error: failure.message, qaMock: true });
+      const phone = normalizePhone(contact.phone);
+      const person = {
+        ...buildGooglePersonPayload(contact),
+        resourceName: contact.resourceName || `people/qa-${phone}`,
+        etag: `qa-etag-${Date.now()}`,
+      } as GooglePerson;
+      await upsertFullLocalContacts(request.user!.companyId, [person]);
+      const saved = contactFieldsFromPerson(person);
+      return { saved: true, qaMock: true, name: saved.name, resourceName: person.resourceName, phone, otherPhone: saved.otherPhones[0] || '' };
+    }
     const phone = normalizePhone(contact.phone);
     const otherPhones = Array.from(new Set([
       ...splitFormValues(contact.otherPhone).map(normalizePhone),
@@ -781,100 +965,59 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
         notes: contact.notes || '',
         googleData: { ...person, ...payload, resourceName, etag: person.etag || existing?.etag || null },
       };
-      await db.query(
-        `INSERT INTO contacts (
-           company_id, name, phone, email, cpf, address, secondary_phone, avatar_url,
-           google_resource_name, source, nickname, birthday, company, job_title,
-           website, notes, google_etag, google_data, google_synced_at
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'google', $10, $11, $12, $13, $14, $15, $16, $17, now())
-         ON CONFLICT (company_id, phone) DO UPDATE SET
-           name = EXCLUDED.name,
-           email = EXCLUDED.email,
-           cpf = EXCLUDED.cpf,
-           address = EXCLUDED.address,
-           secondary_phone = EXCLUDED.secondary_phone,
-           avatar_url = COALESCE(EXCLUDED.avatar_url, contacts.avatar_url),
-           google_resource_name = EXCLUDED.google_resource_name,
-           source = 'google',
-           nickname = EXCLUDED.nickname,
-           birthday = EXCLUDED.birthday,
-           company = EXCLUDED.company,
-           job_title = EXCLUDED.job_title,
-           website = EXCLUDED.website,
-           notes = EXCLUDED.notes,
-           google_etag = EXCLUDED.google_etag,
-           google_data = EXCLUDED.google_data,
-           google_synced_at = now(),
-           updated_at = now()`,
-        [request.user!.companyId, contact.name, phone, emailValues[0] || null, contact.cpf || null, contact.address || null, otherPhone || null, saved.avatarUrl || null, resourceName, saved.nickname || contact.nickname || null, saved.birthday || contact.birthday || null, saved.company || contact.company || null, saved.jobTitle || contact.jobTitle || null, saved.website || contact.website || null, saved.notes || contact.notes || null, person.etag || existing?.etag || null, saved.googleData],
-      );
+      const resourceLocal = resourceName
+        ? await db.query<{ id: string; phone: string }>('SELECT id, phone FROM contacts WHERE company_id = $1 AND google_resource_name = $2 LIMIT 1', [request.user!.companyId, resourceName])
+        : { rows: [] as Array<{ id: string; phone: string }> };
+      const phoneLocal = await db.query<{ id: string }>('SELECT id FROM contacts WHERE company_id = $1 AND phone = $2 LIMIT 1', [request.user!.companyId, phone]);
+      if (resourceLocal.rows[0] && phoneLocal.rows[0] && resourceLocal.rows[0].id !== phoneLocal.rows[0].id) {
+        return reply.code(409).send({ error: 'O telefone informado já pertence a outro contato. Revise a duplicidade antes de salvar.', conflict: true });
+      }
+      let savedContactId = resourceLocal.rows[0]?.id || phoneLocal.rows[0]?.id;
+      if (savedContactId) {
+        await db.query(
+          `UPDATE contacts SET name = $2, phone = $3, email = $4, cpf = $5, address = $6, secondary_phone = $7,
+             avatar_url = COALESCE($8, avatar_url), google_resource_name = $9, source = 'google', nickname = $10,
+             birthday = $11, company = $12, job_title = $13, website = $14, notes = $15, google_etag = $16,
+             google_data = $17, google_synced_at = now(), updated_at = now(), version = version + 1 WHERE id = $1 AND company_id = $18`,
+          [savedContactId, contact.name, phone, emailValues[0] || null, contact.cpf || null, contact.address || null, otherPhone || null, saved.avatarUrl || null, resourceName, saved.nickname || contact.nickname || null, saved.birthday || contact.birthday || null, saved.company || contact.company || null, saved.jobTitle || contact.jobTitle || null, saved.website || contact.website || null, saved.notes || contact.notes || null, person.etag || existing?.etag || null, saved.googleData, request.user!.companyId],
+        );
+      } else {
+        const inserted = await db.query<{ id: string }>(
+          `INSERT INTO contacts (company_id, name, phone, email, cpf, address, secondary_phone, avatar_url,
+             google_resource_name, source, nickname, birthday, company, job_title, website, notes, google_etag, google_data, google_synced_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'google', $10, $11, $12, $13, $14, $15, $16, $17, now()) RETURNING id`,
+          [request.user!.companyId, contact.name, phone, emailValues[0] || null, contact.cpf || null, contact.address || null, otherPhone || null, saved.avatarUrl || null, resourceName, saved.nickname || contact.nickname || null, saved.birthday || contact.birthday || null, saved.company || contact.company || null, saved.jobTitle || contact.jobTitle || null, saved.website || contact.website || null, saved.notes || contact.notes || null, person.etag || existing?.etag || null, saved.googleData],
+        );
+        savedContactId = inserted.rows[0]!.id;
+      }
+      if (savedContactId) {
+        await db.query('UPDATE contact_phones SET is_primary = false, updated_at = now() WHERE contact_id = $1', [savedContactId]);
+        await db.query('UPDATE contact_emails SET is_primary = false, updated_at = now() WHERE contact_id = $1', [savedContactId]);
+        for (const [index, value] of [phone, ...otherPhones].entries()) {
+          await db.query(
+            `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
+             VALUES ($1, $2, $3, $4, $5, 'google')
+             ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET phone = EXCLUDED.phone, is_primary = EXCLUDED.is_primary, source = 'google', updated_at = now()`,
+            [request.user!.companyId, savedContactId, value, normalizePhone(value), index === 0],
+          );
+        }
+        for (const [index, value] of emailValues.entries()) {
+          await db.query(
+            `INSERT INTO contact_emails (company_id, contact_id, email, normalized_email, is_primary, source)
+             VALUES ($1, $2, $3, $4, $5, 'google')
+             ON CONFLICT (contact_id, normalized_email) DO UPDATE SET email = EXCLUDED.email, is_primary = EXCLUDED.is_primary, source = 'google', updated_at = now()`,
+            [request.user!.companyId, savedContactId, value, value.toLowerCase(), index === 0],
+          );
+        }
+      }
       googleContactsCache.delete(request.user!.companyId);
       return reply.code(existing ? 200 : 201).send({ saved: true, ...saved, name: contact.name, resourceName, phone, otherPhone, otherPhones, emails: emailValues });
-    } catch (error) {
+    } catch (error: any) {
       request.log.warn({ err: error }, 'Não foi possível salvar contato no Google');
+      if (error?.status === 412) return reply.code(409).send({ error: 'O contato foi alterado no Google. Atualize os dados e tente novamente.', conflict: true });
+      if (error?.status === 429) return reply.code(503).send({ error: 'O Google está temporariamente indisponível. Tente novamente.', retryable: true });
       return reply.code(502).send({ error: 'Não foi possível salvar o contato no Google Contacts' });
     }
   });
 
-  app.get('/api/contacts', { preHandler: requireUser }, async (request) => {
-    const result = await db.query(
-      `SELECT id, name, phone, email, avatar_url, notes, cpf, address, secondary_phone,
-              nickname, birthday, company, job_title, website, google_resource_name,
-              google_etag, google_data, google_synced_at, source, created_at
-       FROM contacts WHERE company_id = $1 ORDER BY name`, [request.user!.companyId],
-    );
-    return { contacts: result.rows };
-  });
-
-  app.post('/api/contacts', { preHandler: requireUser }, async (request, reply) => {
-    const parsed = contactSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Contato inválido' });
-    const phone = normalizePhone(parsed.data.phone);
-    const local = await db.query<{ id: string }>(
-      `INSERT INTO contacts (company_id, name, phone, email, source) VALUES ($1, $2, $3, $4, 'hub')
-       ON CONFLICT (company_id, phone) DO UPDATE SET name = EXCLUDED.name, email = EXCLUDED.email, source = 'hub', updated_at = now()
-       RETURNING id`, [request.user!.companyId, parsed.data.name, phone, parsed.data.email || null],
-    );
-
-    let googleSynced = false;
-    try {
-      const token = await accessTokenForCompany(request.user!.companyId);
-      const people = await listGoogleContactsForCompany(request.user!.companyId);
-      const variants = phoneVariants(phone);
-      const existing = people.find((person) => person.phoneNumbers?.some((item) => variants.has(normalizePhone(item.value || ''))));
-      let person: GooglePerson;
-      if (existing?.resourceName) {
-        const response = await googleFetch(`/${existing.resourceName}:updateContact?updatePersonFields=names,emailAddresses,phoneNumbers&personFields=${encodeURIComponent(GOOGLE_PERSON_FIELDS)}`, token, {
-          method: 'PATCH', body: JSON.stringify({ etag: existing.etag, names: [{ givenName: parsed.data.name }], phoneNumbers: [{ value: `+${phone}` }], emailAddresses: parsed.data.email ? [{ value: parsed.data.email }] : [] }),
-        });
-        person = await response.json() as GooglePerson;
-      } else {
-        const response = await googleFetch(`/people:createContact?personFields=${encodeURIComponent(GOOGLE_PERSON_FIELDS)}`, token, {
-          method: 'POST', body: JSON.stringify({ names: [{ givenName: parsed.data.name }], phoneNumbers: [{ value: `+${phone}` }], emailAddresses: parsed.data.email ? [{ value: parsed.data.email }] : [] }),
-        });
-        person = await response.json() as GooglePerson;
-      }
-      const fields = contactFieldsFromPerson({
-        ...person,
-        ...(!person.names?.length ? { names: [{ displayName: parsed.data.name }] } : {}),
-        ...(!person.phoneNumbers?.length ? { phoneNumbers: [{ value: phone }] } : {}),
-      });
-      await db.query(
-        `UPDATE contacts SET
-           name = $2, phone = $3, email = $4, avatar_url = $5, cpf = $6, address = $7,
-           secondary_phone = $8, google_resource_name = $9, source = 'google',
-           nickname = $10, birthday = $11, company = $12, job_title = $13,
-           website = $14, notes = $15, google_etag = $16, google_data = $17,
-           google_synced_at = now(), updated_at = now()
-         WHERE id = $1`,
-        [local.rows[0]!.id, parsed.data.name, phone, fields.email || parsed.data.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, fields.otherPhones[0] || null, fields.resourceName || existing?.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, person.etag || existing?.etag || null, fields.googleData],
-      );
-      googleContactsCache.delete(request.user!.companyId);
-      googleSynced = true;
-    } catch (error) {
-      request.log.warn({ err: error }, 'Contato salvo localmente, mas não sincronizado com Google');
-    }
-    return reply.code(201).send({ id: local.rows[0]!.id, googleSynced });
-  });
 }

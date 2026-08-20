@@ -1,0 +1,6 @@
+name,phone,email,company,notes,tags
+Ana QA Importada,+55 (21) 99000-0001,ana.importada@example.test,Empresa QA,Atualiza o contato Google existente,QA VIP
+Novo Cliente QA,5521990000010,novo.cliente@example.test,Empresa Nova,Contato criado no preview,QA Importação
+Formato Inválido,telefone-invalido,,Empresa QA,Deve ser rejeitado,
+Duplicado QA,5521990000003,duplicado@example.test,Empresa QA,Conflito de telefone,
+Contato com acentos,5521990000011,acentos@example.test,Oficina São José,Observação com ç e ã,QA Importação

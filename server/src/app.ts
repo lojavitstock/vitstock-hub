@@ -1,11 +1,13 @@
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
-import { config } from './config.js';
+import { config, isAllowedFrontendOrigin } from './config.js';
 import { db } from './db.js';
 import { loadUser, registerAuthRoutes } from './auth.js';
 import { registerEvolutionRoutes } from './evolution.js';
 import { registerGoogleContactRoutes } from './google-contacts.js';
+import { registerContactRoutes } from './contacts.js';
+import { registerQaRoutes } from './qa.js';
 
 export async function createApp() {
   const app = Fastify({
@@ -18,7 +20,7 @@ export async function createApp() {
 
   const isAllowedOrigin = (origin: string | undefined): boolean => {
     if (!origin) return true;
-    if (origin === config.FRONTEND_URL) return true;
+    if (isAllowedFrontendOrigin(origin)) return true;
     if (config.NODE_ENV !== 'production') {
       return /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
     }
@@ -62,10 +64,34 @@ export async function createApp() {
   await registerAuthRoutes(app);
   await registerEvolutionRoutes(app);
   await registerGoogleContactRoutes(app);
+  await registerContactRoutes(app);
+  await registerQaRoutes(app);
 
   app.setErrorHandler((error, request, reply) => {
-    request.log.error({ err: error }, 'Erro não tratado');
-    const httpError = error as Error & { statusCode?: number; code?: string };
+    const httpError = (error && typeof error === 'object' ? error : {}) as Error & { statusCode?: number; code?: string };
+    const errorName = httpError.name || 'Error';
+    const errorMessage = httpError.message || String(error);
+    const errorCode = httpError.code;
+    const errorStack = httpError.stack;
+    const route = request.routeOptions?.url || request.url.split('?')[0];
+    request.log.error({
+      errorName,
+      errorMessage,
+      errorCode,
+      errorStack,
+      requestId: request.id,
+      method: request.method,
+      route,
+    }, 'Erro não tratado');
+    console.error('[API_ERROR]', JSON.stringify({
+      errorName,
+      errorMessage,
+      errorCode,
+      errorStack,
+      requestId: request.id,
+      method: request.method,
+      route,
+    }));
     const databaseUnavailable = ['53300', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH'].includes(httpError.code || '')
       || /timeout exceeded when trying to connect/i.test(httpError.message || '');
     const isCorsError = /Origem não permitida por CORS|Origem não autorizada/i.test(httpError.message || '');
