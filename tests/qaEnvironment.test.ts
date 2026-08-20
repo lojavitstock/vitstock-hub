@@ -3,7 +3,7 @@ import test from 'node:test';
 import { isAllowedFrontendOrigin, isLocalHost, parseFrontendOrigins } from '../server/src/config';
 import { currentQaGoogleScenario, qaEvolutionResponse, qaGoogleFailure, qaGooglePeople, setQaGoogleScenario } from '../server/src/qa';
 import { buildExistingConversationQuery } from '../server/src/conversationQueries';
-import { googleIntegrationState, googleSyncErrorResponse } from '../server/src/google-contacts';
+import { buildGooglePhonePlan, googleIntegrationState, googleSyncErrorResponse } from '../server/src/google-contacts';
 
 test('QA host guard accepts only local database/provider targets', () => {
   assert.equal(isLocalHost('postgresql://vitstock@127.0.0.1:55432/vitstock_qa'), true);
@@ -53,6 +53,18 @@ test('Google sync exposes actionable errors instead of generic internal failures
   assert.equal(reconnect.retryable, false);
   assert.equal(googleSyncErrorResponse({ status: 429 }).retryable, true);
   assert.equal(googleSyncErrorResponse(new Error('The operation was aborted due to timeout')).status, 504);
+});
+
+test('Google sync preserves the local canonical phone when a resource phone is occupied', () => {
+  const plan = buildGooglePhonePlan({
+    requestedPhone: '5521990000001',
+    otherPhones: ['5521990000002'],
+    existingPhone: '5521990000003',
+    preserveExistingPhone: true,
+  });
+  assert.equal(plan.primaryPhone, '5521990000003');
+  assert.equal(plan.secondaryPhone, '5521990000001');
+  assert.deepEqual(plan.phones, ['5521990000003', '5521990000001', '5521990000002']);
 });
 
 test('Google integration state is tenant-local and maps persisted sync outcomes', () => {

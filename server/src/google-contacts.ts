@@ -383,6 +383,27 @@ function contactFieldsFromPerson(person: GooglePerson) {
   };
 }
 
+export function buildGooglePhonePlan(input: {
+  requestedPhone: string;
+  otherPhones: string[];
+  existingPhone?: string;
+  preserveExistingPhone: boolean;
+}) {
+  const primaryPhone = input.preserveExistingPhone && input.existingPhone
+    ? input.existingPhone
+    : input.requestedPhone;
+  const phones = Array.from(new Set([
+    primaryPhone,
+    ...(primaryPhone !== input.requestedPhone ? [input.requestedPhone] : []),
+    ...input.otherPhones,
+  ].filter(Boolean)));
+  return {
+    primaryPhone,
+    secondaryPhone: phones.find((phone) => phone !== primaryPhone) || null,
+    phones,
+  };
+}
+
 async function upsertLocalContact(companyId: string, person: GooglePerson) {
   const phone = normalizePhone(person.phoneNumbers?.[0]?.value || '');
   const name = person.names?.[0]?.displayName?.trim();
@@ -497,6 +518,20 @@ async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]
     const manualOverride = (row?.manual_override || {}) as Record<string, string>;
     const preservePhone = manualOverride.phone === 'manual';
     const preserveEmail = manualOverride.email === 'manual';
+    let phoneConflict = false;
+    if (row?.phone && row.phone !== fields.phone) {
+      const phoneOwner = await db.query<{ id: string }>(
+        'SELECT id FROM contacts WHERE company_id = $1 AND phone = $2 AND id <> $3 LIMIT 1',
+        [companyId, fields.phone, contactId],
+      );
+      phoneConflict = phoneOwner.rows.length > 0;
+    }
+    const phonePlan = buildGooglePhonePlan({
+      requestedPhone: fields.phone,
+      otherPhones: fields.otherPhones,
+      existingPhone: row?.phone,
+      preserveExistingPhone: preservePhone || phoneConflict,
+    });
     await db.query(
       `UPDATE contacts SET
          name = CASE WHEN manual_override ? 'name' THEN name ELSE $2 END,
@@ -514,12 +549,11 @@ async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]
          notes = CASE WHEN manual_override ? 'notes' THEN notes ELSE $15 END,
          google_etag = $16, google_data = $17, google_synced_at = now(), updated_at = now(), version = version + 1
        WHERE company_id = $1 AND id = $18`,
-      [companyId, fields.name, fields.phone, fields.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, fields.otherPhones[0] || null, fields.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, fields.etag || null, fields.googleData, contactId],
+      [companyId, fields.name, phonePlan.primaryPhone, fields.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, phonePlan.secondaryPhone, fields.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, fields.etag || null, fields.googleData, contactId],
     );
-    const phoneValues = [fields.phone, ...fields.otherPhones];
     if (!preservePhone) await db.query('UPDATE contact_phones SET is_primary = false, updated_at = now() WHERE contact_id = $1', [contactId]);
     if (!preserveEmail) await db.query('UPDATE contact_emails SET is_primary = false, updated_at = now() WHERE contact_id = $1', [contactId]);
-    for (const [index, phone] of phoneValues.entries()) {
+    for (const [index, phone] of phonePlan.phones.entries()) {
       await db.query(
         `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
          VALUES ($1, $2, $3, $4, $5, 'google')
