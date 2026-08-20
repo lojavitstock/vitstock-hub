@@ -174,6 +174,23 @@ The schema is company-scoped. The important tables are:
 - A Hub outbound message also carries a client-generated `clientMessageId` while it is optimistic/pending and through provider confirmation.
 - Conversation remote JIDs are provider identities. Phone variants are used only where the implementation explicitly needs to bridge provider representations such as phone JIDs and LIDs; text or timestamp heuristics are not used to correlate Hub sends.
 
+### Phone identity and presentation
+
+Contact phone data follows this boundary:
+
+```text
+raw input → normalization → canonical identity → channel aliases/JID/LID → presentation formatting
+```
+
+- `server/src/contactDomain.ts` is the backend source for phone normalization. When the country is known, new contact inputs use an E.164-like canonical value (for Brazil, `+55` plus the national number).
+- `contacts.phone` remains the primary/compatibility field and `contact_phones` stores the contact's additional phone identities. New writes keep both representations synchronized; existing legacy rows are not rewritten automatically.
+- Brazil's tenth- and eleventh-digit forms are not treated as equivalent by the canonical identity helper: the missing-ninth-digit case remains a human-review candidate. Existing `phoneVariants` helpers are limited to provider/channel routing compatibility and must not authorize contact merges.
+- International numbers are preserved when an explicit country code is present. A local number without country context is ambiguous and is not assigned `+55` automatically.
+- `contact_channel_identities` stores WhatsApp identities independently of phone values. `@s.whatsapp.net`, `@c.us`, `@lid` and `@g.us` remain remote channel identifiers; they are never replaced by a phone string and do not change conversation selection rules.
+- `src/utils/phone.ts` formats Brazilian canonical values as `(DD) XXXXX-XXXX` or `(DD) XXXX-XXXX` for display without changing persisted identity. Search and future contact inputs use exact canonical identity keys, while normalization never merges Contacts automatically.
+
+Production legacy data contains representation differences and cross-contact canonical collisions. Any future backfill or constraint change therefore requires a separate, company-scoped, auditable human-reviewed operation; this implementation only prevents new inconsistencies.
+
 ## 7. Authentication, Authorization and CORS
 
 ### Sessions and roles

@@ -4,10 +4,12 @@ import { db } from './db.js';
 import { canMergeContacts } from './contactMerge.js';
 import { requireAdmin, requireUser } from './auth.js';
 import {
+  canonicalPhone,
   normalizeContactEmail,
   normalizeContactPhone,
   orderedContactPair,
   parseContactCsv,
+  phoneIdentityKeys,
   splitContactValues,
 } from './contactDomain.js';
 
@@ -46,7 +48,9 @@ function pagination(request: any) {
 }
 
 function contactValues(input: z.infer<typeof contactInput>) {
-  const phones = Array.from(new Set([normalizeContactPhone(input.phone), ...splitContactValues(input.phones).map(normalizeContactPhone)].filter((value) => value.length >= 8)));
+  const phones = Array.from(new Set([input.phone, ...splitContactValues(input.phones)]
+    .map((value) => canonicalPhone(value, { defaultCountry: 'BR' }))
+    .filter((value): value is string => Boolean(value))));
   const emails = Array.from(new Set([input.email ? normalizeContactEmail(input.email) : '', ...splitContactValues(input.emails).map(normalizeContactEmail)].filter(Boolean)));
   return { phones, emails };
 }
@@ -114,7 +118,14 @@ async function ensureContact(companyId: string, input: z.infer<typeof contactInp
   const values = contactValues(input);
   const phone = values.phones[0];
   if (!phone) throw new Error('Telefone inválido');
-  const duplicate = await db.query<{ id: string }>('SELECT id FROM contacts WHERE company_id = $1 AND phone = $2 LIMIT 1', [companyId, phone]);
+  const phoneDigits = phoneIdentityKeys(phone, { defaultCountry: 'BR' }).filter((value) => /^\d+$/.test(value));
+  const duplicate = await db.query<{ id: string }>(
+    `SELECT c.id FROM contacts c
+     WHERE c.company_id = $1
+       AND (regexp_replace(c.phone, '\\D', '', 'g') = ANY($2::text[])
+            OR EXISTS (SELECT 1 FROM contact_phones p WHERE p.company_id = c.company_id AND p.contact_id = c.id AND p.normalized_phone = ANY($2::text[])))
+     ORDER BY c.id LIMIT 1`, [companyId, phoneDigits],
+  );
   if (duplicate.rows[0]) {
     if (updateExisting) {
       await db.query(
@@ -154,7 +165,16 @@ export async function registerContactRoutes(app: FastifyInstance) {
     if (duplicatesOnly) conditions.push(`EXISTS (
       SELECT 1 FROM contact_phones dup
       WHERE dup.contact_id = c.id AND dup.company_id = c.company_id
-        AND EXISTS (SELECT 1 FROM contact_phones other WHERE other.company_id = dup.company_id AND other.normalized_phone = dup.normalized_phone AND other.contact_id <> dup.contact_id)
+        AND EXISTS (
+          SELECT 1 FROM contact_phones other
+          WHERE other.company_id = dup.company_id AND other.contact_id <> dup.contact_id
+            AND (CASE WHEN length(regexp_replace(other.phone, '\\D', '', 'g')) IN (10, 11)
+                      THEN '55' || regexp_replace(other.phone, '\\D', '', 'g')
+                      ELSE regexp_replace(other.phone, '\\D', '', 'g') END)
+              = (CASE WHEN length(regexp_replace(dup.phone, '\\D', '', 'g')) IN (10, 11)
+                      THEN '55' || regexp_replace(dup.phone, '\\D', '', 'g')
+                      ELSE regexp_replace(dup.phone, '\\D', '', 'g') END)
+        )
     )`);
     if (tag) {
       values.push(tag);
@@ -163,12 +183,22 @@ export async function registerContactRoutes(app: FastifyInstance) {
     if (search) {
       values.push(`%${search}%`);
       const q = `$${values.length}`;
+      const searchPhoneDigits = phoneIdentityKeys(search, { defaultCountry: 'BR' }).filter((value) => /^\d+$/.test(value));
+      const phoneCondition = searchPhoneDigits.length
+        ? (() => {
+          values.push(searchPhoneDigits);
+          const phoneParam = `$${values.length}`;
+          return `OR regexp_replace(c.phone, '\\D', '', 'g') = ANY(${phoneParam}::text[])
+                  OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = c.company_id AND cp.contact_id = c.id AND cp.normalized_phone = ANY(${phoneParam}::text[]))`;
+        })()
+        : '';
       conditions.push(`(
         c.name ILIKE ${q} OR c.phone ILIKE ${q} OR COALESCE(c.email, '') ILIKE ${q}
         OR COALESCE(c.company, '') ILIKE ${q}
         OR EXISTS (SELECT 1 FROM contact_phones p WHERE p.contact_id = c.id AND p.phone ILIKE ${q})
         OR EXISTS (SELECT 1 FROM contact_emails e WHERE e.contact_id = c.id AND e.email ILIKE ${q})
         OR EXISTS (SELECT 1 FROM contact_tag_links tl JOIN contact_tags tg ON tg.id = tl.tag_id WHERE tl.contact_id = c.id AND tg.name ILIKE ${q})
+        ${phoneCondition}
       )`);
     }
     const count = await db.query<{ count: string }>(`SELECT count(*)::text AS count FROM contacts c WHERE ${conditions.join(' AND ')}`, values);
@@ -250,9 +280,16 @@ export async function registerContactRoutes(app: FastifyInstance) {
     if (parsed.data.address !== undefined) add('address', parsed.data.address || null);
     if (parsed.data.notes !== undefined) add('notes', parsed.data.notes || null);
     if (parsed.data.phone !== undefined) {
-      const phone = normalizeContactPhone(parsed.data.phone);
-      if (phone.length < 8) return reply.code(400).send({ error: 'Telefone principal inválido' });
-      const duplicate = await db.query('SELECT id FROM contacts WHERE company_id = $1 AND phone = $2 AND id <> $3', [request.user!.companyId, phone, id]);
+      const phone = canonicalPhone(parsed.data.phone, { defaultCountry: 'BR' });
+      if (!phone) return reply.code(400).send({ error: 'Telefone principal inválido' });
+      const phoneDigits = phoneIdentityKeys(phone, { defaultCountry: 'BR' }).filter((value) => /^\d+$/.test(value));
+      const duplicate = await db.query(
+        `SELECT c.id FROM contacts c
+         WHERE c.company_id = $1 AND c.id <> $3
+           AND (regexp_replace(c.phone, '\\D', '', 'g') = ANY($2::text[])
+                OR EXISTS (SELECT 1 FROM contact_phones p WHERE p.company_id = c.company_id AND p.contact_id = c.id AND p.normalized_phone = ANY($2::text[])))
+         LIMIT 1`, [request.user!.companyId, phoneDigits, id],
+      );
       if (duplicate.rows[0]) return reply.code(409).send({ error: 'Este telefone já pertence a outro contato' });
       add('phone', phone);
     }
@@ -328,19 +365,29 @@ export async function registerContactRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/contacts/duplicates', { preHandler: requireUser }, async (request) => {
-    const result = await db.query(
-      `SELECT p.normalized_phone, json_agg(json_build_object('id', c.id, 'name', c.name, 'phone', c.phone, 'archived', c.archived_at IS NOT NULL) ORDER BY c.id) AS contacts
+    const phoneRows = await db.query<{ normalized_phone: string; phone: string; contact_id: string; id: string; name: string; archived: boolean }>(
+      `SELECT p.normalized_phone, p.phone, p.contact_id, c.id, c.name, c.archived_at IS NOT NULL AS archived
        FROM contact_phones p JOIN contacts c ON c.id = p.contact_id
-       WHERE p.company_id = $1 AND c.company_id = $1
-       GROUP BY p.normalized_phone HAVING count(DISTINCT p.contact_id) > 1 ORDER BY p.normalized_phone`, [request.user!.companyId],
+       WHERE p.company_id = $1 AND c.company_id = $1 ORDER BY c.id, p.id`, [request.user!.companyId],
     );
+    const phoneGroups = new Map<string, Map<string, { id: string; name: string; phone: string; archived: boolean }>>();
+    for (const row of phoneRows.rows) {
+      const key = canonicalPhone(row.phone, { defaultCountry: 'BR' }) || normalizeContactPhone(row.phone);
+      if (!key) continue;
+      const contacts = phoneGroups.get(key) || new Map<string, { id: string; name: string; phone: string; archived: boolean }>();
+      contacts.set(row.contact_id, { id: row.id, name: row.name, phone: row.phone, archived: row.archived });
+      phoneGroups.set(key, contacts);
+    }
+    const phoneDuplicates = Array.from(phoneGroups.entries())
+      .filter(([, contacts]) => contacts.size > 1)
+      .map(([key, contacts]) => ({ kind: 'phone', key, contacts: Array.from(contacts.values()) }));
     const emailDuplicates = await db.query(
       `SELECT e.normalized_email AS key, json_agg(json_build_object('id', c.id, 'name', c.name, 'phone', c.phone, 'archived', c.archived_at IS NOT NULL) ORDER BY c.id) AS contacts
        FROM contact_emails e JOIN contacts c ON c.id = e.contact_id
        WHERE e.company_id = $1 AND c.company_id = $1
        GROUP BY e.normalized_email HAVING count(DISTINCT e.contact_id) > 1`, [request.user!.companyId],
     );
-    return { duplicates: result.rows.map((row) => ({ kind: 'phone', key: row.normalized_phone, contacts: row.contacts })).concat(emailDuplicates.rows.map((row) => ({ kind: 'email', key: row.key, contacts: row.contacts }))) };
+    return { duplicates: phoneDuplicates.concat(emailDuplicates.rows.map((row) => ({ kind: 'email', key: row.key, contacts: row.contacts }))) };
   });
 
   app.post('/api/contacts/duplicate-decisions', { preHandler: requireUser }, async (request, reply) => {
@@ -407,8 +454,8 @@ export async function registerContactRoutes(app: FastifyInstance) {
     let created = 0; let updated = 0; let invalid = 0;
     for (const [index, row] of rows.entries()) {
       const name = row.name || row.nome || '';
-      const phone = normalizeContactPhone(row.phone || row.telefone || row.celular || '');
-      if (!name || phone.length < 8) { invalid += 1; await db.query('INSERT INTO contact_import_rows (job_id, row_number, raw_data, status, error) VALUES ($1, $2, $3::jsonb, \'invalid\', $4)', [jobId, index + 2, JSON.stringify(row), 'Nome ou telefone inválido']); continue; }
+      const phone = canonicalPhone(row.phone || row.telefone || row.celular || '', { defaultCountry: 'BR' }) || '';
+      if (!name || !phone) { invalid += 1; await db.query('INSERT INTO contact_import_rows (job_id, row_number, raw_data, status, error) VALUES ($1, $2, $3::jsonb, \'invalid\', $4)', [jobId, index + 2, JSON.stringify(row), 'Nome ou telefone inválido']); continue; }
       if (preview) { await db.query('INSERT INTO contact_import_rows (job_id, row_number, raw_data, status) VALUES ($1, $2, $3::jsonb, \'pending\')', [jobId, index + 2, JSON.stringify(row)]); continue; }
       const result = await ensureContact(request.user!.companyId, { name, phone, email: row.email || row['e-mail'] || '', company: row.company || row.empresa || '', notes: row.notes || row.notas || '', source: 'csv/import' } as any, 'csv/import', true);
       const status = result.created ? 'created' : 'updated';
@@ -437,8 +484,8 @@ export async function registerContactRoutes(app: FastifyInstance) {
     try {
       for (const row of rows.rows) {
         const name = row.raw_data.name || row.raw_data.nome || '';
-        const phone = normalizeContactPhone(row.raw_data.phone || row.raw_data.telefone || row.raw_data.celular || '');
-        if (!name || phone.length < 8) { invalid += 1; await db.query('UPDATE contact_import_rows SET status = \'invalid\', error = $2 WHERE id = $1', [row.id, 'Nome ou telefone inválido']); continue; }
+        const phone = canonicalPhone(row.raw_data.phone || row.raw_data.telefone || row.raw_data.celular || '', { defaultCountry: 'BR' }) || '';
+        if (!name || !phone) { invalid += 1; await db.query('UPDATE contact_import_rows SET status = \'invalid\', error = $2 WHERE id = $1', [row.id, 'Nome ou telefone inválido']); continue; }
         const result = await ensureContact(request.user!.companyId, { name, phone, email: row.raw_data.email || row.raw_data['e-mail'] || '', company: row.raw_data.company || row.raw_data.empresa || '', notes: row.raw_data.notes || row.raw_data.notas || '', source: 'csv/import' } as any, 'csv/import', true);
         const status = result.created ? 'created' : 'updated'; if (result.created) created += 1; else updated += 1;
         await db.query('UPDATE contact_import_rows SET status = $2, contact_id = $3, error = NULL WHERE id = $1', [row.id, status, result.id]);

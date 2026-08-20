@@ -1,8 +1,57 @@
 export const normalizePhone = (value: string) => value.replace(/\D/g, '');
 
+export type PhoneIdentity = {
+  raw: string;
+  digits: string;
+  canonical: string | null;
+  country: string | null;
+  national: string | null;
+  valid: boolean;
+  ambiguous: boolean;
+};
+
+/** Exact contact identity normalization. It intentionally does not infer a ninth digit. */
+export const normalizePhoneIdentity = (value: string | undefined, defaultCountry = 'BR'): PhoneIdentity => {
+  const raw = String(value || '').trim();
+  let digits = normalizePhone(raw);
+  const explicitInternational = raw.startsWith('+') || /^00\d/.test(raw);
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (!digits) return { raw, digits, canonical: null, country: null, national: null, valid: false, ambiguous: false };
+  if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) {
+    return { raw, digits, canonical: `+${digits}`, country: 'BR', national: digits.slice(2), valid: true, ambiguous: digits.length === 12 };
+  }
+  if (explicitInternational) {
+    const country = digits.startsWith('55') ? 'BR' : null;
+    const national = country === 'BR' ? digits.slice(2) : null;
+    return { raw, digits, canonical: digits.length >= 8 ? `+${digits}` : null, country, national, valid: digits.length >= 8, ambiguous: digits.length < 8 || national?.length === 10 };
+  }
+  if (defaultCountry === 'BR' && (digits.length === 10 || digits.length === 11)) {
+    return { raw, digits, canonical: `+55${digits}`, country: 'BR', national: digits, valid: true, ambiguous: digits.length === 10 };
+  }
+  return { raw, digits, canonical: null, country: defaultCountry || null, national: defaultCountry === 'BR' ? digits : null, valid: false, ambiguous: digits.length >= 8 };
+};
+
+export const phoneIdentityKeys = (value: string, defaultCountry = 'BR') => {
+  const identity = normalizePhoneIdentity(value, defaultCountry);
+  const canonicalDigits = identity.canonical?.replace(/\D/g, '') || '';
+  return Array.from(new Set([identity.canonical || '', canonicalDigits, identity.digits].filter(Boolean)));
+};
+
+export const formatPhoneForDisplay = (value: string | undefined, defaultCountry = 'BR') => {
+  const identity = normalizePhoneIdentity(value, defaultCountry);
+  if (identity.country === 'BR' && identity.national && (identity.national.length === 10 || identity.national.length === 11)) {
+    const area = identity.national.slice(0, 2);
+    const number = identity.national.slice(2);
+    return identity.national.length === 11
+      ? `(${area}) ${number.slice(0, 5)}-${number.slice(5)}`
+      : `(${area}) ${number.slice(0, 4)}-${number.slice(4)}`;
+  }
+  return identity.canonical || identity.raw;
+};
+
 /**
- * Retorna as formas equivalentes de um telefone brasileiro para cruzar dados
- * da Evolution, do WhatsApp e do Google Contacts (com ou sem o 9º dígito/55).
+ * Compatibility aliases for provider/channel routing. These variants are not
+ * contact identities and must never authorize a contact merge.
  */
 export const phoneVariants = (value: string) => {
   const digits = normalizePhone(value);

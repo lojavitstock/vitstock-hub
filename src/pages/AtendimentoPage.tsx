@@ -33,6 +33,7 @@ import { ConversationList } from '../components/conversations/ConversationList';
 import { ContactPhoto } from '../components/conversations/ContactPhoto';
 import { MessageTimeline } from '../components/conversations/MessageTimeline';
 import { MessageComposer, MessageComposerHandle } from '../components/conversations/MessageComposer';
+import { formatPhoneForDisplay } from '../utils/phone';
 import { formatMessageTimestamp } from '../components/conversations/conversationFormatters';
 import { useConversationMessages } from '../hooks/useConversationMessages';
 import { conversationNeedsResponse, useConversationInbox } from '../hooks/useConversationInbox';
@@ -1373,7 +1374,7 @@ export const AtendimentoPage: React.FC = () => {
                   <h2 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
                     {activeConv.contact.name}
                   </h2>
-                  <p className="text-xs text-zinc-400 font-mono">{activeConv.isGroup ? 'Grupo WhatsApp' : activeConv.contact.phone}</p>
+                  <p className="text-xs text-zinc-400 font-mono">{activeConv.isGroup ? 'Grupo WhatsApp' : formatPhoneForDisplay(activeConv.contact.phone)}</p>
                 </div>
               </button>
 
@@ -1496,7 +1497,7 @@ export const AtendimentoPage: React.FC = () => {
                 <ContactPhoto name={activeConv.contact.name} avatar={activeConv.contact.avatar} size="large" emphasized />
               </div>
               <h3 className="text-sm font-extrabold text-zinc-100">{activeConv.contact.name}</h3>
-              <p className="text-xs text-amber-400 font-mono mt-0.5">{activeConv.contact.phone}</p>
+              <p className="text-xs text-amber-400 font-mono mt-0.5">{formatPhoneForDisplay(activeConv.contact.phone)}</p>
             </div>
 
             <div className="py-4 border-b border-zinc-800/80">
@@ -1535,7 +1536,7 @@ export const AtendimentoPage: React.FC = () => {
             <div className="text-center space-y-2">
               <div className="flex justify-center"><ContactPhoto name={activeConv.contact.name} avatar={activeConv.contact.avatar} size="large" emphasized /></div>
               <h4 className="font-extrabold text-slate-100">{googleContactStatus === 'saved' && googleMatchedName ? googleMatchedName : businessProfile?.verifiedName || businessProfile?.name || activeConv.contact.name}</h4>
-              <p className="text-xs text-amber-300 font-mono">{activeConv.contact.phone}</p>
+              <p className="text-xs text-amber-300 font-mono">{formatPhoneForDisplay(activeConv.contact.phone)}</p>
               {googleContactStatus === 'checking' ? (
                 <span className="mx-auto mt-2 inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-[#2a343a] text-slate-300 text-xs font-bold"><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Verificando Google Contacts...</span>
               ) : googleContactStatus === 'saved' ? (

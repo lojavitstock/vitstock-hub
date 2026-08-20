@@ -6,6 +6,7 @@ import { db } from './db.js';
 import { requireAdmin, requireUser } from './auth.js';
 import { decryptSecret, encryptSecret } from './security/encryption.js';
 import { currentQaGoogleScenario, qaGoogleFailure, qaGooglePeople } from './qa.js';
+import { canonicalPhone, phoneIdentityKeys } from './contactDomain.js';
 
 const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/contacts';
 const GOOGLE_PERSON_FIELDS = [
@@ -76,6 +77,11 @@ function normalizePhone(value: string) {
   return value.replace(/\D/g, '');
 }
 
+function storagePhone(value: string) {
+  return canonicalPhone(value, { defaultCountry: 'BR' }) || '';
+}
+
+/** Compatibility aliases for provider matching; never use these for contact identity or merges. */
 export function phoneVariants(value: string) {
   const digits = normalizePhone(value);
   const variants = new Set<string>();
@@ -405,7 +411,7 @@ export function buildGooglePhonePlan(input: {
 }
 
 async function upsertLocalContact(companyId: string, person: GooglePerson) {
-  const phone = normalizePhone(person.phoneNumbers?.[0]?.value || '');
+  const phone = storagePhone(person.phoneNumbers?.[0]?.value || '');
   const name = person.names?.[0]?.displayName?.trim();
   if (!phone || !name) return false;
   await db.query(
@@ -421,7 +427,7 @@ async function upsertLocalContact(companyId: string, person: GooglePerson) {
        google_resource_name = EXCLUDED.google_resource_name,
        source = CASE WHEN contacts.source = 'hub' THEN contacts.source ELSE 'google' END,
        updated_at = now()`,
-    [companyId, name, phone, person.emailAddresses?.[0]?.value || null, person.photos?.find((photo) => !photo.default)?.url || null, personCpf(person) || null, personAddress(person) || null, personPhoneValues(person).find((value) => value !== phone) || null, person.resourceName || null],
+    [companyId, name, phone, person.emailAddresses?.[0]?.value || null, person.photos?.find((photo) => !photo.default)?.url || null, personCpf(person) || null, personAddress(person) || null, personPhoneValues(person).find((value) => storagePhone(value) !== phone) || null, person.resourceName || null],
   );
   return true;
 }
@@ -442,7 +448,7 @@ async function upsertLocalContacts(companyId: string, people: GooglePerson[]) {
     const name = person.names?.[0]?.displayName?.trim();
     if (!name) continue;
     for (const phoneValue of person.phoneNumbers || []) {
-      const phone = normalizePhone(phoneValue.value || '');
+      const phone = storagePhone(phoneValue.value || '');
       if (!phone) continue;
       unique.set(phone, {
         name,
@@ -451,7 +457,7 @@ async function upsertLocalContacts(companyId: string, people: GooglePerson[]) {
         avatarUrl: person.photos?.find((photo) => !photo.default)?.url || null,
         cpf: personCpf(person) || null,
         address: personAddress(person) || null,
-        secondaryPhone: personPhoneValues(person).find((value) => value !== phone) || null,
+        secondaryPhone: personPhoneValues(person).find((value) => storagePhone(value) !== phone) || null,
         resourceName: person.resourceName || null,
       });
     }
@@ -494,11 +500,16 @@ async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]
   for (const person of people) {
     const fields = contactFieldsFromPerson(person);
     if (!fields.name || !fields.phone) continue;
+    const requestedPhone = storagePhone(fields.phone);
+    if (!requestedPhone) continue;
+    const requestedDigits = phoneIdentityKeys(requestedPhone, { defaultCountry: 'BR' }).filter((value) => /^\d+$/.test(value));
     const existing = await db.query<{ id: string; phone: string; manual_override: Record<string, string> }>(
       `SELECT id, phone, manual_override FROM contacts
-       WHERE company_id = $1 AND (google_resource_name = $2 OR phone = $3)
+       WHERE company_id = $1 AND (google_resource_name = $2
+          OR regexp_replace(phone, '\\D', '', 'g') = ANY($3::text[])
+          OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = contacts.company_id AND cp.contact_id = contacts.id AND cp.normalized_phone = ANY($3::text[])))
        ORDER BY CASE WHEN google_resource_name = $2 THEN 0 ELSE 1 END LIMIT 1`,
-      [companyId, person.resourceName || '', fields.phone],
+      [companyId, person.resourceName || '', requestedDigits],
     );
     const row = existing.rows[0];
     let contactId = row?.id;
@@ -510,7 +521,7 @@ async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'google', $10, $11, $12, $13, $14, $15, $16, $17, now())
          ON CONFLICT (company_id, phone) DO UPDATE SET google_resource_name = COALESCE(EXCLUDED.google_resource_name, contacts.google_resource_name), updated_at = now()
          RETURNING id`,
-        [companyId, fields.name, fields.phone, fields.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, fields.otherPhones[0] || null, fields.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, fields.etag || null, fields.googleData],
+          [companyId, fields.name, requestedPhone, fields.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, fields.otherPhones[0] || null, fields.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, fields.etag || null, fields.googleData],
       );
       contactId = created.rows[0]?.id;
     }
@@ -519,19 +530,27 @@ async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]
     const preservePhone = manualOverride.phone === 'manual';
     const preserveEmail = manualOverride.email === 'manual';
     let phoneConflict = false;
-    if (row?.phone && row.phone !== fields.phone) {
+    if (row?.phone) {
       const phoneOwner = await db.query<{ id: string }>(
-        'SELECT id FROM contacts WHERE company_id = $1 AND phone = $2 AND id <> $3 LIMIT 1',
-        [companyId, fields.phone, contactId],
+        `SELECT id FROM contacts
+         WHERE company_id = $1 AND id <> $3
+           AND (regexp_replace(phone, '\\D', '', 'g') = ANY($2::text[])
+                OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = contacts.company_id AND cp.contact_id = contacts.id AND cp.normalized_phone = ANY($2::text[])))
+         LIMIT 1`, [companyId, requestedDigits, contactId],
       );
       phoneConflict = phoneOwner.rows.length > 0;
     }
     const phonePlan = buildGooglePhonePlan({
-      requestedPhone: fields.phone,
+      requestedPhone: requestedPhone,
       otherPhones: fields.otherPhones,
       existingPhone: row?.phone,
       preserveExistingPhone: preservePhone || phoneConflict,
     });
+    const primaryPhone = preservePhone || phoneConflict
+      ? phonePlan.primaryPhone
+      : (storagePhone(phonePlan.primaryPhone) || phonePlan.primaryPhone);
+    const plannedPhones = phonePlan.phones.map((phone) => storagePhone(phone) || phone);
+    const secondaryPhone = plannedPhones.find((phone) => phone !== primaryPhone) || null;
     await db.query(
       `UPDATE contacts SET
          name = CASE WHEN manual_override ? 'name' THEN name ELSE $2 END,
@@ -549,11 +568,11 @@ async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]
          notes = CASE WHEN manual_override ? 'notes' THEN notes ELSE $15 END,
          google_etag = $16, google_data = $17, google_synced_at = now(), updated_at = now(), version = version + 1
        WHERE company_id = $1 AND id = $18`,
-      [companyId, fields.name, phonePlan.primaryPhone, fields.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, phonePlan.secondaryPhone, fields.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, fields.etag || null, fields.googleData, contactId],
+      [companyId, fields.name, primaryPhone, fields.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, secondaryPhone, fields.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, fields.etag || null, fields.googleData, contactId],
     );
     if (!preservePhone) await db.query('UPDATE contact_phones SET is_primary = false, updated_at = now() WHERE contact_id = $1', [contactId]);
     if (!preserveEmail) await db.query('UPDATE contact_emails SET is_primary = false, updated_at = now() WHERE contact_id = $1', [contactId]);
-    for (const [index, phone] of phonePlan.phones.entries()) {
+    for (const [index, phone] of plannedPhones.entries()) {
       await db.query(
         `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
          VALUES ($1, $2, $3, $4, $5, 'google')
@@ -837,7 +856,7 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
     const parsed = contactStatusSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Telefone inválido' });
     try {
-      const variants = phoneVariants(parsed.data.phone);
+      const variants = new Set(phoneIdentityKeys(parsed.data.phone, { defaultCountry: 'BR' }).map(normalizePhone));
       const local = await db.query<{
         name: string;
         phone: string;
@@ -901,13 +920,13 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
           notes: localContact.notes || '',
           etag: localContact.google_etag || '',
           googleData: localContact.google_data || {},
-          phone: normalizePhone(parsed.data.phone),
+          phone: storagePhone(parsed.data.phone) || normalizePhone(parsed.data.phone),
         };
       }
 
       // Só acessa a agenda remota quando não há um contato sincronizado localmente.
       const connection = await db.query('SELECT 1 FROM google_connections WHERE company_id = $1 LIMIT 1', [request.user!.companyId]);
-      const phone = normalizePhone(parsed.data.phone);
+      const phone = storagePhone(parsed.data.phone) || normalizePhone(parsed.data.phone);
       return {
         connected: Boolean(connection.rows[0]),
         saved: false,
@@ -932,7 +951,7 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
     if (isQaMode) {
       const failure = qaGoogleFailure();
       if (failure) return reply.code(failure.status || 504).send({ error: failure.message, qaMock: true });
-      const phone = normalizePhone(contact.phone);
+      const phone = storagePhone(contact.phone) || normalizePhone(contact.phone);
       const person = {
         ...buildGooglePersonPayload(contact),
         resourceName: contact.resourceName || `people/qa-${phone}`,
@@ -942,11 +961,11 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
       const saved = contactFieldsFromPerson(person);
       return { saved: true, qaMock: true, name: saved.name, resourceName: person.resourceName, phone, otherPhone: saved.otherPhones[0] || '' };
     }
-    const phone = normalizePhone(contact.phone);
+    const phone = storagePhone(contact.phone) || normalizePhone(contact.phone);
     const otherPhones = Array.from(new Set([
-      ...splitFormValues(contact.otherPhone).map(normalizePhone),
-      ...splitFormValues(contact.otherPhones).map(normalizePhone),
-    ].filter(Boolean))).filter((value) => value !== phone);
+      ...splitFormValues(contact.otherPhone).map((value) => storagePhone(value) || normalizePhone(value)),
+      ...splitFormValues(contact.otherPhones).map((value) => storagePhone(value) || normalizePhone(value)),
+    ].filter(Boolean))).filter((value) => normalizePhone(value) !== normalizePhone(phone));
     const otherPhone = otherPhones[0] || '';
     if (!phone || phone.length < 8) return reply.code(400).send({ error: 'Telefone principal inválido' });
     const emailValues = Array.from(new Set([
@@ -957,7 +976,7 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
     try {
       const token = await accessTokenForCompany(request.user!.companyId);
       const people = await listGoogleContactsForCompany(request.user!.companyId);
-      const variants = phoneVariants(phone);
+      const variants = new Set(phoneIdentityKeys(phone, { defaultCountry: 'BR' }).map(normalizePhone));
       const existing = contact.resourceName
         ? people.find((person) => person.resourceName === contact.resourceName)
         : people.find((person) => person.phoneNumbers?.some((item) => variants.has(normalizePhone(item.value || ''))));
@@ -1002,7 +1021,14 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
       const resourceLocal = resourceName
         ? await db.query<{ id: string; phone: string }>('SELECT id, phone FROM contacts WHERE company_id = $1 AND google_resource_name = $2 LIMIT 1', [request.user!.companyId, resourceName])
         : { rows: [] as Array<{ id: string; phone: string }> };
-      const phoneLocal = await db.query<{ id: string }>('SELECT id FROM contacts WHERE company_id = $1 AND phone = $2 LIMIT 1', [request.user!.companyId, phone]);
+      const phoneDigits = phoneIdentityKeys(phone, { defaultCountry: 'BR' }).filter((value) => /^\d+$/.test(value));
+      const phoneLocal = await db.query<{ id: string }>(
+        `SELECT c.id FROM contacts c
+         WHERE c.company_id = $1
+           AND (regexp_replace(c.phone, '\\D', '', 'g') = ANY($2::text[])
+                OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = c.company_id AND cp.contact_id = c.id AND cp.normalized_phone = ANY($2::text[])))
+         ORDER BY c.id LIMIT 1`, [request.user!.companyId, phoneDigits],
+      );
       if (resourceLocal.rows[0] && phoneLocal.rows[0] && resourceLocal.rows[0].id !== phoneLocal.rows[0].id) {
         return reply.code(409).send({ error: 'O telefone informado já pertence a outro contato. Revise a duplicidade antes de salvar.', conflict: true });
       }
