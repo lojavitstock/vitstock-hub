@@ -35,8 +35,9 @@ test('Atendimento abre a lista e uma conversa sem enviar mensagens', async ({ pa
     await expect(missingAvatar.locator('img')).toHaveCount(0);
     await expect.poll(() => brokenAvatar.locator('img').evaluate((image) => (image as HTMLImageElement).style.display === 'none')).toBe(true);
 
-    const expectedAvatarFailures = diagnostics.entries.filter((entry) => entry.kind === 'http-error' && entry.url?.includes('/api/qa/avatar/') && entry.status === 404);
-    expect(expectedAvatarFailures.length, 'o fixture de avatar 404 deve ser classificado como falha esperada').toBeGreaterThan(0);
+    const expectedAvatarFailures = diagnostics.entries.filter((entry) => entry.url?.includes('/api/qa/avatar/broken.svg')
+      && ((entry.kind === 'http-error' && entry.status === 404) || entry.kind === 'requestfailed'));
+    expect(expectedAvatarFailures.length, 'o fixture de avatar quebrado deve ser classificado como falha esperada').toBeGreaterThan(0);
     expect(relevantBrowserErrors(diagnostics), 'erros fatais do navegador atribuíveis à aplicação').toEqual([]);
   } finally {
     await attachBrowserDiagnostics(page, diagnostics, testInfo);

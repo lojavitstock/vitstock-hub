@@ -30,6 +30,7 @@ async function waitForHttp(label, url, timeoutMs = 30_000) {
   const startedAt = Date.now();
   let lastError = 'sem resposta';
   while (Date.now() - startedAt < timeoutMs) {
+    if (childFailure) throw new Error(childFailure);
     try {
       const response = await fetch(url);
       if (response.ok || response.status < 500) return;
@@ -42,14 +43,20 @@ async function waitForHttp(label, url, timeoutMs = 30_000) {
   throw new Error(`${label} não ficou disponível em ${url}: ${lastError}`);
 }
 
+let childFailure = null;
+let stopping = false;
+
 function startChild(label, args) {
   const child = spawn(process.execPath, [npmCli, ...args], {
     cwd: process.cwd(),
     env: { ...process.env, ...qaEnv },
     stdio: 'inherit',
   });
-  child.on('exit', (code) => {
-    if (code && code !== 0) console.error(`[e2e] ${label} encerrou com código ${code}.`);
+  child.on('exit', (code, signal) => {
+    if (!stopping) {
+      childFailure = `[e2e] ${label} encerrou antes do ambiente ficar pronto (código ${code ?? 'n/a'}, sinal ${signal || 'n/a'}).`;
+      console.error(childFailure);
+    }
   });
   return child;
 }
@@ -68,10 +75,11 @@ console.log('Evolution/Google: mock-only; produção bloqueada.\n');
 
 const children = [
   startChild('backend', ['run', 'server:dev']),
-  startChild('frontend', ['run', 'dev:frontend', '--', '--host', '127.0.0.1']),
+  startChild('frontend', ['run', 'dev:frontend', '--', '--host', '127.0.0.1', '--strictPort']),
 ];
 
 const stop = () => {
+  stopping = true;
   for (const child of children) if (!child.killed) child.kill('SIGTERM');
 };
 process.on('SIGINT', () => { stop(); process.exit(0); });

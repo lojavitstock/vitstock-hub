@@ -59,7 +59,7 @@ npm run qa:stop
 
 `npm run test:e2e` valida o backend QA por um marcador explícito antes de iniciar o Playwright. O alvo padrão é `http://localhost:3000`; um Preview remoto só pode ser usado com `PLAYWRIGHT_ALLOW_REMOTE=true` e configuração explícita de `PLAYWRIGHT_BASE_URL`. Não invente `npm run lint`, Cypress ou qualquer outro comando que não exista no repositório.
 
-`npm run dev:e2e` gera uma credencial efêmera para o usuário sintético do QA e a grava somente em `test-results/qa-credentials.json`, que é ignorado pelo Git. O runner lê esse arquivo para o teste autenticado; nenhuma senha QA fixa é versionada.
+`npm run dev:e2e` gera uma credencial efêmera para o usuário sintético do QA e a grava somente em `.qa/qa-credentials.json`, que é ignorado pelo Git. O runner lê esse arquivo para o teste autenticado; nenhuma senha QA fixa é versionada.
 
 ## 4. Validação por tipo de alteração
 

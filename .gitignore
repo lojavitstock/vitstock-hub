@@ -28,3 +28,4 @@ dist-ssr
 # Playwright reports and test artifacts
 playwright-report
 test-results
+.qa

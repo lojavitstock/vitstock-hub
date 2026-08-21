@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 
 const qaSecret = (label) => `${label}-${randomUUID()}-${'x'.repeat(64)}`;
-const qaCredentialsPath = resolve(process.cwd(), 'test-results', 'qa-credentials.json');
+const qaCredentialsPath = resolve(process.cwd(), '.qa', 'qa-credentials.json');
 
 export function createQaEnv() {
   const qaPassword = qaSecret('qa-e2e-password');

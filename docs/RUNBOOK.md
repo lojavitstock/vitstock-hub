@@ -150,7 +150,7 @@ Não inicie servidores apenas por rotina em tarefa que não exige execução loc
 
 O fluxo E2E não usa `.env.local` como fallback: `dev:e2e` injeta explicitamente `QA_MODE=true`, PostgreSQL `127.0.0.1:55432/vitstock_qa`, Evolution mock e Google mock. Se o guard rail não confirmar esses destinos, o processo aborta antes de iniciar a aplicação.
 
-O `dev:e2e` gera uma credencial efêmera para o usuário sintético e a grava somente em `test-results/qa-credentials.json`, ignorado pelo Git. Não há senha QA fixa no repositório.
+O `dev:e2e` gera uma credencial efêmera para o usuário sintético e a grava somente em `.qa/qa-credentials.json`, ignorado pelo Git. Não há senha QA fixa no repositório.
 
 ## 8. Banco de dados e migrations
 
