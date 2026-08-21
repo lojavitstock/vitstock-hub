@@ -244,6 +244,8 @@ Não ignore testes falhando. Se um teste já falhava antes da alteração, confi
 
 ### Browser validation protocol
 
+Para alterações de UI ou comportamento visível, o ambiente padrão de browser testing é o QA local isolado (`npm run dev:e2e` + `npm run test:e2e`). Esse fluxo exige `QA_MODE=true`, PostgreSQL local, Evolution mock e Google mock; se a configuração não confirmar esses limites, deve abortar. O Vercel Preview é uma segunda camada de validação de integração e não deve ser usado como substituto do QA local. O uso de um alvo remoto pelo Playwright exige autorização explícita e configuração consciente.
+
 Quando uma alteração afetar comportamento visível da aplicação:
 
 1. implemente a alteração;

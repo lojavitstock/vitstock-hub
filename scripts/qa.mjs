@@ -1,27 +1,11 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import process from 'node:process';
+import { createQaEnv, validateQaEnv, writeQaCredentials } from './qa-env.mjs';
 
 const composeFile = 'docker-compose.qa.yml';
 const npmCli = process.env.npm_execpath;
-const qaSecret = (label) => `${label}-${randomUUID()}-${'x'.repeat(64)}`;
-const qaEnv = {
-  QA_MODE: 'true',
-  NODE_ENV: 'development',
-  PORT: '3001',
-  DATABASE_URL: 'postgresql://vitstock@127.0.0.1:55432/vitstock_qa',
-  EVOLUTION_API_URL: 'http://127.0.0.1:3999',
-  EVOLUTION_API_KEY: 'qa-local-disabled-key',
-  EVOLUTION_INSTANCE_NAME: 'vitstock_qa_mock',
-  SESSION_SECRET: qaSecret('qa-local-session'),
-  WEBHOOK_SECRET: qaSecret('qa-local-webhook'),
-  FRONTEND_URL: 'http://localhost:3000',
-  ALLOWED_FRONTEND_ORIGINS: 'http://127.0.0.1:3000',
-  GOOGLE_CLIENT_ID: 'qa-local-google-client-id-not-real',
-  GOOGLE_CLIENT_SECRET: 'qa-local-google-client-secret-not-real',
-  VITE_API_URL: 'http://localhost:3001',
-  VITE_USE_MOCK_DATA: 'false',
-};
+const qaEnv = createQaEnv();
+validateQaEnv(qaEnv);
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { stdio: 'inherit', env: { ...process.env, ...qaEnv }, ...options });
@@ -35,6 +19,11 @@ function runNpm(args) {
 
 function compose(args) {
   run('docker', ['compose', '-f', composeFile, ...args]);
+}
+
+function dockerAvailable() {
+  const result = spawnSync('docker', ['info'], { stdio: 'inherit', env: { ...process.env, ...qaEnv } });
+  return result.status === 0;
 }
 
 function start() {
@@ -63,18 +52,34 @@ function start() {
 
 const command = process.argv[2];
 if (command === 'setup') {
+  if (!dockerAvailable()) {
+    console.error('Docker daemon inacessível. QA/E2E abortado sem iniciar banco ou backend.');
+    process.exit(1);
+  }
   compose(['up', '-d', '--wait']);
   runNpm(['--prefix', 'server', 'run', 'migrate']);
 } else if (command === 'seed') {
   runNpm(['--prefix', 'server', 'run', 'qa:seed']);
+  writeQaCredentials(qaEnv);
 } else if (command === 'reset') {
+  if (!dockerAvailable()) {
+    console.error('Docker daemon inacessível. QA/E2E abortado sem resetar banco.');
+    process.exit(1);
+  }
   compose(['down', '-v', '--remove-orphans']);
   compose(['up', '-d', '--wait']);
   runNpm(['--prefix', 'server', 'run', 'migrate']);
   runNpm(['--prefix', 'server', 'run', 'qa:seed']);
+  writeQaCredentials(qaEnv);
 } else if (command === 'start') {
   start();
+} else if (command === 'stop') {
+  if (!dockerAvailable()) {
+    console.error('Docker daemon inacessível. Nenhum recurso QA foi alterado.');
+    process.exit(1);
+  }
+  compose(['down', '--remove-orphans']);
 } else {
-  console.error('Uso: npm run qa:setup | qa:seed | qa:reset | qa:start');
+  console.error('Uso: npm run qa:setup | qa:seed | qa:reset | qa:start | qa:stop');
   process.exit(1);
 }

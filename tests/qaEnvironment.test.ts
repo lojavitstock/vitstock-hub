@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { isAllowedFrontendOrigin, isLocalHost, parseFrontendOrigins } from '../server/src/config';
+import { isAllowedFrontendOrigin, isLocalHost, parseFrontendOrigins, validateQaRuntimeSafety } from '../server/src/config';
 import { currentQaGoogleScenario, qaEvolutionResponse, qaGoogleFailure, qaGooglePeople, setQaGoogleScenario } from '../server/src/qa';
 import { buildExistingConversationQuery } from '../server/src/conversationQueries';
 import { buildGoogleContactUpdatePayload, buildGooglePhonePlan, googleContactErrorResponse, googleIntegrationState, googleSyncErrorResponse } from '../server/src/google-contacts';
@@ -55,6 +55,21 @@ test('Google sync exposes actionable errors instead of generic internal failures
   assert.equal(reconnect.retryable, false);
   assert.equal(googleSyncErrorResponse({ status: 429 }).retryable, true);
   assert.equal(googleSyncErrorResponse(new Error('The operation was aborted due to timeout')).status, 504);
+});
+
+test('QA runtime guard accepts only the isolated database, provider and fake Google credentials', () => {
+  assert.doesNotThrow(() => validateQaRuntimeSafety({
+    DATABASE_URL: 'postgresql://vitstock@127.0.0.1:55432/vitstock_qa',
+    EVOLUTION_API_URL: 'http://127.0.0.1:3999',
+    GOOGLE_CLIENT_ID: 'qa-local-google-client-id-not-real',
+    GOOGLE_CLIENT_SECRET: 'qa-local-google-client-secret-not-real',
+  }));
+  assert.throws(() => validateQaRuntimeSafety({
+    DATABASE_URL: 'postgresql://user@railway.example/railway',
+    EVOLUTION_API_URL: 'https://evolution.example',
+    GOOGLE_CLIENT_ID: 'real-client-id',
+    GOOGLE_CLIENT_SECRET: 'real-client-secret',
+  }), /QA_MODE exige/);
 });
 
 test('Google sync preserves the local canonical phone when a resource phone is occupied', () => {

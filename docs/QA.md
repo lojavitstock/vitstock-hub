@@ -41,13 +41,10 @@ O seed cria dois tenants, administradores, um usuário operacional, contatos
 com múltiplos telefones e threads, identidade `@lid`, grupo, contato arquivado,
 tags, duplicidade/telefone compartilhado e dados Google simulados.
 
-Credenciais locais determinísticas:
-
-- `qa-admin-a@vitstock.test` / `QA-admin-2026!`
-- `qa-operational-a@vitstock.test` / `QA-attendant-2026!`
-- `qa-admin-b@vitstock.test` / `QA-admin-2026!`
-
-Essas credenciais só existem no banco local descartável.
+O runner gera uma credencial efêmera para `qa-admin-a@vitstock.test` durante o
+seed e a grava somente em `test-results/qa-credentials.json`, ignorado pelo
+Git. O wrapper `npm run test:e2e` lê esse arquivo; nenhuma senha é mantida
+em código ou documentação.
 
 ## Mocks controláveis
 
@@ -88,7 +85,8 @@ sem dados reais.
 
 ## Verificação manual
 
-Depois de `qa:start`, faça login com as credenciais acima e valide no Preview
+Depois de `dev:e2e`, execute `test:e2e` ou faça login usando a credencial
+efêmera criada em `test-results/qa-credentials.json` e valide no Preview
 local: isolamento entre tenants, contatos Google (sync/criação/edição),
 duplicidade, múltiplos telefones, grupos, contato arquivado que recebe nova
 mensagem, tags e importação CSV. O resultado esperado para este ciclo é

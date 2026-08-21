@@ -80,6 +80,25 @@ const qaInboundSchema = z.object({
 export async function registerQaRoutes(app: FastifyInstance) {
   if (!isQaMode) return;
 
+  app.get<{ Params: { variant: string } }>('/api/qa/avatar/:variant', async (request, reply) => {
+    const variant = request.params.variant;
+    if (variant === 'valid.svg') {
+      reply.type('image/svg+xml').send('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96"><rect width="96" height="96" rx="48" fill="#eebb2c"/><circle cx="48" cy="38" r="16" fill="#172027"/><path d="M20 78c4-18 16-27 28-27s24 9 28 27" fill="#172027"/></svg>');
+      return;
+    }
+    if (variant === 'broken.svg') {
+      return reply.code(404).send({ error: 'Avatar QA indisponível' });
+    }
+    return reply.code(404).send({ error: 'Avatar QA não encontrado' });
+  });
+
+  app.get('/api/qa/ready', async () => ({
+    qaMode: true,
+    database: 'local-only',
+    evolution: 'mock-only',
+    google: 'mock-only',
+  }));
+
   app.get('/api/qa/status', { preHandler: requireAdmin }, async () => ({
     qaMode: true,
     database: 'local-only',

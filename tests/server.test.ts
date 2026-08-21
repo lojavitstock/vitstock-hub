@@ -15,6 +15,24 @@ test('Fastify app responde /health endpoint', async () => {
   await app.close();
 });
 
+test('QA app expõe marcador seguro e fixtures de avatar somente no QA', async () => {
+  const app = await createApp();
+  const ready = await app.inject({ method: 'GET', url: '/api/qa/ready' });
+  assert.equal(ready.statusCode, 200);
+  assert.deepEqual(JSON.parse(ready.body), { qaMode: true, database: 'local-only', evolution: 'mock-only', google: 'mock-only' });
+
+  const validAvatar = await app.inject({ method: 'GET', url: '/api/qa/avatar/valid.svg' });
+  assert.equal(validAvatar.statusCode, 200);
+  assert.match(validAvatar.headers['content-type'] || '', /image\/svg\+xml/);
+
+  const brokenAvatar = await app.inject({ method: 'GET', url: '/api/qa/avatar/broken.svg' });
+  assert.equal(brokenAvatar.statusCode, 404);
+
+  const missingAvatar = await app.inject({ method: 'GET', url: '/api/qa/avatar/missing.svg' });
+  assert.equal(missingAvatar.statusCode, 404);
+  await app.close();
+});
+
 test('Fastify app bloqueia requisição mutativa com origem não autorizada (CORS Hook)', async () => {
   const app = await createApp();
   const response = await app.inject({

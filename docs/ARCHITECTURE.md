@@ -484,6 +484,8 @@ The root README states that the configured `.env.local` may still point the loca
 
 `docker-compose.yml` offers an optional local PostgreSQL 16 service.
 
+For browser automation, `npm run dev:e2e` uses the isolated QA Compose database on `127.0.0.1:55432/vitstock_qa`, `QA_MODE=true`, Evolution mock and Google mock. Its startup guard rejects remote database/provider URLs instead of falling back to `.env.local`. `npm run test:e2e` defaults to the local frontend and confirms the QA marker before running Playwright; remote Preview execution requires explicit `PLAYWRIGHT_ALLOW_REMOTE=true`.
+
 ### Preview and production
 
 - `vercel.json` rewrites routes to `index.html` for the SPA.
