@@ -158,8 +158,24 @@ async function googleFetch(path: string, accessToken: string, init?: RequestInit
     signal: AbortSignal.timeout(20_000),
   });
   if (!response.ok) {
-    const error = new Error(`Google People API respondeu ${response.status}`) as Error & { status: number };
+    const provider = await response.json().catch(() => null) as {
+      error?: { status?: unknown; message?: unknown; errors?: Array<{ reason?: unknown }> };
+    } | null;
+    const providerError = provider?.error;
+    const providerReason = typeof providerError?.status === 'string'
+      ? providerError.status
+      : typeof providerError?.errors?.[0]?.reason === 'string'
+        ? providerError.errors[0].reason
+        : undefined;
+    const providerMessage = typeof providerError?.message === 'string' ? providerError.message : undefined;
+    const error = new Error(`Google People API respondeu ${response.status}`) as Error & {
+      status: number;
+      providerReason?: string;
+      providerMessage?: string;
+    };
     error.status = response.status;
+    error.providerReason = providerReason;
+    error.providerMessage = providerMessage;
     throw error;
   }
   return response;
@@ -882,6 +898,73 @@ function buildGooglePersonPayload(contact: z.infer<typeof googleContactFormSchem
   };
 }
 
+export function buildGoogleContactUpdatePayload(
+  existing: Pick<GooglePerson, 'resourceName' | 'etag' | 'metadata'>,
+  payload: Record<string, unknown>,
+) {
+  return {
+    ...payload,
+    resourceName: existing.resourceName,
+    etag: existing.etag,
+    metadata: existing.metadata,
+  };
+}
+
+type GoogleContactErrorResponse = {
+  status: number;
+  error: string;
+  code: string;
+  retryable?: boolean;
+  conflict?: boolean;
+};
+
+export function googleContactErrorResponse(error: unknown): GoogleContactErrorResponse {
+  const details = (error || {}) as {
+    code?: unknown;
+    constraint?: unknown;
+    status?: unknown;
+    providerReason?: unknown;
+  };
+  const status = typeof details.status === 'number' ? details.status : 0;
+  const providerReason = typeof details.providerReason === 'string' ? details.providerReason.toLowerCase() : '';
+
+  if (details.code === '23505' && details.constraint === 'contacts_company_id_phone_key') {
+    return {
+      status: 409,
+      error: 'O telefone informado já pertence a outro contato. Revise a duplicidade antes de salvar.',
+      code: 'CONTACT_PHONE_CONFLICT',
+      conflict: true,
+    };
+  }
+  if (status === 412 || (status === 400 && (providerReason === 'failed_precondition' || providerReason === 'failedprecondition'))) {
+    return {
+      status: 409,
+      error: 'O contato foi alterado no Google. Atualize os dados e tente novamente.',
+      code: 'GOOGLE_CONTACT_CONFLICT',
+      conflict: true,
+    };
+  }
+  if (status === 400) {
+    return { status: 400, error: 'Os dados enviados para o Google são inválidos. Revise o contato e tente novamente.', code: 'GOOGLE_CONTACT_INVALID' };
+  }
+  if (status === 401) {
+    return { status: 401, error: 'Sua conexão com o Google precisa ser renovada. Reconecte sua conta para continuar.', code: 'GOOGLE_AUTH_REQUIRED' };
+  }
+  if (status === 403) {
+    return { status: 403, error: 'A conta Google não tem permissão para editar este contato.', code: 'GOOGLE_PERMISSION_DENIED' };
+  }
+  if (status === 404) {
+    return { status: 404, error: 'O contato não foi encontrado no Google. Sincronize novamente antes de editar.', code: 'GOOGLE_CONTACT_NOT_FOUND' };
+  }
+  if (status === 429) {
+    return { status: 503, error: 'O Google está temporariamente indisponível. Tente novamente.', code: 'GOOGLE_RATE_LIMITED', retryable: true };
+  }
+  if (status >= 500) {
+    return { status: 503, error: 'O Google está temporariamente indisponível. Tente novamente.', code: 'GOOGLE_UNAVAILABLE', retryable: true };
+  }
+  return { status: 502, error: 'Não foi possível salvar o contato no Google Contacts', code: 'GOOGLE_CONTACT_SAVE_FAILED', retryable: true };
+}
+
 export async function registerGoogleContactRoutes(app: FastifyInstance) {
   app.get('/api/google/status', { preHandler: requireUser }, async (request) => {
     const result = await db.query<{
@@ -1142,19 +1225,36 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
       ...(contact.email ? [contact.email.trim()] : []),
       ...splitFormValues(contact.emails),
     ].filter(Boolean)));
+    const phoneDigits = phoneIdentityKeys(phone, { defaultCountry: 'BR' }).filter((value) => /^\d+$/.test(value));
 
     try {
+      const resourceLocal = contact.resourceName
+        ? await db.query<{ id: string; phone: string }>('SELECT id, phone FROM contacts WHERE company_id = $1 AND google_resource_name = $2 LIMIT 1', [request.user!.companyId, contact.resourceName])
+        : { rows: [] as Array<{ id: string; phone: string }> };
+      const phoneLocal = await db.query<{ id: string }>(
+        `SELECT c.id FROM contacts c
+         WHERE c.company_id = $1
+           AND (regexp_replace(c.phone, '\\D', '', 'g') = ANY($2::text[])
+                OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = c.company_id AND cp.contact_id = c.id AND cp.normalized_phone = ANY($2::text[])))
+         ORDER BY c.id LIMIT 1`, [request.user!.companyId, phoneDigits],
+      );
+      if (resourceLocal.rows[0] && phoneLocal.rows[0] && resourceLocal.rows[0].id !== phoneLocal.rows[0].id) {
+        return reply.code(409).send({ error: 'O telefone informado já pertence a outro contato. Revise a duplicidade antes de salvar.', conflict: true });
+      }
       const token = await accessTokenForCompany(request.user!.companyId);
-      const people = await listGoogleContactsForCompany(request.user!.companyId);
+      const people = await listGoogleContactsForCompany(request.user!.companyId, true);
       const variants = new Set(phoneIdentityKeys(phone, { defaultCountry: 'BR' }).map(normalizePhone));
       const existing = contact.resourceName
         ? people.find((person) => person.resourceName === contact.resourceName)
         : people.find((person) => person.phoneNumbers?.some((item) => variants.has(normalizePhone(item.value || ''))));
+      if (contact.resourceName && !existing) {
+        return reply.code(404).send({ error: 'O contato não foi encontrado no Google. Sincronize novamente antes de editar.' });
+      }
       const payload = buildGooglePersonPayload(contact);
       const response = existing?.resourceName
         ? await googleFetch(`/${existing.resourceName}:updateContact?updatePersonFields=names,nicknames,emailAddresses,phoneNumbers,addresses,organizations,birthdays,biographies,occupations,relations,events,urls,userDefined&personFields=${encodeURIComponent(GOOGLE_PERSON_FIELDS)}`, token, {
             method: 'PATCH',
-            body: JSON.stringify({ ...payload, etag: existing.etag }),
+            body: JSON.stringify(buildGoogleContactUpdatePayload(existing, payload)),
           })
         : await googleFetch(`/people:createContact?personFields=${encodeURIComponent(GOOGLE_PERSON_FIELDS)}`, token, {
             method: 'POST',
@@ -1188,20 +1288,6 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
         notes: contact.notes || '',
         googleData: { ...person, ...payload, resourceName, etag: person.etag || existing?.etag || null },
       };
-      const resourceLocal = resourceName
-        ? await db.query<{ id: string; phone: string }>('SELECT id, phone FROM contacts WHERE company_id = $1 AND google_resource_name = $2 LIMIT 1', [request.user!.companyId, resourceName])
-        : { rows: [] as Array<{ id: string; phone: string }> };
-      const phoneDigits = phoneIdentityKeys(phone, { defaultCountry: 'BR' }).filter((value) => /^\d+$/.test(value));
-      const phoneLocal = await db.query<{ id: string }>(
-        `SELECT c.id FROM contacts c
-         WHERE c.company_id = $1
-           AND (regexp_replace(c.phone, '\\D', '', 'g') = ANY($2::text[])
-                OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = c.company_id AND cp.contact_id = c.id AND cp.normalized_phone = ANY($2::text[])))
-         ORDER BY c.id LIMIT 1`, [request.user!.companyId, phoneDigits],
-      );
-      if (resourceLocal.rows[0] && phoneLocal.rows[0] && resourceLocal.rows[0].id !== phoneLocal.rows[0].id) {
-        return reply.code(409).send({ error: 'O telefone informado já pertence a outro contato. Revise a duplicidade antes de salvar.', conflict: true });
-      }
       let savedContactId = resourceLocal.rows[0]?.id || phoneLocal.rows[0]?.id;
       if (savedContactId) {
         await db.query(
@@ -1244,9 +1330,8 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
       return reply.code(existing ? 200 : 201).send({ saved: true, ...saved, name: contact.name, resourceName, phone, otherPhone, otherPhones, emails: emailValues });
     } catch (error: any) {
       request.log.warn({ err: error }, 'Não foi possível salvar contato no Google');
-      if (error?.status === 412) return reply.code(409).send({ error: 'O contato foi alterado no Google. Atualize os dados e tente novamente.', conflict: true });
-      if (error?.status === 429) return reply.code(503).send({ error: 'O Google está temporariamente indisponível. Tente novamente.', retryable: true });
-      return reply.code(502).send({ error: 'Não foi possível salvar o contato no Google Contacts' });
+      const response = googleContactErrorResponse(error);
+      return reply.code(response.status).send(response);
     }
   });
 

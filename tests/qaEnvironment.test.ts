@@ -3,7 +3,7 @@ import test from 'node:test';
 import { isAllowedFrontendOrigin, isLocalHost, parseFrontendOrigins } from '../server/src/config';
 import { currentQaGoogleScenario, qaEvolutionResponse, qaGoogleFailure, qaGooglePeople, setQaGoogleScenario } from '../server/src/qa';
 import { buildExistingConversationQuery } from '../server/src/conversationQueries';
-import { buildGooglePhonePlan, googleIntegrationState, googleSyncErrorResponse } from '../server/src/google-contacts';
+import { buildGoogleContactUpdatePayload, buildGooglePhonePlan, googleContactErrorResponse, googleIntegrationState, googleSyncErrorResponse } from '../server/src/google-contacts';
 import { classifyGooglePhoneMatch, googlePhoneKey } from '../server/src/googleContactReconciliation';
 import { GOOGLE_INTEGRATION_SETTINGS_PATH, googleSidebarIndicator } from '../src/utils/googleSidebarStatus';
 
@@ -67,6 +67,26 @@ test('Google sync preserves the local canonical phone when a resource phone is o
   assert.equal(plan.primaryPhone, '5521990000003');
   assert.equal(plan.secondaryPhone, '5521990000001');
   assert.deepEqual(plan.phones, ['5521990000003', '5521990000001', '5521990000002']);
+});
+
+test('Google contact update payload preserves resource identity and metadata etag', () => {
+  const payload = buildGoogleContactUpdatePayload(
+    { resourceName: 'people/qa-contact', etag: 'etag-current', metadata: { sources: [{ type: 'CONTACT', etag: 'etag-current' }] } },
+    { names: [{ givenName: 'Contato QA' }] },
+  );
+  assert.equal(payload.resourceName, 'people/qa-contact');
+  assert.equal(payload.etag, 'etag-current');
+  assert.deepEqual(payload.metadata, { sources: [{ type: 'CONTACT', etag: 'etag-current' }] });
+});
+
+test('Google contact edit maps provider and local conflicts to actionable responses', () => {
+  assert.equal(googleContactErrorResponse({ status: 400, providerReason: 'failedPrecondition' }).status, 409);
+  assert.equal(googleContactErrorResponse({ status: 400, providerReason: 'failedPrecondition' }).code, 'GOOGLE_CONTACT_CONFLICT');
+  assert.equal(googleContactErrorResponse({ status: 400 }).status, 400);
+  assert.equal(googleContactErrorResponse({ status: 403 }).status, 403);
+  assert.equal(googleContactErrorResponse({ status: 404 }).status, 404);
+  assert.equal(googleContactErrorResponse({ code: '23505', constraint: 'contacts_company_id_phone_key' }).status, 409);
+  assert.equal(googleContactErrorResponse({ code: '23505', constraint: 'contacts_company_id_phone_key' }).code, 'CONTACT_PHONE_CONFLICT');
 });
 
 test('Google identity reconciliation only reuses one provisional WhatsApp contact', () => {
