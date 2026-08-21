@@ -467,6 +467,21 @@ test('SSE de status não altera preview nem ordenação do inbox', () => {
   assert.strictEqual(unchanged, null);
 });
 
+test('Google contact update changes only the conversation contact name', () => {
+  const current = [conversation('conversation-1'), conversation('conversation-2')];
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'conversation.updated',
+    remoteJid: 'conversation-1',
+    phone: current[0]?.contact.phone,
+    contactName: 'Nome salvo no Google',
+  });
+
+  assert.equal(updated?.[0]?.contact.name, 'Nome salvo no Google');
+  assert.equal(updated?.[0]?.lastMessage, current[0]?.lastMessage);
+  assert.equal(updated?.[0]?.lastMessageAt, current[0]?.lastMessageAt);
+  assert.strictEqual(updated?.[1], current[1]);
+});
+
 test('SSE de mídia sem legenda usa resumo do tipo no preview', () => {
   const current = [conversation('conversation-1')];
   const updated = reconcileRealtimeConversation(current, {

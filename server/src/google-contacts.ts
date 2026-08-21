@@ -7,6 +7,8 @@ import { requireAdmin, requireUser } from './auth.js';
 import { decryptSecret, encryptSecret } from './security/encryption.js';
 import { currentQaGoogleScenario, qaGoogleFailure, qaGooglePeople } from './qa.js';
 import { canonicalPhone, phoneIdentityKeys } from './contactDomain.js';
+import { publishRealtimeEvent } from './realtime.js';
+import { classifyGooglePhoneMatch, googlePhoneKey, type GoogleContactCandidate } from './googleContactReconciliation.js';
 
 const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/contacts';
 const GOOGLE_PERSON_FIELDS = [
@@ -495,37 +497,94 @@ async function upsertLocalContacts(companyId: string, people: GooglePerson[]) {
   return contacts.length;
 }
 
-async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]) {
+type GoogleUpsertSummary = {
+  imported: number;
+  created: number;
+  reconciled: number;
+  updated: number;
+  conflicts: number;
+  affectedContactIds: string[];
+};
+
+async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]): Promise<GoogleUpsertSummary> {
   let imported = 0;
+  let created = 0;
+  let reconciled = 0;
+  let updated = 0;
+  let conflicts = 0;
+  const affectedContactIds: string[] = [];
+  const reconciliationAudits: Array<{ contactId: string; beforeName: string; afterName: string; resourceName: string }> = [];
+  const peopleByPhone = new Map<string, Set<string>>();
+  people.forEach((person, index) => {
+    const personKey = person.resourceName || `anonymous:${index}`;
+    for (const phoneValue of person.phoneNumbers || []) {
+      const phone = storagePhone(phoneValue.value || '');
+      const key = phone ? googlePhoneKey(phone) : '';
+      if (!key) continue;
+      const resourceNames = peopleByPhone.get(key) || new Set<string>();
+      resourceNames.add(personKey);
+      peopleByPhone.set(key, resourceNames);
+    }
+  });
+
   for (const person of people) {
     const fields = contactFieldsFromPerson(person);
     if (!fields.name || !fields.phone) continue;
     const requestedPhone = storagePhone(fields.phone);
     if (!requestedPhone) continue;
     const requestedDigits = phoneIdentityKeys(requestedPhone, { defaultCountry: 'BR' }).filter((value) => /^\d+$/.test(value));
-    const existing = await db.query<{ id: string; phone: string; manual_override: Record<string, string> }>(
-      `SELECT id, phone, manual_override FROM contacts
-       WHERE company_id = $1 AND (google_resource_name = $2
-          OR regexp_replace(phone, '\\D', '', 'g') = ANY($3::text[])
-          OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = contacts.company_id AND cp.contact_id = contacts.id AND cp.normalized_phone = ANY($3::text[])))
-       ORDER BY CASE WHEN google_resource_name = $2 THEN 0 ELSE 1 END LIMIT 1`,
+    const existing = await db.query<{
+      id: string;
+      name: string;
+      phone: string;
+      manual_override: Record<string, unknown> | null;
+      source: string | null;
+      google_resource_name: string | null;
+      has_whatsapp_identity: boolean;
+      has_whatsapp_phone: boolean;
+    }>(
+      `SELECT c.id, c.name, c.phone, c.manual_override, c.source, c.google_resource_name,
+          EXISTS (SELECT 1 FROM contact_channel_identities ci WHERE ci.company_id = c.company_id AND ci.contact_id = c.id AND ci.channel = 'whatsapp') AS has_whatsapp_identity,
+          EXISTS (SELECT 1 FROM contact_phones cpw WHERE cpw.company_id = c.company_id AND cpw.contact_id = c.id AND cpw.source = 'whatsapp') AS has_whatsapp_phone
+       FROM contacts c
+       WHERE c.company_id = $1 AND (c.google_resource_name = $2
+          OR regexp_replace(c.phone, '\\D', '', 'g') = ANY($3::text[])
+          OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = c.company_id AND cp.contact_id = c.id AND cp.normalized_phone = ANY($3::text[])))`,
       [companyId, person.resourceName || '', requestedDigits],
     );
-    const row = existing.rows[0];
+    const googlePersonCount = peopleByPhone.get(googlePhoneKey(requestedPhone))?.size || 1;
+    const candidates: GoogleContactCandidate[] = existing.rows.map((candidate) => ({
+      id: candidate.id,
+      source: candidate.source,
+      manualOverride: candidate.manual_override,
+      hasWhatsappIdentity: candidate.has_whatsapp_identity,
+      hasWhatsappPhone: candidate.has_whatsapp_phone,
+      googleResourceName: candidate.google_resource_name,
+    }));
+    const decision = classifyGooglePhoneMatch({ candidates, googlePersonCount, resourceName: person.resourceName });
+    if (decision === 'ambiguous') {
+      conflicts += 1;
+      continue;
+    }
+    const row = existing.rows.find((candidate) => candidate.google_resource_name === person.resourceName) || existing.rows[0];
     let contactId = row?.id;
     if (!contactId) {
-      const created = await db.query<{ id: string }>(
+      const inserted = await db.query<{ id: string }>(
         `INSERT INTO contacts (company_id, name, phone, email, avatar_url, cpf, address, secondary_phone,
           google_resource_name, source, nickname, birthday, company, job_title, website, notes,
           google_etag, google_data, google_synced_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'google', $10, $11, $12, $13, $14, $15, $16, $17, now())
-         ON CONFLICT (company_id, phone) DO UPDATE SET google_resource_name = COALESCE(EXCLUDED.google_resource_name, contacts.google_resource_name), updated_at = now()
+         ON CONFLICT (company_id, phone) DO NOTHING
          RETURNING id`,
-          [companyId, fields.name, requestedPhone, fields.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, fields.otherPhones[0] || null, fields.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, fields.etag || null, fields.googleData],
+        [companyId, fields.name, requestedPhone, fields.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, fields.otherPhones[0] || null, fields.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, fields.etag || null, fields.googleData],
       );
-      contactId = created.rows[0]?.id;
+      contactId = inserted.rows[0]?.id;
+      if (contactId) created += 1;
     }
-    if (!contactId) continue;
+    if (!contactId) {
+      conflicts += 1;
+      continue;
+    }
     const manualOverride = (row?.manual_override || {}) as Record<string, string>;
     const preservePhone = manualOverride.phone === 'manual';
     const preserveEmail = manualOverride.email === 'manual';
@@ -541,7 +600,7 @@ async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]
       phoneConflict = phoneOwner.rows.length > 0;
     }
     const phonePlan = buildGooglePhonePlan({
-      requestedPhone: requestedPhone,
+      requestedPhone,
       otherPhones: fields.otherPhones,
       existingPhone: row?.phone,
       preserveExistingPhone: preservePhone || phoneConflict,
@@ -549,7 +608,7 @@ async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]
     const primaryPhone = preservePhone || phoneConflict
       ? phonePlan.primaryPhone
       : (storagePhone(phonePlan.primaryPhone) || phonePlan.primaryPhone);
-    const plannedPhones = phonePlan.phones.map((phone) => storagePhone(phone) || phone);
+    const plannedPhones = Array.from(new Set(phonePlan.phones.map((phone) => storagePhone(phone) || phone)));
     const secondaryPhone = plannedPhones.find((phone) => phone !== primaryPhone) || null;
     await db.query(
       `UPDATE contacts SET
@@ -577,7 +636,7 @@ async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]
         `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
          VALUES ($1, $2, $3, $4, $5, 'google')
          ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET phone = EXCLUDED.phone, is_primary = EXCLUDED.is_primary, source = 'google', updated_at = now()`,
-        [companyId, contactId, phone, normalizePhone(phone), index === 0 && !preservePhone],
+        [companyId, contactId, phone, normalizePhone(storagePhone(phone) || phone), index === 0 && !preservePhone],
       );
     }
     for (const [index, email] of fields.emails.entries()) {
@@ -589,13 +648,49 @@ async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]
       );
     }
     imported += 1;
+    affectedContactIds.push(contactId);
+    if (decision === 'safe_reconcile') {
+      reconciled += 1;
+      reconciliationAudits.push({ contactId, beforeName: row?.name || '', afterName: fields.name, resourceName: fields.resourceName });
+    }
+    if (decision === 'linked') updated += 1;
   }
-  return imported;
+  if (reconciliationAudits.length) {
+    await db.query(
+      `INSERT INTO contact_audit_logs (company_id, contact_id, actor_user_id, action, before_data, after_data)
+       SELECT $1, item.contact_id, NULL, 'contact.google_reconciled', item.before_data, item.after_data
+       FROM jsonb_to_recordset($2::jsonb) AS item(contact_id uuid, before_data jsonb, after_data jsonb)`,
+      [companyId, JSON.stringify(reconciliationAudits.map((audit) => ({
+        contact_id: audit.contactId,
+        before_data: { name: audit.beforeName, source: 'whatsapp_provisional' },
+        after_data: { name: audit.afterName, googleResourceName: audit.resourceName },
+      })))],
+    );
+  }
+  return { imported, created, reconciled, updated, conflicts, affectedContactIds: Array.from(new Set(affectedContactIds)) };
+}
+
+async function publishGoogleContactUpdates(companyId: string, contactIds: string[]) {
+  if (!contactIds.length) return;
+  const conversations = await db.query<{ remoteJid: string; phone: string; name: string }>(
+    `SELECT cv.evolution_remote_jid AS "remoteJid", c.phone, c.name
+     FROM conversations cv JOIN contacts c ON c.id = cv.contact_id AND c.company_id = cv.company_id
+     WHERE cv.company_id = $1 AND cv.contact_id = ANY($2::uuid[])`, [companyId, contactIds],
+  );
+  for (const conversation of conversations.rows) {
+    if (!conversation.remoteJid || !conversation.name) continue;
+    publishRealtimeEvent(companyId, 'conversation.updated', {
+      remoteJid: conversation.remoteJid,
+      phone: conversation.phone,
+      contactName: conversation.name,
+    });
+  }
 }
 
 export async function syncGoogleContactsForCompany(companyId: string) {
   const people = await listGoogleContactsForCompany(companyId, true);
-  const imported = await upsertFullLocalContacts(companyId, people);
+  const upsertResult = await upsertFullLocalContacts(companyId, people);
+  await publishGoogleContactUpdates(companyId, upsertResult.affectedContactIds);
   const resourceNames = people.map((person) => person.resourceName).filter((value): value is string => Boolean(value));
   await db.query(
     `UPDATE contacts
@@ -610,7 +705,7 @@ export async function syncGoogleContactsForCompany(companyId: string) {
        AND NOT (google_resource_name = ANY($2::text[]))`,
     [companyId, resourceNames],
   );
-  return { imported, total: people.length };
+  return { ...upsertResult, total: people.length };
 }
 
 type GoogleSyncError = {
@@ -805,7 +900,8 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
         const people = qaGooglePeople() as GooglePerson[];
         const scenario = currentQaGoogleScenario();
         const importedPeople = scenario === 'partial' ? people.slice(0, 1) : people;
-        const imported = await upsertFullLocalContacts(request.user!.companyId, importedPeople);
+        const upsertResult = await upsertFullLocalContacts(request.user!.companyId, importedPeople);
+        await publishGoogleContactUpdates(request.user!.companyId, upsertResult.affectedContactIds);
         const resourceNames = importedPeople
           .map((person) => person.resourceName)
           .filter((value): value is string => Boolean(value));
@@ -821,8 +917,12 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
           [request.user!.companyId, resourceNames],
         );
         const result = {
-          imported,
+          imported: upsertResult.imported,
           total: people.length,
+          created: upsertResult.created,
+          reconciled: upsertResult.reconciled,
+          updated: upsertResult.updated,
+          conflicts: upsertResult.conflicts,
           scenario,
           fullSync: scenario === 'sync-token-expired' || scenario === 'external-delete',
           partial: scenario === 'partial',
@@ -957,7 +1057,8 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
         resourceName: contact.resourceName || `people/qa-${phone}`,
         etag: `qa-etag-${Date.now()}`,
       } as GooglePerson;
-      await upsertFullLocalContacts(request.user!.companyId, [person]);
+      const upsertResult = await upsertFullLocalContacts(request.user!.companyId, [person]);
+      await publishGoogleContactUpdates(request.user!.companyId, upsertResult.affectedContactIds);
       const saved = contactFieldsFromPerson(person);
       return { saved: true, qaMock: true, name: saved.name, resourceName: person.resourceName, phone, otherPhone: saved.otherPhones[0] || '' };
     }
@@ -1058,7 +1159,7 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
             `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
              VALUES ($1, $2, $3, $4, $5, 'google')
              ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET phone = EXCLUDED.phone, is_primary = EXCLUDED.is_primary, source = 'google', updated_at = now()`,
-            [request.user!.companyId, savedContactId, value, normalizePhone(value), index === 0],
+            [request.user!.companyId, savedContactId, value, normalizePhone(storagePhone(value) || value), index === 0],
           );
         }
         for (const [index, value] of emailValues.entries()) {

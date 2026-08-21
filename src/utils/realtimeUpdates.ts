@@ -17,6 +17,7 @@ export type RealtimeEventPayload = {
   leaseOwnerUserId?: string | null;
   leaseOwnerName?: string | null;
   leaseExpiresAt?: string | null;
+  contactName?: string | null;
   messageTimestamp?: number;
   message?: Message;
   [key: string]: unknown;
@@ -141,6 +142,14 @@ const updateConversationFromStatus = (
 ): Conversation | null => {
   let next: Conversation = conversation;
   let changed = false;
+
+  if (typeof event.contactName === 'string' && event.contactName.trim()) {
+    const contactName = event.contactName.trim();
+    if (conversation.contact.name !== contactName) {
+      changed = true;
+      next = { ...next, contact: { ...next.contact, name: contactName } };
+    }
+  }
 
   if (hasOwn(event, 'assignedUserId')) {
     if (event.assignedUserId === null) {

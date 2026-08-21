@@ -47,6 +47,7 @@ export const GoogleContactsIntegrationCard: React.FC = () => {
     try {
       const result = await apiRequest<GoogleStatus>('/api/google/status');
       setStatus(result);
+      window.dispatchEvent(new CustomEvent('vitstock:google-status', { detail: result.state }));
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Não foi possível carregar o estado do Google Contacts.');
     } finally {
@@ -88,6 +89,7 @@ export const GoogleContactsIntegrationCard: React.FC = () => {
   const sync = async () => {
     if (!isAdmin) return;
     setAction('sync'); setError(''); setFeedback('');
+    window.dispatchEvent(new CustomEvent('vitstock:google-status', { detail: 'syncing' }));
     try {
       const result = await apiRequest<{ imported: number; total: number; partial?: boolean; errors?: unknown[] }>('/api/google/sync', { method: 'POST' });
       const failed = result.errors?.length ?? Math.max(0, result.total - result.imported);

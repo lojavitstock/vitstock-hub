@@ -4,6 +4,8 @@ import { isAllowedFrontendOrigin, isLocalHost, parseFrontendOrigins } from '../s
 import { currentQaGoogleScenario, qaEvolutionResponse, qaGoogleFailure, qaGooglePeople, setQaGoogleScenario } from '../server/src/qa';
 import { buildExistingConversationQuery } from '../server/src/conversationQueries';
 import { buildGooglePhonePlan, googleIntegrationState, googleSyncErrorResponse } from '../server/src/google-contacts';
+import { classifyGooglePhoneMatch, googlePhoneKey } from '../server/src/googleContactReconciliation';
+import { GOOGLE_INTEGRATION_SETTINGS_PATH, googleSidebarIndicator } from '../src/utils/googleSidebarStatus';
 
 test('QA host guard accepts only local database/provider targets', () => {
   assert.equal(isLocalHost('postgresql://vitstock@127.0.0.1:55432/vitstock_qa'), true);
@@ -67,6 +69,27 @@ test('Google sync preserves the local canonical phone when a resource phone is o
   assert.deepEqual(plan.phones, ['5521990000003', '5521990000001', '5521990000002']);
 });
 
+test('Google identity reconciliation only reuses one provisional WhatsApp contact', () => {
+  const candidate = {
+    id: 'whatsapp-contact',
+    source: 'hub',
+    manualOverride: {},
+    hasWhatsappIdentity: true,
+    hasWhatsappPhone: true,
+    googleResourceName: null,
+  };
+  assert.equal(classifyGooglePhoneMatch({ candidates: [candidate], googlePersonCount: 1, resourceName: 'people/one' }), 'safe_reconcile');
+  assert.equal(classifyGooglePhoneMatch({ candidates: [{ ...candidate, source: 'manual' }], googlePersonCount: 1, resourceName: 'people/one' }), 'ambiguous');
+  assert.equal(classifyGooglePhoneMatch({ candidates: [candidate, { ...candidate, id: 'manual-contact', source: 'manual' }], googlePersonCount: 1, resourceName: 'people/one' }), 'ambiguous');
+  assert.equal(classifyGooglePhoneMatch({ candidates: [candidate], googlePersonCount: 2, resourceName: 'people/one' }), 'ambiguous');
+  assert.equal(classifyGooglePhoneMatch({ candidates: [{ ...candidate, googleResourceName: 'people/one' }], googlePersonCount: 1, resourceName: 'people/one' }), 'linked');
+});
+
+test('Google identity reconciliation uses exact canonical phone keys', () => {
+  assert.equal(googlePhoneKey('+5521999999999'), googlePhoneKey('21999999999'));
+  assert.notEqual(googlePhoneKey('2199999999'), googlePhoneKey('21999999999'));
+});
+
 test('Google integration state is tenant-local and maps persisted sync outcomes', () => {
   assert.equal(googleIntegrationState(null), 'not_connected');
   assert.equal(googleIntegrationState({ sync_status: 'never' }), 'connected');
@@ -75,6 +98,15 @@ test('Google integration state is tenant-local and maps persisted sync outcomes'
   assert.equal(googleIntegrationState({ sync_status: 'auth_required' }), 'reconnect_required');
   assert.equal(googleIntegrationState({ sync_status: 'error' }), 'error');
   assert.equal(googleIntegrationState({ sync_status: 'unknown' }), 'connected');
+});
+
+test('Google sidebar indicator exposes every connection state and one settings target', () => {
+  assert.equal(GOOGLE_INTEGRATION_SETTINGS_PATH, '/configuracoes?tab=integracoes');
+  assert.equal(googleSidebarIndicator('connected').tone, 'connected');
+  assert.equal(googleSidebarIndicator('syncing').icon, 'sync');
+  assert.equal(googleSidebarIndicator('reconnect_required').tone, 'error');
+  assert.equal(googleSidebarIndicator('error').tone, 'error');
+  assert.equal(googleSidebarIndicator('not_connected').tone, 'idle');
 });
 
 test('Evolution QA adapter is fail-closed while covering app read routes', async () => {

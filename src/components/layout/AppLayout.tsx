@@ -8,16 +8,22 @@ import {
   Wifi, 
   WifiOff,
   RefreshCw,
-  LogOut
+  LogOut,
+  Cloud,
+  CloudOff,
 } from 'lucide-react';
 import { EvolutionApiService } from '../../services/evolutionApi';
 import { useAuth } from '../../auth/AuthContext';
+import { apiRequest } from '../../services/api';
+import { GOOGLE_INTEGRATION_SETTINGS_PATH, googleSidebarIndicator, type GoogleSidebarState } from '../../utils/googleSidebarStatus';
 
 export const AppLayout: React.FC = () => {
   const location = useLocation();
   const { user: currentUser, logout } = useAuth();
   const instanceName = 'vitstock_atendimento';
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'connecting' | 'disconnected'>('connecting');
+  const [googleStatus, setGoogleStatus] = useState<GoogleSidebarState>('not_connected');
+  const googleIndicator = googleSidebarIndicator(googleStatus);
 
   useEffect(() => {
     const syncSharedStatus = (event: Event) => {
@@ -44,6 +50,37 @@ export const AppLayout: React.FC = () => {
       window.removeEventListener('online', handleOnline);
     };
   }, [instanceName]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const syncGoogleStatus = (event: Event) => {
+      const state = (event as CustomEvent<GoogleSidebarState>).detail;
+      if (state === 'not_connected' || state === 'connected' || state === 'reconnect_required' || state === 'syncing' || state === 'error') setGoogleStatus(state);
+    };
+    const checkGoogleStatus = async () => {
+      try {
+        const result = await apiRequest<{ state: GoogleSidebarState }>('/api/google/status');
+        if (!cancelled) setGoogleStatus(result.state || 'not_connected');
+      } catch {
+        if (!cancelled) setGoogleStatus('error');
+      }
+    };
+    window.addEventListener('vitstock:google-status', syncGoogleStatus);
+    void checkGoogleStatus();
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void checkGoogleStatus();
+    }, 60_000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void checkGoogleStatus();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('vitstock:google-status', syncGoogleStatus);
+    };
+  }, [currentUser?.id]);
 
   const navItems: Array<{
     path: string;
@@ -120,6 +157,25 @@ export const AppLayout: React.FC = () => {
 
         {/* Bottom Section: Status da Conexão & Perfil do Atendente */}
         <div className="border-t border-[#344047] bg-[#151e23] p-2">
+
+          {/* Status Google Contacts: leitura disponível para toda a equipe. */}
+          <NavLink
+            to={GOOGLE_INTEGRATION_SETTINGS_PATH}
+            className="mb-2 flex h-11 items-center justify-center rounded-xl border border-[#3a474e] bg-[#20292f] transition-colors hover:border-amber-300/50 hover:bg-[#263138]"
+            title={googleIndicator.label}
+            aria-label={googleIndicator.label}
+          >
+            <span className="relative flex h-2.5 w-2.5" aria-hidden="true">
+              <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${googleIndicator.tone === 'connected' ? 'bg-emerald-500' : googleIndicator.tone === 'syncing' ? 'bg-sky-400' : googleIndicator.tone === 'error' ? 'bg-red-500' : 'bg-slate-500'}`}></span>
+            </span>
+            {googleIndicator.icon === 'cloud' ? (
+              <Cloud className="ml-2 h-4 w-4 text-emerald-400" aria-hidden="true" />
+            ) : googleIndicator.icon === 'sync' ? (
+              <RefreshCw className="ml-2 h-4 w-4 animate-spin text-sky-400" aria-hidden="true" />
+            ) : (
+              <CloudOff className={`ml-2 h-4 w-4 ${googleIndicator.tone === 'error' ? 'text-red-400' : 'text-slate-400'}`} aria-hidden="true" />
+            )}
+          </NavLink>
           
           {/* Status WhatsApp (Evolution API em Tempo Real) */}
           <div
