@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { db } from './db.js';
 import { canMergeContacts } from './contactMerge.js';
+import { buildDuplicateGroups } from './contactDuplicates.js';
 import { requireAdmin, requireUser } from './auth.js';
 import {
   canonicalPhone,
@@ -365,32 +366,45 @@ export async function registerContactRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/contacts/duplicates', { preHandler: requireUser }, async (request) => {
-    const phoneRows = await db.query<{ normalized_phone: string; phone: string; contact_id: string; id: string; name: string; archived: boolean }>(
-      `SELECT p.normalized_phone, p.phone, p.contact_id, c.id, c.name, c.archived_at IS NOT NULL AS archived
-       FROM contact_phones p JOIN contacts c ON c.id = p.contact_id
-       WHERE p.company_id = $1 AND c.company_id = $1 ORDER BY c.id, p.id`, [request.user!.companyId],
+    const companyId = request.user!.companyId;
+    const rows = await db.query(
+      `SELECT c.*, MAX(CASE WHEN cv.is_group = false THEN cv.last_message_at END) AS last_interaction,
+              MIN(CASE WHEN cv.is_group = false THEN cv.created_at END) AS first_interaction,
+              count(DISTINCT CASE WHEN cv.is_group = false THEN cv.id END)::int AS conversation_count,
+              EXISTS (SELECT 1 FROM contact_channel_identities ci WHERE ci.company_id = c.company_id AND ci.contact_id = c.id AND ci.channel = 'whatsapp') AS whatsapp_linked
+       FROM contacts c LEFT JOIN conversations cv ON cv.contact_id = c.id
+       WHERE c.company_id = $1
+         AND c.merged_into_contact_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM conversations cg WHERE cg.contact_id = c.id AND cg.is_group = true)
+       GROUP BY c.id`, [companyId],
     );
-    const phoneGroups = new Map<string, Map<string, { id: string; name: string; phone: string; archived: boolean }>>();
-    for (const row of phoneRows.rows) {
-      const key = canonicalPhone(row.phone, { defaultCountry: 'BR' }) || normalizeContactPhone(row.phone);
-      if (!key) continue;
-      const contacts = phoneGroups.get(key) || new Map<string, { id: string; name: string; phone: string; archived: boolean }>();
-      contacts.set(row.contact_id, { id: row.id, name: row.name, phone: row.phone, archived: row.archived });
-      phoneGroups.set(key, contacts);
-    }
-    const phoneDuplicates = Array.from(phoneGroups.entries())
-      .filter(([, contacts]) => contacts.size > 1)
-      .map(([key, contacts]) => ({ kind: 'phone', key, contacts: Array.from(contacts.values()) }));
-    const emailDuplicates = await db.query(
-      `SELECT e.normalized_email AS key, json_agg(json_build_object('id', c.id, 'name', c.name, 'phone', c.phone, 'archived', c.archived_at IS NOT NULL) ORDER BY c.id) AS contacts
-       FROM contact_emails e JOIN contacts c ON c.id = e.contact_id
-       WHERE e.company_id = $1 AND c.company_id = $1
-       GROUP BY e.normalized_email HAVING count(DISTINCT e.contact_id) > 1`, [request.user!.companyId],
+    const ids = rows.rows.map((row) => row.id);
+    const channels = await loadPhonesAndEmails(companyId, ids);
+    const tags = await loadTags(companyId, ids);
+    const phoneRows = await db.query<{ contact_id: string; phone: string }>(
+      `SELECT contact_id, phone FROM contact_phones WHERE company_id = $1 AND contact_id = ANY($2::uuid[])`, [companyId, ids],
     );
-    return { duplicates: phoneDuplicates.concat(emailDuplicates.rows.map((row) => ({ kind: 'email', key: row.key, contacts: row.contacts }))) };
+    const emailRows = await db.query<{ contact_id: string; email: string; normalized_email: string }>(
+      `SELECT contact_id, email, normalized_email FROM contact_emails WHERE company_id = $1 AND contact_id = ANY($2::uuid[])`, [companyId, ids],
+    );
+    const decisions = await db.query<{ contact_a_id: string; contact_b_id: string; decision: 'different' | 'merged' }>(
+      `SELECT contact_a_id, contact_b_id, decision
+       FROM contact_duplicate_decisions
+       WHERE company_id = $1 AND contact_a_id = ANY($2::uuid[]) AND contact_b_id = ANY($2::uuid[])`, [companyId, ids],
+    );
+    const contacts = enrichRows(rows.rows, tags, channels).map((contact) => ({ ...contact, first_interaction: contact.first_interaction || null }));
+    const sources = [
+      ...phoneRows.rows.map((row) => ({ contactId: row.contact_id, kind: 'phone' as const, key: canonicalPhone(row.phone, { defaultCountry: 'BR' }) || normalizeContactPhone(row.phone), value: row.phone })),
+      ...rows.rows.map((row) => ({ contactId: row.id, kind: 'phone' as const, key: canonicalPhone(row.phone, { defaultCountry: 'BR' }) || normalizeContactPhone(row.phone), value: row.phone })),
+      ...emailRows.rows.map((row) => ({ contactId: row.contact_id, kind: 'email' as const, key: row.normalized_email || normalizeContactEmail(row.email), value: row.email })),
+    ].filter((source) => Boolean(source.key));
+    const groups = buildDuplicateGroups(contacts, sources, decisions.rows.map((row) => ({ contactAId: row.contact_a_id, contactBId: row.contact_b_id, decision: row.decision })));
+    const reason = queryString(request, 'reason');
+    const filtered = reason && ['phone', 'email', 'multiple'].includes(reason) ? groups.filter((group) => group.kind === reason) : groups;
+    return { duplicates: filtered, summary: { cases: filtered.length, contacts: new Set(filtered.flatMap((group) => group.contacts.map((contact) => contact.id))).size } };
   });
 
-  app.post('/api/contacts/duplicate-decisions', { preHandler: requireUser }, async (request, reply) => {
+  app.post('/api/contacts/duplicate-decisions', { preHandler: requireAdmin }, async (request, reply) => {
     const parsed = z.object({ contactAId: z.string().uuid(), contactBId: z.string().uuid(), decision: z.enum(['different', 'merged']) }).safeParse(request.body);
     if (!parsed.success || parsed.data.contactAId === parsed.data.contactBId) return reply.code(400).send({ error: 'Decisão inválida' });
     const [a, b] = orderedContactPair(parsed.data.contactAId, parsed.data.contactBId);
