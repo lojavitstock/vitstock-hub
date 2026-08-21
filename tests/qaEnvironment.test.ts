@@ -85,6 +85,32 @@ test('Google identity reconciliation only reuses one provisional WhatsApp contac
   assert.equal(classifyGooglePhoneMatch({ candidates: [{ ...candidate, googleResourceName: 'people/one' }], googlePersonCount: 1, resourceName: 'people/one' }), 'linked');
 });
 
+test('Google identity reconciliation consolidates a linked Google row into the WhatsApp principal', () => {
+  const linked = {
+    id: 'google-contact',
+    source: 'google',
+    manualOverride: {},
+    hasWhatsappIdentity: false,
+    hasWhatsappPhone: false,
+    googleResourceName: 'people/one',
+    conversationCount: 0,
+  };
+  const provisional = {
+    id: 'whatsapp-contact',
+    source: 'hub',
+    manualOverride: {},
+    hasWhatsappIdentity: true,
+    hasWhatsappPhone: true,
+    googleResourceName: null,
+    conversationCount: 2,
+  };
+  assert.equal(classifyGooglePhoneMatch({ candidates: [linked, provisional], googlePersonCount: 1, resourceName: 'people/one' }), 'safe_reconcile_linked');
+  assert.equal(classifyGooglePhoneMatch({ candidates: [linked, provisional, { ...provisional, id: 'manual' }], googlePersonCount: 1, resourceName: 'people/one' }), 'ambiguous');
+  assert.equal(classifyGooglePhoneMatch({ candidates: [linked, { ...provisional, manualOverride: { name: 'manual' } }], googlePersonCount: 1, resourceName: 'people/one' }), 'ambiguous');
+  assert.equal(classifyGooglePhoneMatch({ candidates: [linked, provisional], googlePersonCount: 2, resourceName: 'people/one' }), 'ambiguous');
+  assert.equal(classifyGooglePhoneMatch({ candidates: [linked], googlePersonCount: 1, resourceName: 'people/one' }), 'linked');
+});
+
 test('Google identity reconciliation uses exact canonical phone keys', () => {
   assert.equal(googlePhoneKey('+5521999999999'), googlePhoneKey('21999999999'));
   assert.notEqual(googlePhoneKey('2199999999'), googlePhoneKey('21999999999'));

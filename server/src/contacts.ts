@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { db } from './db.js';
-import { canMergeContacts } from './contactMerge.js';
+import { mergeContactsInTransaction } from './contactMerge.js';
 import { buildDuplicateGroups } from './contactDuplicates.js';
 import { requireAdmin, requireUser } from './auth.js';
 import {
@@ -418,22 +418,16 @@ export async function registerContactRoutes(app: FastifyInstance) {
     const client = await db.connect();
     try {
       await client.query('BEGIN');
-      const contacts = await client.query('SELECT * FROM contacts WHERE company_id = $1 AND id = ANY($2::uuid[]) FOR UPDATE', [request.user!.companyId, [parsed.data.sourceContactId, parsed.data.targetContactId]]);
-      const source = contacts.rows.find((row) => row.id === parsed.data.sourceContactId);
-      const target = contacts.rows.find((row) => row.id === parsed.data.targetContactId);
-      if (!canMergeContacts(source, target)) { await client.query('ROLLBACK'); return reply.code(404).send({ error: 'Contatos não encontrados ou já mesclados' }); }
-      const merge = await client.query('INSERT INTO contact_merge_operations (company_id, source_contact_id, target_contact_id, performed_by, field_snapshot) VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING id', [request.user!.companyId, source.id, target.id, request.user!.id, JSON.stringify({ source, targetVersion: target.version })]);
-      const mergeId = merge.rows[0]!.id;
-      const moved = await client.query('UPDATE conversations SET contact_id = $1, updated_at = now() WHERE company_id = $2 AND contact_id = $3 RETURNING id', [target.id, request.user!.companyId, source.id]);
-      for (const conversation of moved.rows) await client.query('INSERT INTO contact_merge_conversations (merge_id, conversation_id, original_contact_id) VALUES ($1, $2, $3)', [mergeId, conversation.id, source.id]);
-      await client.query('INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, label, is_primary, source) SELECT company_id, $1, phone, normalized_phone, label, false, source FROM contact_phones WHERE contact_id = $2 ON CONFLICT DO NOTHING', [target.id, source.id]);
-      await client.query('INSERT INTO contact_emails (company_id, contact_id, email, normalized_email, label, is_primary, source) SELECT company_id, $1, email, normalized_email, label, false, source FROM contact_emails WHERE contact_id = $2 ON CONFLICT DO NOTHING', [target.id, source.id]);
-      await client.query('INSERT INTO contact_tag_links (company_id, contact_id, tag_id) SELECT company_id, $1, tag_id FROM contact_tag_links WHERE contact_id = $2 ON CONFLICT DO NOTHING', [target.id, source.id]);
-      await client.query('UPDATE contacts SET merged_into_contact_id = $1, archived_at = now(), version = version + 1, updated_at = now() WHERE id = $2 AND company_id = $3', [target.id, source.id, request.user!.companyId]);
-      await client.query('UPDATE contacts SET version = version + 1, updated_at = now() WHERE id = $1', [target.id]);
+      const merge = await mergeContactsInTransaction(client, {
+        companyId: request.user!.companyId,
+        sourceContactId: parsed.data.sourceContactId,
+        targetContactId: parsed.data.targetContactId,
+        performedBy: request.user!.id,
+      });
+      if (!merge) { await client.query('ROLLBACK'); return reply.code(404).send({ error: 'Contatos não encontrados ou já mesclados' }); }
       await client.query('COMMIT');
-      await writeAudit(request.user!.companyId, target.id, request.user!.id, 'contact.merged', { sourceId: source.id }, { targetId: target.id, mergeId });
-      return { merged: true, mergeId };
+      await writeAudit(request.user!.companyId, merge.target.id as string, request.user!.id, 'contact.merged', { sourceId: merge.source.id }, { targetId: merge.target.id, mergeId: merge.mergeId });
+      return { merged: true, mergeId: merge.mergeId };
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   });
 

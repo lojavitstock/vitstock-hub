@@ -7,9 +7,10 @@ export type GoogleContactCandidate = {
   hasWhatsappIdentity: boolean;
   hasWhatsappPhone: boolean;
   googleResourceName?: string | null;
+  conversationCount?: number;
 };
 
-export type GooglePhoneMatchDecision = 'linked' | 'safe_reconcile' | 'create' | 'ambiguous';
+export type GooglePhoneMatchDecision = 'linked' | 'safe_reconcile' | 'safe_reconcile_linked' | 'create' | 'ambiguous';
 
 /**
  * Decides whether a Google person can reuse a local WhatsApp contact.
@@ -25,19 +26,30 @@ export function classifyGooglePhoneMatch(input: {
     Boolean(input.resourceName)
     && candidate.googleResourceName === input.resourceName
   ));
-  if (linked.length === 1) return 'linked';
   if (linked.length > 1) return 'ambiguous';
   if (input.googlePersonCount !== 1) return 'ambiguous';
+  if (linked.length === 1) {
+    const additional = input.candidates.filter((candidate) => candidate.id !== linked[0]!.id);
+    const provisional = additional.filter(isProvisionalWhatsapp);
+    // A linked Google row can be a duplicate created before WhatsApp identity
+    // reconciliation existed. Only the exact one-Google + one-provisional
+    // shape is safe to consolidate automatically.
+    if (additional.length === 1 && provisional.length === 1) return 'safe_reconcile_linked';
+    return additional.length ? 'ambiguous' : 'linked';
+  }
   if (input.candidates.length === 0) return 'create';
   if (input.candidates.length !== 1) return 'ambiguous';
 
   const candidate = input.candidates[0]!;
+  return isProvisionalWhatsapp(candidate) ? 'safe_reconcile' : 'ambiguous';
+}
+
+function isProvisionalWhatsapp(candidate: GoogleContactCandidate) {
   const hasManualOverride = Boolean(candidate.manualOverride && Object.keys(candidate.manualOverride).length);
-  const isProvisionalWhatsapp = candidate.source === 'hub'
+  return candidate.source === 'hub'
     && (candidate.hasWhatsappIdentity || candidate.hasWhatsappPhone)
     && !hasManualOverride
     && !candidate.googleResourceName;
-  return isProvisionalWhatsapp ? 'safe_reconcile' : 'ambiguous';
 }
 
 export function googlePhoneKey(value: string) {

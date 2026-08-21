@@ -10,6 +10,7 @@
     "migrate": "tsx src/scripts/migrate.ts",
     "seed:admin": "tsx src/scripts/seed-admin.ts",
     "qa:seed": "tsx src/scripts/qa-seed.ts",
+    "reconcile:google-whatsapp": "tsx src/scripts/reconcile-google-whatsapp.ts",
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

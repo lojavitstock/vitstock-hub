@@ -9,6 +9,7 @@ import { currentQaGoogleScenario, qaGoogleFailure, qaGooglePeople } from './qa.j
 import { canonicalPhone, phoneIdentityKeys } from './contactDomain.js';
 import { publishRealtimeEvent } from './realtime.js';
 import { classifyGooglePhoneMatch, googlePhoneKey, type GoogleContactCandidate } from './googleContactReconciliation.js';
+import { mergeContactsInTransaction } from './contactMerge.js';
 
 const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/contacts';
 const GOOGLE_PERSON_FIELDS = [
@@ -506,6 +507,99 @@ type GoogleUpsertSummary = {
   affectedContactIds: string[];
 };
 
+type ExistingGoogleMatch = {
+  id: string;
+  name: string;
+  phone: string;
+  manual_override: Record<string, unknown> | null;
+  source: string | null;
+  google_resource_name: string | null;
+  has_whatsapp_identity: boolean;
+  has_whatsapp_phone: boolean;
+  conversation_count: number;
+};
+
+type SqlExecutor = {
+  query: (text: string, values?: unknown[]) => Promise<{ rows: any[] }>;
+};
+
+async function applyGoogleFieldsToContact(
+  executor: SqlExecutor,
+  companyId: string,
+  contactId: string,
+  row: ExistingGoogleMatch,
+  fields: ReturnType<typeof contactFieldsFromPerson>,
+  requestedPhone: string,
+  requestedDigits: string[],
+) {
+  const manualOverride = (row.manual_override || {}) as Record<string, string>;
+  const preservePhone = manualOverride.phone === 'manual';
+  const preserveEmail = manualOverride.email === 'manual';
+  let phoneConflict = false;
+  if (row.phone) {
+    const phoneOwner = await executor.query(
+      `SELECT id FROM contacts
+       WHERE company_id = $1 AND id <> $3
+         AND (regexp_replace(phone, '\\D', '', 'g') = ANY($2::text[])
+              OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = contacts.company_id AND cp.contact_id = contacts.id AND cp.normalized_phone = ANY($2::text[])))
+       LIMIT 1`, [companyId, requestedDigits, contactId],
+    );
+    phoneConflict = phoneOwner.rows.length > 0;
+  }
+  const phonePlan = buildGooglePhonePlan({
+    requestedPhone,
+    otherPhones: fields.otherPhones,
+    existingPhone: row.phone,
+    preserveExistingPhone: preservePhone || phoneConflict,
+  });
+  const primaryPhone = preservePhone || phoneConflict
+    ? phonePlan.primaryPhone
+    : (storagePhone(phonePlan.primaryPhone) || phonePlan.primaryPhone);
+  const plannedPhones = Array.from(new Set(phonePlan.phones.map((phone) => storagePhone(phone) || phone)));
+  const secondaryPhone = plannedPhones.find((phone) => phone !== primaryPhone) || null;
+  await executor.query(
+    `UPDATE contacts SET
+       name = CASE WHEN manual_override ? 'name' THEN name ELSE $2 END,
+       phone = CASE WHEN manual_override ? 'phone' THEN phone ELSE $3 END,
+       email = CASE WHEN manual_override ? 'email' THEN email ELSE $4 END,
+       avatar_url = COALESCE($5, avatar_url), cpf = CASE WHEN manual_override ? 'cpf' THEN cpf ELSE $6 END,
+       address = CASE WHEN manual_override ? 'address' THEN address ELSE $7 END,
+       secondary_phone = CASE WHEN manual_override ? 'phone' THEN secondary_phone ELSE $8 END,
+       google_resource_name = $9, source = CASE WHEN source = 'hub' THEN source ELSE 'google' END,
+       nickname = CASE WHEN manual_override ? 'nickname' THEN nickname ELSE $10 END,
+       birthday = CASE WHEN manual_override ? 'birthday' THEN birthday ELSE $11 END,
+       company = CASE WHEN manual_override ? 'company' THEN company ELSE $12 END,
+       job_title = CASE WHEN manual_override ? 'jobTitle' THEN job_title ELSE $13 END,
+       website = CASE WHEN manual_override ? 'website' THEN website ELSE $14 END,
+       notes = CASE WHEN manual_override ? 'notes' THEN notes ELSE $15 END,
+       google_etag = $16, google_data = $17, google_synced_at = now(), updated_at = now(), version = version + 1
+     WHERE company_id = $1 AND id = $18`,
+    [companyId, fields.name, primaryPhone, fields.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, secondaryPhone, fields.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, fields.etag || null, fields.googleData, contactId],
+  );
+  if (!preservePhone) await executor.query('UPDATE contact_phones SET is_primary = false, updated_at = now() WHERE contact_id = $1', [contactId]);
+  if (!preserveEmail) await executor.query('UPDATE contact_emails SET is_primary = false, updated_at = now() WHERE contact_id = $1', [contactId]);
+  for (const [index, phone] of plannedPhones.entries()) {
+    await executor.query(
+      `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
+       VALUES ($1, $2, $3, $4, $5, 'google')
+       ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET
+         phone = EXCLUDED.phone,
+         is_primary = EXCLUDED.is_primary,
+         source = CASE WHEN contact_phones.source = 'whatsapp' THEN contact_phones.source ELSE 'google' END,
+         updated_at = now()`,
+      [companyId, contactId, phone, normalizePhone(storagePhone(phone) || phone), index === 0 && !preservePhone],
+    );
+  }
+  for (const [index, email] of fields.emails.entries()) {
+    await executor.query(
+      `INSERT INTO contact_emails (company_id, contact_id, email, normalized_email, is_primary, source)
+       VALUES ($1, $2, $3, $4, $5, 'google')
+       ON CONFLICT (contact_id, normalized_email) DO UPDATE SET email = EXCLUDED.email, is_primary = EXCLUDED.is_primary, source = 'google', updated_at = now()`,
+      [companyId, contactId, email, email.toLowerCase(), index === 0 && !preserveEmail],
+    );
+  }
+}
+
 async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]): Promise<GoogleUpsertSummary> {
   let imported = 0;
   let created = 0;
@@ -533,21 +627,14 @@ async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]
     const requestedPhone = storagePhone(fields.phone);
     if (!requestedPhone) continue;
     const requestedDigits = phoneIdentityKeys(requestedPhone, { defaultCountry: 'BR' }).filter((value) => /^\d+$/.test(value));
-    const existing = await db.query<{
-      id: string;
-      name: string;
-      phone: string;
-      manual_override: Record<string, unknown> | null;
-      source: string | null;
-      google_resource_name: string | null;
-      has_whatsapp_identity: boolean;
-      has_whatsapp_phone: boolean;
-    }>(
+    const existing = await db.query<ExistingGoogleMatch>(
       `SELECT c.id, c.name, c.phone, c.manual_override, c.source, c.google_resource_name,
           EXISTS (SELECT 1 FROM contact_channel_identities ci WHERE ci.company_id = c.company_id AND ci.contact_id = c.id AND ci.channel = 'whatsapp') AS has_whatsapp_identity,
-          EXISTS (SELECT 1 FROM contact_phones cpw WHERE cpw.company_id = c.company_id AND cpw.contact_id = c.id AND cpw.source = 'whatsapp') AS has_whatsapp_phone
+          EXISTS (SELECT 1 FROM contact_phones cpw WHERE cpw.company_id = c.company_id AND cpw.contact_id = c.id AND cpw.source = 'whatsapp') AS has_whatsapp_phone,
+          (SELECT COUNT(*)::int FROM conversations cv WHERE cv.company_id = c.company_id AND cv.contact_id = c.id) AS conversation_count
        FROM contacts c
-       WHERE c.company_id = $1 AND (c.google_resource_name = $2
+       WHERE c.company_id = $1 AND c.archived_at IS NULL AND c.merged_into_contact_id IS NULL
+         AND (c.google_resource_name = $2
           OR regexp_replace(c.phone, '\\D', '', 'g') = ANY($3::text[])
           OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = c.company_id AND cp.contact_id = c.id AND cp.normalized_phone = ANY($3::text[])))`,
       [companyId, person.resourceName || '', requestedDigits],
@@ -560,13 +647,21 @@ async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]
       hasWhatsappIdentity: candidate.has_whatsapp_identity,
       hasWhatsappPhone: candidate.has_whatsapp_phone,
       googleResourceName: candidate.google_resource_name,
+      conversationCount: candidate.conversation_count,
     }));
     const decision = classifyGooglePhoneMatch({ candidates, googlePersonCount, resourceName: person.resourceName });
     if (decision === 'ambiguous') {
       conflicts += 1;
       continue;
     }
-    const row = existing.rows.find((candidate) => candidate.google_resource_name === person.resourceName) || existing.rows[0];
+    const linkedRow = existing.rows.find((candidate) => candidate.google_resource_name === person.resourceName);
+    const provisionalRow = existing.rows.find((candidate) => candidate.id !== linkedRow?.id
+      && candidate.source === 'hub'
+      && !candidate.google_resource_name
+      && (candidate.has_whatsapp_identity || candidate.has_whatsapp_phone)
+      && !Object.keys(candidate.manual_override || {}).length);
+    const row = decision === 'safe_reconcile_linked' ? provisionalRow : (linkedRow || existing.rows[0]);
+    const redundantGoogleRow = decision === 'safe_reconcile_linked' ? linkedRow : undefined;
     let contactId = row?.id;
     if (!contactId) {
       const inserted = await db.query<{ id: string }>(
@@ -585,68 +680,42 @@ async function upsertFullLocalContacts(companyId: string, people: GooglePerson[]
       conflicts += 1;
       continue;
     }
-    const manualOverride = (row?.manual_override || {}) as Record<string, string>;
-    const preservePhone = manualOverride.phone === 'manual';
-    const preserveEmail = manualOverride.email === 'manual';
-    let phoneConflict = false;
-    if (row?.phone) {
-      const phoneOwner = await db.query<{ id: string }>(
-        `SELECT id FROM contacts
-         WHERE company_id = $1 AND id <> $3
-           AND (regexp_replace(phone, '\\D', '', 'g') = ANY($2::text[])
-                OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = contacts.company_id AND cp.contact_id = contacts.id AND cp.normalized_phone = ANY($2::text[])))
-         LIMIT 1`, [companyId, requestedDigits, contactId],
-      );
-      phoneConflict = phoneOwner.rows.length > 0;
+    if (decision === 'safe_reconcile_linked' && redundantGoogleRow) {
+      const client = await db.connect();
+      try {
+        await client.query('BEGIN');
+        await applyGoogleFieldsToContact(client, companyId, contactId, row!, fields, requestedPhone, requestedDigits);
+        const merge = await mergeContactsInTransaction(client, {
+          companyId,
+          sourceContactId: redundantGoogleRow.id,
+          targetContactId: contactId,
+          performedBy: null,
+          fieldSnapshot: {
+            sourceId: redundantGoogleRow.id,
+            targetId: contactId,
+            reason: 'google_whatsapp_legacy_reconciliation',
+            resourceName: person.resourceName || null,
+          },
+        });
+        if (!merge) throw new Error('Legacy Google/WhatsApp merge became unsafe before commit');
+        await client.query(
+          `INSERT INTO contact_audit_logs (company_id, contact_id, actor_user_id, action, before_data, after_data)
+           VALUES ($1, $2, NULL, 'contact.google_whatsapp_reconciled', $3::jsonb, $4::jsonb)`,
+          [companyId, contactId, JSON.stringify({ name: row!.name, source: 'hub', conversations: row!.conversation_count }), JSON.stringify({ name: fields.name, googleResourceName: fields.resourceName, mergedGoogleContactId: redundantGoogleRow.id })],
+        );
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+      imported += 1;
+      reconciled += 1;
+      affectedContactIds.push(contactId);
+      continue;
     }
-    const phonePlan = buildGooglePhonePlan({
-      requestedPhone,
-      otherPhones: fields.otherPhones,
-      existingPhone: row?.phone,
-      preserveExistingPhone: preservePhone || phoneConflict,
-    });
-    const primaryPhone = preservePhone || phoneConflict
-      ? phonePlan.primaryPhone
-      : (storagePhone(phonePlan.primaryPhone) || phonePlan.primaryPhone);
-    const plannedPhones = Array.from(new Set(phonePlan.phones.map((phone) => storagePhone(phone) || phone)));
-    const secondaryPhone = plannedPhones.find((phone) => phone !== primaryPhone) || null;
-    await db.query(
-      `UPDATE contacts SET
-         name = CASE WHEN manual_override ? 'name' THEN name ELSE $2 END,
-         phone = CASE WHEN manual_override ? 'phone' THEN phone ELSE $3 END,
-         email = CASE WHEN manual_override ? 'email' THEN email ELSE $4 END,
-         avatar_url = COALESCE($5, avatar_url), cpf = CASE WHEN manual_override ? 'cpf' THEN cpf ELSE $6 END,
-         address = CASE WHEN manual_override ? 'address' THEN address ELSE $7 END,
-         secondary_phone = CASE WHEN manual_override ? 'phone' THEN secondary_phone ELSE $8 END,
-         google_resource_name = $9, source = CASE WHEN source = 'hub' THEN source ELSE 'google' END,
-         nickname = CASE WHEN manual_override ? 'nickname' THEN nickname ELSE $10 END,
-         birthday = CASE WHEN manual_override ? 'birthday' THEN birthday ELSE $11 END,
-         company = CASE WHEN manual_override ? 'company' THEN company ELSE $12 END,
-         job_title = CASE WHEN manual_override ? 'jobTitle' THEN job_title ELSE $13 END,
-         website = CASE WHEN manual_override ? 'website' THEN website ELSE $14 END,
-         notes = CASE WHEN manual_override ? 'notes' THEN notes ELSE $15 END,
-         google_etag = $16, google_data = $17, google_synced_at = now(), updated_at = now(), version = version + 1
-       WHERE company_id = $1 AND id = $18`,
-      [companyId, fields.name, primaryPhone, fields.email || null, fields.avatarUrl || null, fields.cpf || null, fields.address || null, secondaryPhone, fields.resourceName || null, fields.nickname || null, fields.birthday || null, fields.company || null, fields.jobTitle || null, fields.website || null, fields.notes || null, fields.etag || null, fields.googleData, contactId],
-    );
-    if (!preservePhone) await db.query('UPDATE contact_phones SET is_primary = false, updated_at = now() WHERE contact_id = $1', [contactId]);
-    if (!preserveEmail) await db.query('UPDATE contact_emails SET is_primary = false, updated_at = now() WHERE contact_id = $1', [contactId]);
-    for (const [index, phone] of plannedPhones.entries()) {
-      await db.query(
-        `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
-         VALUES ($1, $2, $3, $4, $5, 'google')
-         ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET phone = EXCLUDED.phone, is_primary = EXCLUDED.is_primary, source = 'google', updated_at = now()`,
-        [companyId, contactId, phone, normalizePhone(storagePhone(phone) || phone), index === 0 && !preservePhone],
-      );
-    }
-    for (const [index, email] of fields.emails.entries()) {
-      await db.query(
-        `INSERT INTO contact_emails (company_id, contact_id, email, normalized_email, is_primary, source)
-         VALUES ($1, $2, $3, $4, $5, 'google')
-         ON CONFLICT (contact_id, normalized_email) DO UPDATE SET email = EXCLUDED.email, is_primary = EXCLUDED.is_primary, source = 'google', updated_at = now()`,
-        [companyId, contactId, email, email.toLowerCase(), index === 0 && !preserveEmail],
-      );
-    }
+    await applyGoogleFieldsToContact({ query: (text, values) => db.query(text, values) }, companyId, contactId, row!, fields, requestedPhone, requestedDigits);
     imported += 1;
     affectedContactIds.push(contactId);
     if (decision === 'safe_reconcile') {
