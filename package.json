@@ -17,7 +17,10 @@
     "qa:setup": "node scripts/qa.mjs setup",
     "qa:seed": "node scripts/qa.mjs seed",
     "qa:reset": "node scripts/qa.mjs reset",
-    "qa:start": "node scripts/qa.mjs start"
+    "qa:start": "node scripts/qa.mjs start",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:debug": "playwright test --debug"
   },
   "dependencies": {
     "clsx": "^2.1.1",
@@ -27,6 +30,7 @@
     "react-router-dom": "^6.25.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^20.14.12",
     "@types/react": "^18.3.3",

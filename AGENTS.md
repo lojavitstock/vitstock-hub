@@ -242,6 +242,21 @@ Utilize somente os comandos reais definidos pelo projeto; consulte `docs/TESTING
 
 Não ignore testes falhando. Se um teste já falhava antes da alteração, confirme que é preexistente e registre-o na entrega. Não altere testes apenas para fazer uma implementação incorreta passar.
 
+### Browser validation protocol
+
+Quando uma alteração afetar comportamento visível da aplicação:
+
+1. implemente a alteração;
+2. execute typecheck, testes e builds aplicáveis;
+3. inicie os serviços necessários em ambiente apropriado;
+4. execute o fluxo afetado com Playwright quando houver cobertura E2E;
+5. observe erros atribuíveis à aplicação no console, exceções de página e requests relevantes;
+6. confirme visualmente e funcionalmente o comportamento;
+7. se houver erro atribuível ao Vitstock Hub, diagnostique, corrija e repita o teste;
+8. somente considere o fluxo pronto quando não houver erros relevantes atribuíveis ao Vitstock Hub.
+
+Não é necessário exigir console absolutamente vazio: ruído externo, do navegador ou requests conhecidos devem ser diferenciados de falhas da aplicação.
+
 ---
 
 # 13. Functional Validation
