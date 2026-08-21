@@ -46,6 +46,7 @@ type MessageTimelineProps = {
   loadingOlderMessages?: boolean;
   loadingMessages?: boolean;
   historyExpanded?: boolean;
+  isNearBottom?: boolean;
   newMessagesCount?: number;
   onLoadOlder?: () => void;
   onJumpToLatest?: () => void;
@@ -532,8 +533,8 @@ const MediaMessageContent: React.FC<{
   return null;
 };
 
-export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage, onReplyMessage, onReactMessage, onLayoutChange }) => {
-  const shouldShowIndicator = newMessagesCount > 0 && Boolean(onJumpToLatest);
+export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, isNearBottom = true, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage, onReplyMessage, onReactMessage, onLayoutChange }) => {
+  const shouldShowIndicator = !isNearBottom && Boolean(onJumpToLatest);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [viewerItem, setViewerItem] = useState<MediaViewerItem | null>(null);
   const [openMenuMessageId, setOpenMenuMessageId] = useState<string | null>(null);
@@ -709,9 +710,12 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
     <button
       type="button"
       onClick={onJumpToLatest}
-      className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border border-emerald-300/40 bg-[#1f8f70] px-4 py-2 text-xs font-bold text-white shadow-lg transition-colors hover:bg-[#27a77f]"
+      aria-label="Ir para o final da conversa"
+      title="Ir para o final da conversa"
+      className="absolute bottom-5 right-6 z-20 flex h-10 w-10 items-center justify-center rounded-full border border-emerald-300/40 bg-[#1f8f70] text-white shadow-lg transition-colors hover:bg-[#27a77f]"
     >
-      ↓ {newMessagesCount} nova {newMessagesCount === 1 ? 'mensagem' : 'mensagens'}
+      <ChevronDown className="h-5 w-5" aria-hidden="true" />
+      {newMessagesCount > 0 && <span className="absolute -right-1 -top-1 min-w-4 rounded-full border border-[#152027] bg-amber-400 px-1 text-[10px] font-extrabold leading-4 text-zinc-950">{newMessagesCount}</span>}
     </button>
   )}
   </div>

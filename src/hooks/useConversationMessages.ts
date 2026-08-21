@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Conversation, Message, WhatsappInstance } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { phoneVariants } from '../utils/phone';
@@ -32,6 +32,22 @@ type ConversationScrollState = {
   stickyToBottom: boolean;
 };
 
+type TimelineLayoutSnapshot = {
+  conversationId: string;
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+  anchorId: string | null;
+  anchorOffset: number;
+};
+
+type PendingPrepend = {
+  conversationId: string;
+  previousTop: number;
+  previousHeight: number;
+  previousMessageCount: number;
+};
+
 export { mergeConversationMessages } from '../utils/messageMerge';
 
 export const useConversationMessages = ({
@@ -49,6 +65,7 @@ export const useConversationMessages = ({
   const [backgroundRefreshing, setBackgroundRefreshing] = useState(false);
   const [historyExpanded, setHistoryExpanded] = useState(false);
   const [newMessagesCount, setNewMessagesCount] = useState(0);
+  const [isNearBottom, setIsNearBottom] = useState(true);
   const conversationsRef = useRef(conversations);
   const messagesRef = useRef<Message[]>([]);
   const messagesConversationIdRef = useRef('');
@@ -60,6 +77,9 @@ export const useConversationMessages = ({
   const newMessagesCountByConversationRef = useRef(new Map<string, number>());
   const scrollStatesRef = useRef(new Map<string, ConversationScrollState>());
   const scrollGenerationRef = useRef(0);
+  const isNearBottomRef = useRef(true);
+  const timelineLayoutRef = useRef<TimelineLayoutSnapshot | null>(null);
+  const pendingPrependRef = useRef<PendingPrepend | null>(null);
 
   const traceScroll = useCallback((reason: string, conversationId = activeConversationId, details?: Record<string, string | number | boolean | null | undefined>) => {
     traceTimelineScroll({
@@ -72,9 +92,73 @@ export const useConversationMessages = ({
     });
   }, [activeConversationId]);
 
+  const updateStickiness = useCallback((conversationId: string, stickyToBottom: boolean) => {
+    stickToBottomRef.current = stickyToBottom;
+    if (isNearBottomRef.current === stickyToBottom) return;
+    isNearBottomRef.current = stickyToBottom;
+    if (messagesConversationIdRef.current === conversationId) setIsNearBottom(stickyToBottom);
+  }, []);
+
+  const readTimelineLayout = useCallback((conversationId: string): TimelineLayoutSnapshot | null => {
+    const container = messagesContainerRef.current;
+    if (!container || !conversationId || messagesConversationIdRef.current !== conversationId) return null;
+    const containerRect = container.getBoundingClientRect();
+    const visibleMessage = Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]'))
+      .find((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.bottom > containerRect.top && rect.top < containerRect.bottom;
+      });
+    return {
+      conversationId,
+      scrollTop: container.scrollTop,
+      scrollHeight: container.scrollHeight,
+      clientHeight: container.clientHeight,
+      anchorId: visibleMessage?.dataset.messageId || null,
+      anchorOffset: visibleMessage ? visibleMessage.getBoundingClientRect().top - containerRect.top : 0,
+    };
+  }, []);
+
+  const reconcileTimelineLayout = useCallback((reason: string, conversationId = activeConversationId) => {
+    const container = messagesContainerRef.current;
+    if (!container || !conversationId || messagesConversationIdRef.current !== conversationId) return;
+    const previous = timelineLayoutRef.current;
+    const current = readTimelineLayout(conversationId);
+    if (!current) return;
+    if (!previous || previous.conversationId !== conversationId) {
+      timelineLayoutRef.current = current;
+      return;
+    }
+
+    const layoutChanged = previous.scrollHeight !== current.scrollHeight
+      || previous.clientHeight !== current.clientHeight;
+    if (!layoutChanged) {
+      timelineLayoutRef.current = current;
+      return;
+    }
+
+    const previousScrollTop = container.scrollTop;
+    if (stickToBottomRef.current) {
+      container.scrollTop = container.scrollHeight;
+      updateStickiness(conversationId, true);
+    } else if (previous.anchorId && previous.anchorId === current.anchorId) {
+      container.scrollTop = Math.max(0, previous.scrollTop + (current.anchorOffset - previous.anchorOffset));
+      updateStickiness(conversationId, false);
+    } else {
+      container.scrollTop = Math.min(previous.scrollTop, Math.max(0, container.scrollHeight - container.clientHeight));
+      updateStickiness(conversationId, false);
+    }
+    timelineLayoutRef.current = readTimelineLayout(conversationId) || current;
+    traceScroll(reason, conversationId, {
+      previousScrollTop,
+      previousScrollHeight: previous.scrollHeight,
+      currentScrollHeight: current.scrollHeight,
+    });
+  }, [activeConversationId, readTimelineLayout, traceScroll, updateStickiness]);
+
   const traceTimelineLayoutChange = useCallback((reason: string, messageId?: string) => {
+    reconcileTimelineLayout(`layout.${reason}`, activeConversationId);
     traceScroll(reason, activeConversationId, { messageId: messageId || null });
-  }, [activeConversationId, traceScroll]);
+  }, [activeConversationId, reconcileTimelineLayout, traceScroll]);
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -119,19 +203,21 @@ export const useConversationMessages = ({
     const savedState = scrollStatesRef.current.get(conversationId);
     const previousScrollTop = container.scrollTop;
     if (!savedState || savedState.stickyToBottom) {
-      stickToBottomRef.current = true;
+      updateStickiness(conversationId, true);
       container.scrollTop = container.scrollHeight;
       rememberScrollState(conversationId, container, true);
+      timelineLayoutRef.current = readTimelineLayout(conversationId);
       traceScroll('scroll.restore.bottom', conversationId, { previousScrollTop, generation: generation ?? null });
       return;
     }
 
-    stickToBottomRef.current = false;
+    updateStickiness(conversationId, false);
     const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
     container.scrollTop = Math.min(savedState.scrollTop, maxScrollTop);
     rememberScrollState(conversationId, container, false);
+    timelineLayoutRef.current = readTimelineLayout(conversationId);
     traceScroll('scroll.restore.saved', conversationId, { previousScrollTop, savedScrollTop: savedState.scrollTop, generation: generation ?? null });
-  }, [rememberScrollState, traceScroll]);
+  }, [readTimelineLayout, rememberScrollState, traceScroll, updateStickiness]);
 
   const clearNewMessages = useCallback((conversationId = messagesConversationIdRef.current) => {
     if (!conversationId) return;
@@ -158,13 +244,14 @@ export const useConversationMessages = ({
     // A send/load callback can outlive the conversation that scheduled it.
     // Never let it move the viewport of the newly selected conversation.
     if (container && messagesConversationIdRef.current === activeConversationId) {
-      stickToBottomRef.current = true;
+      updateStickiness(activeConversationId, true);
       clearNewMessages();
       container.scrollTop = container.scrollHeight;
       rememberScrollState(activeConversationId, container, true);
+      timelineLayoutRef.current = readTimelineLayout(activeConversationId);
       traceScroll(reason, activeConversationId);
     }
-  }, [activeConversationId, clearNewMessages, rememberScrollState, traceScroll]);
+  }, [activeConversationId, clearNewMessages, readTimelineLayout, rememberScrollState, traceScroll, updateStickiness]);
 
   const captureScrollState = useCallback((conversationId: string) => {
     const container = messagesContainerRef.current;
@@ -172,13 +259,14 @@ export const useConversationMessages = ({
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     const stickyToBottom = distanceFromBottom <= 120;
     const previousStickyState = scrollStatesRef.current.get(conversationId)?.stickyToBottom;
-    stickToBottomRef.current = stickyToBottom;
+    updateStickiness(conversationId, stickyToBottom);
     rememberScrollState(conversationId, container, stickyToBottom);
+    timelineLayoutRef.current = readTimelineLayout(conversationId);
     if (stickyToBottom) clearNewMessages();
     if (previousStickyState !== undefined && previousStickyState !== stickyToBottom) {
       traceScroll('scroll.sticky.changed', conversationId, { distanceFromBottom: Math.round(distanceFromBottom), previousStickyState });
     }
-  }, [clearNewMessages, rememberScrollState, traceScroll]);
+  }, [clearNewMessages, readTimelineLayout, rememberScrollState, traceScroll, updateStickiness]);
 
   useEffect(() => {
     const container = messagesContainerRef.current;
@@ -189,35 +277,10 @@ export const useConversationMessages = ({
       captureScrollState(activeConversationId);
     };
     container.addEventListener('scroll', handleScroll, { passive: true });
-    let observedScrollHeight = container.scrollHeight;
-    let observedClientHeight = container.clientHeight;
     const resizeObserver = typeof ResizeObserver !== 'undefined'
       ? new ResizeObserver(() => {
         if (messagesConversationIdRef.current !== activeConversationId || scrollGenerationRef.current !== scrollGeneration) return;
-        const previousScrollTop = container.scrollTop;
-        const previousScrollHeight = observedScrollHeight;
-        const previousClientHeight = observedClientHeight;
-        const dimensionsChanged = container.scrollHeight !== previousScrollHeight
-          || container.clientHeight !== previousClientHeight;
-        if (stickToBottomRef.current) {
-          container.scrollTop = container.scrollHeight;
-          rememberScrollState(activeConversationId, container, true);
-          if (container.scrollTop !== previousScrollTop || dimensionsChanged) {
-            traceScroll('resize.observer.bottom', activeConversationId, { previousScrollTop, previousScrollHeight, previousClientHeight });
-          }
-          observedScrollHeight = container.scrollHeight;
-          observedClientHeight = container.clientHeight;
-          return;
-        }
-        const savedState = scrollStatesRef.current.get(activeConversationId);
-        if (savedState) {
-          container.scrollTop = savedState.scrollTop;
-          if (container.scrollTop !== previousScrollTop || dimensionsChanged) {
-            traceScroll('resize.observer.restore', activeConversationId, { previousScrollTop, previousScrollHeight, previousClientHeight, savedScrollTop: savedState.scrollTop });
-          }
-        }
-        observedScrollHeight = container.scrollHeight;
-        observedClientHeight = container.clientHeight;
+        reconcileTimelineLayout('resize.observer', activeConversationId);
       })
       : undefined;
     resizeObserver?.observe(container);
@@ -225,7 +288,42 @@ export const useConversationMessages = ({
       container.removeEventListener('scroll', handleScroll);
       resizeObserver?.disconnect();
     };
-  }, [activeConversationId, captureScrollState, clearNewMessages, rememberScrollState, traceScroll]);
+  }, [activeConversationId, captureScrollState, reconcileTimelineLayout]);
+
+  useLayoutEffect(() => {
+    if (!activeConversationId || messagesConversationIdRef.current !== activeConversationId) {
+      timelineLayoutRef.current = null;
+      pendingPrependRef.current = null;
+      return;
+    }
+
+    const pendingPrepend = pendingPrependRef.current;
+    const container = messagesContainerRef.current;
+    if (
+      pendingPrepend
+      && pendingPrepend.conversationId === activeConversationId
+      && container
+      && messages.length > pendingPrepend.previousMessageCount
+    ) {
+      const previousScrollTop = container.scrollTop;
+      const scrollHeightDelta = container.scrollHeight - pendingPrepend.previousHeight;
+      container.scrollTop = Math.max(0, pendingPrepend.previousTop + scrollHeightDelta);
+      updateStickiness(activeConversationId, false);
+      rememberScrollState(activeConversationId, container, false);
+      timelineLayoutRef.current = readTimelineLayout(activeConversationId);
+      pendingPrependRef.current = null;
+      traceScroll('history.prepend.restored', activeConversationId, {
+        previousScrollTop,
+        previousTop: pendingPrepend.previousTop,
+        previousHeight: pendingPrepend.previousHeight,
+        currentHeight: container.scrollHeight,
+        scrollHeightDelta,
+        loadedMessages: messages.length - pendingPrepend.previousMessageCount,
+      });
+      return;
+    }
+    reconcileTimelineLayout('timeline.commit', activeConversationId);
+  }, [activeConversationId, historyExpanded, messages, readTimelineLayout, reconcileTimelineLayout, rememberScrollState, traceScroll, updateStickiness]);
 
   useEffect(() => {
     if (!activeConversationId || isMock || connectionStatus !== 'connected') {
@@ -249,7 +347,8 @@ export const useConversationMessages = ({
     if (isConversationSwitch) {
       const savedState = scrollStatesRef.current.get(activeConversationId);
       const stickyToBottom = savedState?.stickyToBottom ?? true;
-      stickToBottomRef.current = stickyToBottom;
+      updateStickiness(activeConversationId, stickyToBottom);
+      timelineLayoutRef.current = null;
       if (stickyToBottom) {
         clearNewMessages(activeConversationId);
       } else {
@@ -332,13 +431,13 @@ export const useConversationMessages = ({
         latestTimestamp: latestTimestampRef.current,
       });
       if (recentMessages.length === 0) return;
-      if (shouldScroll) window.setTimeout(() => {
+      if (shouldScroll) window.requestAnimationFrame(() => {
         if (
           scrollGenerationRef.current === scrollGeneration
           && messagesConversationIdRef.current === activeConversationId
           && stickToBottomRef.current
         ) scrollToBottom('messages.snapshot.bottom');
-      }, 0);
+      });
     };
 
     const fetchConversationMessages = async (source = 'unknown') => {
@@ -353,7 +452,7 @@ export const useConversationMessages = ({
       const shouldScroll = isInitialFetch
         ? (savedState?.stickyToBottom ?? true)
         : stickToBottomRef.current;
-      if (!hasCachedMessages && !savedState) stickToBottomRef.current = shouldScroll;
+      if (!hasCachedMessages && !savedState) updateStickiness(activeConversationId, shouldScroll);
       isInitialFetch = false;
       const conversation = conversationsRef.current.find((item) => item.id === activeConversationId);
       const phone = conversation?.isGroup ? '' : conversation?.contact.phone || activeConversationId;
@@ -518,14 +617,21 @@ export const useConversationMessages = ({
           incomingIds.size,
           stickyAtArrival,
         );
+        if (stickyAtArrival) window.requestAnimationFrame(() => {
+          if (
+            scrollGenerationRef.current === scrollGeneration
+            && messagesConversationIdRef.current === activeConversationId
+            && stickToBottomRef.current
+          ) scrollToBottom('realtime.message.bottom');
+        });
       } else {
-        window.setTimeout(() => {
+        window.requestAnimationFrame(() => {
           if (
             scrollGenerationRef.current === scrollGeneration
             && messagesConversationIdRef.current === activeConversationId
             && stickToBottomRef.current
           ) scrollToBottom('realtime.status.bottom');
-        }, 0);
+        });
       }
     });
     let previousWhatsappStatus: 'connected' | 'connecting' | 'disconnected' = 'connecting';
@@ -556,7 +662,7 @@ export const useConversationMessages = ({
       window.removeEventListener('vitstock:whatsapp-status', handleWhatsAppStatus);
       unsubscribe();
     };
-  }, [activeConversationId, attendantLabel, connectionStatus, instanceName, isMock, registerNewMessages, restoreScrollPosition, scrollToBottom, traceScroll]);
+  }, [activeConversationId, attendantLabel, connectionStatus, instanceName, isMock, registerNewMessages, restoreScrollPosition, scrollToBottom, traceScroll, updateStickiness]);
 
 
   useEffect(() => {
@@ -579,10 +685,9 @@ export const useConversationMessages = ({
     const container = messagesContainerRef.current;
     const previousHeight = container?.scrollHeight || 0;
     const previousTop = container?.scrollTop || 0;
-    const scrollGeneration = scrollGenerationRef.current;
     loadingOlderRef.current = true;
     traceScroll('history.prepend.started', activeConversationId, { previousHeight, previousTop });
-    stickToBottomRef.current = false;
+    updateStickiness(activeConversationId, false);
     if (container) rememberScrollState(activeConversationId, container, false);
     setLoadingOlderMessages(true);
     setHistoryExpanded(true);
@@ -603,23 +708,17 @@ export const useConversationMessages = ({
         const reconciledMessages = mergeConversationMessages(previousMessages, page.messages);
         nextMessages = reconciledMessages;
         if (reconciledMessages !== previousMessages) {
+          pendingPrependRef.current = {
+            conversationId: activeConversationId,
+            previousTop,
+            previousHeight,
+            previousMessageCount: previousMessages.length,
+          };
           messagesRef.current = reconciledMessages;
           setMessages((currentMessages) => currentMessages === previousMessages
             ? reconciledMessages
             : mergeConversationMessages(currentMessages, page.messages));
         }
-        window.requestAnimationFrame(() => {
-          if (
-            messagesConversationIdRef.current !== activeConversationId
-            || scrollGenerationRef.current !== scrollGeneration
-          ) return;
-          const nextContainer = messagesContainerRef.current;
-          if (nextContainer) {
-            nextContainer.scrollTop = nextContainer.scrollHeight - previousHeight + previousTop;
-            rememberScrollState(activeConversationId, nextContainer, false);
-            traceScroll('history.prepend.restored', activeConversationId, { previousHeight, previousTop, loadedMessages: page.messages.length });
-          }
-        });
       }
       setHasMoreMessages(page.hasMore);
       writeConversationMessagesCache(messageCacheRef.current, activeConversationId, {
@@ -634,7 +733,7 @@ export const useConversationMessages = ({
       loadingOlderRef.current = false;
       setLoadingOlderMessages(false);
     }
-  }, [activeConversationId, attendantLabel, hasMoreMessages, instanceName, isMock, rememberScrollState, traceScroll]);
+  }, [activeConversationId, attendantLabel, hasMoreMessages, instanceName, isMock, rememberScrollState, traceScroll, updateStickiness]);
 
   const cachedActiveEntry = activeConversationId
     ? messageCacheRef.current.get(activeConversationId)
@@ -680,6 +779,7 @@ export const useConversationMessages = ({
     scrollToBottom,
     captureScrollState,
     traceTimelineLayoutChange,
+    isNearBottom,
     newMessagesCount: visibleNewMessagesCount,
   };
 };

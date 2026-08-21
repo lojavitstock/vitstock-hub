@@ -75,6 +75,7 @@ const qaInboundSchema = z.object({
   name: z.string().min(2).max(160).default('Contato QA'),
   content: z.string().min(1).max(4096),
   isGroup: z.boolean().optional().default(false),
+  timestampMs: z.number().int().positive().optional(),
 });
 
 export async function registerQaRoutes(app: FastifyInstance) {
@@ -119,6 +120,7 @@ export async function registerQaRoutes(app: FastifyInstance) {
     const parsed = qaInboundSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Mensagem QA inválida' });
     const input = parsed.data;
+    const timestampMs = input.timestampMs ?? Date.now();
     const phone = input.phone?.replace(/\D/g, '') || input.remoteJid.split('@')[0];
     const contact = await db.query<{ id: string }>(
       `INSERT INTO contacts (company_id, name, phone, source)
@@ -137,12 +139,12 @@ export async function registerQaRoutes(app: FastifyInstance) {
     const evolutionMessageId = `qa-inbound-${randomUUID()}`;
     await db.query(
       `INSERT INTO messages (company_id, conversation_id, evolution_message_id, sender, sender_name, content, status, sent_at)
-       VALUES ($1, $2, $3, 'contact', $4, $5, 'delivered', now())`,
-      [request.user!.companyId, conversationId, evolutionMessageId, input.name, input.content],
+       VALUES ($1, $2, $3, 'contact', $4, $5, 'delivered', to_timestamp($6::numeric / 1000))`,
+      [request.user!.companyId, conversationId, evolutionMessageId, input.name, input.content, timestampMs],
     );
     publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
-      remoteJid: input.remoteJid, phone, messageId: evolutionMessageId, timestampMs: Date.now(), fromMe: false,
-      message: { id: evolutionMessageId, conversationId: input.remoteJid, sender: 'contact', senderName: input.name, content: input.content, status: 'delivered', isInternalNote: false },
+      remoteJid: input.remoteJid, phone, messageId: evolutionMessageId, timestampMs, fromMe: false,
+      message: { id: evolutionMessageId, conversationId: input.remoteJid, sender: 'contact', senderName: input.name, content: input.content, status: 'delivered', isInternalNote: false, timestampMs },
     });
     return { injected: true, remoteJid: input.remoteJid, evolutionMessageId };
   });

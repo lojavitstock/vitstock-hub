@@ -282,6 +282,7 @@ export const AtendimentoPage: React.FC = () => {
     scrollToBottom,
     captureScrollState,
     traceTimelineLayoutChange,
+    isNearBottom,
     newMessagesCount,
   } = useConversationMessages({
     activeConversationId: activeConvId,
@@ -1426,6 +1427,7 @@ export const AtendimentoPage: React.FC = () => {
               loadingMessages={loadingMessages}
               historyExpanded={historyExpanded}
               loadingOlderMessages={loadingOlderMessages}
+              isNearBottom={isNearBottom}
               newMessagesCount={newMessagesCount}
               onLoadOlder={handleLoadOlderMessages}
               onJumpToLatest={scrollToBottom}
