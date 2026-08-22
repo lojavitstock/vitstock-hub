@@ -259,6 +259,46 @@ Quando uma alteração afetar comportamento visível da aplicação:
 
 Não é necessário exigir console absolutamente vazio: ruído externo, do navegador ou requests conhecidos devem ser diferenciados de falhas da aplicação.
 
+### Bootstrap e ambientes de validação
+
+O fluxo padrão para uma mudança funcional é:
+
+```text
+branch de desenvolvimento
+→ reproduzir
+→ QA local
+→ Playwright local
+→ corrigir e repetir até PASS
+→ regressão
+→ commit/push autorizado
+→ preview
+→ E2E Preview quando a integração real for necessária
+→ READY FOR HUMAN REVIEW
+→ validação humana
+→ merge humano
+```
+
+O QA local iniciado por `npm run dev:e2e` é o ambiente padrão para testes de
+browser. Ele deve permanecer limitado a `QA_MODE=true`, PostgreSQL local em
+`127.0.0.1:55432/vitstock_qa`, Evolution mock, Google mock, frontend em
+`http://localhost:3000` e backend em `http://localhost:3001`. Se os guards não
+confirmarem esses limites, aborte; Production nunca é fallback para QA.
+
+A branch `preview` é a integração oficial para Vercel Preview e Railway
+Preview. Ela deve usar somente PostgreSQL Preview, Evolution Preview e um
+cliente/callback Google OAuth de Preview. Nunca aponte Preview para banco,
+Evolution, backend ou callback Google de Production.
+
+O Codex deve usar Playwright quando houver cobertura disponível e investigar
+DOM, console, network, screenshots, traces e logs antes de pedir intervenção
+humana. Pode parar somente por decisão de produto, credencial externa
+indispensável, risco de Production, requisito ambíguo ou bloqueio técnico real.
+
+Ao trocar de máquina, finalize o trabalho versionado com `git status`, commit
+e push; na outra máquina use `git fetch`, checkout da branch de trabalho e
+`git pull`. Git não sincroniza arquivos `.env`, credenciais, bancos Docker ou
+outros artefatos ignorados.
+
 ---
 
 # 13. Functional Validation
