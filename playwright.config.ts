@@ -1,6 +1,12 @@
 import { defineConfig, devices } from '@playwright/test';
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:3000';
+const isPreview = process.env.PLAYWRIGHT_MODE === 'preview';
+const bypassSecret = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+
+if (isPreview && !bypassSecret) {
+  throw new Error('Preview E2E abortado: VERCEL_AUTOMATION_BYPASS_SECRET ausente');
+}
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -13,7 +19,8 @@ export default defineConfig({
   use: {
     baseURL,
     screenshot: 'only-on-failure',
-    trace: 'retain-on-failure',
+    // Protection bypass headers must never be captured in traces.
+    trace: isPreview ? 'off' : 'retain-on-failure',
     video: 'off',
   },
   projects: [

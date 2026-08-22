@@ -21,6 +21,7 @@
     "qa:stop": "node scripts/qa.mjs stop",
     "dev:e2e": "node scripts/dev-e2e.mjs",
     "test:e2e": "node scripts/test-e2e.mjs",
+    "test:e2e:preview": "node scripts/test-e2e-preview.mjs",
     "test:e2e:headed": "node scripts/test-e2e.mjs --headed",
     "test:e2e:debug": "node scripts/test-e2e.mjs --debug"
   },

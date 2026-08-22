@@ -61,6 +61,16 @@ npm run qa:stop
 
 `npm run dev:e2e` gera uma credencial efêmera para o usuário sintético do QA e a grava somente em `.qa/qa-credentials.json`, que é ignorado pelo Git. O runner lê esse arquivo para o teste autenticado; nenhuma senha QA fixa é versionada.
 
+### Preview remoto protegido
+
+O fluxo remoto é separado do QA local e usa somente `.env.e2e.preview.local`, que nunca deve ser commitado. Na primeira configuração de uma máquina, copie `.env.e2e.preview.example` para `.env.e2e.preview.local`, preencha localmente `VERCEL_AUTOMATION_BYPASS_SECRET`, `E2E_EMAIL` e `E2E_PASSWORD`, e execute:
+
+```powershell
+npm run test:e2e:preview
+```
+
+O comando valida o domínio Preview autorizado, envia o bypass da proteção Vercel apenas ao contexto do Playwright e executa um smoke read-only. O trace fica desativado nesse modo para evitar que headers de bypass sejam capturados em artefatos. O fluxo não substitui a validação humana e não deve ser apontado para Production.
+
 ## 4. Validação por tipo de alteração
 
 | Tipo de alteração | Testes automatizados | Build frontend | Check/build backend | Preview manual |

@@ -6,6 +6,7 @@ import { buildExistingConversationQuery } from '../server/src/conversationQuerie
 import { buildGoogleContactUpdatePayload, buildGooglePhonePlan, googleContactErrorResponse, googleIntegrationState, googleSyncErrorResponse, resolveGoogleCallbackUrl } from '../server/src/google-contacts';
 import { classifyGooglePhoneMatch, googlePhoneKey } from '../server/src/googleContactReconciliation';
 import { GOOGLE_INTEGRATION_SETTINGS_PATH, googleSidebarIndicator } from '../src/utils/googleSidebarStatus';
+import { PREVIEW_API_URL, PREVIEW_FRONTEND_URL, validatePreviewEnv } from '../scripts/e2e-preview-env.mjs';
 
 test('QA host guard accepts only local database/provider targets', () => {
   assert.equal(isLocalHost('postgresql://vitstock@127.0.0.1:55432/vitstock_qa'), true);
@@ -97,6 +98,25 @@ test('Google callback URL uses the configured environment URI', () => {
   assert.throws(
     () => resolveGoogleCallbackUrl('https://vitstock-hub.vercel.app'),
     /GOOGLE_REDIRECT_URI é obrigatório fora do ambiente local/,
+  );
+});
+
+test('Preview E2E guard accepts only the authorized remote environment', () => {
+  const valid = validatePreviewEnv({
+    VERCEL_AUTOMATION_BYPASS_SECRET: 'preview-bypass-secret',
+    E2E_EMAIL: 'qa@example.test',
+    E2E_PASSWORD: 'qa-password',
+    PLAYWRIGHT_BASE_URL: PREVIEW_FRONTEND_URL,
+  });
+  assert.equal(valid.apiURL, PREVIEW_API_URL);
+  assert.equal(valid.baseURL, `${PREVIEW_FRONTEND_URL}/`);
+  assert.throws(
+    () => validatePreviewEnv({ E2E_EMAIL: 'qa@example.test', E2E_PASSWORD: 'qa-password', PLAYWRIGHT_BASE_URL: PREVIEW_FRONTEND_URL }),
+    /VERCEL_AUTOMATION_BYPASS_SECRET/,
+  );
+  assert.throws(
+    () => validatePreviewEnv({ VERCEL_AUTOMATION_BYPASS_SECRET: 'secret', E2E_EMAIL: 'qa@example.test', E2E_PASSWORD: 'qa-password', PLAYWRIGHT_BASE_URL: 'https://vitstock-hub.vercel.app' }),
+    /PLAYWRIGHT_BASE_URL/,
   );
 });
 
