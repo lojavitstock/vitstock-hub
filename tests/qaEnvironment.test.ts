@@ -3,7 +3,7 @@ import test from 'node:test';
 import { isAllowedFrontendOrigin, isLocalHost, parseFrontendOrigins, validateQaRuntimeSafety } from '../server/src/config';
 import { currentQaGoogleScenario, qaEvolutionResponse, qaGoogleFailure, qaGooglePeople, setQaGoogleScenario } from '../server/src/qa';
 import { buildExistingConversationQuery } from '../server/src/conversationQueries';
-import { buildGoogleContactUpdatePayload, buildGooglePhonePlan, googleContactErrorResponse, googleIntegrationState, googleSyncErrorResponse } from '../server/src/google-contacts';
+import { buildGoogleContactUpdatePayload, buildGooglePhonePlan, googleContactErrorResponse, googleIntegrationState, googleSyncErrorResponse, resolveGoogleCallbackUrl } from '../server/src/google-contacts';
 import { classifyGooglePhoneMatch, googlePhoneKey } from '../server/src/googleContactReconciliation';
 import { GOOGLE_INTEGRATION_SETTINGS_PATH, googleSidebarIndicator } from '../src/utils/googleSidebarStatus';
 
@@ -82,6 +82,22 @@ test('Google sync preserves the local canonical phone when a resource phone is o
   assert.equal(plan.primaryPhone, '5521990000003');
   assert.equal(plan.secondaryPhone, '5521990000001');
   assert.deepEqual(plan.phones, ['5521990000003', '5521990000001', '5521990000002']);
+});
+
+test('Google callback URL uses the configured environment URI', () => {
+  assert.equal(
+    resolveGoogleCallbackUrl('https://vitstock-hub-git-preview-vitstocks-projects.vercel.app', 'https://vitstock-hub-api-preview.up.railway.app/api/google/callback'),
+    'https://vitstock-hub-api-preview.up.railway.app/api/google/callback',
+  );
+  assert.equal(
+    resolveGoogleCallbackUrl('https://vitstock-hub.vercel.app', 'https://vitstock-hub-api-production.up.railway.app/api/google/callback'),
+    'https://vitstock-hub-api-production.up.railway.app/api/google/callback',
+  );
+  assert.equal(resolveGoogleCallbackUrl('http://localhost:3000'), 'http://localhost:3001/api/google/callback');
+  assert.throws(
+    () => resolveGoogleCallbackUrl('https://vitstock-hub.vercel.app'),
+    /GOOGLE_REDIRECT_URI é obrigatório fora do ambiente local/,
+  );
 });
 
 test('Google contact update payload preserves resource identity and metadata etag', () => {

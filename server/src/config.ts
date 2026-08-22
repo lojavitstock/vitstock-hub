@@ -30,6 +30,7 @@ const configSchema = z.object({
   EVOLUTION_INSTANCE_NAME: z.string().min(1),
   GOOGLE_CLIENT_ID: z.string().min(20).optional(),
   GOOGLE_CLIENT_SECRET: z.string().min(20).optional(),
+  GOOGLE_REDIRECT_URI: z.string().url().optional(),
 });
 
 const parsed = configSchema.safeParse(process.env);
