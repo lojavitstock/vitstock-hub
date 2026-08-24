@@ -2,6 +2,7 @@ import { ChatStatus, WhatsappInstance, Conversation, Message } from '../types';
 import { mockInstances, mockConversations } from './mockData';
 import { evolutionMessagePreview, isEvolutionReactionEvent, normalizeEvolutionMessage } from './evolutionMessageAdapter';
 import { phoneVariants } from '../utils/phone';
+import { providerIdentityKey, providerPhoneDigits } from '../utils/whatsappIdentity';
 import { callMessageInfo } from '../utils/callMessage';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 import type { RealtimeEventPayload } from '../utils/realtimeUpdates';
@@ -427,6 +428,8 @@ export class EvolutionApiService {
       const storedContactsData = payload.storedContacts;
       const storedContactsMap = new Map<string, { name: string; source: string }>();
       const whatsappNamesMap = new Map<string, { name: string; avatar?: string }>();
+      const whatsappIdentitiesMap = new Map<string, { phone?: string; name?: string; avatar?: string }>();
+      const groupMetadataMap = new Map<string, { subject?: string; picture?: string }>();
       const assignmentsMap = new Map<string, { id: string; name: string }>();
       const assignmentsByNumber = new Map<string, { id: string; name: string }>();
       const leasesMap = new Map<string, { ownerUserId: string; ownerName: string; expiresAt: number }>();
@@ -526,11 +529,39 @@ export class EvolutionApiService {
         });
       }
 
+      if (Array.isArray(payload.whatsappIdentities)) {
+        payload.whatsappIdentities.forEach((identity: any) => {
+          const key = providerIdentityKey(identity?.identity);
+          if (!key) return;
+          const phone = typeof identity?.phone === 'string' && identity.phone.replace(/\D/g, '').length >= 8
+            ? identity.phone.replace(/\D/g, '')
+            : undefined;
+          const value = {
+            phone,
+            name: typeof identity?.name === 'string' ? identity.name : undefined,
+            avatar: typeof identity?.avatar_url === 'string' ? identity.avatar_url : undefined,
+          };
+          whatsappIdentitiesMap.set(key, value);
+          if (phone) phoneVariants(phone).forEach((variant) => whatsappIdentitiesMap.set(`phone:${variant}`, value));
+        });
+      }
+
+      if (Array.isArray(payload.groupMetadata)) {
+        payload.groupMetadata.forEach((group: any) => {
+          const key = providerIdentityKey(group?.groupJid);
+          if (!key) return;
+          groupMetadataMap.set(key, {
+            subject: typeof group?.subject === 'string' ? group.subject : undefined,
+            picture: typeof group?.picture === 'string' ? group.picture : undefined,
+          });
+        });
+      }
+
       // Popula o mapa de contatos para resolver nomes salvos
       if (Array.isArray(contactsData)) {
         contactsData.forEach((c: any) => {
           const rawJid = c.remoteJid || c.id || '';
-          const phoneKey = rawJid.split('@')[0].replace(/\D/g, '');
+          const phoneKey = providerPhoneDigits(c);
           if (phoneKey && c.pushName && c.pushName !== 'WhatsApp Business' && c.pushName !== 'Você') {
             contactsMap.set(phoneKey, {
               name: c.pushName,
@@ -553,9 +584,12 @@ export class EvolutionApiService {
         
         // Usa o remoteJid exato com que a Evolution API gravou o chat no banco do Railway
         const rawRemoteJid = item.remoteJid || item.id || `chat-${index}`;
+        const providerPhone = providerPhoneDigits(item);
+        const identity = whatsappIdentitiesMap.get(providerIdentityKey(rawRemoteJid))
+          || phoneVariants(providerPhone).map((phone) => whatsappIdentitiesMap.get(`phone:${phone}`)).find(Boolean);
+        const cleanNumber = isGroup ? '' : (identity?.phone || providerPhone || '');
+        const conversationKey = isGroup ? rawRemoteJid : cleanNumber || rawRemoteJid;
         const altJid = item.lastMessage?.key?.remoteJidAlt;
-        const cleanNumber = isGroup ? '' : (altJid || rawRemoteJid).split('@')[0].replace(/\D/g, '');
-        const conversationKey = isGroup ? rawRemoteJid : cleanNumber;
         const assignment = assignmentsMap.get(rawRemoteJid)
           || (altJid ? assignmentsMap.get(altJid) : undefined)
           || (!isGroup ? phoneVariants(cleanNumber).map((phone) => assignmentsByNumber.get(phone)).find(Boolean) : undefined);
@@ -608,16 +642,17 @@ export class EvolutionApiService {
         const whatsappContact = !isGroup
           ? phoneVariants(cleanNumber).map((phone) => whatsappNamesMap.get(phone)).find(Boolean)
           : undefined;
+        const groupMetadata = isGroup ? groupMetadataMap.get(providerIdentityKey(rawRemoteJid)) : undefined;
         const groupName = isGroup
-          ? [item.groupName, item.subject, item.groupMetadata?.subject, item.chatName, item.name, item.notify, item.verifiedName]
+          ? [groupMetadata?.subject, item.groupName, item.subject, item.groupMetadata?.subject, item.chatName, item.name, item.notify, item.verifiedName]
             .find((value: any) => typeof value === 'string' && value.trim() && !/^\+?[\d\s().-]+$/.test(value.trim()))
           : undefined;
         let displayName = isGroup
           ? (groupName || `Grupo ${rawRemoteJid.split('@')[0]}`)
-          : (savedName || savedContact?.name || whatsappContact?.name || lastMessage?.pushName || item.pushName || item.name || item.verifiedName);
+          : (savedName || savedContact?.name || identity?.name || whatsappContact?.name || lastMessage?.pushName || item.pushName || item.name || item.verifiedName);
 
         if (!displayName || displayName === 'Você' || displayName === 'WhatsApp Business') {
-          displayName = isGroup ? `Grupo ${rawRemoteJid.split('@')[0]}` : `+${cleanNumber}`;
+          displayName = isGroup ? `Grupo ${rawRemoteJid.split('@')[0]}` : cleanNumber ? `+${cleanNumber}` : 'Contato';
         }
 
         const rawMessageContent = evolutionMessagePreview(lastMessage) || 'Conversa iniciada';
@@ -636,12 +671,12 @@ export class EvolutionApiService {
           id: rawRemoteJid, // ID real para findMessages no Railway (ex: 267877160644613@lid)
           isGroup,
           groupName: isGroup ? displayName : undefined,
-          groupAvatar: isGroup ? (item.profilePicUrl || item.profilePictureUrl || item.profilePicture || '') : undefined,
+          groupAvatar: isGroup ? (groupMetadata?.picture || item.profilePicUrl || item.profilePictureUrl || item.profilePicture || '') : undefined,
           contact: {
             id: rawRemoteJid,
             name: displayName,
-            phone: isGroup ? rawRemoteJid : `+${cleanNumber}`,
-            avatar: savedContact?.avatar || whatsappContact?.avatar || item.profilePicUrl || item.profilePictureUrl || '',
+            phone: isGroup ? rawRemoteJid : cleanNumber ? `+${cleanNumber}` : '',
+            avatar: savedContact?.avatar || identity?.avatar || whatsappContact?.avatar || item.profilePicUrl || item.profilePictureUrl || '',
             tags: dailyResponder
               ? [{ id: `daily-responder-${dailyResponder.id}`, name: `👤 ${dailyResponder.name}`, color: '#A78BFA' }]
               : [],

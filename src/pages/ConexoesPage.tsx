@@ -344,7 +344,9 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
               </div>
               <div>
                 <h3 className="text-base font-extrabold text-zinc-100">{instance.profileName || 'Vitstock Atendimento WhatsApp'}</h3>
-                <p className="text-xs font-mono text-amber-400">{instance.phone || 'Número Conectado'}</p>
+                <p className="text-xs font-mono text-amber-400">
+                  {instance.phone || (visibleStatus === 'connected' ? 'Número conectado' : visibleStatus === 'connecting' ? 'Reconectando...' : 'Desconectado')}
+                </p>
                 <p className="text-[11px] text-zinc-500 font-mono">Instância: {instanceName}</p>
               </div>
             </div>

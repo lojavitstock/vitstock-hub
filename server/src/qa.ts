@@ -57,7 +57,8 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
     ? { key: { id: `qa-evolution-${randomUUID()}` } }
       : path.includes('/message/sendReaction/') ? { status: 'ok' }
         : path.includes('/connectionState/') ? { instance: { state: 'open' } }
-          : path.includes('/findChats/') || path.includes('/findContacts/') ? []
+          : path.includes('/group/fetchAllGroups/') ? [{ id: '120363000000@g.us', subject: 'Equipe QA', profilePicUrl: 'http://localhost:3001/api/qa/avatar/valid.svg' }]
+            : path.includes('/findChats/') || path.includes('/findContacts/') ? []
             : path.includes('/chat/findMessages/') ? { messages: { records: [] } }
               : path.includes('/chat/markMessageAsRead/') ? { status: 'read' }
                 : path.includes('/instance/connect/') ? { code: 'QA_MOCK_CONNECTED' }
