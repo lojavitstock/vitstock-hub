@@ -3,7 +3,7 @@ import test from 'node:test';
 import { parseGroupMetadata } from '../server/src/groupMetadata';
 import { providerPhoneDigits, providerPhoneJid } from '../server/src/whatsappIdentity';
 import { providerDisplayName, providerFallbackDisplayName, providerIdentityKey, providerPhoneDigits as frontendProviderPhoneDigits } from '../src/utils/whatsappIdentity';
-import { buildParticipantIdentityMap, enrichRecordsWithParticipantIdentities, participantDisplayNameFromSources, participantFallbackNameFromRecord, participantNameFromRecord, participantPhoneFromRecord } from '../server/src/participantIdentity';
+import { buildParticipantIdentityMap, enrichRecordsWithParticipantIdentities, participantDisplayNameFromSources, participantFallbackNameFromRecord, participantJidFromRecord, participantNameFromRecord, participantPhoneFromRecord } from '../server/src/participantIdentity';
 import { qaGroupMetadataRecords, qaGroupParticipantIdentityRecords, qaGroupParticipantRecords, qaIndividualIdentityRecords, qaNewGroupParticipantWebhookRecords } from '../server/src/qa';
 import { normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
 
@@ -150,4 +150,8 @@ test('frontend never treats a technical participant fallback as a real name', ()
   }, 0, '120363000000@g.us', 'Atendente');
   assert.equal(message.metadata?.participantName, undefined);
   assert.equal(message.senderName, 'Participante …6992');
+});
+
+test('message ids are never mistaken for participant identities', () => {
+  assert.equal(participantJidFromRecord({ id: 'evolution-message-123', message: { conversation: 'Mensagem QA' } }), '');
 });

@@ -57,10 +57,7 @@ export function participantJidFromRecord(record: any) {
       || record?.senderPn
       || record?.metadata?.participantJid
       || record?.key?.participantPn
-      || record?.key?.senderPn
-      || record?.id
-      || record?.jid
-      || record?.lid,
+      || record?.key?.senderPn,
   );
 }
 

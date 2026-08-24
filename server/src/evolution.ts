@@ -212,8 +212,14 @@ async function fetchGroupParticipantIdentitiesUncached(cacheKey: string, groupJi
             .map(normalizeParticipantJid)
             .filter(Boolean);
           if (participantJids.length === 0) continue;
+          const phoneJid = participantJids.find((jid) => !jid.endsWith('@lid') && !jid.endsWith('@g.us'));
           const identity = [...buildParticipantIdentityMap([
-            pictureUrl ? { ...participant, participantAvatar: pictureUrl } : participant,
+            {
+              ...participant,
+              participantJid: participantJids[0],
+              ...(phoneJid ? { participantPhone: phoneJid } : {}),
+              ...(pictureUrl ? { participantAvatar: pictureUrl } : {}),
+            },
           ]).values()][0];
           if (!identity) continue;
           for (const participantJid of participantJids) {
