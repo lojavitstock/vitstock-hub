@@ -115,7 +115,7 @@ function matchesWebhookSecret(value: string | undefined) {
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-async function evolutionRequest(path: string, init?: RequestInit) {
+async function evolutionRequest(path: string, init?: RequestInit, timeoutMs = 15_000) {
   if (isQaMode) return qaEvolutionResponse(path, init);
   return fetch(`${config.EVOLUTION_API_URL}${path}`, {
     ...init,
@@ -124,7 +124,7 @@ async function evolutionRequest(path: string, init?: RequestInit) {
       apikey: config.EVOLUTION_API_KEY,
       ...init?.headers,
     },
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 }
 
@@ -192,7 +192,10 @@ async function refreshGroupMetadata(companyId: string) {
   const instance = encodeURIComponent(config.EVOLUTION_INSTANCE_NAME);
   const request = (async () => {
     try {
-      const response = await evolutionRequest(`/group/fetchAllGroups/${instance}?getParticipants=false`);
+      // Evolution v2.3.x may take over 20s to enumerate groups even without
+      // participants. Keep the normal request budget unchanged and allow only
+      // this metadata endpoint a bounded, evidence-based window.
+      const response = await evolutionRequest(`/group/fetchAllGroups/${instance}?getParticipants=false`, undefined, 30_000);
       if (!response.ok) return [];
       const groups = parseGroupMetadata(await response.json().catch(() => []));
       groupMetadataCache.set(companyId, {
@@ -1957,10 +1960,10 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     let chatsData = snapshot.chats;
     const contactsData = snapshot.contacts;
-    const groupMetadataByJid = new Map(snapshot.groups.map((group) => [group.groupJid, group]));
+    const groupMetadataByJid = new Map(snapshot.groups.map((group) => [group.groupJid.toLowerCase(), group]));
     chatsData = chatsData.map((chat: any) => {
       const remoteJid = String(chat?.remoteJid || chat?.id || '');
-      const metadata = groupMetadataByJid.get(remoteJid);
+      const metadata = groupMetadataByJid.get(remoteJid.toLowerCase());
       if (!metadata) return chat;
       return {
         ...chat,

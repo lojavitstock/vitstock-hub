@@ -25,9 +25,9 @@ test('identity keys are stable and case-insensitive', () => {
 
 test('group metadata parser normalizes, filters, and deduplicates provider results', () => {
   const groups = parseGroupMetadata({ data: [
-    { id: '120363000000@g.us', subject: 'Equipe antiga' },
+    { id: '120363000000@G.US', subject: 'Equipe antiga' },
     { id: 'not-a-group', subject: 'Ignorar' },
-    { id: '120363000000@g.us', subject: 'Equipe atual', profilePicUrl: 'https://img.test/group.jpg' },
+    { id: '120363000000@g.us', subject: 'Equipe atual', pictureUrl: 'https://img.test/group.jpg' },
   ] }, 123);
   assert.deepEqual(groups, [{
     groupJid: '120363000000@g.us',

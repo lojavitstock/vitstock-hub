@@ -5,6 +5,10 @@ export type GroupMetadata = {
   metadataUpdatedAt: number;
 };
 
+function normalizedGroupJid(value: string) {
+  return value.trim().toLowerCase();
+}
+
 function firstText(...values: unknown[]) {
   return values.find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim();
 }
@@ -23,11 +27,12 @@ function groupName(value: any) {
 }
 
 export function normalizeGroupMetadata(value: any, metadataUpdatedAt = Date.now()): GroupMetadata | undefined {
-  const groupJid = String(value?.groupJid || value?.remoteJid || value?.id || value?.jid || '').trim();
+  const groupJid = normalizedGroupJid(String(value?.groupJid || value?.remoteJid || value?.id || value?.jid || ''));
   if (!groupJid.toLowerCase().endsWith('@g.us')) return undefined;
   const subject = groupName(value);
   const picture = firstText(
     value?.profilePicUrl,
+    value?.pictureUrl,
     value?.profilePictureUrl,
     value?.profilePicture,
     value?.picture,
