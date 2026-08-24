@@ -13,6 +13,8 @@ import { evolutionMessageIdFromResponse, evolutionReactionPayload, formatHubOutb
 import { createOutboundRequestCoordinator, outboundDispatchAction, outboundIdempotencyLockKey } from './outboundIdempotency.js';
 import { isNonRenderableProviderMessage, providerMessageType, unwrapProviderMessage } from './providerMessagePolicy.js';
 import { canonicalPhone, normalizeContactPhone } from './contactDomain.js';
+import { isWhatsAppLid, providerPhoneDigits, providerPhoneJid } from './whatsappIdentity.js';
+import { parseGroupMetadata, type GroupMetadata } from './groupMetadata.js';
 import {
   applyProviderReaction,
   areStoredReactionsEqual,
@@ -126,9 +128,11 @@ async function evolutionRequest(path: string, init?: RequestInit) {
   });
 }
 
-type EvolutionChatsSnapshot = { chats: any[]; contacts: any[]; expiresAt: number; staleUntil: number };
+type EvolutionChatsSnapshot = { chats: any[]; contacts: any[]; groups: GroupMetadata[]; expiresAt: number; staleUntil: number };
 const evolutionChatsCache = new Map<string, EvolutionChatsSnapshot>();
-const evolutionChatsInFlight = new Map<string, Promise<{ chats: any[]; contacts: any[] }>>();
+const evolutionChatsInFlight = new Map<string, Promise<{ chats: any[]; contacts: any[]; groups: GroupMetadata[] }>>();
+const groupMetadataCache = new Map<string, { groups: GroupMetadata[]; expiresAt: number; staleUntil: number }>();
+const groupMetadataInFlight = new Map<string, Promise<GroupMetadata[]>>();
 const localInboxCache = new Map<string, { chats: any[]; expiresAt: number }>();
 const outboundTraceEnabled = process.env.OUTBOUND_TRACE === 'true';
 const outboundEvolutionRequests = createOutboundRequestCoordinator<{ ok: boolean; body: any }>();
@@ -163,14 +167,73 @@ function traceOutbound(request: any, stage: string, input: {
   }));
 }
 
+async function persistGroupMetadata(companyId: string, groups: GroupMetadata[]) {
+  if (groups.length === 0) return;
+  try {
+    await db.query(
+      `UPDATE conversations c
+       SET group_name = COALESCE(NULLIF(item.subject, ''), c.group_name),
+           group_avatar_url = COALESCE(NULLIF(item.picture, ''), c.group_avatar_url)
+       FROM jsonb_to_recordset($2::jsonb) AS item(group_jid text, subject text, picture text)
+       WHERE c.company_id = $1
+         AND c.is_group = true
+         AND c.evolution_remote_jid = item.group_jid`,
+      [companyId, JSON.stringify(groups)],
+    );
+  } catch (error) {
+    // Metadata enrichment must never make the inbox unavailable.
+    console.warn('[Evolution] não foi possível persistir metadata de grupos', error);
+  }
+}
+
+async function refreshGroupMetadata(companyId: string) {
+  const current = groupMetadataInFlight.get(companyId);
+  if (current) return current;
+  const instance = encodeURIComponent(config.EVOLUTION_INSTANCE_NAME);
+  const request = (async () => {
+    try {
+      const response = await evolutionRequest(`/group/fetchAllGroups/${instance}?getParticipants=false`);
+      if (!response.ok) return [];
+      const groups = parseGroupMetadata(await response.json().catch(() => []));
+      groupMetadataCache.set(companyId, {
+        groups,
+        expiresAt: Date.now() + 2 * 60_000,
+        staleUntil: Date.now() + 10 * 60_000,
+      });
+      void persistGroupMetadata(companyId, groups);
+      return groups;
+    } catch {
+      return [];
+    }
+  })();
+  groupMetadataInFlight.set(companyId, request);
+  try {
+    return await request;
+  } finally {
+    groupMetadataInFlight.delete(companyId);
+  }
+}
+
+async function fetchGroupMetadataSnapshot(companyId: string) {
+  const cached = groupMetadataCache.get(companyId);
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) return cached.groups;
+  if (cached && cached.staleUntil > now) {
+    void refreshGroupMetadata(companyId).catch(() => undefined);
+    return cached.groups;
+  }
+  return refreshGroupMetadata(companyId);
+}
+
 async function refreshEvolutionChatsSnapshot(companyId: string) {
   const current = evolutionChatsInFlight.get(companyId);
   if (current) return current;
   const instance = encodeURIComponent(config.EVOLUTION_INSTANCE_NAME);
   const request = (async () => {
-    const [chatsResponse, contactsResponse] = await Promise.all([
+    const [chatsResponse, contactsResponse, groups] = await Promise.all([
       evolutionRequest(`/chat/findChats/${instance}`, { method: 'POST', body: '{}' }),
       evolutionRequest(`/chat/findContacts/${instance}`, { method: 'POST', body: '{}' }),
+      fetchGroupMetadataSnapshot(companyId),
     ]);
     if (!chatsResponse.ok || !contactsResponse.ok) {
       throw new Error('Evolution API indisponÃ­vel para consultar as conversas');
@@ -185,10 +248,11 @@ async function refreshEvolutionChatsSnapshot(companyId: string) {
     };
     evolutionChatsCache.set(companyId, {
       ...snapshot,
+      groups,
       expiresAt: Date.now() + 3_000,
       staleUntil: Date.now() + 30_000,
     });
-    return snapshot;
+    return { ...snapshot, groups };
   })();
   evolutionChatsInFlight.set(companyId, request);
   try {
@@ -202,14 +266,14 @@ async function fetchEvolutionChatsSnapshot(companyId: string) {
   const now = Date.now();
   const cached = evolutionChatsCache.get(companyId);
   if (cached && cached.expiresAt > now) {
-    return { chats: cached.chats, contacts: cached.contacts };
+    return { chats: cached.chats, contacts: cached.contacts, groups: cached.groups };
   }
 
   // Enquanto a Evolution responde, entregamos o último snapshot conhecido.
   // Isso mantém o inbox utilizável mesmo quando o provedor demora vários segundos.
   if (cached && cached.staleUntil > now) {
     void refreshEvolutionChatsSnapshot(companyId).catch(() => undefined);
-    return { chats: cached.chats, contacts: cached.contacts };
+    return { chats: cached.chats, contacts: cached.contacts, groups: cached.groups };
   }
 
   return refreshEvolutionChatsSnapshot(companyId);
@@ -345,6 +409,26 @@ function canonicalPhoneJid(number: string) {
 function phoneForContactStorage(value: string) {
   const canonical = canonicalPhone(value, { defaultCountry: 'BR' });
   return canonical || `+${normalizeContactPhone(value)}`;
+}
+
+async function persistProviderIdentities(
+  client: Pool | PoolClient,
+  companyId: string,
+  contactId: string,
+  remoteJid: string,
+  phone?: string,
+) {
+  const identities = [remoteJid, phone ? providerPhoneJid({ remoteJid: phone }) : '']
+    .filter(Boolean)
+    .filter((identity, index, values) => values.indexOf(identity) === index);
+  for (const identity of identities) {
+    await client.query(
+      `INSERT INTO contact_channel_identities (company_id, contact_id, channel, identity, identity_type)
+       VALUES ($1, $2, 'whatsapp', $3, $4)
+       ON CONFLICT (company_id, channel, identity) DO UPDATE SET contact_id = EXCLUDED.contact_id, updated_at = now()`,
+      [companyId, contactId, identity, isWhatsAppLid(identity) ? 'lid' : identity.endsWith('@g.us') ? 'group' : 'remote_jid'],
+    );
+  }
 }
 
 async function findOrCreatePhoneContact(client: Pool | PoolClient, input: { companyId: string; name: string; phone: string; avatarUrl?: string | null }) {
@@ -503,16 +587,7 @@ function providerContactPhone(value: any) {
     || value?.key?.remoteJid
     || '';
   if (isWhatsAppGroupJid(String(primaryJid))) return '';
-  const rawJid = value?.lastMessage?.key?.remoteJidAlt
-    || value?.key?.remoteJidAlt
-    || value?.remoteJidAlt
-    || value?.remoteJid
-    || value?.id
-    || value?.key?.remoteJid
-    || '';
-  if (isWhatsAppGroupJid(String(rawJid))) return '';
-  const digits = String(rawJid).split('@')[0]?.replace(/\D/g, '') || '';
-  return digits.length >= 8 && digits.length <= 20 ? digits : '';
+  return providerPhoneDigits(value);
 }
 
 function normalizeProviderMessageStatus(value: unknown): 'sent' | 'delivered' | 'read' | 'failed' | undefined {
@@ -891,14 +966,7 @@ function providerRemoteJid(record: any) {
 function providerPhone(record: any) {
   const remoteJid = providerRemoteJid(record);
   if (isWhatsAppGroupJid(remoteJid)) return remoteJid;
-  const phoneJid = record?.key?.senderPn
-    || record?.key?.participantPn
-    || record?.senderPn
-    || record?.key?.remoteJidAlt
-    || record?.remoteJidAlt
-    || remoteJid;
-  const digits = String(phoneJid).split('@')[0]?.replace(/\D/g, '') || '';
-  return digits.length >= 8 && digits.length <= 20 ? digits : '';
+  return providerPhoneDigits(record);
 }
 
 function providerMessageId(record: any) {
@@ -918,6 +986,7 @@ function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
   const metadata = providerMessageMetadata(record, message, fromMe);
   const remoteJid = providerRemoteJid(record);
   const isGroup = isWhatsAppGroupJid(remoteJid);
+  const resolvedFallbackPhone = providerPhoneDigits({ remoteJid: fallbackPhone });
   const groupName = isGroup
     ? (providerGroupName(record) || providerGroupName(record?.chat) || providerGroupName(record?.groupMetadata))
     : '';
@@ -930,7 +999,7 @@ function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
   return {
     id: providerMessageId(record),
     remoteJid,
-    phone: isGroup ? remoteJid : providerPhone(record) || fallbackPhone.replace(/\D/g, ''),
+    phone: isGroup ? remoteJid : providerPhone(record) || resolvedFallbackPhone,
     isGroup,
     groupName: groupName || undefined,
     groupAvatarUrl: isGroup
@@ -1340,7 +1409,7 @@ async function persistProviderMessage(
     return persistProviderReaction(companyId, record);
   }
   const local = providerRecordToLocalMessage(record, options.fallbackPhone);
-  if (!local.id || !local.remoteJid || !local.phone) return undefined;
+  if (!local.id || !local.remoteJid) return undefined;
 
   const client = await db.connect();
   try {
@@ -1349,10 +1418,29 @@ async function persistProviderMessage(
     const isGroup = Boolean(local.isGroup) || isWhatsAppGroupJid(local.remoteJid);
     const groupName = isGroup ? local.groupName : undefined;
     const displayGroupName = groupName || `Grupo ${local.remoteJid.split('@')[0]}`;
-    const contactPhone = isGroup ? local.remoteJid : phoneForContactStorage(local.phone);
+    const linkedContact = !isGroup && !local.phone
+      ? await client.query<{ id: string; phone: string }>(
+        `SELECT c.id, COALESCE(primary_phone.phone, c.phone) AS phone
+         FROM contact_channel_identities ci
+         JOIN contacts c ON c.id = ci.contact_id
+         LEFT JOIN LATERAL (
+           SELECT p.phone
+           FROM contact_phones p
+           WHERE p.contact_id = c.id
+           ORDER BY p.is_primary DESC, p.id
+           LIMIT 1
+         ) primary_phone ON true
+         WHERE ci.company_id = $1 AND ci.channel = 'whatsapp' AND ci.identity = $2
+         LIMIT 1`,
+        [companyId, local.remoteJid],
+      )
+      : { rows: [] };
+    const resolvedPhone = local.phone || linkedContact.rows[0]?.phone || '';
+    if (!isGroup && !resolvedPhone) return undefined;
+    const contactPhone = isGroup ? local.remoteJid : phoneForContactStorage(resolvedPhone);
     const contactName = isGroup
       ? displayGroupName
-      : local.sender === 'contact' ? local.senderName : `+${local.phone}`;
+      : local.sender === 'contact' ? local.senderName : `+${resolvedPhone}`;
     const conversationPreview = isGroup
       ? `${local.senderName || (local.sender === 'attendant' ? 'Atendente' : 'Participante')}: ${local.content}`
       : local.content;
@@ -1365,7 +1453,9 @@ async function persistProviderMessage(
            avatar_url = COALESCE(EXCLUDED.avatar_url, contacts.avatar_url), updated_at = now()
          RETURNING id`, [companyId, contactName, contactPhone, local.groupAvatarUrl || null, Boolean(groupName)],
       )
-      : { rows: [{ id: (await findOrCreatePhoneContact(client, { companyId, name: contactName, phone: contactPhone })).id }] };
+      : linkedContact.rows[0]?.id
+        ? { rows: [{ id: linkedContact.rows[0].id }] }
+        : { rows: [{ id: (await findOrCreatePhoneContact(client, { companyId, name: contactName, phone: contactPhone })).id }] };
     const contactId = contact.rows[0]?.id;
     if (!contactId) throw new Error('Contato não pôde ser preparado para a mensagem recebida');
 
@@ -1394,12 +1484,7 @@ async function persistProviderMessage(
       );
     }
 
-    await client.query(
-      `INSERT INTO contact_channel_identities (company_id, contact_id, channel, identity, identity_type)
-       VALUES ($1, $2, 'whatsapp', $3, $4)
-       ON CONFLICT (company_id, channel, identity) DO UPDATE SET contact_id = EXCLUDED.contact_id, updated_at = now()`,
-      [companyId, contactId, local.remoteJid, local.remoteJid.endsWith('@lid') ? 'lid' : 'remote_jid'],
-    );
+    await persistProviderIdentities(client, companyId, contactId, local.remoteJid, isGroup ? undefined : resolvedPhone);
 
     const conversationId = await findOrCreateConversation(client, {
       companyId,
@@ -1845,14 +1930,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/evolution/chats', { preHandler: requireUser }, async (_request, reply) => {
-    let snapshot: { chats: any[]; contacts: any[] };
+    let snapshot: { chats: any[]; contacts: any[]; groups: GroupMetadata[] };
     let usingLocalInboxFallback = false;
     try {
       snapshot = await fetchEvolutionChatsSnapshot(_request.user!.companyId);
     } catch (error) {
       _request.log.warn({ err: error }, 'Evolution nÃ£o respondeu a consulta de conversas');
       try {
-        snapshot = { chats: await fetchLocalInboxChats(_request.user!.companyId), contacts: [] };
+        snapshot = { chats: await fetchLocalInboxChats(_request.user!.companyId), contacts: [], groups: [] };
         usingLocalInboxFallback = true;
       } catch (localError) {
         _request.log.error({ err: localError }, 'NÃ£o foi possÃ­vel recuperar o inbox persistido');
@@ -1863,7 +1948,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       try {
         const localChats = await fetchLocalInboxChats(_request.user!.companyId);
         if (localChats.length > 0) {
-          snapshot = { chats: localChats, contacts: snapshot.contacts };
+          snapshot = { chats: localChats, contacts: snapshot.contacts, groups: snapshot.groups };
           usingLocalInboxFallback = true;
         }
       } catch (error) {
@@ -1872,6 +1957,18 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     let chatsData = snapshot.chats;
     const contactsData = snapshot.contacts;
+    const groupMetadataByJid = new Map(snapshot.groups.map((group) => [group.groupJid, group]));
+    chatsData = chatsData.map((chat: any) => {
+      const remoteJid = String(chat?.remoteJid || chat?.id || '');
+      const metadata = groupMetadataByJid.get(remoteJid);
+      if (!metadata) return chat;
+      return {
+        ...chat,
+        groupName: metadata.subject || chat.groupName,
+        subject: metadata.subject || chat.subject,
+        profilePicUrl: metadata.picture || chat.profilePicUrl,
+      };
+    });
     // O webhook pode chegar antes da próxima atualização da Evolution. Mesclamos
     // o estado local recente sem substituir o snapshot do provedor.
     try {
@@ -2007,6 +2104,33 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     } catch (error) {
       _request.log.warn({ err: error }, 'Tabela de nomes do WhatsApp ainda não está disponível');
     }
+    let whatsappIdentities: { rows: Array<{ identity: string; identity_type: string; phone: string | null; name: string; avatar_url: string | null }> } = { rows: [] };
+    try {
+      whatsappIdentities = await db.query(
+        `SELECT ci.identity,
+                ci.identity_type,
+                phone_identity.phone,
+                c.name,
+                c.avatar_url
+         FROM contact_channel_identities ci
+         JOIN contacts c ON c.id = ci.contact_id
+         LEFT JOIN LATERAL (
+           SELECT regexp_replace(phone_identity.identity, '\\D', '', 'g') AS phone
+           FROM contact_channel_identities phone_identity
+           WHERE phone_identity.company_id = ci.company_id
+             AND phone_identity.contact_id = ci.contact_id
+             AND phone_identity.channel = 'whatsapp'
+             AND phone_identity.identity_type = 'remote_jid'
+             AND phone_identity.identity LIKE '%@s.whatsapp.net'
+           ORDER BY phone_identity.updated_at DESC
+           LIMIT 1
+         ) phone_identity ON true
+         WHERE ci.company_id = $1 AND ci.channel = 'whatsapp'`,
+        [_request.user!.companyId],
+      );
+    } catch (error) {
+      _request.log.warn({ err: error }, 'Identidades WhatsApp ainda não estão disponíveis');
+    }
     let dailyResponders: { rows: Array<{ evolution_remote_jid: string; user_id: string; user_name: string; response_date: string }> } = { rows: [] };
     try {
       dailyResponders = await db.query(
@@ -2024,6 +2148,8 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       contacts: contactsData,
       storedContacts: storedContacts.rows,
       whatsappNames: whatsappNames.rows,
+      whatsappIdentities: whatsappIdentities.rows,
+      groupMetadata: snapshot.groups,
       assignments: assignments.rows,
       leases: leases.rows,
       statuses: statuses.rows,
