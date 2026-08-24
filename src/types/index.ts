@@ -109,7 +109,9 @@ export interface Message {
     }>;
     /** Participant identity used by WhatsApp group messages/replies. */
     participantJid?: string;
+    participantPhone?: string;
     participantName?: string;
+    participantAvatar?: string;
     reaction?: string;
     systemLabel?: string;
     forwarded?: boolean;

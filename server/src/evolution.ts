@@ -16,6 +16,13 @@ import { canonicalPhone, normalizeContactPhone } from './contactDomain.js';
 import { isWhatsAppLid, providerPhoneDigits, providerPhoneJid } from './whatsappIdentity.js';
 import { parseGroupMetadata, type GroupMetadata } from './groupMetadata.js';
 import {
+  buildParticipantIdentityMap,
+  enrichRecordsWithParticipantIdentities,
+  participantNameFromRecord,
+  participantPhoneFromRecord,
+  type ParticipantIdentity,
+} from './participantIdentity.js';
+import {
   applyProviderReaction,
   areStoredReactionsEqual,
   HUB_REACTOR_KEY,
@@ -134,8 +141,71 @@ const evolutionChatsInFlight = new Map<string, Promise<{ chats: any[]; contacts:
 const groupMetadataCache = new Map<string, { groups: GroupMetadata[]; expiresAt: number; staleUntil: number }>();
 const groupMetadataInFlight = new Map<string, Promise<GroupMetadata[]>>();
 const localInboxCache = new Map<string, { chats: any[]; expiresAt: number }>();
+const participantIdentityCache = new Map<string, { identity: ParticipantIdentity; expiresAt: number }>();
+const participantIdentityInFlight = new Map<string, Promise<ParticipantIdentity>>();
+const PARTICIPANT_IDENTITY_TTL_MS = 10 * 60_000;
 const outboundTraceEnabled = process.env.OUTBOUND_TRACE === 'true';
 const outboundEvolutionRequests = createOutboundRequestCoordinator<{ ok: boolean; body: any }>();
+
+async function resolveParticipantIdentity(companyId: string, seed: ParticipantIdentity) {
+  const key = `${companyId}:${seed.participantJid}`;
+  const cached = participantIdentityCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    const identity = {
+      ...cached.identity,
+      ...(seed.displayName ? { displayName: seed.displayName } : {}),
+      ...(seed.participantPhone ? { participantPhone: seed.participantPhone } : {}),
+    };
+    if (identity.displayName !== cached.identity.displayName || identity.participantPhone !== cached.identity.participantPhone) {
+      participantIdentityCache.set(key, { identity, expiresAt: cached.expiresAt });
+    }
+    return identity;
+  }
+  const current = participantIdentityInFlight.get(key);
+  if (current) return current;
+
+  const request = (async () => {
+    let pictureUrl = seed.pictureUrl;
+    try {
+      const response = await evolutionRequest(
+        `/chat/fetchProfilePictureUrl/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+        { method: 'POST', body: JSON.stringify({ number: seed.participantJid }) },
+        10_000,
+      );
+      if (response.ok) {
+        const body: any = await response.json().catch(() => ({}));
+        pictureUrl = body?.profilePictureUrl
+          || body?.profilePicUrl
+          || body?.pictureUrl
+          || body?.data?.profilePictureUrl
+          || body?.data?.profilePicUrl
+          || body?.data?.pictureUrl
+          || pictureUrl;
+      }
+    } catch {
+      // Avatar enrichment is optional and must never block message loading.
+    }
+    const identity = { ...seed, ...(pictureUrl ? { pictureUrl } : {}) };
+    participantIdentityCache.set(key, { identity, expiresAt: Date.now() + PARTICIPANT_IDENTITY_TTL_MS });
+    return identity;
+  })();
+  participantIdentityInFlight.set(key, request);
+  try {
+    return await request;
+  } finally {
+    participantIdentityInFlight.delete(key);
+  }
+}
+
+async function enrichProviderParticipantRecords(companyId: string, records: any[]) {
+  const seeds = buildParticipantIdentityMap(records);
+  if (seeds.size === 0) return records;
+  const resolved = new Map<string, ParticipantIdentity>();
+  await Promise.all([...seeds.entries()].map(async ([key, seed]) => {
+    resolved.set(key, await resolveParticipantIdentity(companyId, seed));
+  }));
+  return enrichRecordsWithParticipantIdentities(records, resolved);
+}
 
 function traceOutbound(request: any, stage: string, input: {
   clientMessageId?: string;
@@ -803,10 +873,14 @@ function providerMessageMetadata(record: any, message: any, fromMe: boolean) {
     record?.key?.senderPn,
   );
   if (participantJid) metadata.participantJid = participantJid;
+  const participantPhone = participantPhoneFromRecord(record);
+  if (participantPhone) metadata.participantPhone = participantPhone;
   if (!fromMe) {
-    const participantName = providerContactName(record) || firstProviderText(record?.pushName, record?.participantName);
+    const participantName = participantNameFromRecord(record);
     if (participantName) metadata.participantName = participantName;
   }
+  const participantAvatar = firstProviderText(record?.participantAvatar, record?.metadata?.participantAvatar);
+  if (participantAvatar) metadata.participantAvatar = participantAvatar;
   const document = providerDocumentMetadata(message);
   if (document) metadata.document = document;
   const quotedMessage = quotedMessageFromContext(context);
@@ -2504,6 +2578,18 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       });
     }
 
+    const enrichedProviderRecords = await enrichProviderParticipantRecords(
+      request.user!.companyId,
+      [...recordsById.values()],
+    );
+    const enrichedRecordsById = new Map<string, any>();
+    for (const record of enrichedProviderRecords) {
+      const id = String(record?.key?.id || record?.id || '');
+      if (id) enrichedRecordsById.set(id, record);
+    }
+    recordsById.clear();
+    for (const [id, record] of enrichedRecordsById) recordsById.set(id, record);
+
     for (const record of recordsById.values()) {
       try {
         await persistProviderMessage(request.user!.companyId, record, {
@@ -3091,7 +3177,8 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       }));
 
       if (companyId) {
-        for (const record of records) {
+        const enrichedRecords = await enrichProviderParticipantRecords(companyId, records);
+        for (const record of enrichedRecords) {
           try {
             traceOutbound(request, `webhook.${normalizedEvent}`, {
               remoteJid: providerRemoteJid(record),

@@ -535,6 +535,19 @@ const MediaMessageContent: React.FC<{
 
 export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, isNearBottom = true, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage, onReplyMessage, onReactMessage, onLayoutChange }) => {
   const shouldShowIndicator = !isNearBottom && Boolean(onJumpToLatest);
+  const participantIdentityMap = React.useMemo(() => {
+    const map = new Map<string, { name?: string; avatar?: string }>();
+    messages.forEach((message) => {
+      const key = message.metadata?.participantJid?.trim().toLowerCase();
+      if (!key) return;
+      const current = map.get(key) || {};
+      map.set(key, {
+        name: current.name || message.metadata?.participantName || message.senderName,
+        avatar: current.avatar || message.metadata?.participantAvatar,
+      });
+    });
+    return map;
+  }, [messages]);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [viewerItem, setViewerItem] = useState<MediaViewerItem | null>(null);
   const [openMenuMessageId, setOpenMenuMessageId] = useState<string | null>(null);
@@ -655,7 +668,16 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
         <React.Fragment key={message.id}>
         {showDay && <DaySeparator label={messageDay} />}
         <div data-message-id={message.id} className={`flex max-w-[78%] gap-2 rounded-xl transition-shadow ${highlightedMessageId === message.id ? 'ring-2 ring-emerald-300/80 ring-offset-2 ring-offset-[#152027]' : ''} ${isMe ? 'ml-auto flex-row-reverse' : ''}`}>
-          {!isMe && <ContactPhoto name={activeConversation.isGroup ? (activeConversation.groupName || activeConversation.contact.name) : activeConversation.contact.name} avatar={activeConversation.contact.avatar} size="small" />}
+          {!isMe && <ContactPhoto
+            name={activeConversation.isGroup
+              ? (participantIdentityMap.get(message.metadata?.participantJid?.trim().toLowerCase() || '')?.name || message.senderName || 'Participante')
+              : activeConversation.contact.name}
+            avatar={activeConversation.isGroup
+              ? participantIdentityMap.get(message.metadata?.participantJid?.trim().toLowerCase() || '')?.avatar
+              : activeConversation.contact.avatar}
+            size="small"
+            lazy
+          />}
           <div>
             {activeConversation.isGroup && !isMe && message.senderName && (
               <p className="mb-1 px-1 text-[11px] font-extrabold text-emerald-300">{message.senderName}</p>

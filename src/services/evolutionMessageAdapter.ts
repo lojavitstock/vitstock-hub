@@ -17,6 +17,9 @@ type ProviderRecord = {
   senderPn?: string;
   participantName?: string;
   senderName?: string;
+  remoteJidAlt?: string;
+  participantPhone?: string;
+  participantAvatar?: string;
   status?: unknown;
   update?: { status?: unknown };
 };
@@ -44,6 +47,13 @@ const unwrapMessage = (message: any) => {
 const firstText = (...values: unknown[]) => values.find(
   (value): value is string => typeof value === 'string' && value.trim().length > 0,
 )?.trim();
+
+const usableParticipantName = (value: unknown) => {
+  if (typeof value !== 'string') return undefined;
+  const name = value.trim();
+  if (!name || name === 'Você' || name === 'WhatsApp Business' || /^\+?[\d\s().-]+$/.test(name)) return undefined;
+  return name;
+};
 
 const interactiveMessage = (message: any) => {
   const msg = unwrapMessage(message);
@@ -220,8 +230,15 @@ const messageMetadata = (record: ProviderRecord, message: any): Message['metadat
     record.key?.senderPn,
   );
   if (participantJid) metadata.participantJid = participantJid;
-  const participantName = firstText(record.pushName, record.participantName, record.senderName);
+  const participantPhone = firstText(record.participantPhone, record.senderPn, record.participantPn, record.key?.senderPn, record.key?.participantPn, record.remoteJidAlt, record.key?.remoteJidAlt);
+  if (participantPhone) metadata.participantPhone = participantPhone;
+  const participantAvatar = firstText(record.participantAvatar, record.metadata?.participantAvatar);
+  if (participantAvatar) metadata.participantAvatar = participantAvatar;
+  const participantName = [record.pushName, record.participantName, record.senderName]
+    .map(usableParticipantName)
+    .find(Boolean);
   if (!fromMe && participantName) metadata.participantName = participantName;
+  else if (metadata.participantName && !usableParticipantName(metadata.participantName)) delete metadata.participantName;
   const callInfo = callMessageInfo(record, msg, String(record.messageType || metadata.providerType || ''), fromMe);
   const externalAd = context?.externalAdReply;
   const hasMessageBoundAdContext = Boolean(
@@ -349,7 +366,7 @@ export const normalizeEvolutionMessage = (
     sender: fromMe ? 'attendant' : 'contact',
     senderName: fromMe
       ? (sentByHub ? metadata.sentByUserName!.trim() : undefined)
-      : (metadata.participantName || record.pushName || 'Contato'),
+      : (metadata.participantName || usableParticipantName(record.pushName) || 'Contato'),
     content: fromMe && sentByHub ? signed.content : (content || '[Mensagem não identificada]'),
     mediaUrl: media.url,
     mediaType: media.type,

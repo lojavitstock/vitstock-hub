@@ -51,19 +51,44 @@ export function qaGooglePeople() {
   return googleScenario === 'external-delete' ? people.slice(1) : people;
 }
 
+/** Deterministic group fixture used by local QA to exercise PN, LID and retroactive identity. */
+export function qaGroupParticipantRecords() {
+  const remoteJid = '120363000000@g.us';
+  const record = (id: string, participant: string, timestamp: number, content: string, extra: Record<string, unknown> = {}) => ({
+    key: { id, remoteJid, participant, fromMe: false },
+    pushName: undefined,
+    messageTimestamp: timestamp,
+    message: { conversation: content },
+    ...extra,
+  });
+  return [
+    record('qa-group-c-old', '333333333@lid', 1_000, 'Mensagem antiga do C'),
+    record('qa-group-a', '5521999000001@s.whatsapp.net', 2_000, 'Mensagem do A', { pushName: 'Participante A' }),
+    record('qa-group-b', '222222222@lid', 3_000, 'Mensagem do B', { pushName: 'Participante B', senderPn: '5521999000002@s.whatsapp.net' }),
+    record('qa-group-c-new', '333333333@lid', 4_000, 'Mensagem recente do C', { pushName: 'Participante C' }),
+    record('qa-group-d', '444444444@lid', 5_000, 'Mensagem do D'),
+  ];
+}
+
 function qaEvolutionResponse(path: string, init?: RequestInit) {
   const method = (init?.method || 'GET').toUpperCase();
+  let requestBody: any = {};
+  try { requestBody = typeof init?.body === 'string' ? JSON.parse(init.body) : {}; } catch { requestBody = {}; }
+  const participantNumber = String(requestBody?.number || '');
   const body = path.includes('/message/sendText/') || path.includes('/message/sendMedia/')
     ? { key: { id: `qa-evolution-${randomUUID()}` } }
       : path.includes('/message/sendReaction/') ? { status: 'ok' }
         : path.includes('/connectionState/') ? { instance: { state: 'open' } }
           : path.includes('/group/fetchAllGroups/') ? [{ id: '120363000000@g.us', subject: 'Equipe QA', profilePicUrl: 'http://localhost:3001/api/qa/avatar/valid.svg' }]
             : path.includes('/findChats/') || path.includes('/findContacts/') ? []
-            : path.includes('/chat/findMessages/') ? { messages: { records: [] } }
+            : path.includes('/chat/findMessages/') ? { messages: { records: requestBody?.remoteJid === '120363000000@g.us' ? qaGroupParticipantRecords() : [] } }
               : path.includes('/chat/markMessageAsRead/') ? { status: 'read' }
                 : path.includes('/instance/connect/') ? { code: 'QA_MOCK_CONNECTED' }
             : path.includes('/instance/logout/') ? { status: 'loggedOut' }
               : path.includes('/chat/getBase64FromMediaMessage') ? { base64: '' }
+                : path.includes('/fetchProfilePictureUrl/') ? (participantNumber.includes('444444444@lid') || participantNumber.includes('333333333@lid')
+                  ? { profilePictureUrl: null }
+                  : { profilePictureUrl: `http://localhost:3001/api/qa/avatar/${participantNumber.includes('5521999000001') ? 'a' : participantNumber.includes('222222222') ? 'b' : 'valid'}.svg` })
                 : path.includes('/profile/') ? { name: 'Vitstock QA', picture: null }
                   : null;
   if (body === null) throw new Error(`QA_MODE bloqueou chamada Evolution não simulada: ${method} ${path}`);
@@ -84,8 +109,9 @@ export async function registerQaRoutes(app: FastifyInstance) {
 
   app.get<{ Params: { variant: string } }>('/api/qa/avatar/:variant', async (request, reply) => {
     const variant = request.params.variant;
-    if (variant === 'valid.svg') {
-      reply.type('image/svg+xml').send('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96"><rect width="96" height="96" rx="48" fill="#eebb2c"/><circle cx="48" cy="38" r="16" fill="#172027"/><path d="M20 78c4-18 16-27 28-27s24 9 28 27" fill="#172027"/></svg>');
+    if (variant === 'valid.svg' || variant === 'a.svg' || variant === 'b.svg') {
+      const fill = variant === 'a.svg' ? '#4ade80' : variant === 'b.svg' ? '#60a5fa' : '#eebb2c';
+      reply.type('image/svg+xml').send(`<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96"><rect width="96" height="96" rx="48" fill="${fill}"/><circle cx="48" cy="38" r="16" fill="#172027"/><path d="M20 78c4-18 16-27 28-27s24 9 28 27" fill="#172027"/></svg>`);
       return;
     }
     if (variant === 'broken.svg') {
