@@ -23,6 +23,7 @@ export function isUsableParticipantName(value: unknown) {
   return Boolean(name)
     && name !== 'Você'
     && name !== 'WhatsApp Business'
+    && name !== 'Contato'
     && !/^\+?[\d\s().-]+$/.test(name);
 }
 
@@ -69,6 +70,22 @@ export function participantPhoneFromRecord(record: any) {
     if (digits.length >= 8 && digits.length <= 20) return digits;
   }
   return undefined;
+}
+
+/**
+ * Produces a useful, non-ambiguous label when WhatsApp did not provide a
+ * display name. LIDs remain opaque; they are never converted into phones.
+ */
+export function participantFallbackNameFromRecord(record: any) {
+  const phone = participantPhoneFromRecord(record);
+  if (phone) return `+${phone}`;
+  const jid = participantJidFromRecord(record);
+  if (jid) {
+    const value = jid.split('@')[0] || jid;
+    if (value.length > 8) return `Participante …${value.slice(-4)}`;
+    return `Participante ${value}`;
+  }
+  return 'Participante';
 }
 
 export function mergeParticipantIdentity(record: any, identity: ParticipantIdentity) {

@@ -24,6 +24,7 @@ const areVisibleFieldsEqual = (previous: Conversation, next: Conversation) => (
   previous.id === next.id
   && previous.contact.name === next.contact.name
   && previous.contact.avatar === next.contact.avatar
+  && previous.groupAvatar === next.groupAvatar
   && previous.lastMessage === next.lastMessage
   && previous.lastMessageAt === next.lastMessageAt
   && previous.lastMessageTimestamp === next.lastMessageTimestamp
@@ -58,7 +59,7 @@ export const ConversationListItem = React.memo<ConversationListItemProps>(({
       }`}
       aria-current={isSelected ? 'true' : undefined}
     >
-      <ContactPhoto name={conversation.contact.name} avatar={conversation.contact.avatar} emphasized={isSelected || needsAttention || isUnread} lazy />
+      <ContactPhoto name={conversation.contact.name} avatar={conversation.isGroup ? (conversation.groupAvatar || conversation.contact.avatar) : conversation.contact.avatar} emphasized={isSelected || needsAttention || isUnread} lazy />
 
       <span className="min-w-0 flex-1">
         <span className="mb-1 flex items-start justify-between gap-2">

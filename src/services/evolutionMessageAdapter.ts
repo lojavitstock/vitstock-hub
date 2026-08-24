@@ -51,8 +51,33 @@ const firstText = (...values: unknown[]) => values.find(
 const usableParticipantName = (value: unknown) => {
   if (typeof value !== 'string') return undefined;
   const name = value.trim();
-  if (!name || name === 'Você' || name === 'WhatsApp Business' || /^\+?[\d\s().-]+$/.test(name)) return undefined;
+  if (!name || name === 'Você' || name === 'WhatsApp Business' || name === 'Contato' || /^\+?[\d\s().-]+$/.test(name)) return undefined;
   return name;
+};
+
+const participantFallbackName = (record: ProviderRecord) => {
+  const phone = firstText(
+    record.participantPhone,
+    record.metadata?.participantPhone,
+    record.senderPn,
+    record.participantPn,
+    record.remoteJidAlt,
+    record.key?.senderPn,
+    record.key?.participantPn,
+  );
+  const phoneDigits = phone?.split('@')[0].replace(/\D/g, '');
+  if (phoneDigits && phoneDigits.length >= 8) return `+${phoneDigits}`;
+  const jid = firstText(
+    record.metadata?.participantJid,
+    record.key?.participant,
+    record.participant,
+  );
+  if (jid) {
+    const value = jid.split('@')[0];
+    if (value.length > 8) return `Participante …${value.slice(-4)}`;
+    return `Participante ${value}`;
+  }
+  return 'Participante';
 };
 
 const interactiveMessage = (message: any) => {
@@ -366,7 +391,7 @@ export const normalizeEvolutionMessage = (
     sender: fromMe ? 'attendant' : 'contact',
     senderName: fromMe
       ? (sentByHub ? metadata.sentByUserName!.trim() : undefined)
-      : (metadata.participantName || usableParticipantName(record.pushName) || 'Contato'),
+      : (usableParticipantName(metadata.participantName) || usableParticipantName(record.pushName) || participantFallbackName(record)),
     content: fromMe && sentByHub ? signed.content : (content || '[Mensagem não identificada]'),
     mediaUrl: media.url,
     mediaType: media.type,

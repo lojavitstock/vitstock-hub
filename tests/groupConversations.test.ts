@@ -43,6 +43,15 @@ test('group inbound shows participant name', () => {
   const message = normalizeEvolutionMessage({ key: { id: '1', remoteJid: groupJid, participant: participantJid }, pushName: 'Maria', message: { conversation: 'Oi' } }, 0, groupJid, 'Atendente');
   assert.equal(message.senderName, 'Maria');
 });
+test('group inbound uses explicit PN when pushName is missing', () => {
+  const message = normalizeEvolutionMessage({ key: { id: '1', remoteJid: groupJid, participant: '123456789@lid' }, senderPn: '5521999999999@s.whatsapp.net', message: { conversation: 'Oi' } }, 0, groupJid, 'Atendente');
+  assert.equal(message.senderName, '+5521999999999');
+  assert.equal(message.metadata?.participantPhone, '5521999999999@s.whatsapp.net');
+});
+test('group inbound uses an opaque technical fallback when identity is unknown', () => {
+  const message = normalizeEvolutionMessage({ key: { id: '1', remoteJid: groupJid, participant: '123456789@lid' }, pushName: 'Contato', message: { conversation: 'Oi' } }, 0, groupJid, 'Atendente');
+  assert.equal(message.senderName, 'Participante …6789');
+});
 test('group inbound stores participant jid metadata', () => {
   const message = normalizeEvolutionMessage({ key: { id: '1', remoteJid: groupJid, participant: participantJid }, pushName: 'Maria', message: { conversation: 'Oi' } }, 0, groupJid, 'Atendente');
   assert.equal(message.metadata?.participantJid, participantJid);

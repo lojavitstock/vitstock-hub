@@ -4,7 +4,7 @@ import { parseGroupMetadata } from '../server/src/groupMetadata';
 import { providerPhoneDigits, providerPhoneJid } from '../server/src/whatsappIdentity';
 import { providerIdentityKey, providerPhoneDigits as frontendProviderPhoneDigits } from '../src/utils/whatsappIdentity';
 import { buildParticipantIdentityMap, enrichRecordsWithParticipantIdentities, participantNameFromRecord, participantPhoneFromRecord } from '../server/src/participantIdentity';
-import { qaGroupParticipantRecords } from '../server/src/qa';
+import { qaGroupMetadataRecords, qaGroupParticipantRecords } from '../server/src/qa';
 
 test('LID identity never becomes a phone number', () => {
   assert.equal(providerPhoneDigits({ remoteJid: '164794086760597@lid' }), '');
@@ -73,4 +73,11 @@ test('QA group fixture covers PN, LID, retroactive enrichment, and unknown fallb
   assert.equal(enriched[0]?.metadata?.participantName, 'Participante C');
   assert.equal(enriched[0]?.metadata?.participantJid, '333333333@lid');
   assert.equal(enriched[4]?.metadata?.participantName, undefined);
+});
+
+test('QA group metadata fixture covers direct picture, lookup fallback and no-picture fallback', () => {
+  const groups = parseGroupMetadata(qaGroupMetadataRecords());
+  assert.equal(groups.find((group) => group.groupJid === '120363000000@g.us')?.picture?.endsWith('/valid.svg'), true);
+  assert.equal(groups.find((group) => group.groupJid === '120363000001@g.us')?.picture, undefined);
+  assert.equal(groups.find((group) => group.groupJid === '120363000002@g.us')?.picture, undefined);
 });

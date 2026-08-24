@@ -70,6 +70,14 @@ export function qaGroupParticipantRecords() {
   ];
 }
 
+export function qaGroupMetadataRecords() {
+  return [
+    { id: '120363000000@g.us', subject: 'Equipe QA', profilePicUrl: 'http://localhost:3001/api/qa/avatar/valid.svg' },
+    { id: '120363000001@g.us', subject: 'Equipe QA sem foto' },
+    { id: '120363000002@g.us', subject: 'Equipe QA sem lookup' },
+  ];
+}
+
 function qaEvolutionResponse(path: string, init?: RequestInit) {
   const method = (init?.method || 'GET').toUpperCase();
   let requestBody: any = {};
@@ -79,16 +87,16 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
     ? { key: { id: `qa-evolution-${randomUUID()}` } }
       : path.includes('/message/sendReaction/') ? { status: 'ok' }
         : path.includes('/connectionState/') ? { instance: { state: 'open' } }
-          : path.includes('/group/fetchAllGroups/') ? [{ id: '120363000000@g.us', subject: 'Equipe QA', profilePicUrl: 'http://localhost:3001/api/qa/avatar/valid.svg' }]
+          : path.includes('/group/fetchAllGroups/') ? qaGroupMetadataRecords()
             : path.includes('/findChats/') || path.includes('/findContacts/') ? []
             : path.includes('/chat/findMessages/') ? { messages: { records: requestBody?.remoteJid === '120363000000@g.us' ? qaGroupParticipantRecords() : [] } }
               : path.includes('/chat/markMessageAsRead/') ? { status: 'read' }
                 : path.includes('/instance/connect/') ? { code: 'QA_MOCK_CONNECTED' }
             : path.includes('/instance/logout/') ? { status: 'loggedOut' }
               : path.includes('/chat/getBase64FromMediaMessage') ? { base64: '' }
-                : path.includes('/fetchProfilePictureUrl/') ? (participantNumber.includes('444444444@lid') || participantNumber.includes('333333333@lid')
+                : path.includes('/fetchProfilePictureUrl/') ? (participantNumber.includes('444444444@lid') || participantNumber.includes('333333333@lid') || participantNumber.includes('120363000002@g.us')
                   ? { profilePictureUrl: null }
-                  : { profilePictureUrl: `http://localhost:3001/api/qa/avatar/${participantNumber.includes('5521999000001') ? 'a' : participantNumber.includes('222222222') ? 'b' : 'valid'}.svg` })
+                  : { profilePictureUrl: `http://localhost:3001/api/qa/avatar/${participantNumber.includes('5521999000001') ? 'a' : participantNumber.includes('222222222') ? 'b' : participantNumber.includes('120363000001@g.us') ? 'b' : 'valid'}.svg` })
                 : path.includes('/profile/') ? { name: 'Vitstock QA', picture: null }
                   : null;
   if (body === null) throw new Error(`QA_MODE bloqueou chamada Evolution não simulada: ${method} ${path}`);
