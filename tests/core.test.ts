@@ -2018,8 +2018,12 @@ test('stale realtime identity cannot regress a canonical group participant', () 
     metadata: { participantJid: '123456992@lid' },
   };
 
-  const merged = mergeConversationMessages([canonical], [stale]);
+  const merged = reconcileRealtimeMessages([canonical], 'conversation-1', {
+    type: 'message.upsert',
+    message: stale,
+  });
 
+  assert.ok(merged);
   assert.equal(merged[0], canonical);
   assert.equal(merged[0]?.senderName, 'Vitstock');
   assert.equal(merged[0]?.metadata?.participantName, 'Vitstock');
