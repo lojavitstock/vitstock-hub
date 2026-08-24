@@ -82,6 +82,41 @@ export function qaGroupParticipantIdentityRecords() {
   ];
 }
 
+/** Webhook-shaped fixtures for the message-new identity path. */
+export function qaNewGroupParticipantWebhookRecords() {
+  const remoteJid = '120363000000@g.us';
+  return [
+    {
+      key: { id: 'qa-new-lid-push-name', remoteJid, participant: '123456992@lid', fromMe: false },
+      pushName: 'Vitstock',
+      messageTimestamp: 1_000,
+      message: { conversation: 'Teste 1' },
+    },
+    {
+      key: { id: 'qa-new-lid-sender-pn', remoteJid, participant: '123456993@lid', fromMe: false },
+      senderPn: '5521999000093@s.whatsapp.net',
+      messageTimestamp: 1_001,
+      message: { conversation: 'Teste 2' },
+    },
+    {
+      key: { id: 'qa-new-lid-unknown', remoteJid, participant: '123456994@lid', fromMe: false },
+      messageTimestamp: 1_002,
+      message: { conversation: 'Teste 3' },
+    },
+    {
+      key: { id: 'qa-new-lid-known', remoteJid, participant: '123456995@lid', fromMe: false },
+      metadata: { participantJid: '123456995@lid', participantName: 'Participante conhecido QA' },
+      messageTimestamp: 1_003,
+      message: { conversation: 'Teste 4' },
+    },
+    {
+      key: { id: 'qa-new-pn', remoteJid, participant: '5521999000096@s.whatsapp.net', fromMe: false },
+      messageTimestamp: 1_004,
+      message: { conversation: 'Teste 5' },
+    },
+  ];
+}
+
 /** Deterministic individual fixtures covering real names, PN and opaque LID fallbacks. */
 export function qaIndividualIdentityRecords() {
   return [
@@ -133,7 +168,11 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
     ? { key: { id: `qa-evolution-${randomUUID()}` } }
       : path.includes('/message/sendReaction/') ? { status: 'ok' }
         : path.includes('/connectionState/') ? { instance: { state: 'open' } }
-          : path.includes('/group/fetchAllGroups/') ? qaGroupMetadataRecords()
+            : path.includes('/group/fetchAllGroups/') ? qaGroupMetadataRecords()
+            : path.includes('/group/participants/') ? [
+              { id: '123456994@lid', pushName: 'Lookup C QA' },
+              { id: '123456995@lid', pushName: 'Participante conhecido QA' },
+            ]
             : path.includes('/findChats/') || path.includes('/findContacts/') ? []
             : path.includes('/chat/findMessages/') ? { messages: { records: requestBody?.remoteJid === '120363000000@g.us' ? qaGroupParticipantRecords() : [] } }
               : path.includes('/chat/markMessageAsRead/') ? { status: 'read' }

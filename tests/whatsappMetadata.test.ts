@@ -3,8 +3,9 @@ import test from 'node:test';
 import { parseGroupMetadata } from '../server/src/groupMetadata';
 import { providerPhoneDigits, providerPhoneJid } from '../server/src/whatsappIdentity';
 import { providerDisplayName, providerFallbackDisplayName, providerIdentityKey, providerPhoneDigits as frontendProviderPhoneDigits } from '../src/utils/whatsappIdentity';
-import { buildParticipantIdentityMap, enrichRecordsWithParticipantIdentities, participantDisplayNameFromSources, participantNameFromRecord, participantPhoneFromRecord } from '../server/src/participantIdentity';
-import { qaGroupMetadataRecords, qaGroupParticipantIdentityRecords, qaGroupParticipantRecords, qaIndividualIdentityRecords } from '../server/src/qa';
+import { buildParticipantIdentityMap, enrichRecordsWithParticipantIdentities, participantDisplayNameFromSources, participantFallbackNameFromRecord, participantNameFromRecord, participantPhoneFromRecord } from '../server/src/participantIdentity';
+import { qaGroupMetadataRecords, qaGroupParticipantIdentityRecords, qaGroupParticipantRecords, qaIndividualIdentityRecords, qaNewGroupParticipantWebhookRecords } from '../server/src/qa';
+import { normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
 
 test('LID identity never becomes a phone number', () => {
   assert.equal(providerPhoneDigits({ remoteJid: '164794086760597@lid' }), '');
@@ -119,4 +120,34 @@ test('group participant display priority uses Google, provider, phone and opaque
   assert.equal(participantDisplayNameFromSources(lid), 'Participante …4444');
   assert.equal(participantDisplayNameFromSources(historical), '+5521999000105');
   assert.equal(participantDisplayNameFromSources(historicalGoogle), 'Google F');
+});
+
+test('new group webhook identity is available before realtime publication', () => {
+  const [withPushName, withSenderPn, unknown, known, withPn] = qaNewGroupParticipantWebhookRecords();
+  const identities = buildParticipantIdentityMap([withPushName, withSenderPn, unknown, known, withPn]);
+  assert.equal(identities.get('123456992@lid')?.displayName, 'Vitstock');
+  assert.equal(identities.get('123456993@lid')?.participantPhone, '5521999000093');
+  assert.equal(identities.get('123456994@lid')?.displayName, undefined);
+  assert.equal(identities.get('123456995@lid')?.displayName, 'Participante conhecido QA');
+  assert.equal(identities.get('5521999000096@s.whatsapp.net')?.participantJid, '5521999000096@s.whatsapp.net');
+
+  const enriched = enrichRecordsWithParticipantIdentities(
+    [withPushName, withSenderPn, unknown, known, withPn],
+    identities,
+  );
+  assert.equal(enriched[0]?.metadata?.participantName, 'Vitstock');
+  assert.equal(enriched[1]?.metadata?.participantPhone, '5521999000093');
+  assert.equal(participantFallbackNameFromRecord(enriched[2]), 'Participante …6994');
+  assert.equal(enriched[3]?.metadata?.participantName, 'Participante conhecido QA');
+});
+
+test('frontend never treats a technical participant fallback as a real name', () => {
+  const message = normalizeEvolutionMessage({
+    key: { id: 'qa-fallback', remoteJid: '120363000000@g.us', participant: '123456992@lid', fromMe: false },
+    message: { conversation: 'Mensagem QA' },
+    metadata: { participantJid: '123456992@lid', participantName: 'Participante …6992' },
+    messageTimestamp: 1_000,
+  }, 0, '120363000000@g.us', 'Atendente');
+  assert.equal(message.metadata?.participantName, undefined);
+  assert.equal(message.senderName, 'Participante …6992');
 });

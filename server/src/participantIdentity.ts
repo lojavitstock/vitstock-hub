@@ -36,9 +36,12 @@ export function participantNameFromRecord(record: any) {
     record?.participantName,
     record?.senderName,
     record?.pushName,
+    record?.contactName,
+    record?.name,
     record?.metadata?.participantName,
     record?.notify,
     record?.verifiedName,
+    record?.businessName,
   ];
   return candidates
     .map((candidate) => firstText(candidate))
@@ -54,7 +57,10 @@ export function participantJidFromRecord(record: any) {
       || record?.senderPn
       || record?.metadata?.participantJid
       || record?.key?.participantPn
-      || record?.key?.senderPn,
+      || record?.key?.senderPn
+      || record?.id
+      || record?.jid
+      || record?.lid,
   );
 }
 
@@ -63,9 +69,15 @@ export function participantPhoneFromRecord(record: any) {
   const values = [
     record?.senderPn,
     record?.participantPn,
+    record?.phoneNumber,
+    record?.phone,
+    record?.number,
+    record?.pn,
     record?.remoteJidAlt,
     record?.key?.senderPn,
     record?.key?.participantPn,
+    record?.key?.phoneNumber,
+    record?.key?.phone,
     record?.key?.remoteJidAlt,
   ];
   for (const value of values) {

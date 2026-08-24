@@ -51,7 +51,13 @@ const firstText = (...values: unknown[]) => values.find(
 const usableParticipantName = (value: unknown) => {
   if (typeof value !== 'string') return undefined;
   const name = value.trim();
-  if (!name || name === 'Você' || name === 'WhatsApp Business' || name === 'Contato' || /^\+?[\d\s().-]+$/.test(name)) return undefined;
+  if (!name
+    || name === 'Você'
+    || name === 'WhatsApp Business'
+    || name === 'Contato'
+    || name === 'Participante'
+    || /^Participante …\S+$/.test(name)
+    || /^\+?[\d\s().-]+$/.test(name)) return undefined;
   return name;
 };
 

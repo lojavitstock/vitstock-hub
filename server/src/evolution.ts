@@ -19,6 +19,7 @@ import {
   buildParticipantIdentityMap,
   enrichRecordsWithParticipantIdentities,
   isUsableParticipantName,
+  participantJidFromRecord,
   normalizeParticipantJid,
   participantNameFromRecord,
   participantFallbackNameFromRecord,
@@ -147,12 +148,104 @@ const groupMetadataInFlight = new Map<string, Promise<GroupMetadata[]>>();
 const localInboxCache = new Map<string, { chats: any[]; expiresAt: number }>();
 const participantIdentityCache = new Map<string, { identity: ParticipantIdentity; expiresAt: number; staleUntil: number }>();
 const participantIdentityInFlight = new Map<string, Promise<ParticipantIdentity>>();
+const groupParticipantCache = new Map<string, { identities: Map<string, ParticipantIdentity>; expiresAt: number; staleUntil: number }>();
+const groupParticipantInFlight = new Map<string, Promise<Map<string, ParticipantIdentity>>>();
 const PARTICIPANT_IDENTITY_TTL_MS = 10 * 60_000;
 const PARTICIPANT_IDENTITY_STALE_MS = 60 * 60_000;
+const GROUP_PARTICIPANT_TTL_MS = 10 * 60_000;
+const GROUP_PARTICIPANT_STALE_MS = 60 * 60_000;
 const GROUP_METADATA_TTL_MS = 2 * 60_000;
 const GROUP_METADATA_STALE_MS = 10 * 60_000;
 const outboundTraceEnabled = process.env.OUTBOUND_TRACE === 'true';
 const outboundEvolutionRequests = createOutboundRequestCoordinator<{ ok: boolean; body: any }>();
+
+async function fetchGroupParticipantIdentities(companyId: string, groupJid: string) {
+  const normalizedGroupJid = normalizeParticipantJid(groupJid);
+  const cacheKey = `${companyId}:${normalizedGroupJid}`;
+  const now = Date.now();
+  const cached = groupParticipantCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) return cached.identities;
+  if (cached && cached.staleUntil > now) {
+    void fetchGroupParticipantIdentitiesUncached(cacheKey, normalizedGroupJid).catch(() => undefined);
+    return cached.identities;
+  }
+  return fetchGroupParticipantIdentitiesUncached(cacheKey, normalizedGroupJid);
+}
+
+async function fetchGroupParticipantIdentitiesUncached(cacheKey: string, groupJid: string) {
+  const current = groupParticipantInFlight.get(cacheKey);
+  if (current) return current;
+  const request = (async () => {
+    const identities = new Map<string, ParticipantIdentity>();
+    try {
+      const instance = encodeURIComponent(config.EVOLUTION_INSTANCE_NAME);
+      const response = await evolutionRequest(
+        `/group/participants/${instance}?groupJid=${encodeURIComponent(groupJid)}`,
+        undefined,
+        10_000,
+      );
+      if (response.ok) {
+        const body: any = await response.json().catch(() => []);
+        const participants = Array.isArray(body)
+          ? body
+          : Array.isArray(body?.participants)
+            ? body.participants
+            : Array.isArray(body?.data?.participants)
+              ? body.data.participants
+              : Array.isArray(body?.data)
+                ? body.data
+                : [];
+        for (const participant of participants) {
+          const pictureUrl = participant?.participantAvatar
+            || participant?.profilePicUrl
+            || participant?.profilePictureUrl
+            || participant?.profilePicture
+            || participant?.avatarUrl;
+          const participantJids = [
+            participant?.lid,
+            participant?.participantJid,
+            participant?.participant,
+            participant?.key?.participant,
+            participant?.id,
+            participant?.jid,
+          ]
+            .map(normalizeParticipantJid)
+            .filter(Boolean);
+          if (participantJids.length === 0) continue;
+          const identity = [...buildParticipantIdentityMap([
+            pictureUrl ? { ...participant, participantAvatar: pictureUrl } : participant,
+          ]).values()][0];
+          if (!identity) continue;
+          for (const participantJid of participantJids) {
+            identities.set(participantJid, { ...identity, participantJid });
+          }
+        }
+      }
+    } catch {
+      // Participant lookup is optional; the webhook identity remains usable.
+    }
+    const timestamp = Date.now();
+    groupParticipantCache.set(cacheKey, {
+      identities,
+      expiresAt: timestamp + GROUP_PARTICIPANT_TTL_MS,
+      staleUntil: timestamp + GROUP_PARTICIPANT_STALE_MS,
+    });
+    return identities;
+  })();
+  groupParticipantInFlight.set(cacheKey, request);
+  try {
+    return await request;
+  } finally {
+    groupParticipantInFlight.delete(cacheKey);
+  }
+}
+
+async function resolveUnknownGroupParticipant(companyId: string, groupJid: string | undefined, seed: ParticipantIdentity) {
+  if (!groupJid || !isWhatsAppGroupJid(groupJid)) return undefined;
+  if (seed.displayName || seed.participantPhone || !seed.participantJid.endsWith('@lid')) return undefined;
+  const identities = await fetchGroupParticipantIdentities(companyId, groupJid);
+  return identities.get(seed.participantJid);
+}
 
 async function resolveParticipantIdentity(companyId: string, seed: ParticipantIdentity) {
   const key = `${companyId}:${seed.participantJid}`;
@@ -366,7 +459,20 @@ async function enrichProviderParticipantRecords(companyId: string, records: any[
   const mergedSeeds = mergePersistedParticipantIdentities(seeds, persisted);
   const resolved = new Map<string, ParticipantIdentity>();
   await Promise.all([...mergedSeeds.entries()].map(async ([key, seed]) => {
-    resolved.set(key, await resolveParticipantIdentity(companyId, seed));
+    const sourceRecord = records.find((record) => participantJidFromRecord(record) === key);
+    const groupJid = sourceRecord ? providerRemoteJid(sourceRecord) : undefined;
+    const lookedUp = await resolveUnknownGroupParticipant(companyId, groupJid, seed);
+    const effectiveSeed = lookedUp
+      ? {
+          ...lookedUp,
+          ...seed,
+          participantJid: seed.participantJid,
+          ...(seed.displayName || !lookedUp.displayName ? {} : { displayName: lookedUp.displayName }),
+          ...(seed.participantPhone || !lookedUp.participantPhone ? {} : { participantPhone: lookedUp.participantPhone }),
+          ...(seed.pictureUrl || !lookedUp.pictureUrl ? {} : { pictureUrl: lookedUp.pictureUrl }),
+        }
+      : seed;
+    resolved.set(key, await resolveParticipantIdentity(companyId, effectiveSeed));
   }));
   return enrichRecordsWithParticipantIdentities(records, resolved);
 }
@@ -1294,6 +1400,11 @@ function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
   const groupName = isGroup
     ? (providerGroupName(record) || providerGroupName(record?.chat) || providerGroupName(record?.groupMetadata))
     : '';
+  const participantDisplayName = !fromMe
+    ? (isUsableParticipantName(metadata.participantName)
+      ? metadata.participantName!.trim()
+      : participantNameFromRecord(record) || providerContactName(record))
+    : undefined;
   // Evolution's fromMe only proves that the connected WhatsApp account sent
   // the message. Until an exact Hub outbox record is matched, it is external.
   if (fromMe) metadata.sentOutsideHub = true;
@@ -1310,9 +1421,7 @@ function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
       ? (record?.profilePicUrl || record?.profilePictureUrl || record?.profilePicture || undefined)
       : undefined,
     sender: fromMe ? 'attendant' as const : 'contact' as const,
-    senderName: fromMe
-      ? undefined
-      : (isUsableParticipantName(metadata.participantName) ? metadata.participantName!.trim() : providerContactName(record) || participantFallbackNameFromRecord({ ...record, metadata })),
+    senderName: fromMe ? undefined : participantDisplayName || participantFallbackNameFromRecord({ ...record, metadata }),
     content: providerMessageContent(record),
     mediaUrl: media?.url,
     mediaType: media?.type,
@@ -1333,7 +1442,9 @@ function localMessageToRealtimeMessage(local: ReturnType<typeof providerRecordTo
     id: local.id,
     conversationId: local.remoteJid,
     sender: local.sender,
-    senderName: local.senderName,
+    senderName: local.sender === 'contact'
+      ? local.senderName || (isUsableParticipantName(local.metadata?.participantName) ? local.metadata.participantName : undefined)
+      : local.senderName,
     content: local.content,
     mediaUrl: local.mediaUrl,
     mediaType: local.mediaType,
