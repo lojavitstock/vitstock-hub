@@ -1,4 +1,5 @@
 import { Message } from '../types';
+import { providerDisplayName } from './whatsappIdentity';
 
 const areInteractiveButtonsEqual = (
   previous?: Message['interactiveButtons'],
@@ -94,6 +95,10 @@ const areMetadataEqual = (
     && previous.sentByUserName === next.sentByUserName
     && previous.sentOutsideHub === next.sentOutsideHub
     && previous.clientMessageId === next.clientMessageId
+    && previous.participantJid === next.participantJid
+    && previous.participantPhone === next.participantPhone
+    && previous.participantName === next.participantName
+    && previous.participantAvatar === next.participantAvatar
     && areQuotedMessagesEqual(previous.quotedMessage, next.quotedMessage)
     && areDocumentsEqual(previous.document, next.document)
     && areReactionsEqual(previous.reactions, next.reactions)
@@ -102,6 +107,51 @@ const areMetadataEqual = (
     && previous.forwarded === next.forwarded
     && areLocationEqual(previous.location, next.location)
     && areContactCardsEqual(previous.contactCard, next.contactCard);
+};
+
+/**
+ * Realtime/provider snapshots can omit the persisted participant identity or
+ * replace it with a synthetic LID fallback. Once a canonical identity is
+ * known for this message, do not let a weaker snapshot regress the timeline.
+ * A new canonical name is still accepted, so real contact-name changes work.
+ */
+const preserveParticipantIdentity = (current: Message, incoming: Message): Message => {
+  if (current.sender !== 'contact' || incoming.sender !== 'contact') return incoming;
+
+  const currentJid = current.metadata?.participantJid?.trim().toLowerCase();
+  const incomingJid = incoming.metadata?.participantJid?.trim().toLowerCase();
+  if (currentJid && incomingJid && currentJid !== incomingJid) return incoming;
+
+  const currentName = providerDisplayName({}, [current.metadata?.participantName, current.senderName]);
+  const incomingName = providerDisplayName({}, [incoming.metadata?.participantName, incoming.senderName]);
+  const metadata = { ...(incoming.metadata || {}) };
+  let changed = false;
+
+  if (current.metadata?.participantJid && !metadata.participantJid) {
+    metadata.participantJid = current.metadata.participantJid;
+    changed = true;
+  }
+  if (current.metadata?.participantPhone && !metadata.participantPhone) {
+    metadata.participantPhone = current.metadata.participantPhone;
+    changed = true;
+  }
+  if (current.metadata?.participantAvatar && !metadata.participantAvatar) {
+    metadata.participantAvatar = current.metadata.participantAvatar;
+    changed = true;
+  }
+
+  if (currentName && !incomingName) {
+    if (current.metadata?.participantName && metadata.participantName !== current.metadata.participantName) {
+      metadata.participantName = current.metadata.participantName;
+      changed = true;
+    }
+    if (current.senderName && incoming.senderName !== current.senderName) {
+      changed = true;
+      return { ...incoming, senderName: current.senderName, metadata };
+    }
+  }
+
+  return changed ? { ...incoming, metadata } : incoming;
 };
 
 /**
@@ -239,7 +289,10 @@ export const mergeConversationMessages = (current: Message[], incoming: Message[
       return [aliasedNext];
     }
     if (!next) return [message];
-    const nextWithAttribution = preserveHubAttribution(message, next);
+    const nextWithAttribution = preserveParticipantIdentity(
+      message,
+      preserveHubAttribution(message, next),
+    );
     if (areMessagesEquivalent(message, nextWithAttribution)) return [message];
     hasChanges = true;
     return [nextWithAttribution];

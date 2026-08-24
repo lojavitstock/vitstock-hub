@@ -1977,6 +1977,56 @@ test('reactions preserve replies and external authorship metadata', () => {
   assert.equal(merged[0]?.metadata?.sentOutsideHub, true);
 });
 
+test('canonical group participant identity replaces a technical LID fallback', () => {
+  const technical = message('group-identity-message', 1_700, 'Teste 1', 'read', {
+    senderName: 'Participante …6992',
+    metadata: { participantJid: '123456992@lid' },
+  });
+  const canonical = {
+    ...technical,
+    senderName: 'Vitstock',
+    metadata: {
+      participantJid: '123456992@lid',
+      participantPhone: '5521999999999',
+      participantName: 'Vitstock',
+      participantAvatar: 'https://cdn.example/avatar.jpg',
+    },
+  };
+
+  const merged = mergeConversationMessages([technical], [canonical]);
+
+  assert.notEqual(merged[0], technical);
+  assert.equal(merged[0]?.senderName, 'Vitstock');
+  assert.equal(merged[0]?.metadata?.participantName, 'Vitstock');
+  assert.equal(merged[0]?.metadata?.participantPhone, '5521999999999');
+  assert.equal(merged[0]?.metadata?.participantAvatar, 'https://cdn.example/avatar.jpg');
+});
+
+test('stale realtime identity cannot regress a canonical group participant', () => {
+  const canonical = message('group-identity-realtime', 1_700, 'Teste 1', 'read', {
+    senderName: 'Vitstock',
+    metadata: {
+      participantJid: '123456992@lid',
+      participantPhone: '5521999999999',
+      participantName: 'Vitstock',
+      participantAvatar: 'https://cdn.example/avatar.jpg',
+    },
+  });
+  const stale = {
+    ...canonical,
+    senderName: 'Participante …6992',
+    metadata: { participantJid: '123456992@lid' },
+  };
+
+  const merged = mergeConversationMessages([canonical], [stale]);
+
+  assert.equal(merged[0], canonical);
+  assert.equal(merged[0]?.senderName, 'Vitstock');
+  assert.equal(merged[0]?.metadata?.participantName, 'Vitstock');
+  assert.equal(merged[0]?.metadata?.participantPhone, '5521999999999');
+  assert.equal(merged[0]?.metadata?.participantAvatar, 'https://cdn.example/avatar.jpg');
+});
+
 test('reaction updates normalize equivalent JID formats into one reactor key', () => {
   const bySwhatsapp = providerReactionUpdate({
     key: { id: 'reaction-1', participant: '5521999999999@s.whatsapp.net', fromMe: false },
