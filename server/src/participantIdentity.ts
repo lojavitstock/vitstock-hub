@@ -7,6 +7,8 @@ export type ParticipantIdentity = {
   participantPhone?: string;
   displayName?: string;
   pictureUrl?: string;
+  /** Internal provenance flag used to let a Google match outrank provider text. */
+  googleContact?: boolean;
 };
 
 const firstText = (...values: unknown[]) => values.find(
@@ -24,6 +26,8 @@ export function isUsableParticipantName(value: unknown) {
     && name !== 'Você'
     && name !== 'WhatsApp Business'
     && name !== 'Contato'
+    && name !== 'Participante'
+    && !/^Participante …\S+$/.test(name)
     && !/^\+?[\d\s().-]+$/.test(name);
 }
 
@@ -86,6 +90,26 @@ export function participantFallbackNameFromRecord(record: any) {
     return `Participante ${value}`;
   }
   return 'Participante';
+}
+
+export function participantDisplayNameFromSources(input: {
+  googleName?: unknown;
+  providerName?: unknown;
+  participantPhone?: unknown;
+  participantJid?: unknown;
+}) {
+  const googleName = isUsableParticipantName(input.googleName) ? String(input.googleName).trim() : '';
+  if (googleName) return googleName;
+  const providerName = isUsableParticipantName(input.providerName) ? String(input.providerName).trim() : '';
+  if (providerName) return providerName;
+  const participantPhone = input.participantPhone;
+  const phone = typeof participantPhone === 'string'
+    ? (participantPhone.trim().split('@')[0] || '').replace(/\D/g, '')
+    : '';
+  if (phone.length >= 8 && phone.length <= 20) return `+${phone}`;
+  return participantFallbackNameFromRecord({
+    key: { participant: typeof input.participantJid === 'string' ? input.participantJid : undefined },
+  });
 }
 
 export function mergeParticipantIdentity(record: any, identity: ParticipantIdentity) {

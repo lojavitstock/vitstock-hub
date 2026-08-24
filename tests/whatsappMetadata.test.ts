@@ -3,8 +3,8 @@ import test from 'node:test';
 import { parseGroupMetadata } from '../server/src/groupMetadata';
 import { providerPhoneDigits, providerPhoneJid } from '../server/src/whatsappIdentity';
 import { providerDisplayName, providerFallbackDisplayName, providerIdentityKey, providerPhoneDigits as frontendProviderPhoneDigits } from '../src/utils/whatsappIdentity';
-import { buildParticipantIdentityMap, enrichRecordsWithParticipantIdentities, participantNameFromRecord, participantPhoneFromRecord } from '../server/src/participantIdentity';
-import { qaGroupMetadataRecords, qaGroupParticipantRecords, qaIndividualIdentityRecords } from '../server/src/qa';
+import { buildParticipantIdentityMap, enrichRecordsWithParticipantIdentities, participantDisplayNameFromSources, participantNameFromRecord, participantPhoneFromRecord } from '../server/src/participantIdentity';
+import { qaGroupMetadataRecords, qaGroupParticipantIdentityRecords, qaGroupParticipantRecords, qaIndividualIdentityRecords } from '../server/src/qa';
 
 test('LID identity never becomes a phone number', () => {
   assert.equal(providerPhoneDigits({ remoteJid: '164794086760597@lid' }), '');
@@ -109,4 +109,14 @@ test('QA individual identity fixtures resolve real, PN, business and opaque iden
 
 test('learned identity supersedes a historical synthetic contact name', () => {
   assert.equal(providerDisplayName({ savedName: 'Contato', pushName: 'Nome aprendido QA' }), 'Nome aprendido QA');
+});
+
+test('group participant display priority uses Google, provider, phone and opaque LID fallbacks', () => {
+  const [google, whatsapp, phone, lid, historical, historicalGoogle] = qaGroupParticipantIdentityRecords();
+  assert.equal(participantDisplayNameFromSources(google), 'Google A');
+  assert.equal(participantDisplayNameFromSources(whatsapp), 'WhatsApp B');
+  assert.equal(participantDisplayNameFromSources(phone), '+5521999000103');
+  assert.equal(participantDisplayNameFromSources(lid), 'Participante …4444');
+  assert.equal(participantDisplayNameFromSources(historical), '+5521999000105');
+  assert.equal(participantDisplayNameFromSources(historicalGoogle), 'Google F');
 });

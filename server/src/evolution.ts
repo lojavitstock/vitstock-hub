@@ -269,22 +269,30 @@ async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<
         )
         : Promise.resolve({ rows: [] as Array<{ identity: string; phone: string | null; name: string | null; avatar_url: string | null }> }),
       phones.length > 0
-        ? db.query<{ phone: string; name: string | null; avatar_url: string | null }>(
-          `SELECT regexp_replace(COALESCE(primary_phone.phone, c.phone), '\\D', '', 'g') AS phone,
-                  c.name, c.avatar_url
-           FROM contacts c
-           LEFT JOIN LATERAL (
-             SELECT p.phone
-             FROM contact_phones p
-             WHERE p.contact_id = c.id
-             ORDER BY p.is_primary DESC, p.id
-             LIMIT 1
-           ) primary_phone ON true
-           WHERE c.company_id = $1
-             AND regexp_replace(COALESCE(primary_phone.phone, c.phone), '\\D', '', 'g') = ANY($2::text[])`,
+        ? db.query<{ phone: string; name: string | null; avatar_url: string | null; google_contact: boolean }>(
+          `SELECT DISTINCT ON (phone)
+                  phone, name, avatar_url, google_contact
+           FROM (
+             SELECT regexp_replace(c.phone, '\\D', '', 'g') AS phone,
+                    c.name, c.avatar_url,
+                    (c.source = 'google' OR c.google_resource_name IS NOT NULL) AS google_contact,
+                    c.updated_at
+             FROM contacts c
+             WHERE c.company_id = $1 AND c.phone IS NOT NULL
+             UNION ALL
+             SELECT regexp_replace(COALESCE(cp.normalized_phone, cp.phone), '\\D', '', 'g') AS phone,
+                    c.name, c.avatar_url,
+                    (c.source = 'google' OR c.google_resource_name IS NOT NULL) AS google_contact,
+                    c.updated_at
+             FROM contact_phones cp
+             JOIN contacts c ON c.id = cp.contact_id
+             WHERE cp.company_id = $1
+           ) candidates
+           WHERE phone <> '' AND phone = ANY($2::text[])
+           ORDER BY phone, google_contact DESC, updated_at DESC`,
           [companyId, phones],
         )
-        : Promise.resolve({ rows: [] as Array<{ phone: string; name: string | null; avatar_url: string | null }> }),
+        : Promise.resolve({ rows: [] as Array<{ phone: string; name: string | null; avatar_url: string | null; google_contact: boolean }> }),
     ]);
     for (const row of queries[0].rows) {
       const jid = normalizeParticipantJid(row.participant_jid);
@@ -316,6 +324,7 @@ async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<
         participantPhone: phone,
         ...(isUsableParticipantName(row.name) ? { displayName: row.name!.trim() } : {}),
         ...(row.avatar_url ? { pictureUrl: row.avatar_url } : {}),
+        ...(row.google_contact ? { googleContact: true } : {}),
       });
     }
   } catch {
@@ -324,27 +333,54 @@ async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<
   return { byJid, byPhone };
 }
 
-async function enrichProviderParticipantRecords(companyId: string, records: any[]) {
-  const seeds = buildParticipantIdentityMap(records);
-  if (seeds.size === 0) return records;
-  const persisted = await loadPersistedParticipantIdentities(companyId, seeds);
-  const mergedSeeds = new Map<string, ParticipantIdentity>();
+function mergePersistedParticipantIdentities(
+  seeds: Map<string, ParticipantIdentity>,
+  persisted: { byJid: Map<string, ParticipantIdentity>; byPhone: Map<string, ParticipantIdentity> },
+) {
+  const merged = new Map<string, ParticipantIdentity>();
   for (const [key, seed] of seeds) {
-    const known = persisted.byJid.get(key) || (seed.participantPhone ? persisted.byPhone.get(seed.participantPhone) : undefined);
-    mergedSeeds.set(key, {
+    const byJid = persisted.byJid.get(key);
+    const byPhone = seed.participantPhone ? persisted.byPhone.get(seed.participantPhone) : undefined;
+    const google = [byPhone, byJid].find((identity) => identity?.googleContact && identity.displayName);
+    const known = google || byJid || byPhone;
+    merged.set(key, {
       ...(known || { participantJid: seed.participantJid }),
       ...seed,
       participantJid: seed.participantJid,
-      ...(seed.displayName || !known?.displayName ? {} : { displayName: known.displayName }),
+      ...(google?.displayName
+        ? { displayName: google.displayName, googleContact: true }
+        : seed.displayName || !known?.displayName
+          ? {}
+          : { displayName: known.displayName }),
       ...(seed.participantPhone || !known?.participantPhone ? {} : { participantPhone: known.participantPhone }),
       ...(seed.pictureUrl || !known?.pictureUrl ? {} : { pictureUrl: known.pictureUrl }),
     });
   }
+  return merged;
+}
+
+async function enrichProviderParticipantRecords(companyId: string, records: any[]) {
+  const seeds = buildParticipantIdentityMap(records);
+  if (seeds.size === 0) return records;
+  const persisted = await loadPersistedParticipantIdentities(companyId, seeds);
+  const mergedSeeds = mergePersistedParticipantIdentities(seeds, persisted);
   const resolved = new Map<string, ParticipantIdentity>();
   await Promise.all([...mergedSeeds.entries()].map(async ([key, seed]) => {
     resolved.set(key, await resolveParticipantIdentity(companyId, seed));
   }));
   return enrichRecordsWithParticipantIdentities(records, resolved);
+}
+
+/**
+ * Apply only persisted identity data to local history. This deliberately does
+ * not call Evolution profile endpoints, keeping cached-message reads free of
+ * per-participant network requests.
+ */
+async function enrichLocalParticipantRecords(companyId: string, records: any[]) {
+  const seeds = buildParticipantIdentityMap(records);
+  if (seeds.size === 0) return records;
+  const persisted = await loadPersistedParticipantIdentities(companyId, seeds);
+  return enrichRecordsWithParticipantIdentities(records, mergePersistedParticipantIdentities(seeds, persisted));
 }
 
 function traceOutbound(request: any, stage: string, input: {
@@ -2739,9 +2775,13 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     // Depois que o webhook persiste a conversa, a leitura deixa de depender da Evolution.
     // A consulta externa serve apenas para uma reconciliação inicial do histórico antigo.
     if (!parsed.data.reconcile && (localMessages.rows.length > 0 || parsed.data.afterTimestamp)) {
+      const localRecords = await enrichLocalParticipantRecords(
+        request.user!.companyId,
+        localMessages.rows.map(localMessageToProviderRecord),
+      );
       return {
         messages: {
-          records: localMessages.rows.map(localMessageToProviderRecord),
+          records: localRecords,
           hasMore: parsed.data.afterTimestamp ? await hasOlderMessages() : localMessages.rows.length >= pageSize,
         },
       };
@@ -2759,9 +2799,13 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     )));
     const successfulResponses = responses.filter((response) => response.ok);
     if (successfulResponses.length === 0) {
+      const localRecords = await enrichLocalParticipantRecords(
+        request.user!.companyId,
+        localMessages.rows.map(localMessageToProviderRecord),
+      );
       return {
         messages: {
-          records: localMessages.rows.map(localMessageToProviderRecord),
+          records: localRecords,
           hasMore: parsed.data.afterTimestamp ? await hasOlderMessages() : localMessages.rows.length >= pageSize,
         },
       };
@@ -2838,7 +2882,10 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       ORDER BY m.sent_at DESC
       LIMIT $${pageSizeParam}`, pageQueryParams);
 
-    const localRecords = reconciledMessages.rows.map(localMessageToProviderRecord);
+    const localRecords = await enrichLocalParticipantRecords(
+      request.user!.companyId,
+      reconciledMessages.rows.map(localMessageToProviderRecord),
+    );
     const mergedRecords = new Map<string, any>();
     for (const record of recordsById.values()) {
       const id = String(record?.key?.id || record?.id || '');

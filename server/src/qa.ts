@@ -70,6 +70,18 @@ export function qaGroupParticipantRecords() {
   ];
 }
 
+/** Final display-priority fixtures: Google, provider, phone, then opaque LID. */
+export function qaGroupParticipantIdentityRecords() {
+  return [
+    { googleName: 'Google A', providerName: 'WhatsApp A', participantPhone: '5521999000101', participantJid: '111111111@lid' },
+    { providerName: 'WhatsApp B', participantPhone: '5521999000102', participantJid: '5521999000102@s.whatsapp.net' },
+    { participantPhone: '5521999000103', participantJid: '5521999000103@s.whatsapp.net' },
+    { participantJid: '444444444@lid' },
+    { providerName: 'Participante', participantPhone: '5521999000105', participantJid: '555555555@lid' },
+    { googleName: 'Google F', providerName: 'Participante', participantPhone: '5521999000106', participantJid: '666666666@lid' },
+  ];
+}
+
 /** Deterministic individual fixtures covering real names, PN and opaque LID fallbacks. */
 export function qaIndividualIdentityRecords() {
   return [
