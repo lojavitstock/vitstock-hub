@@ -2,9 +2,9 @@ import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import { parseGroupMetadata } from '../server/src/groupMetadata';
 import { providerPhoneDigits, providerPhoneJid } from '../server/src/whatsappIdentity';
-import { providerIdentityKey, providerPhoneDigits as frontendProviderPhoneDigits } from '../src/utils/whatsappIdentity';
+import { providerDisplayName, providerFallbackDisplayName, providerIdentityKey, providerPhoneDigits as frontendProviderPhoneDigits } from '../src/utils/whatsappIdentity';
 import { buildParticipantIdentityMap, enrichRecordsWithParticipantIdentities, participantNameFromRecord, participantPhoneFromRecord } from '../server/src/participantIdentity';
-import { qaGroupMetadataRecords, qaGroupParticipantRecords } from '../server/src/qa';
+import { qaGroupMetadataRecords, qaGroupParticipantRecords, qaIndividualIdentityRecords } from '../server/src/qa';
 
 test('LID identity never becomes a phone number', () => {
   assert.equal(providerPhoneDigits({ remoteJid: '164794086760597@lid' }), '');
@@ -80,4 +80,33 @@ test('QA group metadata fixture covers direct picture, lookup fallback and no-pi
   assert.equal(groups.find((group) => group.groupJid === '120363000000@g.us')?.picture?.endsWith('/valid.svg'), true);
   assert.equal(groups.find((group) => group.groupJid === '120363000001@g.us')?.picture, undefined);
   assert.equal(groups.find((group) => group.groupJid === '120363000002@g.us')?.picture, undefined);
+});
+
+test('individual identity fallback prefers real names and business metadata', () => {
+  assert.equal(providerDisplayName({ pushName: 'Contato', remoteJidAlt: '5521999000001@s.whatsapp.net' }), undefined);
+  assert.equal(providerFallbackDisplayName({ pushName: 'Contato', remoteJidAlt: '5521999000001@s.whatsapp.net' }), '+5521999000001');
+  assert.equal(providerDisplayName({ verifiedName: 'Empresa QA', pushName: 'Contato' }), 'Empresa QA');
+});
+
+test('individual historical synthetic name is replaced by explicit PN or opaque fallback', () => {
+  assert.equal(providerFallbackDisplayName({ savedName: 'Contato', remoteJidAlt: '5521999000002@s.whatsapp.net' }), '+5521999000002');
+  assert.equal(providerFallbackDisplayName({ savedName: 'Contato', remoteJid: '444444444@lid' }), 'Participante …4444');
+});
+
+test('group participant fallback preserves PN and never converts an opaque LID', () => {
+  assert.equal(providerFallbackDisplayName({ metadata: { participantPhone: '5521999000003@s.whatsapp.net', participantJid: '222222222@lid' } }), '+5521999000003');
+  assert.equal(providerFallbackDisplayName({ metadata: { participantJid: '333333333@lid' } }), 'Participante …3333');
+});
+
+test('QA individual identity fixtures resolve real, PN, business and opaque identities', () => {
+  const [realName, phone, historical, business, opaque] = qaIndividualIdentityRecords();
+  assert.equal(providerDisplayName(realName), 'Cliente Real QA');
+  assert.equal(providerFallbackDisplayName(phone), '+5521999000014');
+  assert.equal(providerFallbackDisplayName(historical), '+5521999000015');
+  assert.equal(providerDisplayName(business), 'Empresa QA');
+  assert.equal(providerFallbackDisplayName(opaque), 'Participante …8888');
+});
+
+test('learned identity supersedes a historical synthetic contact name', () => {
+  assert.equal(providerDisplayName({ savedName: 'Contato', pushName: 'Nome aprendido QA' }), 'Nome aprendido QA');
 });

@@ -70,6 +70,40 @@ export function qaGroupParticipantRecords() {
   ];
 }
 
+/** Deterministic individual fixtures covering real names, PN and opaque LID fallbacks. */
+export function qaIndividualIdentityRecords() {
+  return [
+    {
+      id: 'qa-individual-a@s.whatsapp.net',
+      remoteJid: 'qa-individual-a@s.whatsapp.net',
+      pushName: 'Cliente Real QA',
+    },
+    {
+      id: 'qa-individual-b@s.whatsapp.net',
+      remoteJid: 'qa-individual-b@s.whatsapp.net',
+      remoteJidAlt: '5521999000014@s.whatsapp.net',
+    },
+    {
+      id: 'qa-individual-c@s.whatsapp.net',
+      remoteJid: 'qa-individual-c@s.whatsapp.net',
+      name: 'Contato',
+      remoteJidAlt: '5521999000015@s.whatsapp.net',
+    },
+    {
+      id: 'qa-individual-d@s.whatsapp.net',
+      remoteJid: 'qa-individual-d@s.whatsapp.net',
+      pushName: 'Contato',
+      verifiedName: 'Empresa QA',
+      businessName: 'Empresa Comercial QA',
+    },
+    {
+      id: '888888888@lid',
+      remoteJid: '888888888@lid',
+      pushName: 'Contato',
+    },
+  ];
+}
+
 export function qaGroupMetadataRecords() {
   return [
     { id: '120363000000@g.us', subject: 'Equipe QA', profilePicUrl: 'http://localhost:3001/api/qa/avatar/valid.svg' },

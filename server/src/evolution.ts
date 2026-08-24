@@ -813,10 +813,21 @@ async function acquireOutboundLease(input: {
 }
 
 function providerContactName(value: any) {
-  const candidate = value?.pushName || value?.notify || value?.verifiedName || value?.name;
+  const candidate = value?.pushName
+    || value?.notify
+    || value?.verifiedName
+    || value?.businessName
+    || value?.contactName
+    || value?.name;
   if (typeof candidate !== 'string') return '';
   const name = candidate.trim();
-  if (!name || name === 'Você' || name === 'WhatsApp Business' || name === 'Contato' || /^\+?[\d\s().-]+$/.test(name)) return '';
+  if (!name
+    || name === 'Você'
+    || name === 'WhatsApp Business'
+    || name === 'Contato'
+    || name === 'Participante'
+    || /^Participante …\S+$/.test(name)
+    || /^\+?[\d\s().-]+$/.test(name)) return '';
   return name;
 }
 
@@ -1703,7 +1714,9 @@ async function persistProviderMessage(
     const contactPhone = isGroup ? local.remoteJid : phoneForContactStorage(resolvedPhone);
     const contactName = isGroup
       ? displayGroupName
-      : local.sender === 'contact' ? local.senderName : `+${resolvedPhone}`;
+      : local.sender === 'contact'
+        ? (providerContactName({ name: local.senderName }) || `+${resolvedPhone}`)
+        : `+${resolvedPhone}`;
     const conversationPreview = isGroup
       ? `${local.senderName || (local.sender === 'attendant' ? 'Atendente' : 'Participante')}: ${local.content}`
       : local.content;
@@ -1722,7 +1735,10 @@ async function persistProviderMessage(
     const contactId = contact.rows[0]?.id;
     if (!contactId) throw new Error('Contato não pôde ser preparado para a mensagem recebida');
 
-    if (!isGroup && local.sender === 'contact' && local.senderName) {
+    const resolvedContactName = local.sender === 'contact'
+      ? providerContactName({ name: local.senderName })
+      : '';
+    if (!isGroup && resolvedContactName) {
       await client.query(
         `UPDATE contacts SET
            name = CASE
@@ -1734,7 +1750,7 @@ async function persistProviderMessage(
              ELSE name END,
            avatar_url = COALESCE($4, avatar_url), updated_at = now()
          WHERE company_id = $1 AND id = $5`,
-        [companyId, local.senderName, false, local.groupAvatarUrl || null, contactId],
+        [companyId, resolvedContactName, false, local.groupAvatarUrl || null, contactId],
       );
     }
 

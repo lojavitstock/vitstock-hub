@@ -2,7 +2,7 @@ import { ChatStatus, WhatsappInstance, Conversation, Message } from '../types';
 import { mockInstances, mockConversations } from './mockData';
 import { evolutionMessagePreview, isEvolutionReactionEvent, normalizeEvolutionMessage } from './evolutionMessageAdapter';
 import { phoneVariants } from '../utils/phone';
-import { providerIdentityKey, providerPhoneDigits } from '../utils/whatsappIdentity';
+import { providerDisplayName, providerFallbackDisplayName, providerIdentityKey, providerPhoneDigits } from '../utils/whatsappIdentity';
 import { callMessageInfo } from '../utils/callMessage';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 import type { RealtimeEventPayload } from '../utils/realtimeUpdates';
@@ -520,10 +520,11 @@ export class EvolutionApiService {
 
       if (Array.isArray(payload.whatsappNames)) {
         payload.whatsappNames.forEach((contact: any) => {
-          if (!contact?.phone || !contact?.name) return;
+          const name = providerDisplayName(contact);
+          if (!contact?.phone || !name) return;
           phoneVariants(contact.phone).forEach((phone) => {
             if (!whatsappNamesMap.has(phone)) {
-              whatsappNamesMap.set(phone, { name: contact.name, avatar: contact.avatar_url || undefined });
+              whatsappNamesMap.set(phone, { name, avatar: contact.avatar_url || undefined });
             }
           });
         });
@@ -562,9 +563,9 @@ export class EvolutionApiService {
         contactsData.forEach((c: any) => {
           const rawJid = c.remoteJid || c.id || '';
           const phoneKey = providerPhoneDigits(c);
-          if (phoneKey && c.pushName && c.pushName !== 'WhatsApp Business' && c.pushName !== 'Você') {
+          if (phoneKey && providerDisplayName(c)) {
             contactsMap.set(phoneKey, {
-              name: c.pushName,
+              name: providerDisplayName(c)!,
               avatar: c.profilePicUrl || ''
             });
           }
@@ -636,9 +637,7 @@ export class EvolutionApiService {
         const storedContact = !isGroup
           ? phoneVariants(cleanNumber).map((phone) => storedContactsMap.get(phone)).find(Boolean)
           : undefined;
-        const savedName = storedContact?.name && !/^\+?[\d\s().-]+$/.test(storedContact.name.trim())
-          ? storedContact.name
-          : undefined;
+        const savedName = providerDisplayName({ savedName: storedContact?.name });
         const whatsappContact = !isGroup
           ? phoneVariants(cleanNumber).map((phone) => whatsappNamesMap.get(phone)).find(Boolean)
           : undefined;
@@ -647,13 +646,10 @@ export class EvolutionApiService {
           ? [groupMetadata?.subject, item.groupName, item.subject, item.groupMetadata?.subject, item.chatName, item.name, item.notify, item.verifiedName]
             .find((value: any) => typeof value === 'string' && value.trim() && !/^\+?[\d\s().-]+$/.test(value.trim()))
           : undefined;
-        let displayName = isGroup
+        const displayName = isGroup
           ? (groupName || `Grupo ${rawRemoteJid.split('@')[0]}`)
-          : (savedName || savedContact?.name || identity?.name || whatsappContact?.name || lastMessage?.pushName || item.pushName || item.name || item.verifiedName);
-
-        if (!displayName || displayName === 'Você' || displayName === 'WhatsApp Business') {
-          displayName = isGroup ? `Grupo ${rawRemoteJid.split('@')[0]}` : cleanNumber ? `+${cleanNumber}` : 'Contato';
-        }
+          : (providerDisplayName(item, [savedName, savedContact?.name, identity?.name, whatsappContact?.name, lastMessage?.pushName])
+            || providerFallbackDisplayName({ ...item, remoteJid: rawRemoteJid, lastMessage }, cleanNumber));
 
         const rawMessageContent = evolutionMessagePreview(lastMessage) || 'Conversa iniciada';
         const participantName = lastMessage?.participantName || lastMessage?.pushName || item.lastMessage?.participantName || item.lastMessage?.pushName || 'Participante';
