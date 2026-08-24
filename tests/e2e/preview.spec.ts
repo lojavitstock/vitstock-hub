@@ -114,11 +114,14 @@ test('Conexão WhatsApp Preview expõe estado real e QR sem acessar Production',
     await page.goto('/configuracoes?tab=connections');
 
     await expect.poll(() => evolutionResponses.some((entry) => entry.path === '/api/evolution/status' && entry.status === 200), { timeout: 10_000 }).toBe(true);
-    const connected = await page.getByText('ONLINE (Conectado)').isVisible().catch(() => false);
-    if (!connected) {
-      await expect.poll(() => evolutionResponses.some((entry) => entry.path === '/api/evolution/connect' && entry.status === 200), { timeout: 25_000 }).toBe(true);
-    }
-    if (!connected) {
+    let connectionResult = 'pending';
+    await expect.poll(async () => {
+      connectionResult = await page.getByText('ONLINE (Conectado)').isVisible().catch(() => false)
+        ? 'connected'
+        : evolutionResponses.some((entry) => entry.path === '/api/evolution/connect' && entry.status === 200) ? 'qr' : 'pending';
+      return connectionResult;
+    }, { timeout: 25_000 }).toMatch(/connected|qr/);
+    if (connectionResult !== 'connected') {
       await expect(page.getByAltText('QR Code WhatsApp')).toBeVisible({ timeout: 25_000 });
     }
 
