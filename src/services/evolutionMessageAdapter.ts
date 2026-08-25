@@ -20,6 +20,8 @@ type ProviderRecord = {
   remoteJidAlt?: string;
   participantPhone?: string;
   participantAvatar?: string;
+  participantCanonicalId?: string;
+  participantAliases?: string[];
   status?: unknown;
   update?: { status?: unknown };
 };
@@ -261,6 +263,14 @@ const messageMetadata = (record: ProviderRecord, message: any): Message['metadat
     record.key?.senderPn,
   );
   if (participantJid) metadata.participantJid = participantJid;
+  const participantCanonicalId = firstText(record.participantCanonicalId, record.metadata?.participantCanonicalId);
+  if (participantCanonicalId) metadata.participantCanonicalId = participantCanonicalId;
+  const participantAliases = Array.isArray(record.participantAliases)
+    ? record.participantAliases.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    : Array.isArray(record.metadata?.participantAliases)
+      ? record.metadata.participantAliases.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      : [];
+  if (participantAliases.length > 0) metadata.participantAliases = [...new Set(participantAliases)];
   const participantPhone = firstText(record.participantPhone, record.senderPn, record.participantPn, record.key?.senderPn, record.key?.participantPn, record.remoteJidAlt, record.key?.remoteJidAlt);
   if (participantPhone) metadata.participantPhone = participantPhone;
   const participantAvatar = firstText(record.participantAvatar, record.metadata?.participantAvatar);

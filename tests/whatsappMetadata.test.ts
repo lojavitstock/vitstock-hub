@@ -3,7 +3,7 @@ import test from 'node:test';
 import { parseGroupMetadata } from '../server/src/groupMetadata';
 import { providerPhoneDigits, providerPhoneJid } from '../server/src/whatsappIdentity';
 import { providerDisplayName, providerFallbackDisplayName, providerIdentityKey, providerPhoneDigits as frontendProviderPhoneDigits } from '../src/utils/whatsappIdentity';
-import { buildParticipantIdentityMap, enrichRecordsWithParticipantIdentities, participantDisplayNameFromSources, participantFallbackNameFromRecord, participantJidFromRecord, participantNameFromRecord, participantPhoneFromRecord } from '../server/src/participantIdentity';
+import { buildParticipantIdentityMap, enrichRecordsWithParticipantIdentities, participantAliasKeysFromRecord, participantDisplayNameFromSources, participantFallbackNameFromRecord, participantJidFromRecord, participantNameFromRecord, participantPhoneFromRecord } from '../server/src/participantIdentity';
 import { qaGroupMetadataRecords, qaGroupParticipantIdentityRecords, qaGroupParticipantRecords, qaIndividualIdentityRecords, qaNewGroupParticipantWebhookRecords } from '../server/src/qa';
 import { normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
 
@@ -61,6 +61,36 @@ test('participant identity keeps LID opaque, rejects numeric names, and enriches
   assert.equal(participantNameFromRecord({ pushName: '5521999999999' }), undefined);
   assert.equal(participantNameFromRecord({ participantName: '5521999999999', pushName: 'Participante QA' }), 'Participante QA');
   assert.equal(participantPhoneFromRecord({ key: { participant: '123456789@lid' } }), undefined);
+});
+
+test('explicit LID and phone aliases share one canonical participant identity', () => {
+  const records = [
+    { key: { participant: 'opaque-2968@lid' }, participantPn: '5521999992968@s.whatsapp.net', metadata: {}, pushName: 'Sidney Lisboa Chaves' },
+    { key: { participant: '5521999992968@s.whatsapp.net' }, senderPn: '5521999992968@s.whatsapp.net', metadata: {}, pushName: 'Sidney Lisboa Chaves' },
+  ];
+  const identities = buildParticipantIdentityMap(records);
+  const lidIdentity = identities.get('opaque-2968@lid');
+  const phoneIdentity = identities.get('5521999992968@s.whatsapp.net');
+  assert.equal(lidIdentity?.canonicalId, 'phone:5521999992968');
+  assert.equal(phoneIdentity?.canonicalId, 'phone:5521999992968');
+  assert.equal(lidIdentity?.participantPhone, '5521999992968');
+  assert.deepEqual(lidIdentity?.aliases, phoneIdentity?.aliases);
+  assert.equal(participantAliasKeysFromRecord({ key: { participant: '164794086760597@lid' } }).includes('phone:164794086760597'), false);
+});
+
+test('canonical participant fields survive adapter normalization for SSE and polling', () => {
+  const message = normalizeEvolutionMessage({
+    key: { id: 'canonical-group-message', remoteJid: '120363000000@g.us', participant: 'opaque@lid', fromMe: false },
+    participantPn: '5521999992968@s.whatsapp.net',
+    participantCanonicalId: 'phone:5521999992968',
+    participantAliases: ['jid:opaque@lid', 'phone:5521999992968', 'jid:5521999992968@s.whatsapp.net'],
+    participantName: 'Sidney Lisboa Chaves',
+    message: { conversation: 'Mensagem canônica' },
+    messageTimestamp: 1_000,
+  }, 0, '120363000000@g.us', 'Atendente');
+  assert.equal(message.metadata?.participantCanonicalId, 'phone:5521999992968');
+  assert.equal(message.metadata?.participantName, 'Sidney Lisboa Chaves');
+  assert.equal(message.metadata?.participantAliases?.includes('jid:opaque@lid'), true);
 });
 
 test('QA group fixture covers PN, LID, retroactive enrichment, and unknown fallback', () => {

@@ -2031,6 +2031,31 @@ test('stale realtime identity cannot regress a canonical group participant', () 
   assert.equal(merged[0]?.metadata?.participantAvatar, 'https://cdn.example/avatar.jpg');
 });
 
+test('message reconciliation prefers explicit canonical identity over a raw JID change', () => {
+  const current = message('group-canonical-alias', 1_700, 'Teste 1', 'read', {
+    senderName: 'Sidney Lisboa Chaves',
+    metadata: {
+      participantJid: 'opaque@lid',
+      participantCanonicalId: 'contact:known',
+      participantAliases: ['jid:opaque@lid', 'phone:5521999992968'],
+      participantName: 'Sidney Lisboa Chaves',
+    },
+  });
+  const incoming = {
+    ...current,
+    senderName: 'Participante …2968',
+    metadata: {
+      participantJid: '5521999992968@s.whatsapp.net',
+      participantCanonicalId: 'phone:5521999992968',
+      participantAliases: ['jid:5521999992968@s.whatsapp.net', 'phone:5521999992968'],
+    },
+  };
+  const merged = mergeConversationMessages([current], [incoming]);
+  assert.equal(merged[0]?.senderName, 'Sidney Lisboa Chaves');
+  assert.equal(merged[0]?.metadata?.participantCanonicalId, 'contact:known');
+  assert.equal(merged[0]?.metadata?.participantAliases?.includes('phone:5521999992968'), true);
+});
+
 test('reaction updates normalize equivalent JID formats into one reactor key', () => {
   const bySwhatsapp = providerReactionUpdate({
     key: { id: 'reaction-1', participant: '5521999999999@s.whatsapp.net', fromMe: false },

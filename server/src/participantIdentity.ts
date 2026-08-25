@@ -4,6 +4,10 @@
  */
 export type ParticipantIdentity = {
   participantJid: string;
+  /** Stable identity key shared by explicit JID/phone aliases. */
+  canonicalId?: string;
+  /** Explicit provider/database aliases; never inferred from an opaque LID. */
+  aliases?: string[];
   participantPhone?: string;
   displayName?: string;
   pictureUrl?: string;
@@ -61,6 +65,79 @@ export function participantJidFromRecord(record: any) {
   );
 }
 
+const explicitParticipantJidValues = (record: any) => [
+  record?.key?.participant,
+  record?.participantJid,
+  record?.participant,
+  record?.participantPn,
+  record?.senderPn,
+  record?.metadata?.participantJid,
+  record?.key?.participantPn,
+  record?.key?.senderPn,
+].filter((value): value is string => typeof value === 'string');
+
+const normalizedPhone = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  const raw = value.trim().toLowerCase();
+  if (!raw || raw.endsWith('@lid') || raw.endsWith('@g.us')) return '';
+  const digits = (raw.split('@')[0] || '').replace(/\D/g, '');
+  return digits.length >= 8 && digits.length <= 20 ? digits : '';
+};
+
+/**
+ * Returns only aliases explicitly supplied by Evolution or persistence. A
+ * phone alias is accepted from a PN/alternate-phone field, never from the
+ * numeric portion of an opaque @lid JID.
+ */
+export function participantAliasKeysFromRecord(record: any) {
+  const aliases = new Set<string>();
+  const persistedAliases = [
+    ...(Array.isArray(record?.participantAliases) ? record.participantAliases : []),
+    ...(Array.isArray(record?.metadata?.participantAliases) ? record.metadata.participantAliases : []),
+  ];
+  persistedAliases
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .forEach((value) => aliases.add(value.trim().toLowerCase()));
+  for (const value of explicitParticipantJidValues(record)) {
+    const jid = normalizeParticipantJid(value);
+    if (jid) aliases.add(`jid:${jid}`);
+  }
+  const phoneValues = [
+    record?.participantPhone,
+    record?.metadata?.participantPhone,
+    record?.phoneNumber,
+    record?.phone,
+    record?.number,
+    record?.pn,
+    record?.remoteJidAlt,
+    record?.key?.phoneNumber,
+    record?.key?.phone,
+    record?.key?.remoteJidAlt,
+    record?.key?.participantPn,
+    record?.key?.senderPn,
+    record?.participantPn,
+    record?.senderPn,
+  ];
+  for (const value of phoneValues) {
+    const phone = normalizedPhone(value);
+    if (phone) {
+      aliases.add(`phone:${phone}`);
+      aliases.add(`jid:${phone}@s.whatsapp.net`);
+      aliases.add(`jid:${phone}@c.us`);
+    }
+  }
+  return [...aliases];
+}
+
+export function participantCanonicalIdFromRecord(record: any) {
+  const explicit = firstText(record?.participantCanonicalId, record?.metadata?.participantCanonicalId);
+  if (explicit) return explicit;
+  const phone = participantPhoneFromRecord(record);
+  if (phone) return `phone:${phone}`;
+  const jid = participantJidFromRecord(record);
+  return jid ? `jid:${jid}` : undefined;
+}
+
 /** Only values explicitly supplied as alternate/sender PN are phone identities. */
 export function participantPhoneFromRecord(record: any) {
   const values = [
@@ -70,6 +147,7 @@ export function participantPhoneFromRecord(record: any) {
     record?.phone,
     record?.number,
     record?.pn,
+    record?.metadata?.participantPhone,
     record?.remoteJidAlt,
     record?.key?.senderPn,
     record?.key?.participantPn,
@@ -124,12 +202,16 @@ export function participantDisplayNameFromSources(input: {
 export function mergeParticipantIdentity(record: any, identity: ParticipantIdentity) {
   const metadata = { ...(record?.metadata || {}) };
   metadata.participantJid = identity.participantJid;
+  if (identity.canonicalId) metadata.participantCanonicalId = identity.canonicalId;
+  if (identity.aliases?.length) metadata.participantAliases = identity.aliases;
   if (identity.participantPhone) metadata.participantPhone = identity.participantPhone;
   if (identity.displayName) metadata.participantName = identity.displayName;
   if (identity.pictureUrl) metadata.participantAvatar = identity.pictureUrl;
   return {
     ...record,
     metadata,
+    ...(identity.canonicalId ? { participantCanonicalId: identity.canonicalId } : {}),
+    ...(identity.aliases?.length ? { participantAliases: identity.aliases } : {}),
     ...(identity.displayName ? { participantName: identity.displayName } : {}),
     ...(identity.participantPhone ? { participantPhone: identity.participantPhone } : {}),
     ...(identity.pictureUrl ? { participantAvatar: identity.pictureUrl } : {}),
@@ -141,18 +223,34 @@ export function buildParticipantIdentityMap(records: any[]) {
   for (const record of records) {
     const participantJid = participantJidFromRecord(record);
     if (!participantJid) continue;
-    const current = identities.get(participantJid) || { participantJid };
+    const aliases = participantAliasKeysFromRecord(record);
+    const canonicalId = participantCanonicalIdFromRecord(record);
+    const current = identities.get(participantJid)
+      || [...identities.values()].find((identity) => (
+        (canonicalId && identity.canonicalId === canonicalId)
+        || aliases.some((alias) => identity.aliases?.includes(alias))
+      ))
+      || { participantJid };
     const displayName = participantNameFromRecord(record);
     const participantPhone = participantPhoneFromRecord(record);
     const pictureUrl = typeof (record?.participantAvatar || record?.metadata?.participantAvatar) === 'string'
       ? (record.participantAvatar || record.metadata.participantAvatar).trim()
       : '';
-    identities.set(participantJid, {
+    const identity: ParticipantIdentity = {
       ...current,
+      participantJid,
+      ...(canonicalId ? { canonicalId } : {}),
+      ...(aliases.length ? { aliases: [...new Set([...(current.aliases || []), ...aliases])] } : {}),
       ...(current.displayName || !displayName ? {} : { displayName }),
       ...(current.participantPhone || !participantPhone ? {} : { participantPhone }),
       ...(current.pictureUrl || !pictureUrl ? {} : { pictureUrl }),
-    });
+    };
+    for (const [key, value] of identities) {
+      if (value === current) identities.set(key, identity);
+    }
+    // Keep the public map keyed by the provider JID for backwards
+    // compatibility. Alias matching is performed by the enrichment helper.
+    identities.set(participantJid, identity);
   }
   return identities;
 }
@@ -160,7 +258,13 @@ export function buildParticipantIdentityMap(records: any[]) {
 export function enrichRecordsWithParticipantIdentities(records: any[], identities: Map<string, ParticipantIdentity>) {
   return records.map((record) => {
     const participantJid = participantJidFromRecord(record);
-    const identity = participantJid ? identities.get(participantJid) : undefined;
+    const aliases = participantAliasKeysFromRecord(record);
+    const canonicalId = participantCanonicalIdFromRecord(record);
+    const identity = (participantJid ? identities.get(participantJid) : undefined)
+      || [...identities.values()].find((candidate) => (
+        (canonicalId && candidate.canonicalId === canonicalId)
+        || aliases.some((alias) => candidate.aliases?.includes(alias))
+      ));
     return identity ? mergeParticipantIdentity(record, identity) : record;
   });
 }

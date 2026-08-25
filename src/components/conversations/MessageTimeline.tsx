@@ -553,15 +553,20 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
   const participantIdentityMap = React.useMemo(() => {
     const map = new Map<string, { name?: string; avatar?: string }>();
     messages.forEach((message) => {
-      const key = message.metadata?.participantJid?.trim().toLowerCase();
-      if (!key) return;
-      const current = map.get(key) || {};
+      const keys = [
+        message.metadata?.participantCanonicalId?.trim(),
+        message.metadata?.participantJid?.trim().toLowerCase(),
+        ...(message.metadata?.participantAliases || []),
+      ].filter((value): value is string => Boolean(value));
+      if (keys.length === 0) return;
+      const current = keys.map((key) => map.get(key)).find(Boolean) || {};
       const candidate = participantDisplayName(message);
       const currentIsTechnical = !providerDisplayName({ name: current.name });
-      map.set(key, {
+      const resolved = {
         name: currentIsTechnical && candidate ? candidate : current.name || candidate,
         avatar: current.avatar || message.metadata?.participantAvatar,
-      });
+      };
+      keys.forEach((key) => map.set(key, resolved));
     });
     return map;
   }, [messages]);
@@ -676,7 +681,10 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
       const isMe = message.sender === 'attendant';
       const messageDay = formatMessageDay(message.timestampMs);
       const showDay = Boolean(messageDay && messageDay !== previousDay);
-      const cachedParticipant = participantIdentityMap.get(message.metadata?.participantJid?.trim().toLowerCase() || '');
+      const participantKey = message.metadata?.participantCanonicalId?.trim()
+        || message.metadata?.participantJid?.trim().toLowerCase()
+        || '';
+      const cachedParticipant = participantIdentityMap.get(participantKey);
       const displayedParticipantName = activeConversation.isGroup && !isMe
         ? participantDisplayName(message, cachedParticipant)
         : undefined;
@@ -694,7 +702,7 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
               ? displayedParticipantName || 'Participante'
               : activeConversation.contact.name}
             avatar={activeConversation.isGroup
-              ? participantIdentityMap.get(message.metadata?.participantJid?.trim().toLowerCase() || '')?.avatar
+              ? participantIdentityMap.get(participantKey)?.avatar
               : activeConversation.contact.avatar}
             size="small"
             lazy

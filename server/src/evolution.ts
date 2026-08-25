@@ -24,6 +24,7 @@ import {
   participantNameFromRecord,
   participantFallbackNameFromRecord,
   participantPhoneFromRecord,
+  participantAliasKeysFromRecord,
   type ParticipantIdentity,
 } from './participantIdentity.js';
 import {
@@ -225,6 +226,11 @@ async function fetchGroupParticipantIdentitiesUncached(cacheKey: string, groupJi
           for (const participantJid of participantJids) {
             identities.set(participantJid, { ...identity, participantJid });
           }
+          // Keep explicit phone aliases available even when Evolution returns
+          // only an opaque LID in `id` and the phone in `phoneNumber`.
+          for (const alias of identity.aliases || []) {
+            if (alias.startsWith('jid:')) identities.set(alias.slice(4), { ...identity, participantJid: identity.participantJid });
+          }
         }
       }
     } catch {
@@ -250,14 +256,18 @@ async function resolveUnknownGroupParticipant(companyId: string, groupJid: strin
   if (!groupJid || !isWhatsAppGroupJid(groupJid)) return undefined;
   if (seed.displayName || seed.participantPhone || !seed.participantJid.endsWith('@lid')) return undefined;
   const identities = await fetchGroupParticipantIdentities(companyId, groupJid);
-  return identities.get(seed.participantJid);
+  return identities.get(seed.participantJid)
+    || identities.get(seed.participantPhone ? `${seed.participantPhone}@s.whatsapp.net` : '');
 }
 
 async function resolveParticipantIdentity(companyId: string, seed: ParticipantIdentity) {
-  const key = `${companyId}:${seed.participantJid}`;
+  const key = `${companyId}:${seed.canonicalId || `jid:${seed.participantJid}`}`;
   const cached = participantIdentityCache.get(key);
   const mergeSeed = (identity: ParticipantIdentity) => ({
     ...identity,
+    ...(seed.canonicalId ? { canonicalId: seed.canonicalId } : {}),
+    ...(seed.aliases?.length ? { aliases: [...new Set([...(identity.aliases || []), ...seed.aliases])] } : {}),
+    ...(seed.participantJid ? { participantJid: seed.participantJid } : {}),
     ...(seed.displayName ? { displayName: seed.displayName } : {}),
     ...(seed.participantPhone ? { participantPhone: seed.participantPhone } : {}),
     ...(seed.pictureUrl ? { pictureUrl: seed.pictureUrl } : {}),
@@ -265,7 +275,7 @@ async function resolveParticipantIdentity(companyId: string, seed: ParticipantId
   const now = Date.now();
   if (cached && cached.expiresAt > now) {
     const identity = mergeSeed(cached.identity);
-    if (identity.displayName !== cached.identity.displayName || identity.participantPhone !== cached.identity.participantPhone || identity.pictureUrl !== cached.identity.pictureUrl) {
+    if (identity.displayName !== cached.identity.displayName || identity.participantPhone !== cached.identity.participantPhone || identity.pictureUrl !== cached.identity.pictureUrl || identity.canonicalId !== cached.identity.canonicalId || identity.aliases?.join('|') !== cached.identity.aliases?.join('|')) {
       participantIdentityCache.set(key, { identity, expiresAt: cached.expiresAt, staleUntil: cached.staleUntil });
     }
     return identity;
@@ -290,7 +300,7 @@ async function refreshParticipantIdentity(key: string, seed: ParticipantIdentity
       if (!pictureUrl) {
         const response = await evolutionRequest(
           `/chat/fetchProfilePictureUrl/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
-          { method: 'POST', body: JSON.stringify({ number: seed.participantJid }) },
+          { method: 'POST', body: JSON.stringify({ number: seed.participantPhone ? providerPhoneJid({ remoteJid: seed.participantPhone }) : seed.participantJid }) },
           10_000,
         );
         if (response.ok) {
@@ -307,9 +317,10 @@ async function refreshParticipantIdentity(key: string, seed: ParticipantIdentity
     } catch {
       // Avatar enrichment is optional and must never block message loading.
     }
-    const identity = {
+    const identity: ParticipantIdentity = {
       ...(baseIdentity || {}),
       ...seed,
+      aliases: [...new Set([...(baseIdentity?.aliases || []), ...(seed.aliases || [])])],
       ...(pictureUrl ? { pictureUrl } : {}),
     };
     participantIdentityCache.set(key, {
@@ -330,27 +341,38 @@ async function refreshParticipantIdentity(key: string, seed: ParticipantIdentity
 async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<string, ParticipantIdentity>) {
   const jids = [...seeds.keys()];
   const phones = [...new Set([...seeds.values()].map((seed) => seed.participantPhone).filter((phone): phone is string => Boolean(phone)))];
+  const identityLookupKeys = [...new Set([
+    ...jids,
+    ...jids.map((jid) => `jid:${jid}`),
+    ...phones.flatMap((phone) => [`phone:${phone}`, `jid:${phone}@s.whatsapp.net`, `jid:${phone}@c.us`]),
+  ])];
   const byJid = new Map<string, ParticipantIdentity>();
   const byPhone = new Map<string, ParticipantIdentity>();
-  if (jids.length === 0 && phones.length === 0) return { byJid, byPhone };
+  const byAlias = new Map<string, ParticipantIdentity>();
+  if (jids.length === 0 && phones.length === 0) return { byJid, byPhone, byAlias };
   try {
     const queries = await Promise.all([
       jids.length > 0
-        ? db.query<{ participant_jid: string; participant_phone: string | null; participant_name: string | null; participant_avatar: string | null }>(
+        ? db.query<{ participant_jid: string; participant_phone: string | null; participant_name: string | null; participant_avatar: string | null; participant_canonical_id: string | null; participant_aliases: string[] | null }>(
           `SELECT metadata->>'participantJid' AS participant_jid,
                   metadata->>'participantPhone' AS participant_phone,
                   metadata->>'participantName' AS participant_name,
-                  metadata->>'participantAvatar' AS participant_avatar
+                  metadata->>'participantAvatar' AS participant_avatar,
+                  metadata->>'participantCanonicalId' AS participant_canonical_id,
+                  CASE WHEN jsonb_typeof(metadata->'participantAliases') = 'array'
+                    THEN ARRAY(SELECT jsonb_array_elements_text(metadata->'participantAliases'))
+                    ELSE ARRAY[]::text[]
+                  END AS participant_aliases
            FROM messages
            WHERE company_id = $1
              AND metadata->>'participantJid' = ANY($2::text[])
            ORDER BY sent_at DESC`,
           [companyId, jids],
         )
-        : Promise.resolve({ rows: [] as Array<{ participant_jid: string; participant_phone: string | null; participant_name: string | null; participant_avatar: string | null }> }),
+        : Promise.resolve({ rows: [] as Array<{ participant_jid: string; participant_phone: string | null; participant_name: string | null; participant_avatar: string | null; participant_canonical_id: string | null; participant_aliases: string[] | null }> }),
       jids.length > 0
-        ? db.query<{ identity: string; phone: string | null; name: string | null; avatar_url: string | null }>(
-          `SELECT ci.identity, phone_identity.phone, c.name, c.avatar_url
+        ? db.query<{ identity: string; phone: string | null; name: string | null; avatar_url: string | null; contact_id: string; aliases: string[] | null }>(
+          `SELECT ci.identity, ci.aliases, ci.contact_id, phone_identity.phone, c.name, c.avatar_url
            FROM contact_channel_identities ci
            JOIN contacts c ON c.id = ci.contact_id
            LEFT JOIN LATERAL (
@@ -363,23 +385,24 @@ async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<
              ORDER BY phone_identity.updated_at DESC
              LIMIT 1
            ) phone_identity ON true
-           WHERE ci.company_id = $1 AND ci.channel = 'whatsapp' AND ci.identity = ANY($2::text[])`,
-          [companyId, jids],
+           WHERE ci.company_id = $1 AND ci.channel = 'whatsapp'
+             AND (ci.identity = ANY($2::text[]) OR ci.aliases && $2::text[])`,
+          [companyId, identityLookupKeys],
         )
-        : Promise.resolve({ rows: [] as Array<{ identity: string; phone: string | null; name: string | null; avatar_url: string | null }> }),
+        : Promise.resolve({ rows: [] as Array<{ identity: string; phone: string | null; name: string | null; avatar_url: string | null; contact_id: string; aliases: string[] | null }> }),
       phones.length > 0
-        ? db.query<{ phone: string; name: string | null; avatar_url: string | null; google_contact: boolean }>(
+        ? db.query<{ phone: string; name: string | null; avatar_url: string | null; google_contact: boolean; contact_id: string }>(
           `SELECT DISTINCT ON (phone)
-                  phone, name, avatar_url, google_contact
+                  phone, name, avatar_url, google_contact, contact_id
            FROM (
-             SELECT regexp_replace(c.phone, '\\D', '', 'g') AS phone,
+             SELECT c.id AS contact_id, regexp_replace(c.phone, '\\D', '', 'g') AS phone,
                     c.name, c.avatar_url,
                     (c.source = 'google' OR c.google_resource_name IS NOT NULL) AS google_contact,
                     c.updated_at
              FROM contacts c
              WHERE c.company_id = $1 AND c.phone IS NOT NULL
              UNION ALL
-             SELECT regexp_replace(COALESCE(cp.normalized_phone, cp.phone), '\\D', '', 'g') AS phone,
+             SELECT c.id AS contact_id, regexp_replace(COALESCE(cp.normalized_phone, cp.phone), '\\D', '', 'g') AS phone,
                     c.name, c.avatar_url,
                     (c.source = 'google' OR c.google_resource_name IS NOT NULL) AS google_contact,
                     c.updated_at
@@ -391,54 +414,67 @@ async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<
            ORDER BY phone, google_contact DESC, updated_at DESC`,
           [companyId, phones],
         )
-        : Promise.resolve({ rows: [] as Array<{ phone: string; name: string | null; avatar_url: string | null; google_contact: boolean }> }),
+        : Promise.resolve({ rows: [] as Array<{ phone: string; name: string | null; avatar_url: string | null; google_contact: boolean; contact_id: string }> }),
     ]);
     for (const row of queries[0].rows) {
       const jid = normalizeParticipantJid(row.participant_jid);
       if (!jid || byJid.has(jid)) continue;
+      const aliases = [...new Set([...(row.participant_aliases || []), ...participantAliasKeysFromRecord({ participantJid: jid, participantPhone: row.participant_phone })])];
       const identity: ParticipantIdentity = {
         participantJid: jid,
+        canonicalId: row.participant_canonical_id || (row.participant_phone ? `phone:${row.participant_phone}` : `jid:${jid}`),
+        ...(aliases.length ? { aliases } : {}),
         ...(row.participant_phone ? { participantPhone: row.participant_phone } : {}),
         ...(isUsableParticipantName(row.participant_name) ? { displayName: row.participant_name!.trim() } : {}),
         ...(row.participant_avatar ? { pictureUrl: row.participant_avatar } : {}),
       };
       byJid.set(jid, identity);
+      for (const alias of identity.aliases || []) byAlias.set(alias, identity);
     }
     for (const row of queries[1].rows) {
       const jid = normalizeParticipantJid(row.identity);
       if (!jid || byJid.has(jid)) continue;
       const identity: ParticipantIdentity = {
         participantJid: jid,
+        canonicalId: `contact:${row.contact_id}`,
+        aliases: [...new Set([`jid:${jid}`, ...(row.aliases || []), ...participantAliasKeysFromRecord({ participantJid: jid, participantPhone: row.phone })])],
         ...(row.phone ? { participantPhone: row.phone } : {}),
         ...(isUsableParticipantName(row.name) ? { displayName: row.name!.trim() } : {}),
         ...(row.avatar_url ? { pictureUrl: row.avatar_url } : {}),
       };
       byJid.set(jid, identity);
+      for (const alias of identity.aliases || []) byAlias.set(alias, identity);
     }
     for (const row of queries[2].rows) {
       const phone = String(row.phone || '').replace(/\D/g, '');
       if (!phone || byPhone.has(phone)) continue;
-      byPhone.set(phone, {
+      const identity: ParticipantIdentity = {
         participantJid: '',
+        canonicalId: `contact:${row.contact_id}`,
+        aliases: participantAliasKeysFromRecord({ participantPhone: phone }),
         participantPhone: phone,
         ...(isUsableParticipantName(row.name) ? { displayName: row.name!.trim() } : {}),
         ...(row.avatar_url ? { pictureUrl: row.avatar_url } : {}),
         ...(row.google_contact ? { googleContact: true } : {}),
-      });
+      };
+      byPhone.set(phone, identity);
+      for (const alias of identity.aliases || []) byAlias.set(alias, identity);
     }
   } catch {
     // Historical identity is an optimization; current provider data remains authoritative.
   }
-  return { byJid, byPhone };
+  return { byJid, byPhone, byAlias };
 }
 
 function mergePersistedParticipantIdentities(
   seeds: Map<string, ParticipantIdentity>,
-  persisted: { byJid: Map<string, ParticipantIdentity>; byPhone: Map<string, ParticipantIdentity> },
+  persisted: { byJid: Map<string, ParticipantIdentity>; byPhone: Map<string, ParticipantIdentity>; byAlias: Map<string, ParticipantIdentity> },
 ) {
   const merged = new Map<string, ParticipantIdentity>();
   for (const [key, seed] of seeds) {
-    const byJid = persisted.byJid.get(key);
+    const aliases = participantAliasKeysFromRecord(seed);
+    const byJid = persisted.byJid.get(seed.participantJid)
+      || aliases.map((alias) => persisted.byAlias.get(alias)).find(Boolean);
     const byPhone = seed.participantPhone ? persisted.byPhone.get(seed.participantPhone) : undefined;
     const google = [byPhone, byJid].find((identity) => identity?.googleContact && identity.displayName);
     const known = google || byJid || byPhone;
@@ -446,6 +482,8 @@ function mergePersistedParticipantIdentities(
       ...(known || { participantJid: seed.participantJid }),
       ...seed,
       participantJid: seed.participantJid,
+      ...(known?.canonicalId ? { canonicalId: known.canonicalId } : {}),
+      aliases: [...new Set([...(known?.aliases || []), ...(seed.aliases || []), ...aliases])],
       ...(google?.displayName
         ? { displayName: google.displayName, googleContact: true }
         : seed.displayName || !known?.displayName
@@ -473,6 +511,8 @@ async function enrichProviderParticipantRecords(companyId: string, records: any[
           ...lookedUp,
           ...seed,
           participantJid: seed.participantJid,
+          canonicalId: seed.canonicalId || lookedUp.canonicalId,
+          aliases: [...new Set([...(lookedUp.aliases || []), ...(seed.aliases || [])])],
           ...(seed.displayName || !lookedUp.displayName ? {} : { displayName: lookedUp.displayName }),
           ...(seed.participantPhone || !lookedUp.participantPhone ? {} : { participantPhone: lookedUp.participantPhone }),
           ...(seed.pictureUrl || !lookedUp.pictureUrl ? {} : { pictureUrl: lookedUp.pictureUrl }),
@@ -697,6 +737,7 @@ async function loadLocalInboxChats(companyId: string) {
     message_id: string | null;
     message_sender: string | null;
     message_sender_name: string | null;
+    message_metadata: Record<string, any> | null;
     message_sent_at: Date | string | null;
     is_group: boolean;
     group_name: string | null;
@@ -717,6 +758,7 @@ async function loadLocalInboxChats(companyId: string) {
             latest.evolution_message_id AS message_id,
             latest.sender AS message_sender,
             latest.sender_name AS message_sender_name,
+            latest.metadata AS message_metadata,
             latest.sent_at AS message_sent_at,
             c.is_group,
             c.group_name,
@@ -724,7 +766,7 @@ async function loadLocalInboxChats(companyId: string) {
      FROM conversations c
      JOIN contacts ct ON ct.id = c.contact_id
      LEFT JOIN LATERAL (
-       SELECT m.evolution_message_id, m.sender, m.sender_name, m.content, m.sent_at
+       SELECT m.evolution_message_id, m.sender, m.sender_name, m.content, m.metadata, m.sent_at
        FROM messages m
        WHERE m.conversation_id = c.id
          AND m.is_internal_note = false
@@ -766,6 +808,7 @@ async function loadLocalInboxChats(companyId: string) {
         messageTimestamp: timestamp,
         pushName: row.contact_name,
         participantName: row.message_sender_name || undefined,
+        metadata: row.message_metadata || undefined,
         previewIsPrefixed: isGroup,
       },
     };
@@ -2389,6 +2432,23 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     let chatsData = snapshot.chats;
     const contactsData = snapshot.contacts;
+    // Inbox previews and conversation history use the same persisted
+    // participant resolver. This is read-only enrichment; provider data is
+    // not refetched per chat and no message is written here.
+    try {
+      const chatMessages = chatsData
+        .map((chat: any) => chat?.lastMessage)
+        .filter((message: any) => message && typeof message === 'object');
+      if (chatMessages.length > 0) {
+        const enrichedMessages = await enrichLocalParticipantRecords(_request.user!.companyId, chatMessages);
+        let messageIndex = 0;
+        chatsData = chatsData.map((chat: any) => chat?.lastMessage && typeof chat.lastMessage === 'object'
+          ? { ...chat, lastMessage: enrichedMessages[messageIndex++] || chat.lastMessage }
+          : chat);
+      }
+    } catch (error) {
+      _request.log.warn({ err: error }, 'Identidade de participante indisponível no preview do inbox');
+    }
     const groupMetadataByJid = new Map(snapshot.groups.map((group) => [group.groupJid.toLowerCase(), group]));
     const applyGroupMetadataToChat = (chat: any) => {
       const remoteJid = String(chat?.remoteJid || chat?.id || '');
