@@ -67,6 +67,10 @@ const usableDisplayName = (value: unknown) => {
 export function providerDisplayName(input: any, preferred: unknown[] = []) {
   const candidates = [
     ...preferred,
+    input?.participantName,
+    input?.senderName,
+    input?.metadata?.participantName,
+    input?.metadata?.senderName,
     input?.identityName,
     input?.savedName,
     input?.contactName,

@@ -142,6 +142,11 @@ test('learned identity supersedes a historical synthetic contact name', () => {
   assert.equal(providerDisplayName({ savedName: 'Contato', pushName: 'Nome aprendido QA' }), 'Nome aprendido QA');
 });
 
+test('frontend participant display uses canonical participant and sender fields before LID fallback', () => {
+  assert.equal(providerDisplayName({ participantName: 'Vitstock', senderName: 'Vitstock', participantJid: '3886962216992@lid' }), 'Vitstock');
+  assert.equal(providerDisplayName({ metadata: { participantName: 'Vitstock' }, participantJid: '3886962216992@lid' }), 'Vitstock');
+});
+
 test('group participant display priority uses Google, provider, phone and opaque LID fallbacks', () => {
   const [google, whatsapp, phone, lid, historical, historicalGoogle] = qaGroupParticipantIdentityRecords();
   assert.equal(participantDisplayNameFromSources(google), 'Google A');
