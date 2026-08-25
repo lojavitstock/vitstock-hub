@@ -3,6 +3,8 @@ import { isQaMode } from '../config.js';
 import { hashPassword } from '../security/password.js';
 
 if (!isQaMode) throw new Error('qa-seed só pode ser executado com QA_MODE=true');
+const qaPassword = process.env.QA_E2E_PASSWORD ?? '';
+if (!qaPassword) throw new Error('qa-seed exige QA_E2E_PASSWORD gerada pelo runner QA; nenhuma credencial fixa é aceita.');
 
 async function seed() {
   const client = await db.connect();
@@ -12,8 +14,8 @@ async function seed() {
 
     const companyA = (await client.query<{ id: string }>('INSERT INTO companies (name) VALUES ($1) RETURNING id', ['Vitstock QA A'])).rows[0]!.id;
     const companyB = (await client.query<{ id: string }>('INSERT INTO companies (name) VALUES ($1) RETURNING id', ['Vitstock QA B'])).rows[0]!.id;
-    const adminHash = await hashPassword('QA-admin-2026!');
-    const attendantHash = await hashPassword('QA-attendant-2026!');
+    const adminHash = await hashPassword(qaPassword);
+    const attendantHash = await hashPassword(qaPassword);
     const adminA = (await client.query<{ id: string }>(`INSERT INTO users (company_id, name, email, password_hash, role, must_change_password) VALUES ($1, 'QA Admin A', 'qa-admin-a@vitstock.test', $2, 'admin', false) RETURNING id`, [companyA, adminHash])).rows[0]!.id;
     await client.query(`INSERT INTO users (company_id, name, email, password_hash, role, must_change_password) VALUES ($1, 'QA Operacional A', 'qa-operational-a@vitstock.test', $2, 'attendant', false)`, [companyA, attendantHash]);
     await client.query(`INSERT INTO users (company_id, name, email, password_hash, role, must_change_password) VALUES ($1, 'QA Admin B', 'qa-admin-b@vitstock.test', $2, 'admin', false)`, [companyB, adminHash]);
@@ -57,6 +59,14 @@ async function seed() {
     const archived = await addContact(companyA, 'Contato QA Arquivado', '5521990000007', { notes: 'Permanece arquivado quando recebe novas mensagens.' });
     await addConversation(companyA, archived, '5521990000007@s.whatsapp.net', 'Histórico anterior do contato arquivado.');
     await client.query(`UPDATE contacts SET archived_at = now(), archived_by = $2 WHERE id = $1`, [archived, adminA]);
+    const avatarValid = await addContact(companyA, 'Contato QA Avatar Válido', '5521990000011', { avatarUrl: 'http://localhost:3001/api/qa/avatar/valid.svg' });
+    await client.query('UPDATE contacts SET avatar_url = $2 WHERE id = $1', [avatarValid, 'http://localhost:3001/api/qa/avatar/valid.svg']);
+    await addConversation(companyA, avatarValid, '5521990000011@s.whatsapp.net', 'Avatar local válido para QA.');
+    const avatarBroken = await addContact(companyA, 'Contato QA Avatar Quebrado', '5521990000012', { avatarUrl: 'http://localhost:3001/api/qa/avatar/broken.svg' });
+    await client.query('UPDATE contacts SET avatar_url = $2 WHERE id = $1', [avatarBroken, 'http://localhost:3001/api/qa/avatar/broken.svg']);
+    await addConversation(companyA, avatarBroken, '5521990000012@s.whatsapp.net', 'Avatar quebrado esperado para QA.');
+    const avatarMissing = await addContact(companyA, 'Contato QA Avatar Ausente', '5521990000013');
+    await addConversation(companyA, avatarMissing, '5521990000013@s.whatsapp.net', 'Avatar ausente para QA.');
     const group = await addContact(companyA, 'Grupo QA (fora de Contatos)', '120363000000@g.us');
     await addConversation(companyA, group, '120363000000@g.us', 'Mensagem de grupo QA.', true);
 
@@ -75,9 +85,7 @@ async function seed() {
     await addConversation(companyB, tenantBContact, '5521988000001@s.whatsapp.net', 'Dados exclusivos do Tenant B.');
     await client.query('COMMIT');
     console.log('Massa QA determinística criada.');
-    console.log('Tenant A: qa-admin-a@vitstock.test / QA-admin-2026!');
-    console.log('Tenant A operacional: qa-operational-a@vitstock.test / QA-attendant-2026!');
-    console.log('Tenant B: qa-admin-b@vitstock.test / QA-admin-2026!');
+    console.log('Credencial QA efêmera disponibilizada pelo runner local.');
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;

@@ -11,13 +11,19 @@
     "preview": "vite preview",
     "server:dev": "npm --prefix server run dev",
     "server:build": "npm --prefix server run build",
-    "test": "node tests/run-tests.mjs tests/core.test.ts tests/server.test.ts && node tests/run-tests.mjs tests/groupConversations.test.ts && node tests/run-tests.mjs tests/contactDomain.test.ts && node tests/run-tests.mjs tests/contactChatNavigation.test.ts && node tests/run-tests.mjs tests/qaEnvironment.test.ts",
+    "test": "node tests/run-tests.mjs tests/core.test.ts tests/server.test.ts && node tests/run-tests.mjs tests/groupConversations.test.ts && node tests/run-tests.mjs tests/contactDomain.test.ts && node tests/run-tests.mjs tests/contactChatNavigation.test.ts && node tests/run-tests.mjs tests/qaEnvironment.test.ts && node tests/run-tests.mjs tests/whatsappMetadata.test.ts",
     "server:migrate": "npm --prefix server run migrate",
     "server:seed-admin": "npm --prefix server run seed:admin",
     "qa:setup": "node scripts/qa.mjs setup",
     "qa:seed": "node scripts/qa.mjs seed",
     "qa:reset": "node scripts/qa.mjs reset",
-    "qa:start": "node scripts/qa.mjs start"
+    "qa:start": "node scripts/qa.mjs start",
+    "qa:stop": "node scripts/qa.mjs stop",
+    "dev:e2e": "node scripts/dev-e2e.mjs",
+    "test:e2e": "node scripts/test-e2e.mjs",
+    "test:e2e:preview": "node scripts/test-e2e-preview.mjs",
+    "test:e2e:headed": "node scripts/test-e2e.mjs --headed",
+    "test:e2e:debug": "node scripts/test-e2e.mjs --debug"
   },
   "dependencies": {
     "clsx": "^2.1.1",
@@ -27,6 +33,7 @@
     "react-router-dom": "^6.25.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^20.14.12",
     "@types/react": "^18.3.3",

@@ -282,6 +282,7 @@ export const AtendimentoPage: React.FC = () => {
     scrollToBottom,
     captureScrollState,
     traceTimelineLayoutChange,
+    isNearBottom,
     newMessagesCount,
   } = useConversationMessages({
     activeConversationId: activeConvId,
@@ -1369,7 +1370,7 @@ export const AtendimentoPage: React.FC = () => {
             {/* Cabeçalho do Chat */}
             <div className="h-16 px-5 border-b border-[#344047] bg-[#20292f] flex items-center justify-between flex-shrink-0">
               <button type="button" onClick={() => setShowContactInfo(true)} className="flex items-center gap-3 rounded-lg hover:bg-white/5 pr-3 py-1 transition-colors text-left">
-                <ContactPhoto name={activeConv.contact.name} avatar={activeConv.contact.avatar} emphasized />
+                <ContactPhoto name={activeConv.contact.name} avatar={activeConv.isGroup ? (activeConv.groupAvatar || activeConv.contact.avatar) : activeConv.contact.avatar} emphasized />
                 <div>
                   <h2 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
                     {activeConv.contact.name}
@@ -1426,6 +1427,7 @@ export const AtendimentoPage: React.FC = () => {
               loadingMessages={loadingMessages}
               historyExpanded={historyExpanded}
               loadingOlderMessages={loadingOlderMessages}
+              isNearBottom={isNearBottom}
               newMessagesCount={newMessagesCount}
               onLoadOlder={handleLoadOlderMessages}
               onJumpToLatest={scrollToBottom}
@@ -1494,7 +1496,7 @@ export const AtendimentoPage: React.FC = () => {
           <div>
             <div className="text-center pb-5 border-b border-zinc-800/80">
               <div className="flex justify-center mb-3">
-                <ContactPhoto name={activeConv.contact.name} avatar={activeConv.contact.avatar} size="large" emphasized />
+                <ContactPhoto name={activeConv.contact.name} avatar={activeConv.isGroup ? (activeConv.groupAvatar || activeConv.contact.avatar) : activeConv.contact.avatar} size="large" emphasized />
               </div>
               <h3 className="text-sm font-extrabold text-zinc-100">{activeConv.contact.name}</h3>
               <p className="text-xs text-amber-400 font-mono mt-0.5">{formatPhoneForDisplay(activeConv.contact.phone)}</p>
@@ -1534,7 +1536,7 @@ export const AtendimentoPage: React.FC = () => {
           </div>
           <div className="flex-1 overflow-y-auto p-5 space-y-5">
             <div className="text-center space-y-2">
-              <div className="flex justify-center"><ContactPhoto name={activeConv.contact.name} avatar={activeConv.contact.avatar} size="large" emphasized /></div>
+              <div className="flex justify-center"><ContactPhoto name={activeConv.contact.name} avatar={activeConv.isGroup ? (activeConv.groupAvatar || activeConv.contact.avatar) : activeConv.contact.avatar} size="large" emphasized /></div>
               <h4 className="font-extrabold text-slate-100">{googleContactStatus === 'saved' && googleMatchedName ? googleMatchedName : businessProfile?.verifiedName || businessProfile?.name || activeConv.contact.name}</h4>
               <p className="text-xs text-amber-300 font-mono">{formatPhoneForDisplay(activeConv.contact.phone)}</p>
               {googleContactStatus === 'checking' ? (

@@ -36,6 +36,7 @@ import { mediaViewerItemFrom, type MediaViewerItem } from '../../utils/mediaView
 import { canDownloadMessageMedia, messageCopyText } from '../../utils/messageActions';
 import { COMMON_REACTION_EMOJIS, canReactToMessage, type CommonReactionEmoji } from '../../utils/messageReactionActions';
 import { positionMessageActionMenu, positionReactionPalette, type PopoverPosition } from '../../utils/messagePopoverPosition';
+import { providerDisplayName, providerFallbackDisplayName } from '../../utils/whatsappIdentity';
 
 type MessageTimelineProps = {
   messages: Message[];
@@ -46,6 +47,7 @@ type MessageTimelineProps = {
   loadingOlderMessages?: boolean;
   loadingMessages?: boolean;
   historyExpanded?: boolean;
+  isNearBottom?: boolean;
   newMessagesCount?: number;
   onLoadOlder?: () => void;
   onJumpToLatest?: () => void;
@@ -69,6 +71,20 @@ const isMediaPlaceholder = (message: Message) => {
   if (message.mediaType === 'audio') return content === '[mensagem de áudio]' || content === '[audio]';
   return message.mediaType === 'sticker' && (content === '[figurinha]' || content === '[sticker]' || !content);
 };
+
+const participantDisplayName = (message: Message, cached?: { name?: string }) => (
+  providerDisplayName({
+    participantName: message.metadata?.participantName,
+    senderName: message.senderName,
+    identityName: cached?.name,
+  })
+  || providerFallbackDisplayName({
+    participantPhone: message.metadata?.participantPhone,
+    metadata: message.metadata,
+    key: message.rawKey,
+    participant: message.metadata?.participantJid,
+  })
+);
 
 const ReactionBadges: React.FC<{ reactions: NonNullable<NonNullable<Message['metadata']>['reactions']>; align: 'left' | 'right' }> = ({ reactions, align }) => {
   const grouped = reactions.reduce<Array<{ emoji: string; count: number }>>((groups, reaction) => {
@@ -532,8 +548,28 @@ const MediaMessageContent: React.FC<{
   return null;
 };
 
-export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage, onReplyMessage, onReactMessage, onLayoutChange }) => {
-  const shouldShowIndicator = newMessagesCount > 0 && Boolean(onJumpToLatest);
+export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, isNearBottom = true, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage, onReplyMessage, onReactMessage, onLayoutChange }) => {
+  const shouldShowIndicator = !isNearBottom && Boolean(onJumpToLatest);
+  const participantIdentityMap = React.useMemo(() => {
+    const map = new Map<string, { name?: string; avatar?: string }>();
+    messages.forEach((message) => {
+      const keys = [
+        message.metadata?.participantCanonicalId?.trim(),
+        message.metadata?.participantJid?.trim().toLowerCase(),
+        ...(message.metadata?.participantAliases || []),
+      ].filter((value): value is string => Boolean(value));
+      if (keys.length === 0) return;
+      const current = keys.map((key) => map.get(key)).find(Boolean) || {};
+      const candidate = participantDisplayName(message);
+      const currentIsTechnical = !providerDisplayName({ name: current.name });
+      const resolved = {
+        name: currentIsTechnical && candidate ? candidate : current.name || candidate,
+        avatar: current.avatar || message.metadata?.participantAvatar,
+      };
+      keys.forEach((key) => map.set(key, resolved));
+    });
+    return map;
+  }, [messages]);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [viewerItem, setViewerItem] = useState<MediaViewerItem | null>(null);
   const [openMenuMessageId, setOpenMenuMessageId] = useState<string | null>(null);
@@ -645,6 +681,13 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
       const isMe = message.sender === 'attendant';
       const messageDay = formatMessageDay(message.timestampMs);
       const showDay = Boolean(messageDay && messageDay !== previousDay);
+      const participantKey = message.metadata?.participantCanonicalId?.trim()
+        || message.metadata?.participantJid?.trim().toLowerCase()
+        || '';
+      const cachedParticipant = participantIdentityMap.get(participantKey);
+      const displayedParticipantName = activeConversation.isGroup && !isMe
+        ? participantDisplayName(message, cachedParticipant)
+        : undefined;
       previousDay = messageDay;
       if (message.isInternalNote) {
         return <React.Fragment key={message.id}>{showDay && <DaySeparator label={messageDay} />}<div className="my-2 flex justify-center"><div className="w-full max-w-xl rounded-lg border border-amber-400/40 bg-amber-400/10 p-3 text-sm text-amber-300"><div className="mb-1 flex items-center gap-1.5 font-bold text-amber-400"><Lock className="h-4 w-4" /><span>Nota Interna ({message.senderName})</span><span className="ml-auto text-xs opacity-70">{formatMessageTimestamp(message.timestampMs, message.timestamp)}</span></div><p>{message.content}</p><span className="mt-1 block text-[10px] font-semibold text-amber-400/70">Invisível para o cliente</span></div></div></React.Fragment>;
@@ -654,10 +697,19 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
         <React.Fragment key={message.id}>
         {showDay && <DaySeparator label={messageDay} />}
         <div data-message-id={message.id} className={`flex max-w-[78%] gap-2 rounded-xl transition-shadow ${highlightedMessageId === message.id ? 'ring-2 ring-emerald-300/80 ring-offset-2 ring-offset-[#152027]' : ''} ${isMe ? 'ml-auto flex-row-reverse' : ''}`}>
-          {!isMe && <ContactPhoto name={activeConversation.isGroup ? (activeConversation.groupName || activeConversation.contact.name) : activeConversation.contact.name} avatar={activeConversation.contact.avatar} size="small" />}
+          {!isMe && <ContactPhoto
+            name={activeConversation.isGroup
+              ? displayedParticipantName || 'Participante'
+              : activeConversation.contact.name}
+            avatar={activeConversation.isGroup
+              ? participantIdentityMap.get(participantKey)?.avatar
+              : activeConversation.contact.avatar}
+            size="small"
+            lazy
+          />}
           <div>
-            {activeConversation.isGroup && !isMe && message.senderName && (
-              <p className="mb-1 px-1 text-[11px] font-extrabold text-emerald-300">{message.senderName}</p>
+            {activeConversation.isGroup && !isMe && displayedParticipantName && (
+              <p className="mb-1 px-1 text-[11px] font-extrabold text-emerald-300">{displayedParticipantName}</p>
             )}
             <div className={`group/message relative space-y-2 rounded-lg px-3.5 py-3 text-[15px] leading-relaxed shadow-sm ${isMe ? 'rounded-tr-none border border-amber-300/15 bg-[#5b4b20] font-medium text-[#fff8df]' : 'rounded-tl-none border border-white/5 bg-[#273238] text-slate-100'}`}>
               <button
@@ -709,9 +761,12 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
     <button
       type="button"
       onClick={onJumpToLatest}
-      className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border border-emerald-300/40 bg-[#1f8f70] px-4 py-2 text-xs font-bold text-white shadow-lg transition-colors hover:bg-[#27a77f]"
+      aria-label="Ir para o final da conversa"
+      title="Ir para o final da conversa"
+      className="absolute bottom-5 right-6 z-20 flex h-10 w-10 items-center justify-center rounded-full border border-emerald-300/40 bg-[#1f8f70] text-white shadow-lg transition-colors hover:bg-[#27a77f]"
     >
-      ↓ {newMessagesCount} nova {newMessagesCount === 1 ? 'mensagem' : 'mensagens'}
+      <ChevronDown className="h-5 w-5" aria-hidden="true" />
+      {newMessagesCount > 0 && <span className="absolute -right-1 -top-1 min-w-4 rounded-full border border-[#152027] bg-amber-400 px-1 text-[10px] font-extrabold leading-4 text-zinc-950">{newMessagesCount}</span>}
     </button>
   )}
   </div>

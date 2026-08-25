@@ -1,7 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { config, isQaMode } from './config.js';
+import { config, isLocalHost, isQaMode } from './config.js';
 import { db } from './db.js';
 import { requireAdmin, requireUser } from './auth.js';
 import { decryptSecret, encryptSecret } from './security/encryption.js';
@@ -123,10 +123,14 @@ export function phoneVariants(value: string) {
   return variants;
 }
 
+export function resolveGoogleCallbackUrl(frontendUrl: string, configuredRedirectUri?: string) {
+  if (configuredRedirectUri) return configuredRedirectUri;
+  if (isLocalHost(frontendUrl)) return 'http://localhost:3001/api/google/callback';
+  throw new Error('GOOGLE_REDIRECT_URI é obrigatório fora do ambiente local');
+}
+
 function callbackUrl() {
-  return config.FRONTEND_URL.includes('localhost')
-    ? 'http://localhost:3001/api/google/callback'
-    : 'https://vitstock-hub-api-production.up.railway.app/api/google/callback';
+  return resolveGoogleCallbackUrl(config.FRONTEND_URL, config.GOOGLE_REDIRECT_URI);
 }
 
 function settingsGoogleRedirect(result: 'connected' | 'error' | 'mock-connected') {

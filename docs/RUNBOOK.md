@@ -138,12 +138,19 @@ Antes de uma ação capaz de enviar WhatsApp, modificar dados, criar usuários, 
 | `npm run dev` | Apenas Vite. |
 | `npm run server:dev` | Apenas backend, delegando para `server` com `tsx watch`. |
 | `npm run preview` | Servidor de preview do build Vite. |
+| `npm run dev:e2e` | Prepara PostgreSQL QA local, executa migrations/seed QA e inicia backend QA + Vite com mocks externos. Requer Docker acessível. |
+| `npm run test:e2e` | Executa Playwright Chromium após confirmar frontend local e marcador QA com Evolution/Google mock-only. |
+| `npm run qa:stop` | Para os containers QA sem remover o volume. |
 
 `npm run dev:local` configura interface em `http://localhost:3000` e API em `http://localhost:3001`. Ele injeta `VITE_API_URL=http://localhost:3001`, `FRONTEND_URL=http://localhost:3000`, `NODE_ENV=development` e `PORT=3001` para os processos que inicia.
 
 Para trabalho separado, inicie backend com `npm run server:dev` e Vite com `npm run dev`, garantindo ambiente coerente. O Fastify escuta em `0.0.0.0` e recebe a porta por `PORT` (padrão 3001).
 
 Não inicie servidores apenas por rotina em tarefa que não exige execução local.
+
+O fluxo E2E não usa `.env.local` como fallback: `dev:e2e` injeta explicitamente `QA_MODE=true`, PostgreSQL `127.0.0.1:55432/vitstock_qa`, Evolution mock e Google mock. Se o guard rail não confirmar esses destinos, o processo aborta antes de iniciar a aplicação.
+
+O `dev:e2e` gera uma credencial efêmera para o usuário sintético e a grava somente em `.qa/qa-credentials.json`, ignorado pelo Git. Não há senha QA fixa no repositório.
 
 ## 8. Banco de dados e migrations
 

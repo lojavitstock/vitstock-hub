@@ -30,6 +30,7 @@ const configSchema = z.object({
   EVOLUTION_INSTANCE_NAME: z.string().min(1),
   GOOGLE_CLIENT_ID: z.string().min(20).optional(),
   GOOGLE_CLIENT_SECRET: z.string().min(20).optional(),
+  GOOGLE_REDIRECT_URI: z.string().url().optional(),
 });
 
 const parsed = configSchema.safeParse(process.env);
@@ -52,14 +53,29 @@ export function isLocalHost(value: string) {
   }
 }
 
-if (isQaMode) {
-  if (!isLocalHost(config.DATABASE_URL)) {
-    throw new Error('QA_MODE exige DATABASE_URL apontando para PostgreSQL local');
+export function validateQaRuntimeSafety(input: Pick<typeof config, 'DATABASE_URL' | 'EVOLUTION_API_URL' | 'GOOGLE_CLIENT_ID' | 'GOOGLE_CLIENT_SECRET'>) {
+  let databaseUrl: URL;
+  let evolutionUrl: URL;
+  try {
+    databaseUrl = new URL(input.DATABASE_URL);
+    evolutionUrl = new URL(input.EVOLUTION_API_URL);
+  } catch {
+    throw new Error('QA_MODE exige URLs válidas para PostgreSQL e Evolution mock locais');
   }
-  if (!isLocalHost(config.EVOLUTION_API_URL)) {
-    throw new Error('QA_MODE exige EVOLUTION_API_URL apontando para um mock local');
+
+  const databaseName = decodeURIComponent(databaseUrl.pathname.replace(/^\//, ''));
+  if (!isLocalHost(input.DATABASE_URL) || databaseUrl.port !== '55432' || databaseName !== 'vitstock_qa') {
+    throw new Error('QA_MODE exige PostgreSQL local em 127.0.0.1:55432/vitstock_qa');
+  }
+  if (!isLocalHost(input.EVOLUTION_API_URL) || evolutionUrl.port !== '3999') {
+    throw new Error('QA_MODE exige Evolution mock local na porta 3999');
+  }
+  if (!input.GOOGLE_CLIENT_ID?.startsWith('qa-local-') || !input.GOOGLE_CLIENT_SECRET?.startsWith('qa-local-')) {
+    throw new Error('QA_MODE exige credenciais fictícias do Google QA; chamadas externas estão bloqueadas');
   }
 }
+
+if (isQaMode) validateQaRuntimeSafety(config);
 
 const configuredFrontendOrigins = new Set([
   config.FRONTEND_URL,

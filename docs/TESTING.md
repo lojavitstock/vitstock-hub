@@ -24,10 +24,11 @@ O projeto usa a API nativa `node:test`, executada em arquivos TypeScript pelo bo
 | `tests/core.test.ts` | Regressões de Inbox, mensagens, reconciliação, SSE, autoria, replies, reações, lease, cache, mídia, popovers e Composer. |
 | `tests/groupConversations.test.ts` | Regressões específicas de conversas em grupo. |
 | `tests/os-userinfo.cjs` | Helper carregado pelo bootstrap; não é uma suíte independente. |
+| `tests/e2e/*.spec.ts` | Smoke e Atendimento no Chromium via Playwright; executados contra QA local por padrão. |
 
 O comando `npm test` executa as duas suítes atuais, nesta ordem: `core.test.ts` e `groupConversations.test.ts`.
 
-Não existe hoje uma suíte dedicada de E2E/browser, métrica de cobertura ou um comando de lint. **No dedicated lint command currently exists.** Isso não é uma exigência para adicionar ferramentas nesta etapa.
+Não existe métrica de cobertura ou um comando de lint. **No dedicated lint command currently exists.** A suíte E2E/browser usa Playwright e deve rodar contra o QA local por padrão.
 
 ## 3. Comandos confirmados
 
@@ -47,11 +48,28 @@ npm run build
 # Backend: TypeScript sem emissão e build
 npm --prefix server run check
 npm --prefix server run build
+
+# Ambiente QA local isolado para browser testing
+npm run dev:e2e
+npm run test:e2e
+npm run qa:stop
 ```
 
 `npm run build` executa `tsc && vite build`. O check do backend executa `tsc -p tsconfig.json --noEmit`; o build compila o backend para `server/dist`.
 
-Não invente `npm run lint`, Playwright, Cypress ou qualquer outro comando que não exista no repositório.
+`npm run test:e2e` valida o backend QA por um marcador explícito antes de iniciar o Playwright. O alvo padrão é `http://localhost:3000`; um Preview remoto só pode ser usado com `PLAYWRIGHT_ALLOW_REMOTE=true` e configuração explícita de `PLAYWRIGHT_BASE_URL`. Não invente `npm run lint`, Cypress ou qualquer outro comando que não exista no repositório.
+
+`npm run dev:e2e` gera uma credencial efêmera para o usuário sintético do QA e a grava somente em `.qa/qa-credentials.json`, que é ignorado pelo Git. O runner lê esse arquivo para o teste autenticado; nenhuma senha QA fixa é versionada.
+
+### Preview remoto protegido
+
+O fluxo remoto é separado do QA local e usa somente `.env.e2e.preview.local`, que nunca deve ser commitado. Na primeira configuração de uma máquina, copie `.env.e2e.preview.example` para `.env.e2e.preview.local`, preencha localmente `VERCEL_AUTOMATION_BYPASS_SECRET`, `E2E_EMAIL` e `E2E_PASSWORD`, e execute:
+
+```powershell
+npm run test:e2e:preview
+```
+
+O comando valida o domínio Preview autorizado, envia o bypass da proteção Vercel apenas ao contexto do Playwright e executa um smoke read-only. O trace fica desativado nesse modo para evitar que headers de bypass sejam capturados em artefatos. O fluxo não substitui a validação humana e não deve ser apontado para Production.
 
 ## 4. Validação por tipo de alteração
 

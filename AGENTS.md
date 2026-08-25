@@ -242,6 +242,63 @@ Utilize somente os comandos reais definidos pelo projeto; consulte `docs/TESTING
 
 Não ignore testes falhando. Se um teste já falhava antes da alteração, confirme que é preexistente e registre-o na entrega. Não altere testes apenas para fazer uma implementação incorreta passar.
 
+### Browser validation protocol
+
+Para alterações de UI ou comportamento visível, o ambiente padrão de browser testing é o QA local isolado (`npm run dev:e2e` + `npm run test:e2e`). Esse fluxo exige `QA_MODE=true`, PostgreSQL local, Evolution mock e Google mock; se a configuração não confirmar esses limites, deve abortar. O Vercel Preview é uma segunda camada de validação de integração e não deve ser usado como substituto do QA local. O uso de um alvo remoto pelo Playwright exige autorização explícita e configuração consciente.
+
+Quando uma alteração afetar comportamento visível da aplicação:
+
+1. implemente a alteração;
+2. execute typecheck, testes e builds aplicáveis;
+3. inicie os serviços necessários em ambiente apropriado;
+4. execute o fluxo afetado com Playwright quando houver cobertura E2E;
+5. observe erros atribuíveis à aplicação no console, exceções de página e requests relevantes;
+6. confirme visualmente e funcionalmente o comportamento;
+7. se houver erro atribuível ao Vitstock Hub, diagnostique, corrija e repita o teste;
+8. somente considere o fluxo pronto quando não houver erros relevantes atribuíveis ao Vitstock Hub.
+
+Não é necessário exigir console absolutamente vazio: ruído externo, do navegador ou requests conhecidos devem ser diferenciados de falhas da aplicação.
+
+### Bootstrap e ambientes de validação
+
+O fluxo padrão para uma mudança funcional é:
+
+```text
+branch de desenvolvimento
+→ reproduzir
+→ QA local
+→ Playwright local
+→ corrigir e repetir até PASS
+→ regressão
+→ commit/push autorizado
+→ preview
+→ E2E Preview quando a integração real for necessária
+→ READY FOR HUMAN REVIEW
+→ validação humana
+→ merge humano
+```
+
+O QA local iniciado por `npm run dev:e2e` é o ambiente padrão para testes de
+browser. Ele deve permanecer limitado a `QA_MODE=true`, PostgreSQL local em
+`127.0.0.1:55432/vitstock_qa`, Evolution mock, Google mock, frontend em
+`http://localhost:3000` e backend em `http://localhost:3001`. Se os guards não
+confirmarem esses limites, aborte; Production nunca é fallback para QA.
+
+A branch `preview` é a integração oficial para Vercel Preview e Railway
+Preview. Ela deve usar somente PostgreSQL Preview, Evolution Preview e um
+cliente/callback Google OAuth de Preview. Nunca aponte Preview para banco,
+Evolution, backend ou callback Google de Production.
+
+O Codex deve usar Playwright quando houver cobertura disponível e investigar
+DOM, console, network, screenshots, traces e logs antes de pedir intervenção
+humana. Pode parar somente por decisão de produto, credencial externa
+indispensável, risco de Production, requisito ambíguo ou bloqueio técnico real.
+
+Ao trocar de máquina, finalize o trabalho versionado com `git status`, commit
+e push; na outra máquina use `git fetch`, checkout da branch de trabalho e
+`git pull`. Git não sincroniza arquivos `.env`, credenciais, bancos Docker ou
+outros artefatos ignorados.
+
 ---
 
 # 13. Functional Validation
