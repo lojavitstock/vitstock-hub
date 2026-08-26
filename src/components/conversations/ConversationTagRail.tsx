@@ -50,7 +50,7 @@ export const ConversationTagRail: React.FC<Props> = ({ conversations, tags, acti
   const customTags = tags.filter((tag) => tag.systemKey !== 'traffic');
   const responsePredicate = needsResponse ?? ((conversation: Conversation) => conversation.needsResponse || (!conversation.lastMessageFromMe && conversation.status !== 'resolved'));
   const pill = (filter: ConversationFilter, label: string, count?: number, colorValue?: string) => (
-    <button key={filter} type="button" onClick={() => select(filter)} aria-label={count === undefined ? label : `${label}: ${count}`} aria-pressed={activeFilter === filter} className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-lg border px-2.5 text-[11px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 ${activeFilter === filter ? 'border-amber-300 bg-amber-300 text-[#17130a]' : 'border-transparent bg-[#1b252a] text-slate-300 hover:border-[#46545c] hover:bg-[#222e34] hover:text-white'}`}>
+    <button key={filter} type="button" onClick={() => select(filter)} aria-label={count === undefined ? label : `${label}: ${count}`} aria-pressed={activeFilter === filter} className={`inline-flex h-[30px] shrink-0 items-center gap-1 rounded-lg border px-2.5 text-[11px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 ${activeFilter === filter ? 'border-amber-300 bg-amber-300 text-[#17130a]' : 'border-transparent bg-[#1b252a] text-slate-300 hover:border-[#46545c] hover:bg-[#222e34] hover:text-white'}`}>
       {colorValue && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: colorValue }} aria-hidden="true" />}
       <span className="whitespace-nowrap">{label}</span>
       {count !== undefined && count > 0 && <span className={`rounded-md px-1 py-0.5 text-[9px] tabular-nums ${activeFilter === filter ? 'bg-[#17130a] text-amber-300' : 'bg-[#263239] text-slate-200'}`}>{count}</span>}
@@ -66,7 +66,7 @@ export const ConversationTagRail: React.FC<Props> = ({ conversations, tags, acti
         {trafficTag && pill('traffic', trafficTag.name, conversationTagCount(conversations, trafficTag), trafficTag.color)}
         {customTags.map((tag) => pill(`tag:${tag.id}`, tag.name, conversationTagCount(conversations, tag), tag.color))}
       </div>
-      <button type="button" onClick={() => setCreateOpen(true)} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-amber-300 text-zinc-950 transition-colors hover:bg-amber-200" aria-label="Criar tag"><Plus className="h-3.5 w-3.5" /></button>
+      <button type="button" onClick={() => setCreateOpen(true)} className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-lg bg-amber-300 text-zinc-950 transition-colors hover:bg-amber-200" aria-label="Criar tag"><Plus className="h-3.5 w-3.5" /></button>
     </div>
     {createOpen && <div className="fixed inset-0 z-[70] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="conversation-tag-title">
       <button type="button" className="absolute inset-0 bg-black/60" aria-label="Fechar criação de tag" onClick={() => setCreateOpen(false)} />
