@@ -2,7 +2,8 @@ import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import { canonicalPhone, formatPhoneForDisplay, normalizeContactEmail, normalizeContactPhone, normalizePhoneIdentity, orderedContactPair, parseContactCsv, phoneIdentityKeys, splitContactValues } from '../server/src/contactDomain';
 import { canMergeContacts } from '../server/src/contactMerge';
-import { buildDuplicateGroups } from '../server/src/contactDuplicates';
+import { buildDuplicateGroups, isHubGoogleSameIdentity } from '../server/src/contactDuplicates';
+import { phoneLookupKeys, upsertContactPhone } from '../server/src/contactPhones';
 
 test('normalizes phone and email values deterministically', () => {
   assert.equal(normalizeContactPhone('+55 (21) 99999-0000'), '5521999990000');
@@ -78,4 +79,58 @@ test('different decision removes only the decided pair from a duplicate group', 
   assert.deepEqual(groups[0]?.differentPairs, [['a', 'b']]);
   assert.equal(groups[0]?.unresolvedPairCount, 2);
   assert.equal(buildDuplicateGroups([{ id: 'a' }, { id: 'b' }], sources.slice(0, 2), [{ contactAId: 'a', contactBId: 'b', decision: 'different' }]).length, 0);
+});
+
+test('phone lookup keys cover canonical and legacy representations without guessing a ninth digit', () => {
+  assert.deepEqual(phoneLookupKeys('(21) 99999-0000'), ['5521999990000', '21999990000']);
+  assert.deepEqual(phoneLookupKeys('+5521999990000'), ['5521999990000', '21999990000']);
+  assert.notDeepEqual(phoneLookupKeys('2199990000'), phoneLookupKeys('21999990000'));
+});
+
+test('phone upsert reuses a semantically equivalent legacy row', async () => {
+  const calls: Array<{ sql: string; values?: unknown[] }> = [];
+  const executor = {
+    async query(sql: string, values?: unknown[]) {
+      calls.push({ sql, values });
+      if (sql.startsWith('SELECT id, normalized_phone')) {
+        return { rows: [{ id: 'phone-1', normalized_phone: '21999990000', source: 'whatsapp' }] };
+      }
+      return { rows: [] };
+    },
+  };
+  const result = await upsertContactPhone(executor, {
+    companyId: 'company-1',
+    contactId: 'contact-1',
+    phone: '+55 (21) 99999-0000',
+    isPrimary: true,
+    source: 'google',
+  });
+  assert.deepEqual(result, { id: 'phone-1', created: false });
+  assert.equal(calls.some((call) => call.sql.startsWith('INSERT INTO contact_phones')), false);
+  const updateValues = calls.find((call) => call.sql.startsWith('UPDATE contact_phones'))?.values || [];
+  assert.equal(updateValues[3], false);
+  assert.equal(updateValues[4], '5521999990000');
+});
+
+test('Hub and Google records with WhatsApp evidence are excluded from duplicate review', () => {
+  const hub = { id: 'hub', source: 'hub', google_resource_name: null, whatsapp_linked: true };
+  const google = { id: 'google', source: 'google', google_resource_name: 'people/a', whatsapp_linked: false };
+  const googleOther = { id: 'google-b', source: 'google', google_resource_name: 'people/b', whatsapp_linked: false };
+  const sources = [
+    { contactId: 'hub', kind: 'phone' as const, key: '+5521999990000' },
+    { contactId: 'google', kind: 'phone' as const, key: '+5521999990000' },
+  ];
+  assert.equal(isHubGoogleSameIdentity(hub, google), true);
+  assert.equal(buildDuplicateGroups([hub, google], sources).length, 0);
+  assert.equal(buildDuplicateGroups([hub, google, googleOther], [
+    ...sources,
+    { contactId: 'google-b', kind: 'phone' as const, key: '+5521999990000' },
+  ]).length, 1);
+  assert.equal(buildDuplicateGroups([
+    { id: 'manual', source: 'manual', google_resource_name: null, whatsapp_linked: false },
+    google,
+  ], [
+    { contactId: 'manual', kind: 'phone' as const, key: '+5521999990000' },
+    { contactId: 'google', kind: 'phone' as const, key: '+5521999990000' },
+  ]).length, 1);
 });

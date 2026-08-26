@@ -10,9 +10,9 @@ import {
   normalizeContactPhone,
   orderedContactPair,
   parseContactCsv,
-  phoneIdentityKeys,
   splitContactValues,
 } from './contactDomain.js';
+import { phoneLookupKeys, upsertContactPhone } from './contactPhones.js';
 
 const contactInput = z.object({
   name: z.string().trim().min(2).max(160),
@@ -100,11 +100,7 @@ function enrichRows(rows: any[], tags: Map<string, any[]>, channels: Map<string,
 
 async function insertContactChannels(companyId: string, contactId: string, values: { phones: string[]; emails: string[] }, source: string) {
   for (const [index, phone] of values.phones.entries()) {
-    await db.query(
-      `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT DO NOTHING`, [companyId, contactId, phone, normalizeContactPhone(phone), index === 0, source],
-    );
+    await upsertContactPhone(db, { companyId, contactId, phone, isPrimary: index === 0, source });
   }
   for (const [index, email] of values.emails.entries()) {
     await db.query(
@@ -119,7 +115,7 @@ async function ensureContact(companyId: string, input: z.infer<typeof contactInp
   const values = contactValues(input);
   const phone = values.phones[0];
   if (!phone) throw new Error('Telefone inválido');
-  const phoneDigits = phoneIdentityKeys(phone, { defaultCountry: 'BR' }).filter((value) => /^\d+$/.test(value));
+  const phoneDigits = phoneLookupKeys(phone);
   const duplicate = await db.query<{ id: string }>(
     `SELECT c.id FROM contacts c
      WHERE c.company_id = $1
@@ -168,6 +164,7 @@ export async function registerContactRoutes(app: FastifyInstance) {
       WHERE dup.contact_id = c.id AND dup.company_id = c.company_id
         AND EXISTS (
           SELECT 1 FROM contact_phones other
+          JOIN contacts other_contact ON other_contact.id = other.contact_id AND other_contact.company_id = other.company_id
           WHERE other.company_id = dup.company_id AND other.contact_id <> dup.contact_id
             AND (CASE WHEN length(regexp_replace(other.phone, '\\D', '', 'g')) IN (10, 11)
                       THEN '55' || regexp_replace(other.phone, '\\D', '', 'g')
@@ -175,6 +172,17 @@ export async function registerContactRoutes(app: FastifyInstance) {
               = (CASE WHEN length(regexp_replace(dup.phone, '\\D', '', 'g')) IN (10, 11)
                       THEN '55' || regexp_replace(dup.phone, '\\D', '', 'g')
                       ELSE regexp_replace(dup.phone, '\\D', '', 'g') END)
+            AND NOT (
+              (((c.source IN ('hub', 'whatsapp')) AND c.google_resource_name IS NULL
+                 AND (EXISTS (SELECT 1 FROM contact_channel_identities cwi WHERE cwi.company_id = c.company_id AND cwi.contact_id = c.id AND cwi.channel = 'whatsapp')
+                      OR EXISTS (SELECT 1 FROM contact_phones cwp WHERE cwp.company_id = c.company_id AND cwp.contact_id = c.id AND cwp.source = 'whatsapp')))
+               AND (other_contact.source = 'google' OR other_contact.google_resource_name IS NOT NULL))
+              OR
+              (((other_contact.source IN ('hub', 'whatsapp')) AND other_contact.google_resource_name IS NULL
+                 AND (EXISTS (SELECT 1 FROM contact_channel_identities owi WHERE owi.company_id = other_contact.company_id AND owi.contact_id = other_contact.id AND owi.channel = 'whatsapp')
+                      OR EXISTS (SELECT 1 FROM contact_phones owp WHERE owp.company_id = other_contact.company_id AND owp.contact_id = other_contact.id AND owp.source = 'whatsapp')))
+               AND (c.source = 'google' OR c.google_resource_name IS NOT NULL))
+            )
         )
     )`);
     if (tag) {
@@ -184,7 +192,7 @@ export async function registerContactRoutes(app: FastifyInstance) {
     if (search) {
       values.push(`%${search}%`);
       const q = `$${values.length}`;
-      const searchPhoneDigits = phoneIdentityKeys(search, { defaultCountry: 'BR' }).filter((value) => /^\d+$/.test(value));
+      const searchPhoneDigits = phoneLookupKeys(search);
       const phoneCondition = searchPhoneDigits.length
         ? (() => {
           values.push(searchPhoneDigits);
@@ -283,7 +291,7 @@ export async function registerContactRoutes(app: FastifyInstance) {
     if (parsed.data.phone !== undefined) {
       const phone = canonicalPhone(parsed.data.phone, { defaultCountry: 'BR' });
       if (!phone) return reply.code(400).send({ error: 'Telefone principal inválido' });
-      const phoneDigits = phoneIdentityKeys(phone, { defaultCountry: 'BR' }).filter((value) => /^\d+$/.test(value));
+      const phoneDigits = phoneLookupKeys(phone);
       const duplicate = await db.query(
         `SELECT c.id FROM contacts c
          WHERE c.company_id = $1 AND c.id <> $3
@@ -303,7 +311,10 @@ export async function registerContactRoutes(app: FastifyInstance) {
     if (Object.keys(overrideFields).length) await db.query('UPDATE contacts SET manual_override = manual_override || $3::jsonb WHERE company_id = $1 AND id = $2', [request.user!.companyId, id, JSON.stringify(overrideFields)]);
     if (parsed.data.phone !== undefined || parsed.data.phones !== undefined || parsed.data.email !== undefined || parsed.data.emails !== undefined) {
       const channels = contactValues({ ...existing, ...parsed.data, phone: parsed.data.phone || existing.phone } as any);
-      await db.query('DELETE FROM contact_phones WHERE contact_id = $1', [id]);
+      // Keep WhatsApp-origin phone rows as provenance/identity evidence. The
+      // manual form replaces only non-channel phone rows; the shared upsert
+      // then reuses any semantically equivalent row instead of duplicating it.
+      await db.query("DELETE FROM contact_phones WHERE contact_id = $1 AND source <> 'whatsapp'", [id]);
       await db.query('DELETE FROM contact_emails WHERE contact_id = $1', [id]);
       await insertContactChannels(request.user!.companyId, id, channels, 'manual');
     }
