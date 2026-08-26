@@ -936,6 +936,35 @@ test('filtros de conversa usam tags tenant-scoped e tráfego sem N+1', () => {
   assert.equal(conversationTagCount(all, vipTag), 1);
 });
 
+test('contadores e filtros de não lidas e não respondidas usam a mesma população', () => {
+  const conversations = [
+    conversation('a', { unreadCount: 2, needsResponse: true, lastMessageFromMe: false }),
+    conversation('b', { unreadCount: 0, needsResponse: true, lastMessageFromMe: false }),
+    conversation('c', { unreadCount: 3, needsResponse: false, lastMessageFromMe: true }),
+    conversation('d', { unreadCount: 0, needsResponse: false, lastMessageFromMe: true }),
+  ];
+  const needsResponse = conversationNeedsResponse;
+
+  assert.equal(conversations.filter((item) => matchesConversationFilter(item, 'unread', needsResponse)).length, 2);
+  assert.equal(conversations.filter((item) => matchesConversationFilter(item, 'unanswered', needsResponse)).length, 2);
+  assert.equal(conversations.filter((item) => matchesConversationFilter(item, 'all', needsResponse)).length, 4);
+  assert.equal(conversations.filter((item) => item.unreadCount > 0).length, 2);
+  assert.equal(conversations.filter(needsResponse).length, 2);
+});
+
+test('tráfego exige metadata real ou tag sistêmica e não usa texto como heurística', () => {
+  const trafficTag = { id: 'traffic', name: 'Tráfego', color: '#F97316', systemKey: 'traffic' } as const;
+  const realTraffic = conversation('real-traffic', { trafficSource: 'campaign_referral' });
+  const instagramText = conversation('instagram-text', { lastMessage: 'Veja instagram.com/oferta', conversationTags: [] });
+  const manualTraffic = conversation('manual-traffic', { conversationTags: [trafficTag] });
+  const both = conversation('both', { trafficSource: 'campaign_referral', conversationTags: [trafficTag] });
+  const conversations = [realTraffic, instagramText, manualTraffic, both];
+
+  assert.equal(conversations.filter((item) => matchesConversationFilter(item, 'traffic', conversationNeedsResponse)).length, 3);
+  assert.equal(matchesConversationFilter(instagramText, 'traffic', conversationNeedsResponse), false);
+  assert.equal(conversationTagCount(conversations, trafficTag), 3);
+});
+
 test('realtime atualiza tags da conversa sem alterar atividade ou identidade das demais', () => {
   const first = conversation('first', { lastMessageAt: 2_000 });
   const second = conversation('second', { lastMessageAt: 1_000 });

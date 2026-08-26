@@ -28,12 +28,14 @@ export const ConversationTagRail: React.FC<Props> = ({ conversations, tags, acti
   const beginDrag = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!scrollRef.current) return;
     dragRef.current = { active: true, moved: false, startX: event.clientX, startScroll: scrollRef.current.scrollLeft };
-    event.currentTarget.setPointerCapture(event.pointerId);
   };
   const moveDrag = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!dragRef.current.active || !scrollRef.current) return;
     const delta = event.clientX - dragRef.current.startX;
-    if (Math.abs(delta) > 4) dragRef.current.moved = true;
+    if (Math.abs(delta) > 4 && !dragRef.current.moved) {
+      dragRef.current.moved = true;
+      event.currentTarget.setPointerCapture(event.pointerId);
+    }
     scrollRef.current.scrollLeft = dragRef.current.startScroll - delta;
   };
   const endDrag = () => { dragRef.current.active = false; window.setTimeout(() => { dragRef.current.moved = false; }, 0); };
@@ -48,23 +50,23 @@ export const ConversationTagRail: React.FC<Props> = ({ conversations, tags, acti
   const customTags = tags.filter((tag) => tag.systemKey !== 'traffic');
   const responsePredicate = needsResponse ?? ((conversation: Conversation) => conversation.needsResponse || (!conversation.lastMessageFromMe && conversation.status !== 'resolved'));
   const pill = (filter: ConversationFilter, label: string, count?: number, colorValue?: string) => (
-    <button key={filter} type="button" onClick={() => select(filter)} aria-label={count === undefined ? label : `${label}: ${count}`} aria-pressed={activeFilter === filter} className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border px-3 text-[11px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 ${activeFilter === filter ? 'border-amber-300 bg-amber-300 text-[#17130a]' : 'border-transparent bg-[#1b252a] text-slate-300 hover:border-[#46545c] hover:bg-[#222e34] hover:text-white'}`}>
+    <button key={filter} type="button" onClick={() => select(filter)} aria-label={count === undefined ? label : `${label}: ${count}`} aria-pressed={activeFilter === filter} className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-lg border px-2.5 text-[11px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 ${activeFilter === filter ? 'border-amber-300 bg-amber-300 text-[#17130a]' : 'border-transparent bg-[#1b252a] text-slate-300 hover:border-[#46545c] hover:bg-[#222e34] hover:text-white'}`}>
       {colorValue && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: colorValue }} aria-hidden="true" />}
       <span className="whitespace-nowrap">{label}</span>
-      {count !== undefined && count > 0 && <span className={`rounded-md px-1.5 py-0.5 text-[10px] tabular-nums ${activeFilter === filter ? 'bg-[#17130a] text-amber-300' : 'bg-[#263239] text-slate-200'}`}>{count}</span>}
+      {count !== undefined && count > 0 && <span className={`rounded-md px-1 py-0.5 text-[9px] tabular-nums ${activeFilter === filter ? 'bg-[#17130a] text-amber-300' : 'bg-[#263239] text-slate-200'}`}>{count}</span>}
     </button>
   );
 
   return <>
-    <div data-testid="conversation-tag-rail" className="flex items-center gap-1.5 rounded-xl border border-[#3a474e] bg-[#141d22] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.025),0_8px_24px_rgba(0,0,0,0.14)]">
-      <div data-testid="conversation-tag-scroll" ref={scrollRef} className="flex min-w-0 flex-1 cursor-grab touch-pan-y select-none items-center gap-1.5 overflow-x-auto overscroll-x-contain whitespace-nowrap [scrollbar-width:none] [&::-webkit-scrollbar]:hidden active:cursor-grabbing" onPointerDown={beginDrag} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} onWheel={(event) => { if (scrollRef.current && Math.abs(event.deltaY) > Math.abs(event.deltaX)) { scrollRef.current.scrollLeft += event.deltaY; event.preventDefault(); } }}>
+    <div data-testid="conversation-tag-rail" className="flex items-center gap-1 rounded-xl border border-[#3a474e] bg-[#141d22] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.025),0_8px_24px_rgba(0,0,0,0.14)]">
+      <div data-testid="conversation-tag-scroll" ref={scrollRef} className="flex min-w-0 flex-1 cursor-grab touch-pan-y select-none items-center gap-1 overflow-x-auto overscroll-x-contain whitespace-nowrap [scrollbar-width:none] [&::-webkit-scrollbar]:hidden active:cursor-grabbing" onPointerDown={beginDrag} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} onWheel={(event) => { if (scrollRef.current && Math.abs(event.deltaY) > Math.abs(event.deltaX)) { scrollRef.current.scrollLeft += event.deltaY; event.preventDefault(); } }}>
         {pill('all', 'Tudo')}
         {pill('unread', 'Não lidas', conversations.filter((conversation) => conversation.unreadCount > 0).length)}
         {pill('unanswered', 'Não resp.', conversations.filter(responsePredicate).length)}
         {trafficTag && pill('traffic', trafficTag.name, conversationTagCount(conversations, trafficTag), trafficTag.color)}
         {customTags.map((tag) => pill(`tag:${tag.id}`, tag.name, conversationTagCount(conversations, tag), tag.color))}
       </div>
-      <button type="button" onClick={() => setCreateOpen(true)} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-300 text-zinc-950 transition-colors hover:bg-amber-200" aria-label="Criar tag"><Plus className="h-4 w-4" /></button>
+      <button type="button" onClick={() => setCreateOpen(true)} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-amber-300 text-zinc-950 transition-colors hover:bg-amber-200" aria-label="Criar tag"><Plus className="h-3.5 w-3.5" /></button>
     </div>
     {createOpen && <div className="fixed inset-0 z-[70] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="conversation-tag-title">
       <button type="button" className="absolute inset-0 bg-black/60" aria-label="Fechar criação de tag" onClick={() => setCreateOpen(false)} />
