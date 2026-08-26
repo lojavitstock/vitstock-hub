@@ -10,12 +10,47 @@ const createTagSchema = z.object({
   name: z.string().trim().min(1).max(80),
   color: colorSchema.default('#EABB19'),
 });
+const updateTagSchema = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  color: colorSchema.optional(),
+}).refine((value) => value.name !== undefined || value.color !== undefined);
 const tagLinkSchema = z.object({ tagId: z.string().uuid() });
 
-const normalizeTagName = (value: string) => value.trim().toLocaleLowerCase();
+export const normalizeTagName = (value: string) => value.trim().toLocaleLowerCase();
+
+type ConversationTagRow = {
+  id: string;
+  name: string;
+  color: string;
+  system_key: string | null;
+  usage_count: number;
+};
+
+const toPublicTag = (tag: ConversationTagRow) => ({
+  id: tag.id,
+  name: tag.name,
+  color: tag.color,
+  ...(tag.system_key ? { systemKey: tag.system_key } : {}),
+  usageCount: Number(tag.usage_count || 0),
+});
+
+async function loadTagByIdWithUsage(companyId: string, tagId: string) {
+  const result = await db.query<ConversationTagRow>(
+    `SELECT t.id, t.name, t.color, t.system_key,
+            COUNT(l.conversation_id)::int AS usage_count
+     FROM conversation_tags t
+     LEFT JOIN conversation_tag_links l
+       ON l.tag_id = t.id AND l.company_id = t.company_id
+     WHERE t.company_id = $1 AND t.id = $2
+     GROUP BY t.id, t.name, t.color, t.system_key
+     LIMIT 1`,
+    [companyId, tagId],
+  );
+  return result.rows[0] || null;
+}
 
 async function ensureTrafficTag(companyId: string) {
-  const existing = await db.query<{ id: string; name: string; color: string; system_key: string | null }>(
+  const existing = await db.query<{ id: string }>(
     `SELECT id, name, color, system_key
      FROM conversation_tags
      WHERE company_id = $1 AND system_key = 'traffic'
@@ -30,11 +65,15 @@ async function ensureTrafficTag(companyId: string) {
       [companyId],
     );
   }
-  const result = await db.query<{ id: string; name: string; color: string; system_key: string | null }>(
-    `SELECT id, name, color, system_key
-     FROM conversation_tags
-     WHERE company_id = $1
-     ORDER BY system_key DESC NULLS LAST, lower(name)`,
+  const result = await db.query<ConversationTagRow>(
+    `SELECT t.id, t.name, t.color, t.system_key,
+            COUNT(l.conversation_id)::int AS usage_count
+     FROM conversation_tags t
+     LEFT JOIN conversation_tag_links l
+       ON l.tag_id = t.id AND l.company_id = t.company_id
+     WHERE t.company_id = $1
+     GROUP BY t.id, t.name, t.color, t.system_key
+     ORDER BY t.system_key DESC NULLS LAST, lower(t.name)`,
     [companyId],
   );
   return result.rows;
@@ -75,7 +114,7 @@ export async function registerConversationTagRoutes(app: FastifyInstance) {
   app.get('/api/conversation-tags', { preHandler: requireUser }, async (request) => {
     const tags = await ensureTrafficTag(request.user!.companyId);
     return {
-      tags: tags.map((tag) => ({ id: tag.id, name: tag.name, color: tag.color, ...(tag.system_key ? { systemKey: tag.system_key } : {}) })),
+      tags: tags.map(toPublicTag),
       colors: TAG_COLORS,
     };
   });
@@ -86,16 +125,78 @@ export async function registerConversationTagRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'Nome ou cor de tag inválido' });
     }
     try {
-      const result = await db.query<{ id: string; name: string; color: string }>(
+      const result = await db.query<{ id: string; name: string; color: string; system_key: string | null }>(
         `INSERT INTO conversation_tags (company_id, name, color)
          VALUES ($1, $2, $3)
          ON CONFLICT (company_id, lower(trim(name))) DO UPDATE SET color = conversation_tags.color
-         RETURNING id, name, color`,
+         RETURNING id, name, color, system_key`,
         [request.user!.companyId, parsed.data.name, parsed.data.color],
       );
-      return reply.code(201).send({ tag: result.rows[0] });
+      const inserted = result.rows[0];
+      if (!inserted) return reply.code(500).send({ error: 'Não foi possível criar a tag' });
+      const tag = await loadTagByIdWithUsage(request.user!.companyId, inserted.id);
+      return reply.code(201).send({ tag: tag ? toPublicTag(tag) : undefined });
     } catch {
       return reply.code(409).send({ error: 'Não foi possível criar a tag' });
+    }
+  });
+
+  app.patch('/api/conversation-tags/:tagId', { preHandler: requireUser }, async (request, reply) => {
+    const tagId = String((request.params as { tagId?: string }).tagId || '');
+    const parsed = updateTagSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Nome ou cor de tag inválido' });
+    const companyId = request.user!.companyId;
+    const existing = await loadTagByIdWithUsage(companyId, tagId);
+    if (!existing) return reply.code(404).send({ error: 'Tag não encontrada nesta empresa' });
+    if (existing.system_key === 'traffic' && parsed.data.name !== undefined && normalizeTagName(parsed.data.name) !== normalizeTagName(existing.name)) {
+      return reply.code(400).send({ error: 'A tag Tráfego não pode ser renomeada' });
+    }
+    if (!existing.system_key && parsed.data.name !== undefined && ['traffic', 'tráfego'].includes(normalizeTagName(parsed.data.name))) {
+      return reply.code(400).send({ error: 'Nome ou cor de tag inválido' });
+    }
+    try {
+      const updated = await db.query<{ id: string; name: string; color: string; system_key: string | null }>(
+        `UPDATE conversation_tags
+         SET name = $3, color = $4, updated_at = now()
+         WHERE company_id = $1 AND id = $2
+         RETURNING id, name, color, system_key`,
+        [companyId, tagId, parsed.data.name ?? existing.name, parsed.data.color ?? existing.color],
+      );
+      const updatedRow = updated.rows[0];
+      if (!updatedRow) return reply.code(404).send({ error: 'Tag não encontrada nesta empresa' });
+      const tag = await loadTagByIdWithUsage(companyId, updatedRow.id);
+      return { tag: tag ? toPublicTag(tag) : undefined };
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505') return reply.code(409).send({ error: 'Já existe uma tag com esse nome' });
+      throw error;
+    }
+  });
+
+  app.delete('/api/conversation-tags/:tagId', { preHandler: requireUser }, async (request, reply) => {
+    const tagId = String((request.params as { tagId?: string }).tagId || '');
+    const companyId = request.user!.companyId;
+    const existing = await loadTagByIdWithUsage(companyId, tagId);
+    if (!existing) return reply.code(404).send({ error: 'Tag não encontrada nesta empresa' });
+    if (existing.system_key === 'traffic') return reply.code(409).send({ error: 'A tag Tráfego não pode ser excluída' });
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `DELETE FROM conversation_tag_links WHERE company_id = $1 AND tag_id = $2`,
+        [companyId, tagId],
+      );
+      await client.query(
+        `DELETE FROM conversation_tags WHERE company_id = $1 AND id = $2`,
+        [companyId, tagId],
+      );
+      await client.query('COMMIT');
+      return { removed: true, tagId, usageCount: Number(existing.usage_count || 0) };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
     }
   });
 

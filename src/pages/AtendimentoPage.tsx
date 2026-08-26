@@ -42,7 +42,7 @@ import { toQuotedMessage } from '../utils/quotedMessage';
 import { canRestoreComposerDraft, captureComposerSubmission, readConversationDraft, scheduleComposerFocus, writeConversationDraft } from '../utils/composerSubmission';
 import { createOutboundTrace } from '../utils/outboundTrace';
 import { findConversationForContactChat, normalizeContactChatPhone } from '../utils/contactChatNavigation';
-import { addConversationTag, createConversationTag, fetchConversationTags, removeConversationTag } from '../services/conversationTagsApi';
+import { addConversationTag, createConversationTag, deleteConversationTag, fetchConversationTags, removeConversationTag, updateConversationTag } from '../services/conversationTagsApi';
 import {
   canReactToMessage,
   nextHubReactionEmoji,
@@ -163,9 +163,18 @@ export const AtendimentoPage: React.FC = () => {
     const seededTags = conversations.flatMap((conversation) => conversation.conversationTags || []);
     setConversationTags((previous) => {
       const byId = new Map(previous.map((tag) => [tag.id, tag]));
-      seededTags.forEach((tag) => byId.set(tag.id, tag));
+      seededTags.forEach((tag) => byId.set(tag.id, {
+        ...tag,
+        usageCount: conversations.filter((conversation) => (conversation.conversationTags || []).some((item) => item.id === tag.id)).length,
+      }));
       if (!Array.from(byId.values()).some((tag) => tag.systemKey === 'traffic')) {
-        byId.set('mock-traffic', { id: 'mock-traffic', name: 'Tráfego', color: '#F97316', systemKey: 'traffic' });
+        byId.set('mock-traffic', {
+          id: 'mock-traffic',
+          name: 'Tráfego',
+          color: '#F97316',
+          systemKey: 'traffic',
+          usageCount: conversations.filter((conversation) => Boolean(conversation.trafficSource)).length,
+        });
       }
       return Array.from(byId.values());
     });
@@ -673,7 +682,7 @@ export const AtendimentoPage: React.FC = () => {
     const normalizedName = name.trim();
     if (!normalizedName) return;
     if (isMock) {
-      const tag: Tag = { id: `mock-conversation-tag-${Date.now()}`, name: normalizedName, color };
+      const tag: Tag = { id: `mock-conversation-tag-${Date.now()}`, name: normalizedName, color, usageCount: 0 };
       setConversationTags((previous) => previous.some((item) => item.name.trim().toLocaleLowerCase() === normalizedName.toLocaleLowerCase())
         ? previous
         : [...previous, tag]);
@@ -689,8 +698,60 @@ export const AtendimentoPage: React.FC = () => {
       setAssignmentFeedback('Tag criada.');
     } catch (error) {
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível criar a tag.');
+      throw error;
     }
   }, [isMock, setAssignmentFeedback]);
+
+  const handleUpdateConversationTag = useCallback(async (tagId: string, input: { name?: string; color?: string }) => {
+    if (isMock) {
+      setConversationTags((previous) => previous.map((tag) => tag.id === tagId ? { ...tag, ...input } : tag));
+      setConversations((previous) => previous.map((conversation) => ({
+        ...conversation,
+        conversationTags: (conversation.conversationTags || []).map((tag) => tag.id === tagId ? { ...tag, ...input } : tag),
+      })));
+      setAssignmentFeedback('Tag atualizada.');
+      return;
+    }
+    try {
+      const result = await updateConversationTag(tagId, input);
+      if (!result.tag) throw new Error('Não foi possível atualizar a tag.');
+      setConversationTags((previous) => previous.map((tag) => tag.id === tagId ? result.tag : tag));
+      setConversations((previous) => previous.map((conversation) => ({
+        ...conversation,
+        conversationTags: (conversation.conversationTags || []).map((tag) => tag.id === tagId ? result.tag : tag),
+      })));
+      setAssignmentFeedback('Tag atualizada.');
+    } catch (error) {
+      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível atualizar a tag.');
+      throw error;
+    }
+  }, [isMock, setAssignmentFeedback, setConversations]);
+
+  const handleDeleteConversationTag = useCallback(async (tagId: string) => {
+    if (isMock) {
+      setConversationTags((previous) => previous.filter((tag) => tag.id !== tagId));
+      setConversations((previous) => previous.map((conversation) => ({
+        ...conversation,
+        conversationTags: (conversation.conversationTags || []).filter((tag) => tag.id !== tagId),
+      })));
+      if (filterTab === `tag:${tagId}`) setFilterTab('all');
+      setAssignmentFeedback('Tag excluída.');
+      return;
+    }
+    try {
+      await deleteConversationTag(tagId);
+      setConversationTags((previous) => previous.filter((tag) => tag.id !== tagId));
+      setConversations((previous) => previous.map((conversation) => ({
+        ...conversation,
+        conversationTags: (conversation.conversationTags || []).filter((tag) => tag.id !== tagId),
+      })));
+      if (filterTab === `tag:${tagId}`) setFilterTab('all');
+      setAssignmentFeedback('Tag excluída.');
+    } catch (error) {
+      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível excluir a tag.');
+      throw error;
+    }
+  }, [filterTab, isMock, setAssignmentFeedback, setConversations, setFilterTab]);
 
   const toggleConversationTag = useCallback(async (tag: Tag) => {
     if (!activeConv) return;
@@ -705,6 +766,9 @@ export const AtendimentoPage: React.FC = () => {
               : [...(conversation.conversationTags || []), tag],
           }
         : conversation));
+      setConversationTags((previous) => previous.map((item) => item.id === tag.id
+        ? { ...item, usageCount: Math.max(0, (item.usageCount || 0) + (assigned ? -1 : 1)) }
+        : item));
       return;
     }
     try {
@@ -715,6 +779,9 @@ export const AtendimentoPage: React.FC = () => {
       setConversations((previous) => previous.map((conversation) => conversation.id === conversationId
         ? { ...conversation, conversationTags: nextTags }
         : conversation));
+      setConversationTags((previous) => previous.map((item) => item.id === tag.id
+        ? { ...item, usageCount: Math.max(0, (item.usageCount || 0) + (assigned ? -1 : 1)) }
+        : item));
     } catch (error) {
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível atualizar as tags.');
     }
@@ -1407,6 +1474,8 @@ export const AtendimentoPage: React.FC = () => {
             activeFilter={filterTab}
             onFilterChange={setFilterTab}
             onCreateTag={handleCreateConversationTag}
+            onUpdateTag={handleUpdateConversationTag}
+            onDeleteTag={handleDeleteConversationTag}
             needsResponse={conversationNeedsResponse}
           />
           </> : (

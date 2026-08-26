@@ -60,6 +60,7 @@ import {
   isAllowedFrontendOrigin,
   parseFrontendOrigins,
 } from '../server/src/config';
+import { normalizeTagName } from '../server/src/conversationTags';
 import type { Conversation, Message } from '../src/types';
 
 const message = (
@@ -963,6 +964,12 @@ test('tráfego exige metadata real ou tag sistêmica e não usa texto como heur�
   assert.equal(conversations.filter((item) => matchesConversationFilter(item, 'traffic', conversationNeedsResponse)).length, 3);
   assert.equal(matchesConversationFilter(instagramText, 'traffic', conversationNeedsResponse), false);
   assert.equal(conversationTagCount(conversations, trafficTag), 3);
+});
+
+test('gerenciador de tags mantém unicidade de nomes sem diferenciar caixa ou espaços', () => {
+  assert.equal(normalizeTagName('  Orçamento  '), 'orçamento');
+  assert.equal(normalizeTagName('ORÇAMENTO'), normalizeTagName('orçamento'));
+  assert.notEqual(normalizeTagName('Pós-venda'), normalizeTagName('Pós atendimento'));
 });
 
 test('realtime atualiza tags da conversa sem alterar atividade ou identidade das demais', () => {

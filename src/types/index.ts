@@ -15,6 +15,7 @@ export interface Tag {
   name: string;
   color: string;
   systemKey?: string;
+  usageCount?: number;
 }
 
 export interface Contact {
