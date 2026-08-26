@@ -32,9 +32,13 @@ export function classifyGooglePhoneMatch(input: {
     const additional = input.candidates.filter((candidate) => candidate.id !== linked[0]!.id);
     const provisional = additional.filter(isProvisionalWhatsapp);
     // A linked Google row can be a duplicate created before WhatsApp identity
-    // reconciliation existed. Only the exact one-Google + one-provisional
-    // shape is safe to consolidate automatically.
-    if (additional.length === 1 && provisional.length === 1) return 'safe_reconcile_linked';
+    // reconciliation existed. Only the exact one-Google-only + one-provisional
+    // shape is safe to consolidate automatically. A row that already carries
+    // Hub/WhatsApp provenance must never be archived implicitly.
+    const linkedIsGoogleOnly = linked[0]!.source === 'google'
+      && !linked[0]!.hasWhatsappIdentity
+      && !linked[0]!.hasWhatsappPhone;
+    if (additional.length === 1 && provisional.length === 1 && linkedIsGoogleOnly) return 'safe_reconcile_linked';
     return additional.length ? 'ambiguous' : 'linked';
   }
   if (input.candidates.length === 0) return 'create';
@@ -44,9 +48,12 @@ export function classifyGooglePhoneMatch(input: {
   return isProvisionalWhatsapp(candidate) ? 'safe_reconcile' : 'ambiguous';
 }
 
-function isProvisionalWhatsapp(candidate: GoogleContactCandidate) {
+export function isProvisionalWhatsapp(candidate: GoogleContactCandidate) {
   const hasManualOverride = Boolean(candidate.manualOverride && Object.keys(candidate.manualOverride).length);
-  return candidate.source === 'hub'
+  // Evolution-created contacts historically used both the contacts.source
+  // default ('hub') and the explicit 'whatsapp' value. Either is safe only
+  // when the WhatsApp evidence is present and no human/Google ownership exists.
+  return (candidate.source === 'hub' || candidate.source === 'whatsapp')
     && (candidate.hasWhatsappIdentity || candidate.hasWhatsappPhone)
     && !hasManualOverride
     && !candidate.googleResourceName;

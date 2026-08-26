@@ -4,7 +4,7 @@ import { isAllowedFrontendOrigin, isLocalHost, parseFrontendOrigins, validateQaR
 import { currentQaGoogleScenario, qaEvolutionResponse, qaGoogleFailure, qaGooglePeople, setQaGoogleScenario } from '../server/src/qa';
 import { buildExistingConversationQuery } from '../server/src/conversationQueries';
 import { buildGoogleContactUpdatePayload, buildGooglePhonePlan, googleContactErrorResponse, googleIntegrationState, googleSyncErrorResponse, resolveGoogleCallbackUrl } from '../server/src/google-contacts';
-import { classifyGooglePhoneMatch, googlePhoneKey } from '../server/src/googleContactReconciliation';
+import { classifyGooglePhoneMatch, googlePhoneKey, isProvisionalWhatsapp } from '../server/src/googleContactReconciliation';
 import { GOOGLE_INTEGRATION_SETTINGS_PATH, googleSidebarIndicator } from '../src/utils/googleSidebarStatus';
 import { PREVIEW_API_URL, PREVIEW_FRONTEND_URL, validatePreviewEnv } from '../scripts/e2e-preview-env.mjs';
 
@@ -83,6 +83,17 @@ test('Google sync preserves the local canonical phone when a resource phone is o
   assert.equal(plan.primaryPhone, '5521990000003');
   assert.equal(plan.secondaryPhone, '5521990000001');
   assert.deepEqual(plan.phones, ['5521990000003', '5521990000001', '5521990000002']);
+});
+
+test('Google phone plans deduplicate formatted variants before persistence', () => {
+  const plan = buildGooglePhonePlan({
+    requestedPhone: '+55 (21) 99999-0001',
+    otherPhones: ['5521999990001', '(21) 99999-0002'],
+    existingPhone: '(21) 99999-0001',
+    preserveExistingPhone: true,
+  });
+  assert.deepEqual(plan.phones, ['(21) 99999-0001', '(21) 99999-0002']);
+  assert.equal(plan.secondaryPhone, '(21) 99999-0002');
 });
 
 test('Google callback URL uses the configured environment URI', () => {
@@ -185,6 +196,32 @@ test('Google identity reconciliation consolidates a linked Google row into the W
 test('Google identity reconciliation uses exact canonical phone keys', () => {
   assert.equal(googlePhoneKey('+5521999999999'), googlePhoneKey('21999999999'));
   assert.notEqual(googlePhoneKey('2199999999'), googlePhoneKey('21999999999'));
+});
+
+test('legacy WhatsApp sources remain eligible only with explicit WhatsApp evidence', () => {
+  assert.equal(isProvisionalWhatsapp({ id: 'legacy', source: 'whatsapp', manualOverride: {}, hasWhatsappIdentity: true, hasWhatsappPhone: false, googleResourceName: null }), true);
+  assert.equal(isProvisionalWhatsapp({ id: 'legacy-system', source: 'system', manualOverride: {}, hasWhatsappIdentity: true, hasWhatsappPhone: true, googleResourceName: null }), false);
+  assert.equal(isProvisionalWhatsapp({ id: 'manual', source: 'whatsapp', manualOverride: { name: 'manual' }, hasWhatsappIdentity: true, hasWhatsappPhone: true, googleResourceName: null }), false);
+});
+
+test('a linked Hub row is never implicitly archived as a Google duplicate', () => {
+  const linkedHub = {
+    id: 'hub-linked',
+    source: 'hub',
+    manualOverride: {},
+    hasWhatsappIdentity: true,
+    hasWhatsappPhone: true,
+    googleResourceName: 'people/one',
+  };
+  const provisional = {
+    id: 'hub-provisional',
+    source: 'hub',
+    manualOverride: {},
+    hasWhatsappIdentity: true,
+    hasWhatsappPhone: true,
+    googleResourceName: null,
+  };
+  assert.equal(classifyGooglePhoneMatch({ candidates: [linkedHub, provisional], googlePersonCount: 1, resourceName: 'people/one' }), 'ambiguous');
 });
 
 test('Google integration state is tenant-local and maps persisted sync outcomes', () => {

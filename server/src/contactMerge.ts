@@ -1,4 +1,5 @@
 import type { PoolClient } from 'pg';
+import { upsertContactPhone } from './contactPhones.js';
 
 type MergeableContact = { merged_into_contact_id?: string | null };
 
@@ -53,13 +54,20 @@ export async function mergeContactsInTransaction(client: PoolClient, input: Cont
       [mergeId, conversation.id, source.id],
     );
   }
-  await client.query(
-    `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, label, is_primary, source)
-     SELECT company_id, $1, phone, normalized_phone, label, false, source
-     FROM contact_phones WHERE contact_id = $2
-     ON CONFLICT DO NOTHING`,
-    [target.id, source.id],
+  const sourcePhones = await client.query<{ phone: string; label: string | null; source: string }>(
+    'SELECT phone, label, source FROM contact_phones WHERE company_id = $1 AND contact_id = $2 ORDER BY is_primary DESC, id',
+    [input.companyId, source.id],
   );
+  for (const phone of sourcePhones.rows) {
+    await upsertContactPhone(client, {
+      companyId: input.companyId,
+      contactId: target.id,
+      phone: phone.phone,
+      label: phone.label,
+      isPrimary: false,
+      source: phone.source,
+    });
+  }
   await client.query(
     `INSERT INTO contact_emails (company_id, contact_id, email, normalized_email, label, is_primary, source)
      SELECT company_id, $1, email, normalized_email, label, false, source

@@ -13,6 +13,7 @@ import { evolutionMessageIdFromResponse, evolutionReactionPayload, formatHubOutb
 import { createOutboundRequestCoordinator, outboundDispatchAction, outboundIdempotencyLockKey } from './outboundIdempotency.js';
 import { isNonRenderableProviderMessage, providerMessageType, unwrapProviderMessage } from './providerMessagePolicy.js';
 import { canonicalPhone, normalizeContactPhone } from './contactDomain.js';
+import { phoneLookupKeys, upsertContactPhone } from './contactPhones.js';
 import { isWhatsAppLid, providerPhoneDigits, providerPhoneJid } from './whatsappIdentity.js';
 import { parseGroupMetadata, type GroupMetadata } from './groupMetadata.js';
 import {
@@ -877,16 +878,18 @@ async function persistProviderIdentities(
 
 async function findOrCreatePhoneContact(client: Pool | PoolClient, input: { companyId: string; name: string; phone: string; avatarUrl?: string | null }) {
   const storagePhone = phoneForContactStorage(input.phone);
-  const digits = normalizeContactPhone(storagePhone);
+  const digits = phoneLookupKeys(storagePhone);
   const existing = await client.query<{ id: string }>(
     `SELECT c.id FROM contacts c
      WHERE c.company_id = $1
-       AND (regexp_replace(c.phone, '\\D', '', 'g') = $2
-            OR EXISTS (SELECT 1 FROM contact_phones p WHERE p.company_id = c.company_id AND p.contact_id = c.id AND p.normalized_phone = $2))
+       AND (regexp_replace(c.phone, '\\D', '', 'g') = ANY($2::text[])
+            OR EXISTS (SELECT 1 FROM contact_phones p WHERE p.company_id = c.company_id AND p.contact_id = c.id
+              AND regexp_replace(p.normalized_phone, '\\D', '', 'g') = ANY($2::text[])))
      ORDER BY c.id LIMIT 1`, [input.companyId, digits],
   );
   if (existing.rows[0]?.id) {
     if (input.avatarUrl) await client.query('UPDATE contacts SET avatar_url = COALESCE($3, avatar_url), updated_at = now() WHERE company_id = $1 AND id = $2', [input.companyId, existing.rows[0].id, input.avatarUrl]);
+    await upsertContactPhone(client, { companyId: input.companyId, contactId: existing.rows[0].id, phone: storagePhone, isPrimary: true, source: 'whatsapp' });
     return { id: existing.rows[0].id, phone: storagePhone, created: false };
   }
   const created = await client.query<{ id: string }>(
@@ -895,11 +898,15 @@ async function findOrCreatePhoneContact(client: Pool | PoolClient, input: { comp
      ON CONFLICT (company_id, phone) DO UPDATE SET updated_at = now()
      RETURNING id`, [input.companyId, input.name, storagePhone, input.avatarUrl || null],
   );
-  if (created.rows[0]?.id) return { id: created.rows[0].id, phone: storagePhone, created: true };
+  if (created.rows[0]?.id) {
+    await upsertContactPhone(client, { companyId: input.companyId, contactId: created.rows[0].id, phone: storagePhone, isPrimary: true, source: 'whatsapp' });
+    return { id: created.rows[0].id, phone: storagePhone, created: true };
+  }
   const raced = await client.query<{ id: string }>(
-    `SELECT id FROM contacts WHERE company_id = $1 AND regexp_replace(phone, '\\D', '', 'g') = $2 LIMIT 1`, [input.companyId, digits],
+    `SELECT id FROM contacts WHERE company_id = $1 AND regexp_replace(phone, '\\D', '', 'g') = ANY($2::text[]) LIMIT 1`, [input.companyId, digits],
   );
   if (!raced.rows[0]?.id) throw new Error('Contato não pôde ser preparado');
+  await upsertContactPhone(client, { companyId: input.companyId, contactId: raced.rows[0].id, phone: storagePhone, isPrimary: true, source: 'whatsapp' });
   return { id: raced.rows[0].id, phone: storagePhone, created: false };
 }
 
@@ -923,12 +930,7 @@ async function prepareOutboundConversation(input: {
   if (!contactId) throw new Error('Contato n\u00e3o p\u00f4de ser preparado para o envio');
 
   if (!isGroup) {
-    await db.query(
-      `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
-       VALUES ($1, $2, $3, $4, true, 'whatsapp')
-       ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET updated_at = now()`,
-      [input.companyId, contactId, contactPhone, normalizeContactPhone(contactPhone)],
-    );
+    await upsertContactPhone(db, { companyId: input.companyId, contactId, phone: contactPhone, isPrimary: true, source: 'whatsapp' });
   }
 
   await db.query(
@@ -1951,12 +1953,7 @@ async function persistProviderMessage(
     }
 
     if (!isGroup) {
-      await client.query(
-        `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
-         VALUES ($1, $2, $3, $4, true, 'whatsapp')
-         ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET updated_at = now()`,
-        [companyId, contactId, contactPhone, normalizeContactPhone(contactPhone)],
-      );
+      await upsertContactPhone(client, { companyId, contactId, phone: contactPhone, isPrimary: true, source: 'whatsapp' });
     }
 
     await persistProviderIdentities(client, companyId, contactId, local.remoteJid, isGroup ? undefined : resolvedPhone);
@@ -2186,12 +2183,7 @@ async function ensureOutboundMessage(input: {
   if (!contactId) throw new Error('Contato não pôde ser preparado para o envio');
 
     if (!isGroup) {
-      await client.query(
-        `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
-         VALUES ($1, $2, $3, $4, true, 'whatsapp')
-         ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET updated_at = now()`,
-        [input.companyId, contactId, contactPhone, normalizeContactPhone(contactPhone)],
-      );
+      await upsertContactPhone(client, { companyId: input.companyId, contactId, phone: contactPhone, isPrimary: true, source: 'whatsapp' });
     }
 
     await client.query(

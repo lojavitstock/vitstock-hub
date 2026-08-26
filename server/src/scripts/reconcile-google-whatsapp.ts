@@ -2,7 +2,8 @@ import { closeDatabase, db } from '../db.js';
 import type { PoolClient } from 'pg';
 import { canonicalPhone } from '../contactDomain.js';
 import { mergeContactsInTransaction } from '../contactMerge.js';
-import { googlePhoneKey } from '../googleContactReconciliation.js';
+import { googlePhoneKey, isProvisionalWhatsapp as isProvisionalGoogleWhatsapp } from '../googleContactReconciliation.js';
+import { upsertContactPhone } from '../contactPhones.js';
 
 type ContactRow = {
   id: string;
@@ -21,19 +22,20 @@ type ContactRow = {
 
 type Group = { companyId: string; key: string; contacts: ContactRow[] };
 
-function hasManualOverride(contact: ContactRow) {
-  return Boolean(contact.manual_override && Object.keys(contact.manual_override).length);
-}
-
 function isGoogle(contact: ContactRow) {
   return Boolean(contact.google_resource_name);
 }
 
 function isProvisionalWhatsapp(contact: ContactRow) {
-  return contact.source === 'hub'
-    && !contact.google_resource_name
-    && !hasManualOverride(contact)
-    && (contact.has_whatsapp_identity || contact.has_whatsapp_phone);
+  return isProvisionalGoogleWhatsapp({
+    id: contact.id,
+    source: contact.source,
+    googleResourceName: contact.google_resource_name,
+    manualOverride: contact.manual_override,
+    hasWhatsappIdentity: contact.has_whatsapp_identity,
+    hasWhatsappPhone: contact.has_whatsapp_phone,
+    conversationCount: contact.conversation_count,
+  });
 }
 
 async function loadGroups(): Promise<Group[]> {
@@ -140,9 +142,17 @@ async function applySafeGroup(client: PoolClient, group: Group) {
     );
     const source = locked.rows.find((row: { id: string }) => row.id === google.id);
     const target = locked.rows.find((row: { id: string }) => row.id === provisional.id);
+    const targetIsProvisional = target && isProvisionalGoogleWhatsapp({
+      id: target.id,
+      source: target.source,
+      googleResourceName: target.google_resource_name,
+      manualOverride: target.manual_override,
+      hasWhatsappIdentity: provisional.has_whatsapp_identity,
+      hasWhatsappPhone: provisional.has_whatsapp_phone,
+      conversationCount: provisional.conversation_count,
+    });
     if (!source || !target || source.google_resource_name !== google.google_resource_name
-      || target.source !== 'hub' || target.google_resource_name
-      || Object.keys(target.manual_override || {}).length) {
+      || !targetIsProvisional) {
       await client.query('ROLLBACK');
       return null;
     }
@@ -151,8 +161,8 @@ async function applySafeGroup(client: PoolClient, group: Group) {
       await client.query('ROLLBACK');
       return null;
     }
-    const targetPhone = target.phone;
-    const secondaryPhone = fields.phones.find((phone) => phone !== targetPhone) || null;
+    const targetPhone = canonicalPhone(target.phone, { defaultCountry: 'BR' }) || target.phone;
+    const secondaryPhone = fields.phones.find((phone) => (canonicalPhone(phone, { defaultCountry: 'BR' }) || phone) !== targetPhone) || null;
     await client.query(
       `UPDATE contacts SET name = $2, email = $3, avatar_url = COALESCE($4, avatar_url),
          cpf = $5, address = $6, secondary_phone = COALESCE($7, secondary_phone),
@@ -164,16 +174,13 @@ async function applySafeGroup(client: PoolClient, group: Group) {
       [group.companyId, fields.name, fields.email, fields.avatarUrl, fields.cpf, fields.address, secondaryPhone, fields.resourceName, fields.nickname, fields.birthday, fields.company, fields.jobTitle, fields.website, fields.notes, fields.etag, fields.person, target.id],
     );
     for (const [index, phone] of fields.phones.entries()) {
-      await client.query(
-        `INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source)
-         VALUES ($1, $2, $3, $4, $5, 'google')
-         ON CONFLICT (contact_id, normalized_phone) DO UPDATE SET
-           phone = EXCLUDED.phone,
-           is_primary = EXCLUDED.is_primary,
-           source = CASE WHEN contact_phones.source = 'whatsapp' THEN contact_phones.source ELSE 'google' END,
-           updated_at = now()`,
-        [group.companyId, target.id, phone, phone.replace(/\D/g, ''), index === 0 && phone === targetPhone],
-      );
+      await upsertContactPhone(client, {
+        companyId: group.companyId,
+        contactId: target.id,
+        phone,
+        isPrimary: index === 0 && (canonicalPhone(phone, { defaultCountry: 'BR' }) || phone) === targetPhone,
+        source: 'google',
+      });
     }
     for (const [index, email] of fields.emails.entries()) {
       await client.query(

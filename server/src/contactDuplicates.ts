@@ -34,6 +34,32 @@ function pairKey(a: string, b: string) {
   return [a, b].sort().join(':');
 }
 
+type ContactIdentityMetadata = {
+  source?: string | null;
+  google_resource_name?: string | null;
+  google_saved?: boolean;
+  whatsapp_linked?: boolean;
+};
+
+function isGoogleContact(contact: ContactIdentityMetadata | undefined) {
+  return Boolean(contact?.google_saved || contact?.google_resource_name || contact?.source === 'google');
+}
+
+function isWhatsappPrincipal(contact: ContactIdentityMetadata | undefined) {
+  return Boolean(
+    contact
+    && !isGoogleContact(contact)
+    && (contact.source === 'hub' || contact.source === 'whatsapp')
+    && contact.whatsapp_linked,
+  );
+}
+
+/** Hub and Google rows with the same evidence are one identity, not a review duplicate. */
+export function isHubGoogleSameIdentity(first: ContactIdentityMetadata | undefined, second: ContactIdentityMetadata | undefined) {
+  return (isGoogleContact(first) && isWhatsappPrincipal(second))
+    || (isGoogleContact(second) && isWhatsappPrincipal(first));
+}
+
 /** Builds review groups without deciding or merging contacts. */
 export function buildDuplicateGroups<T extends { id: string }>(
   contacts: T[],
@@ -59,6 +85,7 @@ export function buildDuplicateGroups<T extends { id: string }>(
   };
 
   for (const contact of contacts) find(contact.id);
+  const contactsById = new Map(contacts.map((contact) => [contact.id, contact]));
   const sourceGroups = new Map<string, string[]>();
   for (const source of sources) {
     if (!source.key || !parent.has(source.contactId)) continue;
@@ -68,24 +95,32 @@ export function buildDuplicateGroups<T extends { id: string }>(
     sourceGroups.set(key, ids);
   }
   for (const ids of sourceGroups.values()) {
-    for (const id of ids.slice(1)) union(ids[0]!, id);
+    for (let index = 0; index < ids.length; index += 1) {
+      for (let next = index + 1; next < ids.length; next += 1) {
+        if (!isHubGoogleSameIdentity(contactsById.get(ids[index]!) as ContactIdentityMetadata, contactsById.get(ids[next]!) as ContactIdentityMetadata)) {
+          union(ids[index]!, ids[next]!);
+        }
+      }
+    }
   }
 
   const groups = new Map<string, { ids: Set<string>; evidence: Map<string, DuplicateEvidence> }>();
   for (const [sourceKey, ids] of sourceGroups.entries()) {
-    const root = find(ids[0]!);
-    const group = groups.get(root) || { ids: new Set<string>(), evidence: new Map<string, DuplicateEvidence>() };
-    ids.forEach((id) => group.ids.add(id));
     const [kind, ...keyParts] = sourceKey.split(':');
     const key = keyParts.join(':');
-    const source = sources.find((item) => item.kind === kind && item.key === key && item.contactId === ids[0]);
-    group.evidence.set(sourceKey, { kind: kind as DuplicateEvidenceKind, key, value: source?.value });
-    groups.set(root, group);
+    for (const id of ids) {
+      const root = find(id);
+      const group = groups.get(root) || { ids: new Set<string>(), evidence: new Map<string, DuplicateEvidence>() };
+      group.ids.add(id);
+      const source = sources.find((item) => item.kind === kind && item.key === key && item.contactId === id)
+        || sources.find((item) => item.kind === kind && item.key === key);
+      group.evidence.set(sourceKey, { kind: kind as DuplicateEvidenceKind, key, value: source?.value });
+      groups.set(root, group);
+    }
   }
 
   const decisionMap = new Map<string, DuplicateDecision['decision']>();
   for (const decision of decisions) decisionMap.set(pairKey(decision.contactAId, decision.contactBId), decision.decision);
-  const contactsById = new Map(contacts.map((contact) => [contact.id, contact]));
   const result: DuplicateGroup<T>[] = [];
 
   for (const group of groups.values()) {
