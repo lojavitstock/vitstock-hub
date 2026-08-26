@@ -37,6 +37,34 @@ export const phoneIdentityKeys = (value: string, defaultCountry = 'BR') => {
   return Array.from(new Set([identity.canonical || '', canonicalDigits, identity.digits].filter(Boolean)));
 };
 
+export type ContactPhoneValue = { phone?: string; is_primary?: boolean };
+
+/**
+ * Keeps one display value per canonical phone identity. Primary values win;
+ * otherwise the complete canonical representation is preferred over a
+ * legacy/national alias. The original rows remain untouched in storage.
+ */
+export const dedupeContactPhones = <T extends ContactPhoneValue>(phones: T | T[]): T[] => {
+  const values = Array.isArray(phones) ? phones : [phones];
+  const selected = new Map<string, { value: T; rank: number }>();
+  values.forEach((value) => {
+    const raw = String(value.phone || '').trim();
+    if (!raw) return;
+    const identity = normalizePhoneIdentity(raw);
+    const key = identity.canonical || identity.digits;
+    if (!key) return;
+    const digits = normalizePhone(raw);
+    const isCanonicalRepresentation = Boolean(identity.canonical && (
+      raw === identity.canonical
+      || (digits.length === 12 || digits.length === 13)
+    ));
+    const rank = (value.is_primary ? 4 : 0) + (isCanonicalRepresentation ? 2 : 0);
+    const previous = selected.get(key);
+    if (!previous || rank > previous.rank) selected.set(key, { value, rank });
+  });
+  return Array.from(selected.values()).map(({ value }) => value);
+};
+
 export const formatPhoneForDisplay = (value: string | undefined, defaultCountry = 'BR') => {
   const identity = normalizePhoneIdentity(value, defaultCountry);
   if (identity.country === 'BR' && identity.national && (identity.national.length === 10 || identity.national.length === 11)) {

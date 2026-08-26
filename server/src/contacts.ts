@@ -13,6 +13,7 @@ import {
   splitContactValues,
 } from './contactDomain.js';
 import { phoneLookupKeys, upsertContactPhone } from './contactPhones.js';
+import { contactArchiveWhereClause } from './contactList.js';
 
 const contactInput = z.object({
   name: z.string().trim().min(2).max(160),
@@ -158,7 +159,8 @@ export async function registerContactRoutes(app: FastifyInstance) {
     const sort = queryString(request, 'sort') === 'name' ? 'name' : 'last_interaction';
     const values: unknown[] = [request.user!.companyId];
     const conditions = ['c.company_id = $1', 'NOT EXISTS (SELECT 1 FROM conversations cg WHERE cg.contact_id = c.id AND cg.is_group = true)'];
-    if (!includeArchived && !search) conditions.push('c.archived_at IS NULL');
+    const archiveClause = contactArchiveWhereClause(includeArchived);
+    if (archiveClause) conditions.push(archiveClause);
     if (duplicatesOnly) conditions.push(`EXISTS (
       SELECT 1 FROM contact_phones dup
       WHERE dup.contact_id = c.id AND dup.company_id = c.company_id

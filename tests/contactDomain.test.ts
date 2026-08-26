@@ -1,6 +1,8 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import { canonicalPhone, formatPhoneForDisplay, normalizeContactEmail, normalizeContactPhone, normalizePhoneIdentity, orderedContactPair, parseContactCsv, phoneIdentityKeys, splitContactValues } from '../server/src/contactDomain';
+import { dedupeContactPhones } from '../src/utils/phone';
+import { contactArchiveWhereClause, isContactVisibleInList } from '../server/src/contactList';
 import { canMergeContacts } from '../server/src/contactMerge';
 import { buildDuplicateGroups, isHubGoogleSameIdentity } from '../server/src/contactDuplicates';
 import { phoneLookupKeys, upsertContactPhone } from '../server/src/contactPhones';
@@ -85,6 +87,27 @@ test('phone lookup keys cover canonical and legacy representations without guess
   assert.deepEqual(phoneLookupKeys('(21) 99999-0000'), ['5521999990000', '21999990000']);
   assert.deepEqual(phoneLookupKeys('+5521999990000'), ['5521999990000', '21999990000']);
   assert.notDeepEqual(phoneLookupKeys('2199990000'), phoneLookupKeys('21999990000'));
+});
+
+test('contact list phone display deduplicates equivalent aliases and keeps the preferred value', () => {
+  const phones = dedupeContactPhones([
+    { phone: '21999990000', is_primary: false },
+    { phone: '+5521999990000', is_primary: true },
+    { phone: '5511999990000', is_primary: false },
+  ]);
+  assert.deepEqual(phones, [{ phone: '+5521999990000', is_primary: true }, { phone: '5511999990000', is_primary: false }]);
+});
+
+test('default contacts list hides archived and merged records while explicit archive view includes them', () => {
+  const active = { archived_at: null, merged_into_contact_id: null };
+  const archived = { archived_at: '2026-08-25T20:04:16.996Z', merged_into_contact_id: null };
+  const merged = { archived_at: null, merged_into_contact_id: 'target' };
+  assert.equal(isContactVisibleInList(active, false), true);
+  assert.equal(isContactVisibleInList(archived, false), false);
+  assert.equal(isContactVisibleInList(merged, false), false);
+  assert.equal(isContactVisibleInList(archived, true), true);
+  assert.equal(contactArchiveWhereClause(false), 'c.archived_at IS NULL AND c.merged_into_contact_id IS NULL');
+  assert.equal(contactArchiveWhereClause(true), '');
 });
 
 test('phone upsert reuses a semantically equivalent legacy row', async () => {
