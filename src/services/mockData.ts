@@ -24,6 +24,11 @@ export const mockConversations: Conversation[] = [
     },
     lastMessage: 'Gostaria de confirmar o valor do frete para Curitiba no lote de 50 unidades.',
     lastMessageTimestamp: '14:05',
+    conversationTags: [
+      { id: 'traffic', name: 'Tráfego', color: '#F97316', systemKey: 'traffic' },
+      { id: 'tag-vip-conversation', name: 'VIP', color: '#EEBB2C' },
+    ],
+    trafficSource: 'whatsapp_campaign',
     unreadCount: 2,
     status: 'open',
     assignedAttendant: mockAttendants[0],

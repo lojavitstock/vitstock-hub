@@ -14,6 +14,7 @@ export interface Tag {
   id: string;
   name: string;
   color: string;
+  systemKey?: string;
 }
 
 export interface Contact {
@@ -143,6 +144,8 @@ export interface Conversation {
   };
   unreadCount: number;
   needsResponse?: boolean;
+  conversationTags?: Tag[];
+  trafficSource?: string;
   status: ChatStatus;
   assignedAttendant?: Pick<Attendant, 'id' | 'name'>;
   lease?: {

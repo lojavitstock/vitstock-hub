@@ -1,4 +1,4 @@
-import type { Conversation, Message } from '../types';
+import type { Conversation, Message, Tag } from '../types';
 import { phoneVariants } from './phone';
 import { mergeConversationMessages } from './messageMerge';
 import { reconcileConversations } from './conversationReconciliation';
@@ -18,12 +18,25 @@ export type RealtimeEventPayload = {
   leaseOwnerName?: string | null;
   leaseExpiresAt?: string | null;
   contactName?: string | null;
+  conversationTags?: Tag[];
+  trafficSource?: string | null;
   messageTimestamp?: number;
   message?: Message;
   [key: string]: unknown;
 };
 
 const hasOwn = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key);
+
+const areConversationTagsEqual = (previous: Tag[] = [], next: Tag[] = []) => (
+  previous.length === next.length
+  && previous.every((tag, index) => {
+    const candidate = next[index];
+    return candidate?.id === tag.id
+      && candidate.name === tag.name
+      && candidate.color === tag.color
+      && candidate.systemKey === tag.systemKey;
+  })
+);
 
 const normalizePhone = (value?: string) => String(value || '').replace(/\D/g, '');
 
@@ -132,6 +145,9 @@ const updateConversationFromMessage = (
     unreadCount: nextUnreadCount,
     status: nextStatus,
     needsResponse: isIncoming ? true : false,
+    trafficSource: typeof message.metadata?.trafficSource === 'string' && message.metadata.trafficSource.trim()
+      ? message.metadata.trafficSource.trim()
+      : conversation.trafficSource,
   };
   return next;
 };
@@ -228,6 +244,32 @@ const updateConversationFromStatus = (
     if (next.lastMessageAt && next.lastMessageAt <= messageTimestamp && next.unreadCount > 0) {
       changed = true;
       next = { ...next, unreadCount: 0 };
+    }
+  }
+
+  if (hasOwn(event, 'conversationTags')) {
+    if (!Array.isArray(event.conversationTags)) return null;
+    const tags = event.conversationTags.filter((tag): tag is Tag => (
+      Boolean(tag)
+      && typeof tag === 'object'
+      && typeof (tag as Tag).id === 'string'
+      && typeof (tag as Tag).name === 'string'
+      && typeof (tag as Tag).color === 'string'
+    ));
+    if (tags.length !== event.conversationTags.length) return null;
+    if (!areConversationTagsEqual(next.conversationTags || [], tags)) {
+      changed = true;
+      next = { ...next, conversationTags: tags };
+    }
+  }
+
+  if (hasOwn(event, 'trafficSource')) {
+    const trafficSource = typeof event.trafficSource === 'string' && event.trafficSource.trim()
+      ? event.trafficSource.trim()
+      : undefined;
+    if (next.trafficSource !== trafficSource) {
+      changed = true;
+      next = { ...next, trafficSource };
     }
   }
 

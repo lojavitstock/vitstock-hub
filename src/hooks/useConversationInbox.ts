@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { mockConversations } from '../services/mockData';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { ChatStatus, Conversation, WhatsappInstance } from '../types';
-import { ConversationFilter } from '../components/conversations/ConversationFilters';
+import { ConversationFilter, matchesConversationFilter } from '../utils/conversationTagFilters';
 import { phoneVariants } from '../utils/phone';
 import { reconcileConversations, reconcileConversationsMonotonic } from '../utils/conversationReconciliation';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
@@ -250,12 +250,7 @@ export const useConversationInbox = ({
 
   const normalizedConversationSearch = normalizeSearchText(conversationSearch.trim());
   const visibleConversations = useMemo(() => conversations.filter((conversation) => {
-    const matchesFilter = filterTab === 'all'
-      || (filterTab === 'unread' && conversation.unreadCount > 0)
-      || (filterTab === 'unanswered' && conversationNeedsResponse(conversation))
-      || (filterTab === 'groups' && conversation.isGroup === true)
-      || (filterTab === 'delivery' && conversation.status === 'pending')
-      || (filterTab === 'resolved' && conversation.status === 'resolved');
+    const matchesFilter = matchesConversationFilter(conversation, filterTab, conversationNeedsResponse);
     if (!matchesFilter) return false;
     if (!normalizedConversationSearch) return true;
     return [conversation.contact.name, conversation.groupName || '', conversation.contact.phone]

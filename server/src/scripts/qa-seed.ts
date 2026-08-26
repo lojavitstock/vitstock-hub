@@ -42,7 +42,7 @@ async function seed() {
 
     const ana = await addContact(companyA, 'Ana QA', '5521990000001', { email: 'ana.qa@example.test', company: 'Empresa QA', notes: 'Contato Google fictício', source: 'google', googleResourceName: 'people/qa-ana', cpf: '000.000.000-01', address: 'Rua QA, 100', birthday: '1990-05-10', jobTitle: 'Compradora', website: 'https://example.test/qa-ana' });
     await addPhone(companyA, ana, '5521990000099');
-    await addConversation(companyA, ana, '5521990000001@s.whatsapp.net', 'Olá, preciso de uma cotação QA.');
+    const anaConversation = await addConversation(companyA, ana, '5521990000001@s.whatsapp.net', 'Olá, preciso de uma cotação QA.');
     await addConversation(companyA, ana, '164700000001@lid', 'Mensagem na identidade LID QA.');
 
     const multi = await addContact(companyA, 'Contato QA com dois números', '5521990000002', { email: 'multi.qa@example.test' });
@@ -79,6 +79,33 @@ async function seed() {
     const tagVip = (await client.query<{ id: string }>(`INSERT INTO contact_tags (company_id, name, color) VALUES ($1, 'QA VIP', '#EABB19') RETURNING id`, [companyA])).rows[0]!.id;
     const tagImport = (await client.query<{ id: string }>(`INSERT INTO contact_tags (company_id, name, color) VALUES ($1, 'QA Importação', '#3B82F6') RETURNING id`, [companyA])).rows[0]!.id;
     await client.query(`INSERT INTO contact_tag_links (company_id, contact_id, tag_id) VALUES ($1, $2, $3), ($1, $4, $5)`, [companyA, ana, tagVip, multi, tagImport]);
+
+    const conversationTagNames = [
+      ['Tráfego', '#F97316', 'traffic'],
+      ['VIP Atendimento', '#EABB19', null],
+      ['Retorno', '#3B82F6', null],
+      ['Orçamento', '#10B981', null],
+      ['Pós-venda', '#A78BFA', null],
+      ['Prioridade', '#EF4444', null],
+      ['Indicação', '#EC4899', null],
+      ['Aguardando cliente', '#64748B', null],
+    ] as const;
+    const conversationTagIds: string[] = [];
+    for (const [name, color, systemKey] of conversationTagNames) {
+      const tag = (await client.query<{ id: string }>(
+        `INSERT INTO conversation_tags (company_id, name, color, system_key) VALUES ($1, $2, $3, $4) RETURNING id`,
+        [companyA, name, color, systemKey],
+      )).rows[0]!.id;
+      conversationTagIds.push(tag);
+    }
+    await client.query(
+      `INSERT INTO conversation_tag_links (company_id, conversation_id, tag_id) VALUES ($1, $2, $3), ($1, $2, $4)`,
+      [companyA, anaConversation, conversationTagIds[0], conversationTagIds[1]],
+    );
+    await client.query(
+      `UPDATE messages SET metadata = jsonb_build_object('trafficSource', 'qa_campaign') WHERE conversation_id = $1`,
+      [anaConversation],
+    );
     await client.query(`INSERT INTO google_connections (company_id, google_email, refresh_token_encrypted, access_token_encrypted, access_token_expires_at, scopes) VALUES ($1, 'qa-google@example.test', 'qa-refresh-token', 'qa-access-token', now() + interval '1 day', ARRAY['qa-mock'])`, [companyA]);
 
     const tenantBContact = await addContact(companyB, 'Contato QA Tenant B', '5521988000001', { email: 'tenant-b@example.test' });

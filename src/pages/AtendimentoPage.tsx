@@ -25,10 +25,10 @@ import {
   Globe,
   Archive,
 } from 'lucide-react';
-import { Conversation, Message, WhatsappInstance } from '../types';
+import { Conversation, Message, Tag, WhatsappInstance } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { useAuth } from '../auth/AuthContext';
-import { ConversationFilters } from '../components/conversations/ConversationFilters';
+import { ConversationTagRail } from '../components/conversations/ConversationTagRail';
 import { ConversationList } from '../components/conversations/ConversationList';
 import { ContactPhoto } from '../components/conversations/ContactPhoto';
 import { MessageTimeline } from '../components/conversations/MessageTimeline';
@@ -42,6 +42,7 @@ import { toQuotedMessage } from '../utils/quotedMessage';
 import { canRestoreComposerDraft, captureComposerSubmission, readConversationDraft, scheduleComposerFocus, writeConversationDraft } from '../utils/composerSubmission';
 import { createOutboundTrace } from '../utils/outboundTrace';
 import { findConversationForContactChat, normalizeContactChatPhone } from '../utils/contactChatNavigation';
+import { addConversationTag, createConversationTag, fetchConversationTags, removeConversationTag } from '../services/conversationTagsApi';
 import {
   canReactToMessage,
   nextHubReactionEmoji,
@@ -62,6 +63,7 @@ export const AtendimentoPage: React.FC = () => {
 
   const attendantName = user?.name || 'Atendente';
   const [whatsappStatus, setWhatsappStatus] = useState<WhatsappInstance['status']>('connecting');
+  const whatsappConnected = whatsappStatus === 'connected';
   const composerRef = useRef<MessageComposerHandle>(null);
   const composerTextRef = useRef('');
   const composerDraftsRef = useRef(new Map<string, string>());
@@ -87,6 +89,8 @@ export const AtendimentoPage: React.FC = () => {
   const [startingNewChat, setStartingNewChat] = useState(false);
   const [pendingContactChatId, setPendingContactChatId] = useState<string | null>(null);
   const pendingContactChatRef = useRef<Conversation | null>(null);
+  const [conversationTags, setConversationTags] = useState<Tag[]>([]);
+  const [showConversationTagMenu, setShowConversationTagMenu] = useState(false);
 
   const {
     conversations,
@@ -135,6 +139,37 @@ export const AtendimentoPage: React.FC = () => {
     if (!activeConvId || whatsappStatus !== 'connected') return;
     composerRef.current?.setText(readConversationDraft(composerDraftsRef.current, activeConvId));
   }, [activeConvId, whatsappStatus]);
+
+  useEffect(() => {
+    if (!whatsappConnected) {
+      setConversationTags([]);
+      setShowConversationTagMenu(false);
+      return undefined;
+    }
+    if (isMock) return undefined;
+    let mounted = true;
+    void fetchConversationTags()
+      .then((result) => {
+        if (mounted) setConversationTags(Array.isArray(result.tags) ? result.tags : []);
+      })
+      .catch(() => {
+        if (mounted) setConversationTags([]);
+      });
+    return () => { mounted = false; };
+  }, [isMock, whatsappConnected]);
+
+  useEffect(() => {
+    if (!isMock || !whatsappConnected) return;
+    const seededTags = conversations.flatMap((conversation) => conversation.conversationTags || []);
+    setConversationTags((previous) => {
+      const byId = new Map(previous.map((tag) => [tag.id, tag]));
+      seededTags.forEach((tag) => byId.set(tag.id, tag));
+      if (!Array.from(byId.values()).some((tag) => tag.systemKey === 'traffic')) {
+        byId.set('mock-traffic', { id: 'mock-traffic', name: 'Tráfego', color: '#F97316', systemKey: 'traffic' });
+      }
+      return Array.from(byId.values());
+    });
+  }, [conversations, isMock, whatsappConnected]);
 
   useEffect(() => {
     if (!activeConv || activeConv.unreadCount <= 0) return;
@@ -633,6 +668,57 @@ export const AtendimentoPage: React.FC = () => {
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar a reação.');
     }
   }, [activeChatLocked, activeConv, activeLease?.ownerName, attendantName, isMock, setAssignmentFeedback, setMessages, user?.id, whatsappStatus]);
+
+  const handleCreateConversationTag = useCallback(async (name: string, color: string) => {
+    const normalizedName = name.trim();
+    if (!normalizedName) return;
+    if (isMock) {
+      const tag: Tag = { id: `mock-conversation-tag-${Date.now()}`, name: normalizedName, color };
+      setConversationTags((previous) => previous.some((item) => item.name.trim().toLocaleLowerCase() === normalizedName.toLocaleLowerCase())
+        ? previous
+        : [...previous, tag]);
+      return;
+    }
+    try {
+      const result = await createConversationTag(normalizedName, color);
+      if (result.tag) {
+        setConversationTags((previous) => previous.some((item) => item.id === result.tag.id)
+          ? previous.map((item) => item.id === result.tag.id ? result.tag : item)
+          : [...previous, result.tag]);
+      }
+      setAssignmentFeedback('Tag criada.');
+    } catch (error) {
+      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível criar a tag.');
+    }
+  }, [isMock, setAssignmentFeedback]);
+
+  const toggleConversationTag = useCallback(async (tag: Tag) => {
+    if (!activeConv) return;
+    const conversationId = activeConv.id;
+    const assigned = (activeConv.conversationTags || []).some((item) => item.id === tag.id);
+    if (isMock) {
+      setConversations((previous) => previous.map((conversation) => conversation.id === conversationId
+        ? {
+            ...conversation,
+            conversationTags: assigned
+              ? (conversation.conversationTags || []).filter((item) => item.id !== tag.id)
+              : [...(conversation.conversationTags || []), tag],
+          }
+        : conversation));
+      return;
+    }
+    try {
+      const result = assigned
+        ? await removeConversationTag(conversationId, tag.id)
+        : await addConversationTag(conversationId, tag.id);
+      const nextTags = Array.isArray(result.tags) ? result.tags : [];
+      setConversations((previous) => previous.map((conversation) => conversation.id === conversationId
+        ? { ...conversation, conversationTags: nextTags }
+        : conversation));
+    } catch (error) {
+      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível atualizar as tags.');
+    }
+  }, [activeConv, isMock, setAssignmentFeedback, setConversations]);
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1144,7 +1230,6 @@ export const AtendimentoPage: React.FC = () => {
     setStartingNewChat(false);
   };
 
-  const whatsappConnected = whatsappStatus === 'connected';
   return (
     <div className="flex h-full w-full bg-[#11181d] overflow-hidden text-slate-100 font-overpass relative">
       
@@ -1316,10 +1401,12 @@ export const AtendimentoPage: React.FC = () => {
               );
             })}
           </div>
-          <ConversationFilters
+          <ConversationTagRail
             conversations={conversations}
+            tags={conversationTags}
             activeFilter={filterTab}
             onFilterChange={setFilterTab}
+            onCreateTag={handleCreateConversationTag}
             needsResponse={conversationNeedsResponse}
           />
           </> : (
@@ -1409,6 +1496,42 @@ export const AtendimentoPage: React.FC = () => {
                     {activeConv.status === 'pending' ? 'Retirar da Entrega' : 'Solicitar Entrega'}
                   </button>
                 )}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setShowConversationTagMenu((open) => !open)}
+                    aria-label="Gerenciar tags da conversa"
+                    aria-expanded={showConversationTagMenu}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-[#46535a] bg-[#2a343a] px-2.5 py-2 text-xs font-semibold text-slate-300 transition-colors hover:border-amber-300/50 hover:text-amber-300"
+                  >
+                    <TagIcon className="h-3.5 w-3.5" />
+                    <span className="hidden xl:inline">Tags</span>
+                  </button>
+                  {showConversationTagMenu && (
+                    <div role="menu" aria-label="Tags da conversa" className="absolute right-0 top-full z-30 mt-2 w-56 rounded-xl border border-[#46535a] bg-[#182126] p-2 shadow-2xl">
+                      <p className="px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-slate-500">Tags da conversa</p>
+                      {conversationTags.length === 0 ? (
+                        <p className="px-2 py-3 text-xs text-slate-500">Crie uma tag na barra lateral.</p>
+                      ) : conversationTags.map((tag) => {
+                        const checked = (activeConv.conversationTags || []).some((item) => item.id === tag.id);
+                        return (
+                          <button
+                            key={tag.id}
+                            type="button"
+                            role="menuitemcheckbox"
+                            aria-checked={checked}
+                            onClick={() => void toggleConversationTag(tag)}
+                            className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-xs text-slate-200 hover:bg-white/5"
+                          >
+                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: tag.color }} aria-hidden="true" />
+                            <span className="min-w-0 flex-1 truncate">{tag.name}</span>
+                            <span className={`h-3.5 w-3.5 rounded border ${checked ? 'border-amber-300 bg-amber-300' : 'border-slate-600'}`} aria-hidden="true" />
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
                 <button className="p-2 rounded-lg text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100">
                   <MoreVertical className="w-4 h-4" />
                 </button>

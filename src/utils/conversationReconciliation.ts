@@ -7,7 +7,8 @@ const areTagsEqual = (previous: Tag[], next: Tag[]) => (
     const nextTag = next[index];
     return nextTag?.id === tag.id
       && nextTag.name === tag.name
-      && nextTag.color === tag.color;
+      && nextTag.color === tag.color
+      && nextTag.systemKey === tag.systemKey;
   })
 );
 
@@ -70,6 +71,8 @@ export const areConversationsEquivalent = (previous: Conversation, next: Convers
   && areLastMessageKeysEqual(previous.lastMessageKey, next.lastMessageKey)
   && previous.unreadCount === next.unreadCount
   && previous.needsResponse === next.needsResponse
+  && areTagsEqual(previous.conversationTags || [], next.conversationTags || [])
+  && previous.trafficSource === next.trafficSource
   && previous.status === next.status
   && areAssignedAttendantsEqual(previous.assignedAttendant, next.assignedAttendant)
   && areLeasesEqual(previous.lease, next.lease)

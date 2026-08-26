@@ -37,6 +37,7 @@ import {
   providerReactionUpdate,
 } from './messageReactions.js';
 import { qaEvolutionResponse } from './qa.js';
+import { loadConversationTags } from './conversationTags.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -728,6 +729,7 @@ async function fetchEvolutionChatsSnapshot(companyId: string) {
  * navegável e nenhuma conversa desapareça da tela.
  */
 async function loadLocalInboxChats(companyId: string) {
+  const conversationTags = await loadConversationTags(companyId);
   const result = await db.query<{
     evolution_remote_jid: string;
     unread_count: number;
@@ -812,6 +814,7 @@ async function loadLocalInboxChats(companyId: string) {
         metadata: row.message_metadata || undefined,
         previewIsPrefixed: isGroup,
       },
+      conversationTags: conversationTags.get(remoteJid) || [],
     };
   });
 }
@@ -2456,6 +2459,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       };
     };
     chatsData = chatsData.map(applyGroupMetadataToChat);
+    const conversationTags = await loadConversationTags(_request.user!.companyId);
+    chatsData = chatsData.map((chat: any) => {
+      const remoteJid = String(chat?.remoteJid || chat?.id || '');
+      return { ...chat, conversationTags: conversationTags.get(remoteJid) || [] };
+    });
     // O webhook pode chegar antes da próxima atualização da Evolution. Mesclamos
     // o estado local recente sem substituir o snapshot do provedor.
     try {
@@ -2643,6 +2651,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       statuses: statuses.rows,
       readStates: readStates.rows,
       dailyResponders: dailyResponders.rows,
+      conversationTags: Array.from(conversationTags.entries()).map(([remoteJid, tags]) => ({ remoteJid, tags })),
     };
   });
 

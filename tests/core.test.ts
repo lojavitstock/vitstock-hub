@@ -11,6 +11,7 @@ import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../s
 import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
 import { createMessageNotificationDeduper } from '../src/utils/messageNotification';
 import { conversationNeedsResponse } from '../src/utils/conversationState';
+import { conversationTagCount, isTrafficConversation, matchesConversationFilter } from '../src/utils/conversationTagFilters';
 import { getMessageIdentityValues, getNewIncomingMessageIds } from '../src/utils/messageActivity';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../src/utils/realtimeConfig';
 import {
@@ -913,6 +914,43 @@ test('reconcilia uma conversa alterada preservando as demais', () => {
   assert.strictEqual(reconciled[0], previous[0]);
   assert.notStrictEqual(reconciled[1], previous[1]);
   assert.equal(reconciled[1].lastMessage, 'Mensagem atualizada');
+});
+
+test('filtros de conversa usam tags tenant-scoped e tráfego sem N+1', () => {
+  const trafficTag = { id: 'traffic', name: 'Tráfego', color: '#F97316', systemKey: 'traffic' } as const;
+  const vipTag = { id: 'vip', name: 'VIP', color: '#EABB19' } as const;
+  const trafficConversation = conversation('traffic', {
+    conversationTags: [trafficTag, vipTag],
+    trafficSource: 'qa_campaign',
+    unreadCount: 2,
+  });
+  const normalConversation = conversation('normal', { conversationTags: [], unreadCount: 0 });
+  const all = [trafficConversation, normalConversation];
+
+  assert.equal(isTrafficConversation(trafficConversation), true);
+  assert.equal(isTrafficConversation(normalConversation), false);
+  assert.equal(matchesConversationFilter(trafficConversation, 'traffic', conversationNeedsResponse), true);
+  assert.equal(matchesConversationFilter(trafficConversation, 'tag:vip', conversationNeedsResponse), true);
+  assert.equal(matchesConversationFilter(normalConversation, 'tag:vip', conversationNeedsResponse), false);
+  assert.equal(conversationTagCount(all, trafficTag), 1);
+  assert.equal(conversationTagCount(all, vipTag), 1);
+});
+
+test('realtime atualiza tags da conversa sem alterar atividade ou identidade das demais', () => {
+  const first = conversation('first', { lastMessageAt: 2_000 });
+  const second = conversation('second', { lastMessageAt: 1_000 });
+  const previous = [first, second];
+  const next = reconcileRealtimeConversation(previous, {
+    type: 'conversation.updated',
+    remoteJid: first.id,
+    conversationTags: [{ id: 'tag-1', name: 'VIP', color: '#EABB19' }],
+  });
+
+  assert.ok(next);
+  assert.notStrictEqual(next, previous);
+  assert.equal(next?.[0]?.lastMessage, first.lastMessage);
+  assert.deepEqual(next?.[0]?.conversationTags, [{ id: 'tag-1', name: 'VIP', color: '#EABB19' }]);
+  assert.strictEqual(next?.[1], second);
 });
 
 test('reconcilia nova conversa preservando identidade dos itens antigos', () => {

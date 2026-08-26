@@ -438,6 +438,20 @@ export class EvolutionApiService {
       const statusesMap = new Map<string, { status: ChatStatus; updatedAt: number }>();
       const statusesByNumber = new Map<string, { status: ChatStatus; updatedAt: number }>();
       const readStatesMap = new Map<string, number>();
+      const conversationTagsMap = new Map<string, Conversation['conversationTags']>();
+
+      if (Array.isArray(payload.conversationTags)) {
+        payload.conversationTags.forEach((entry: any) => {
+          const remoteJid = String(entry?.remoteJid || '').trim();
+          if (!remoteJid || !Array.isArray(entry?.tags)) return;
+          conversationTagsMap.set(remoteJid, entry.tags.map((tag: any) => ({
+            id: String(tag.id),
+            name: String(tag.name),
+            color: String(tag.color || '#EABB19'),
+            ...(tag.systemKey ? { systemKey: String(tag.systemKey) } : {}),
+          })));
+        });
+      }
 
       if (Array.isArray(payload.assignments)) {
         payload.assignments.forEach((assignment: any) => {
@@ -686,6 +700,10 @@ export class EvolutionApiService {
           unreadCount,
           status: effectiveStatus,
           needsResponse,
+          conversationTags: conversationTagsMap.get(rawRemoteJid) || item.conversationTags || [],
+          trafficSource: typeof lastMessage?.metadata?.trafficSource === 'string'
+            ? lastMessage.metadata.trafficSource
+            : typeof item.trafficSource === 'string' ? item.trafficSource : undefined,
           department: 'Atendimento Geral',
           assignedAttendant: assignment ? { id: assignment.id, name: assignment.name } : undefined,
           lease,
