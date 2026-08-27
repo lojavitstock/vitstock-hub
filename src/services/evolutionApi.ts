@@ -230,6 +230,30 @@ const apiFetch = (path: string, init?: RequestInit) => fetch(`${API_URL}${path}`
   },
 });
 
+export class EvolutionApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = 'EvolutionApiError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+const errorFromResponse = (response: Response, body: any, fallback: string) => (
+  new EvolutionApiError(
+    typeof body?.error === 'string' && body.error.trim()
+      ? body.error.trim()
+      : typeof body?.message === 'string' && body.message.trim()
+        ? body.message.trim()
+        : fallback,
+    response.status,
+    typeof body?.code === 'string' ? body.code : undefined,
+  )
+);
+
 export type EvolutionRealtimeEvent = RealtimeEventPayload;
 
 export class EvolutionApiService {
@@ -886,7 +910,7 @@ export class EvolutionApiService {
       });
 
       const responseData = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(responseData?.error || 'NÃ£o foi possÃ­vel enviar a mensagem');
+      if (!res.ok) throw errorFromResponse(res, responseData, 'Não foi possível enviar a mensagem');
       console.log('[EvolutionAPI] Resposta do envio real:', responseData);
       return responseData;
     } catch (err) {
@@ -1131,7 +1155,7 @@ export class EvolutionApiService {
       }),
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body?.error || 'Não foi possível enviar o anexo');
+    if (!response.ok) throw errorFromResponse(response, body, 'Não foi possível enviar o anexo');
     return body;
   }
 

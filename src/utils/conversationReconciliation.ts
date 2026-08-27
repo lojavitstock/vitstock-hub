@@ -49,6 +49,32 @@ const areLeasesEqual = (previous?: Conversation['lease'], next?: Conversation['l
   && Boolean(previous) === Boolean(next)
 );
 
+const isWeakContactName = (value: string | undefined) => {
+  const name = String(value || '').trim();
+  return !name
+    || ['Contato', 'Participante', 'WhatsApp Business', 'Você'].includes(name)
+    || /^\+?[\d\s().-]+$/.test(name);
+};
+
+/**
+ * A sparse provider snapshot must not erase a richer identity already known
+ * for the same conversation. Explicitly supplied names/avatars still win.
+ */
+export const mergeContactIdentity = (
+  previous: Conversation['contact'],
+  next: Conversation['contact'],
+): Conversation['contact'] => {
+  const preserveName = isWeakContactName(next.name) && !isWeakContactName(previous.name);
+  const preserveContactId = preserveName && Boolean(previous.id);
+  const preserved = {
+    ...next,
+    ...(preserveContactId ? { id: previous.id } : {}),
+    ...(preserveName ? { name: previous.name } : {}),
+    ...(!next.avatar && previous.avatar ? { avatar: previous.avatar } : {}),
+  };
+  return preserved;
+};
+
 /**
  * Compares only fields that Atendimento reads for rendering or actions:
  * contact identity/avatar/tags, list preview/status, assignment and the
@@ -100,14 +126,23 @@ export const reconcileConversations = (
   if (sameLengthAndOrder) return previous;
 
   const previousById = new Map(previous.map((conversation) => [conversation.id, conversation]));
-  let changed = true;
+  let changed = previous.length !== next.length
+    || next.some((conversation, index) => previous[index]?.id !== conversation.id);
   const reconciled = next.map((conversation) => {
     const previousConversation = previousById.get(conversation.id);
-    if (previousConversation && areConversationsEquivalent(previousConversation, conversation)) {
+    const candidate = previousConversation
+      ? {
+          ...conversation,
+          contact: mergeContactIdentity(previousConversation.contact, conversation.contact),
+          groupName: conversation.groupName || previousConversation.groupName,
+          groupAvatar: conversation.groupAvatar || previousConversation.groupAvatar,
+        }
+      : conversation;
+    if (previousConversation && areConversationsEquivalent(previousConversation, candidate)) {
       return previousConversation;
     }
     changed = true;
-    return conversation;
+    return candidate;
   });
 
   return changed ? reconciled : previous;
@@ -182,7 +217,13 @@ export const reconcileConversationsMonotonic = (
     if (!previousConversation) return conversation;
 
     const withLease = preserveObservedLease(previousConversation, conversation);
-    const protectedActivity = preserveNewerActivity(previousConversation, withLease);
+    const withIdentity = {
+      ...withLease,
+      contact: mergeContactIdentity(previousConversation.contact, withLease.contact),
+      groupName: withLease.groupName || previousConversation.groupName,
+      groupAvatar: withLease.groupAvatar || previousConversation.groupAvatar,
+    };
+    const protectedActivity = preserveNewerActivity(previousConversation, withIdentity);
     if (protectedActivity.preserved) locallyNewerIds.add(conversation.id);
     const nextConversation = protectedActivity.conversation;
     // Reading is a local state transition that can arrive before the next

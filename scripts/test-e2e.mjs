@@ -9,6 +9,8 @@ const allowRemote = process.env.PLAYWRIGHT_ALLOW_REMOTE === 'true';
 const qaCredentials = readQaCredentials();
 const e2eEmail = process.env.E2E_EMAIL || qaCredentials?.email;
 const e2ePassword = process.env.E2E_PASSWORD || qaCredentials?.password;
+const e2eSecondEmail = process.env.E2E_SECOND_EMAIL || qaCredentials?.secondEmail;
+const e2eSecondPassword = process.env.E2E_SECOND_PASSWORD || qaCredentials?.secondPassword;
 
 function isLocal(value) {
   try {
@@ -52,6 +54,8 @@ const result = spawnSync(process.execPath, [npmCli, 'exec', '--', 'playwright', 
     PLAYWRIGHT_BASE_URL: baseURL,
     E2E_EMAIL: e2eEmail || '',
     E2E_PASSWORD: e2ePassword || '',
+    E2E_SECOND_EMAIL: e2eSecondEmail || '',
+    E2E_SECOND_PASSWORD: e2eSecondPassword || '',
   },
 });
 

@@ -9,7 +9,7 @@ import { buildHasOlderMessagesQuery } from './hasOlderMessagesQuery.js';
 import { buildExistingConversationQuery } from './conversationQueries.js';
 import { publishRealtimeEvent, registerRealtimeClient } from './realtime.js';
 import { acquireConversationLease, type ConversationLease } from './conversationLease.js';
-import { evolutionMessageIdFromResponse, evolutionReactionPayload, formatHubOutboundText, removeHubAgentPrefix } from './outboundMessage.js';
+import { evolutionMessageReferenceFromResponse, evolutionReactionPayload, formatHubOutboundText, removeHubAgentPrefix } from './outboundMessage.js';
 import { createOutboundRequestCoordinator, outboundDispatchAction, outboundIdempotencyLockKey } from './outboundIdempotency.js';
 import { isNonRenderableProviderMessage, providerMessageType, unwrapProviderMessage } from './providerMessagePolicy.js';
 import { canonicalPhone, normalizeContactPhone } from './contactDomain.js';
@@ -38,6 +38,7 @@ import {
 } from './messageReactions.js';
 import { qaEvolutionResponse } from './qa.js';
 import { loadConversationTags } from './conversationTags.js';
+import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -83,7 +84,7 @@ const sendMediaSchema = z.object({
   remoteJid: z.string().min(3).max(128).optional(),
   mediatype: z.enum(['image', 'video', 'document']),
   mimetype: z.string().min(3).max(100),
-  media: z.string().min(1).max(14_000_000),
+  media: z.string().min(1).max(MAX_MEDIA_BASE64_CHARS),
   fileName: z.string().max(180).optional(),
   caption: z.string().max(4096).optional(),
   clientMessageId: z.string().trim().min(1).max(128).optional(),
@@ -160,7 +161,7 @@ const GROUP_PARTICIPANT_STALE_MS = 60 * 60_000;
 const GROUP_METADATA_TTL_MS = 2 * 60_000;
 const GROUP_METADATA_STALE_MS = 10 * 60_000;
 const outboundTraceEnabled = process.env.OUTBOUND_TRACE === 'true';
-const outboundEvolutionRequests = createOutboundRequestCoordinator<{ ok: boolean; body: any }>();
+const outboundEvolutionRequests = createOutboundRequestCoordinator<{ ok: boolean; status: number; body: any }>();
 
 async function fetchGroupParticipantIdentities(companyId: string, groupJid: string) {
   const normalizedGroupJid = normalizeParticipantJid(groupJid);
@@ -541,6 +542,7 @@ function traceOutbound(request: any, stage: string, input: {
   clientMessageId?: string;
   remoteJid?: string;
   evolutionMessageId?: string;
+  evolutionMessageIdSourcePath?: string;
   deduplicated?: boolean;
   ok?: boolean;
   elapsedMs?: number;
@@ -557,6 +559,7 @@ function traceOutbound(request: any, stage: string, input: {
     remoteJid: input.remoteJid,
     clientMessageId: input.clientMessageId,
     evolutionMessageId: input.evolutionMessageId,
+    evolutionMessageIdSourcePath: input.evolutionMessageIdSourcePath,
     deduplicated: input.deduplicated,
     ok: input.ok,
     elapsedMs: input.elapsedMs,
@@ -3145,7 +3148,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         deduplicated: true,
       };
     }
-    let dispatch: { ok: boolean; body: any };
+    let dispatch: { ok: boolean; status: number; body: any };
     const evolutionRequestStartedAt = Date.now();
     try {
       dispatch = await outboundEvolutionRequests.run(
@@ -3167,6 +3170,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
           );
           return {
             ok: response.ok,
+            status: response.status,
             body: await response.json().catch(() => ({ error: 'Evolution API response invalid' })),
           };
         },
@@ -3178,13 +3182,21 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     if (!dispatch.ok) {
       await updateOutboundMessage(localMessage.messageId, 'failed');
-      return reply.code(502).send({ error: 'Evolution API unavailable', messageId: localMessage.messageId });
+      const status = [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(dispatch.status) ? dispatch.status : 502;
+      return reply.code(status).send({
+        error: status === 502 ? 'Evolution API unavailable' : 'Evolution API rejected the message',
+        code: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
+        providerStatus: dispatch.status,
+        messageId: localMessage.messageId,
+      });
     }
-    const evolutionMessageId = evolutionMessageIdFromResponse(dispatch.body);
+    const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
+    const evolutionMessageId = evolutionMessageReference?.messageId;
     traceOutbound(request, 'evolution.response', {
       clientMessageId,
       remoteJid: canonicalRemoteJid,
       evolutionMessageId,
+      evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
       ok: dispatch.ok,
       elapsedMs: Date.now() - outboundStartedAt,
       evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
@@ -3194,6 +3206,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       clientMessageId,
       remoteJid: canonicalRemoteJid,
       evolutionMessageId,
+      evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
       elapsedMs: Date.now() - outboundStartedAt,
     });
     const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
@@ -3248,7 +3261,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     };
   });
 
-  app.post('/api/evolution/messages/send-media', { preHandler: requireUser }, async (request, reply) => {
+  app.post('/api/evolution/messages/send-media', { preHandler: requireUser, bodyLimit: MAX_MEDIA_REQUEST_BYTES }, async (request, reply) => {
     const outboundStartedAt = Date.now();
     const parsed = sendMediaSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Anexo inválido' });
@@ -3316,7 +3329,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         deduplicated: true,
       };
     }
-    let dispatch: { ok: boolean; body: any };
+    let dispatch: { ok: boolean; status: number; body: any };
     const evolutionRequestStartedAt = Date.now();
     try {
       const caption = parsed.data.caption?.trim()
@@ -3343,6 +3356,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
           );
           return {
             ok: response.ok,
+            status: response.status,
             body: await response.json().catch(() => ({ error: 'Evolution API response invalid' })),
           };
         },
@@ -3354,13 +3368,21 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     if (!dispatch.ok) {
       await updateOutboundMessage(localMessage.messageId, 'failed');
-      return reply.code(502).send({ error: 'Evolution API indisponível', messageId: localMessage.messageId });
+      const status = [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(dispatch.status) ? dispatch.status : 502;
+      return reply.code(status).send({
+        error: status === 502 ? 'Evolution API indisponível' : 'Evolution API rejeitou o anexo',
+        code: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
+        providerStatus: dispatch.status,
+        messageId: localMessage.messageId,
+      });
     }
-    const evolutionMessageId = evolutionMessageIdFromResponse(dispatch.body);
+    const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
+    const evolutionMessageId = evolutionMessageReference?.messageId;
     traceOutbound(request, 'evolution.response', {
       clientMessageId,
       remoteJid: canonicalRemoteJid,
       evolutionMessageId,
+      evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
       ok: dispatch.ok,
       elapsedMs: Date.now() - outboundStartedAt,
       evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
@@ -3370,6 +3392,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       clientMessageId,
       remoteJid: canonicalRemoteJid,
       evolutionMessageId,
+      evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
       elapsedMs: Date.now() - outboundStartedAt,
     });
     const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;

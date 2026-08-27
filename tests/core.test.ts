@@ -6,7 +6,7 @@ import { canonicalPhoneDigits, phoneVariants } from '../src/utils/phone';
 import { mergeConversationMessages } from '../src/utils/messageMerge';
 import { evolutionMessagePreview, isEvolutionReactionEvent, isWhatsAppGroupJid, normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
 import { callMessageInfo } from '../src/utils/callMessage';
-import { reconcileConversations, reconcileConversationsMonotonic } from '../src/utils/conversationReconciliation';
+import { mergeContactIdentity, reconcileConversations, reconcileConversationsMonotonic } from '../src/utils/conversationReconciliation';
 import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../src/utils/requestCoordinator';
 import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
 import { createMessageNotificationDeduper } from '../src/utils/messageNotification';
@@ -22,10 +22,13 @@ import {
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
 import {
   evolutionMessageIdFromResponse,
+  evolutionMessageReferenceFromResponse,
   evolutionReactionPayload,
   formatHubOutboundText,
   removeHubAgentPrefix,
 } from '../server/src/outboundMessage';
+import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_FILE_BYTES, MAX_MEDIA_REQUEST_BYTES } from '../server/src/mediaLimits';
+import { isMediaBase64SizeAllowed, isMediaFileSizeAllowed } from '../src/utils/mediaLimits';
 import { createOutboundRequestCoordinator, outboundDispatchAction, outboundIdempotencyLockKey } from '../server/src/outboundIdempotency';
 import { isNonRenderableProviderMessage, unwrapProviderMessage } from '../server/src/providerMessagePolicy';
 import {
@@ -63,6 +66,7 @@ import {
 } from '../server/src/config';
 import { normalizeTagName } from '../server/src/conversationTags';
 import { normalizeConversationTags } from '../src/utils/conversationTags';
+import { outboundErrorMessage } from '../src/utils/outboundError';
 import type { Conversation, Message } from '../src/types';
 
 const message = (
@@ -939,6 +943,31 @@ test('filtros de conversa usam tags tenant-scoped e tráfego sem N+1', () => {
   assert.equal(conversationTagCount(all, vipTag), 1);
 });
 
+test('snapshot pobre de envio não substitui nome e avatar já conhecidos', () => {
+  const previous = conversation('conversation-identity', {
+    contact: {
+      ...conversation('conversation-identity').contact,
+      id: 'contact-rich',
+      name: 'Claudio',
+      avatar: 'https://example.test/claudio.jpg',
+    },
+  });
+  const snapshot = {
+    ...cloneConversation(previous),
+    contact: {
+      ...previous.contact,
+      id: 'contact-sparse',
+      name: '+5521999999999',
+      avatar: '',
+    },
+  };
+  const reconciled = reconcileConversationsMonotonic([previous], [snapshot]);
+
+  assert.equal(reconciled[0]?.contact.name, 'Claudio');
+  assert.equal(reconciled[0]?.contact.avatar, 'https://example.test/claudio.jpg');
+  assert.equal(reconciled[0]?.contact.id, 'contact-rich');
+});
+
 test('canonicalPhoneDigits converge aliases nacionais e internacionais do provedor', () => {
   assert.equal(canonicalPhoneDigits('21998877665'), '5521998877665');
   assert.equal(canonicalPhoneDigits('5521998877665'), '5521998877665');
@@ -1289,6 +1318,49 @@ test('extrai o ID explícito da Evolution para texto, reply, mídia, documento e
     assert.equal(evolutionMessageIdFromResponse(payload), expectedId);
   }
   assert.equal(evolutionMessageIdFromResponse({ data: { message: { id: 'sem-key' } } }), undefined);
+});
+
+test('extrai envelopes adicionais de ID da Evolution sem aceitar IDs genéricos', () => {
+  const responses = [
+    [{ id: 'direct-message', status: 'SUCCESS' }, 'id', 'direct-message'],
+    [{ data: { id: 'data-message', status: 'SENT' } }, 'data.id', 'data-message'],
+    [{ messageId: 'message-id' }, 'messageId', 'message-id'],
+    [{ data: { messageId: 'data-message-id' } }, 'data.messageId', 'data-message-id'],
+    [{ messages: [{ key: { id: 'array-message-id' } }] }, 'messages[0].key.id', 'array-message-id'],
+  ] as const;
+
+  for (const [payload, sourcePath, messageId] of responses) {
+    assert.deepEqual(evolutionMessageReferenceFromResponse(payload), {
+      messageId,
+      sourcePath,
+    });
+  }
+  assert.equal(evolutionMessageIdFromResponse({ id: 'instance-id', name: 'vitstock_atendimento' }), undefined);
+  assert.equal(evolutionMessageIdFromResponse({ id: 'instance-id', status: 'OK', instance: 'vitstock_atendimento' }), undefined);
+  assert.equal(evolutionMessageIdFromResponse({ data: { id: 'request-id', resource: 'instance' } }), undefined);
+});
+
+test('contrato de mídia considera base64 e envelope JSON sem ampliar o limite global', () => {
+  assert.equal(MAX_MEDIA_FILE_BYTES, 10_000_000);
+  assert.equal(MAX_MEDIA_BASE64_CHARS, 14_000_000);
+  assert.equal(MAX_MEDIA_REQUEST_BYTES, 16 * 1024 * 1024);
+  assert.ok(Math.ceil(MAX_MEDIA_FILE_BYTES * 4 / 3) < MAX_MEDIA_BASE64_CHARS);
+  assert.equal(isMediaFileSizeAllowed(1_000_000), true);
+  assert.equal(isMediaFileSizeAllowed(MAX_MEDIA_FILE_BYTES), true);
+  assert.equal(isMediaFileSizeAllowed(MAX_MEDIA_FILE_BYTES + 1), false);
+  assert.equal(isMediaBase64SizeAllowed(MAX_MEDIA_BASE64_CHARS), true);
+  assert.equal(isMediaBase64SizeAllowed(MAX_MEDIA_BASE64_CHARS + 1), false);
+});
+
+test('erros outbound preservam feedback específico por status', () => {
+  const leaseError = Object.assign(new Error('A conversa está sendo atendida por Leo'), {
+    status: 409,
+    code: 'conversation_lease_active',
+  });
+  assert.equal(outboundErrorMessage(leaseError, 'Falha'), 'A conversa está sendo atendida por Leo');
+  assert.equal(outboundErrorMessage({ status: 413 }, 'Falha'), 'Arquivo excede o limite permitido.');
+  assert.equal(outboundErrorMessage({ status: 429 }, 'Falha'), 'Muitas tentativas. Aguarde alguns instantes e tente novamente.');
+  assert.equal(outboundErrorMessage({ status: 502 }, 'Falha'), 'O serviço do WhatsApp está indisponível no momento.');
 });
 
 test('mensagem do Henrique preserva conteúdo legítimo iniciado por asteriscos', () => {

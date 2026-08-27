@@ -44,13 +44,14 @@ import { createOutboundTrace } from '../utils/outboundTrace';
 import { findConversationForContactChat, normalizeContactChatPhone } from '../utils/contactChatNavigation';
 import { addConversationTag, createConversationTag, deleteConversationTag, fetchConversationTags, removeConversationTag, updateConversationTag } from '../services/conversationTagsApi';
 import { normalizeConversationTags } from '../utils/conversationTags';
+import { isMediaBase64SizeAllowed, isMediaFileSizeAllowed } from '../utils/mediaLimits';
+import { outboundErrorMessage } from '../utils/outboundError';
 import {
   canReactToMessage,
   nextHubReactionEmoji,
   withOptimisticHubReaction,
   type CommonReactionEmoji,
 } from '../utils/messageReactionActions';
-
 
 export const AtendimentoPage: React.FC = () => {
   const instanceName = 'vitstock_atendimento';
@@ -948,7 +949,7 @@ export const AtendimentoPage: React.FC = () => {
         }
         restoreFailedDraft();
         restoreFailedOptimisticActivity(activeConv, newMsg.id);
-        setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar a mensagem.');
+        setAssignmentFeedback(outboundErrorMessage(error, 'Não foi possível enviar a mensagem.'));
         return;
       }
     }
@@ -981,7 +982,7 @@ export const AtendimentoPage: React.FC = () => {
       setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de enviar anexos.');
       return;
     }
-    if (file.size > 10 * 1024 * 1024) {
+    if (!isMediaFileSizeAllowed(file.size)) {
       setAssignmentFeedback('O anexo deve ter no máximo 10 MB.');
       return;
     }
@@ -1034,6 +1035,12 @@ export const AtendimentoPage: React.FC = () => {
     const media = dataUrl.split(',')[1];
     if (!media) {
       restoreFailedDraft();
+      setSendingMedia(false);
+      return;
+    }
+    if (!isMediaBase64SizeAllowed(media.length)) {
+      restoreFailedDraft();
+      setAssignmentFeedback('Arquivo excede o limite permitido.');
       setSendingMedia(false);
       return;
     }
@@ -1122,7 +1129,7 @@ export const AtendimentoPage: React.FC = () => {
       }
       restoreFailedDraft();
       restoreFailedOptimisticActivity(activeConv, localMessage.id);
-      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar o anexo.');
+      setAssignmentFeedback(outboundErrorMessage(error, 'Não foi possível enviar o anexo.'));
     } finally {
       setSendingMedia(false);
     }
@@ -1234,7 +1241,7 @@ export const AtendimentoPage: React.FC = () => {
     } catch (error) {
       if (activeConversationIdRef.current === conversationId) {
         setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'failed' } : item));
-        setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível reenviar a mensagem.');
+        setAssignmentFeedback(outboundErrorMessage(error, 'Não foi possível reenviar a mensagem.'));
       }
     }
   }, [activeChatLocked, activeConv, activeLease?.ownerName, attendantName, instanceName, isMock, updateConversationActivity, whatsappStatus]);
@@ -1278,7 +1285,7 @@ export const AtendimentoPage: React.FC = () => {
       try {
         result = await EvolutionApiService.sendTextMessage(instanceName, cleanNum, messageText, jid, clientMessageId);
       } catch (error) {
-        setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível iniciar a conversa.');
+        setAssignmentFeedback(outboundErrorMessage(error, 'Não foi possível iniciar a conversa.'));
         setStartingNewChat(false);
         return;
       }

@@ -23,6 +23,8 @@ export function createQaEnv() {
     GOOGLE_CLIENT_SECRET: 'qa-local-google-client-secret-not-real',
     QA_E2E_EMAIL: 'qa-admin-a@vitstock.test',
     QA_E2E_PASSWORD: qaPassword,
+    QA_E2E_SECOND_EMAIL: 'qa-fernanda@vitstock.test',
+    QA_E2E_SECOND_PASSWORD: qaPassword,
     VITE_API_URL: 'http://localhost:3001',
     VITE_USE_MOCK_DATA: 'false',
   };
@@ -31,7 +33,12 @@ export function createQaEnv() {
 export function writeQaCredentials(env) {
   if (!env.QA_E2E_EMAIL || !env.QA_E2E_PASSWORD) throw new Error('Credenciais QA ausentes; seed abortado.');
   mkdirSync(dirname(qaCredentialsPath), { recursive: true });
-  writeFileSync(qaCredentialsPath, `${JSON.stringify({ email: env.QA_E2E_EMAIL, password: env.QA_E2E_PASSWORD })}\n`, { mode: 0o600 });
+  writeFileSync(qaCredentialsPath, `${JSON.stringify({
+    email: env.QA_E2E_EMAIL,
+    password: env.QA_E2E_PASSWORD,
+    secondEmail: env.QA_E2E_SECOND_EMAIL,
+    secondPassword: env.QA_E2E_SECOND_PASSWORD,
+  })}\n`, { mode: 0o600 });
 }
 
 export function readQaCredentials() {

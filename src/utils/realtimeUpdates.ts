@@ -1,7 +1,7 @@
 import type { Conversation, Message, Tag } from '../types';
 import { phoneVariants } from './phone';
 import { mergeConversationMessages } from './messageMerge';
-import { reconcileConversations } from './conversationReconciliation';
+import { mergeContactIdentity, reconcileConversations } from './conversationReconciliation';
 
 export type RealtimeEventPayload = {
   type: string;
@@ -161,9 +161,13 @@ const updateConversationFromStatus = (
 
   if (typeof event.contactName === 'string' && event.contactName.trim()) {
     const contactName = event.contactName.trim();
-    if (conversation.contact.name !== contactName) {
+    const mergedContact = mergeContactIdentity(conversation.contact, {
+      ...conversation.contact,
+      name: contactName,
+    });
+    if (conversation.contact.name !== mergedContact.name) {
       changed = true;
-      next = { ...next, contact: { ...next.contact, name: contactName } };
+      next = { ...next, contact: mergedContact };
     }
   }
 
