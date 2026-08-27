@@ -10,6 +10,9 @@ if (isPreview && !bypassSecret) {
 
 export default defineConfig({
   testDir: './tests/e2e',
+  // Preview-only specs require the remote Vercel bypass and must not run as
+  // part of the isolated localhost/QA suite.
+  testIgnore: isPreview ? [] : ['**/preview.spec.ts'],
   timeout: 30_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,

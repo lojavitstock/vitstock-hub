@@ -1,7 +1,7 @@
 import type { Page, TestInfo } from '@playwright/test';
 
 export type BrowserDiagnostic = {
-  kind: 'console.error' | 'pageerror' | 'requestfailed' | 'http-error' | 'broken-image';
+  kind: 'console.error' | 'pageerror' | 'requestfailed' | 'http-error' | 'broken-image' | 'diagnostics-unavailable';
   message: string;
   url?: string;
   status?: number;
@@ -69,13 +69,36 @@ export function installBrowserDiagnostics(page: Page): BrowserDiagnostics {
 }
 
 export async function collectBrokenImages(page: Page, diagnostics: BrowserDiagnostics): Promise<void> {
-  const brokenImages = await page.locator('img').evaluateAll((elements) => (elements as HTMLImageElement[])
-    .filter((image) => image.getAttribute('src') && (!image.complete || image.naturalWidth === 0))
-    .map((image) => ({
-      src: image.getAttribute('src') || '',
-      alt: image.getAttribute('alt') || '',
-      conversation: image.closest('button')?.getAttribute('aria-label') || '',
-    })));
+  if (page.isClosed()) {
+    diagnostics.entries.push({
+      kind: 'diagnostics-unavailable',
+      message: 'Diagnóstico de imagens ignorado: página fechada',
+      resourceType: 'image',
+    });
+    return;
+  }
+
+  let brokenImages: Array<{ src: string; alt: string; conversation: string }>;
+  try {
+    brokenImages = await page.locator('img').evaluateAll((elements) => (elements as HTMLImageElement[])
+      .filter((image) => image.getAttribute('src') && (!image.complete || image.naturalWidth === 0))
+      .map((image) => ({
+        src: image.getAttribute('src') || '',
+        alt: image.getAttribute('alt') || '',
+        conversation: image.closest('button')?.getAttribute('aria-label') || '',
+      })));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/(execution context was destroyed|frame was detached|target page, context or browser has been closed|page has been closed)/i.test(message)) {
+      throw error;
+    }
+    diagnostics.entries.push({
+      kind: 'diagnostics-unavailable',
+      message: 'Diagnóstico de imagens ignorado durante navegação ou fechamento da página',
+      resourceType: 'image',
+    });
+    return;
+  }
 
   for (const image of brokenImages) {
     diagnostics.entries.push({

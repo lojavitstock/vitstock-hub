@@ -15,15 +15,13 @@ test('Fastify app responde /health endpoint', async () => {
   await app.close();
 });
 
-test('QA app expõe marcador seguro e fixtures de avatar somente no QA', async () => {
+test('fora do QA o marcador e as fixtures de avatar não são expostos', async () => {
   const app = await createApp();
   const ready = await app.inject({ method: 'GET', url: '/api/qa/ready' });
-  assert.equal(ready.statusCode, 200);
-  assert.deepEqual(JSON.parse(ready.body), { qaMode: true, database: 'local-only', evolution: 'mock-only', google: 'mock-only' });
+  assert.equal(ready.statusCode, 404);
 
   const validAvatar = await app.inject({ method: 'GET', url: '/api/qa/avatar/valid.svg' });
-  assert.equal(validAvatar.statusCode, 200);
-  assert.match(validAvatar.headers['content-type'] || '', /image\/svg\+xml/);
+  assert.equal(validAvatar.statusCode, 404);
 
   const brokenAvatar = await app.inject({ method: 'GET', url: '/api/qa/avatar/broken.svg' });
   assert.equal(brokenAvatar.statusCode, 404);

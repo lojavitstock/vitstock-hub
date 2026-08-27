@@ -37,6 +37,7 @@ import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
 import { canDownloadMessageMedia, messageCopyText, messageMenuActionsFor } from '../src/utils/messageActions';
+import { collectBrokenImages, installBrowserDiagnostics } from './e2e/support/diagnostics';
 import {
   canReactToMessage,
   nextHubReactionEmoji,
@@ -2391,4 +2392,65 @@ test('reply action schedules focus for the composer textarea', () => {
     },
   );
   assert.equal(focused, true);
+});
+
+test('diagnóstico de imagens coleta página estável sem esconder falhas reais', async () => {
+  const diagnostics = { entries: [] as Array<{ kind: string; message: string }> };
+  const page = {
+    isClosed: () => false,
+    locator: () => ({
+      evaluateAll: async () => [{ src: 'https://example.test/avatar.png', alt: 'avatar', conversation: '' }],
+    }),
+  } as any;
+
+  await collectBrokenImages(page, diagnostics as any);
+  assert.equal(diagnostics.entries[0]?.kind, 'broken-image');
+});
+
+test('diagnóstico não falha quando a página navega durante a coleta', async () => {
+  const diagnostics = { entries: [] as Array<{ kind: string; message: string }> };
+  const page = {
+    isClosed: () => false,
+    locator: () => ({
+      evaluateAll: async () => { throw new Error('Execution context was destroyed, most likely because of a navigation'); },
+    }),
+  } as any;
+
+  await assert.doesNotReject(() => collectBrokenImages(page, diagnostics as any));
+  assert.equal(diagnostics.entries[0]?.kind, 'diagnostics-unavailable');
+});
+
+test('diagnóstico não falha quando a página já foi fechada', async () => {
+  const diagnostics = { entries: [] as Array<{ kind: string; message: string }> };
+  const page = { isClosed: () => true } as any;
+
+  await assert.doesNotReject(() => collectBrokenImages(page, diagnostics as any));
+  assert.equal(diagnostics.entries[0]?.kind, 'diagnostics-unavailable');
+});
+
+test('diagnóstico propaga erros inesperados do collector', async () => {
+  const diagnostics = { entries: [] as Array<{ kind: string; message: string }> };
+  const page = {
+    isClosed: () => false,
+    locator: () => ({
+      evaluateAll: async () => { throw new Error('collector failure'); },
+    }),
+  } as any;
+
+  await assert.rejects(() => collectBrokenImages(page, diagnostics as any), /collector failure/);
+});
+
+test('diagnósticos de console.error e pageerror continuam sendo capturados', () => {
+  const listeners = new Map<string, (value: any) => void>();
+  const page = {
+    on: (event: string, listener: (value: any) => void) => { listeners.set(event, listener); },
+    url: () => 'http://localhost:3000/atendimento',
+  } as any;
+  const diagnostics = installBrowserDiagnostics(page);
+
+  listeners.get('console')?.({ type: () => 'error', text: () => 'erro real' });
+  listeners.get('pageerror')?.({ message: 'exceção real' });
+
+  assert.equal(diagnostics.entries.filter((entry) => entry.kind === 'console.error').length, 1);
+  assert.equal(diagnostics.entries.filter((entry) => entry.kind === 'pageerror').length, 1);
 });
