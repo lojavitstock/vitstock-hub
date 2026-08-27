@@ -137,6 +137,7 @@ test('phone upsert reuses a semantically equivalent legacy row', async () => {
 
 test('Hub and Google records with WhatsApp evidence are excluded from duplicate review', () => {
   const hub = { id: 'hub', source: 'hub', google_resource_name: null, whatsapp_linked: true };
+  const legacySystemWhatsapp = { id: 'legacy-system', source: 'system', google_resource_name: null, whatsapp_linked: true, conversation_count: 1 };
   const google = { id: 'google', source: 'google', google_resource_name: 'people/a', whatsapp_linked: false };
   const googleOther = { id: 'google-b', source: 'google', google_resource_name: 'people/b', whatsapp_linked: false };
   const sources = [
@@ -144,6 +145,7 @@ test('Hub and Google records with WhatsApp evidence are excluded from duplicate 
     { contactId: 'google', kind: 'phone' as const, key: '+5521999990000' },
   ];
   assert.equal(isHubGoogleSameIdentity(hub, google), true);
+  assert.equal(isHubGoogleSameIdentity(legacySystemWhatsapp, google), true);
   assert.equal(buildDuplicateGroups([hub, google], sources).length, 0);
   assert.equal(buildDuplicateGroups([hub, google, googleOther], [
     ...sources,

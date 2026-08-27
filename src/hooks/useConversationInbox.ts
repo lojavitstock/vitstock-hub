@@ -3,7 +3,7 @@ import { mockConversations } from '../services/mockData';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { ChatStatus, Conversation, WhatsappInstance } from '../types';
 import { ConversationFilter, matchesConversationFilter } from '../utils/conversationTagFilters';
-import { phoneVariants } from '../utils/phone';
+import { canonicalPhoneDigits, phoneVariants } from '../utils/phone';
 import { reconcileConversations, reconcileConversationsMonotonic } from '../utils/conversationReconciliation';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 import { reconcileRealtimeConversation } from '../utils/realtimeUpdates';
@@ -119,7 +119,7 @@ export const useConversationInbox = ({
         (conversation) => conversation.id === activeConversationIdRef.current,
       );
       const previousActivePhone = previousActiveConversation && !previousActiveConversation.isGroup
-        ? previousActiveConversation.contact.phone.replace(/\D/g, '')
+        ? canonicalPhoneDigits(previousActiveConversation.contact.phone)
         : undefined;
       const mergedChats = realChats.map((conversation) => {
         const locallyReadAt = readOverridesRef.current.get(conversation.id);
@@ -143,7 +143,7 @@ export const useConversationInbox = ({
       setActiveConversationId((previousId) => {
         if (mergedChats.some((conversation) => conversation.id === previousId)) return previousId;
         const replacement = previousActivePhone
-          ? mergedChats.find((conversation) => conversation.contact.phone.replace(/\D/g, '') === previousActivePhone)
+          ? mergedChats.find((conversation) => canonicalPhoneDigits(conversation.contact.phone) === previousActivePhone)
           : undefined;
         return replacement?.id || previousId || mergedChats[0].id;
       });

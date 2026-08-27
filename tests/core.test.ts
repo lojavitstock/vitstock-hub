@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import type { ServerResponse } from 'node:http';
-import { phoneVariants } from '../src/utils/phone';
+import { canonicalPhoneDigits, phoneVariants } from '../src/utils/phone';
 import { mergeConversationMessages } from '../src/utils/messageMerge';
 import { evolutionMessagePreview, isEvolutionReactionEvent, isWhatsAppGroupJid, normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
 import { callMessageInfo } from '../src/utils/callMessage';
@@ -936,6 +936,13 @@ test('filtros de conversa usam tags tenant-scoped e tráfego sem N+1', () => {
   assert.equal(matchesConversationFilter(normalConversation, 'tag:vip', conversationNeedsResponse), false);
   assert.equal(conversationTagCount(all, trafficTag), 1);
   assert.equal(conversationTagCount(all, vipTag), 1);
+});
+
+test('canonicalPhoneDigits converge aliases nacionais e internacionais do provedor', () => {
+  assert.equal(canonicalPhoneDigits('21998877665'), '5521998877665');
+  assert.equal(canonicalPhoneDigits('5521998877665'), '5521998877665');
+  assert.equal(canonicalPhoneDigits('+55 (21) 99887-7665'), '5521998877665');
+  assert.equal(canonicalPhoneDigits('164794086760597@lid'), '');
 });
 
 test('contadores e filtros de não lidas e não respondidas usam a mesma população', () => {

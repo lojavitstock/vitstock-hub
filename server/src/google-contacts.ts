@@ -1268,7 +1268,7 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
           `SELECT c.id, c.name, c.phone, c.manual_override, c.source, c.google_resource_name,
               EXISTS (SELECT 1 FROM contact_channel_identities ci WHERE ci.company_id = c.company_id AND ci.contact_id = c.id AND ci.channel = 'whatsapp') AS has_whatsapp_identity,
               EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = c.company_id AND cp.contact_id = c.id AND cp.source = 'whatsapp') AS has_whatsapp_phone,
-              0::int AS conversation_count
+              (SELECT COUNT(*)::int FROM conversations cv WHERE cv.company_id = c.company_id AND cv.contact_id = c.id) AS conversation_count
            FROM contacts c WHERE c.company_id = $1 AND c.google_resource_name = $2 LIMIT 1`,
           [request.user!.companyId, contact.resourceName],
         )
@@ -1277,7 +1277,7 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
         `SELECT c.id, c.name, c.phone, c.manual_override, c.source, c.google_resource_name,
             EXISTS (SELECT 1 FROM contact_channel_identities ci WHERE ci.company_id = c.company_id AND ci.contact_id = c.id AND ci.channel = 'whatsapp') AS has_whatsapp_identity,
             EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = c.company_id AND cp.contact_id = c.id AND cp.source = 'whatsapp') AS has_whatsapp_phone,
-            0::int AS conversation_count
+            (SELECT COUNT(*)::int FROM conversations cv WHERE cv.company_id = c.company_id AND cv.contact_id = c.id) AS conversation_count
          FROM contacts c
          WHERE c.company_id = $1
            AND (regexp_replace(c.phone, '\\D', '', 'g') = ANY($2::text[])

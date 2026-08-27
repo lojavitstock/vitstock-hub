@@ -37,6 +37,15 @@ export const phoneIdentityKeys = (value: string, defaultCountry = 'BR') => {
   return Array.from(new Set([identity.canonical || '', canonicalDigits, identity.digits].filter(Boolean)));
 };
 
+/** Canonical digit key used to correlate provider phone aliases. */
+export const canonicalPhoneDigits = (value: string | undefined, defaultCountry = 'BR') => {
+  const raw = String(value || '');
+  const lower = raw.trim().toLowerCase();
+  if (lower.endsWith('@lid') || lower.endsWith('@g.us')) return '';
+  const identity = normalizePhoneIdentity(raw, defaultCountry);
+  return identity.canonical?.replace(/\D/g, '') || normalizePhone(raw);
+};
+
 export type ContactPhoneValue = { phone?: string; is_primary?: boolean };
 
 /**

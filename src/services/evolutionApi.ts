@@ -1,7 +1,7 @@
 import { ChatStatus, WhatsappInstance, Conversation, Message } from '../types';
 import { mockInstances, mockConversations } from './mockData';
 import { evolutionMessagePreview, isEvolutionReactionEvent, normalizeEvolutionMessage } from './evolutionMessageAdapter';
-import { phoneVariants } from '../utils/phone';
+import { canonicalPhoneDigits, phoneVariants } from '../utils/phone';
 import { providerDisplayName, providerFallbackDisplayName, providerIdentityKey, providerPhoneDigits } from '../utils/whatsappIdentity';
 import { callMessageInfo } from '../utils/callMessage';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
@@ -549,7 +549,7 @@ export class EvolutionApiService {
           const key = providerIdentityKey(identity?.identity);
           if (!key) return;
           const phone = typeof identity?.phone === 'string' && identity.phone.replace(/\D/g, '').length >= 8
-            ? identity.phone.replace(/\D/g, '')
+            ? canonicalPhoneDigits(identity.phone)
             : undefined;
           const value = {
             phone,
@@ -576,7 +576,7 @@ export class EvolutionApiService {
       if (Array.isArray(contactsData)) {
         contactsData.forEach((c: any) => {
           const rawJid = c.remoteJid || c.id || '';
-          const phoneKey = providerPhoneDigits(c);
+          const phoneKey = canonicalPhoneDigits(providerPhoneDigits(c));
           if (phoneKey && providerDisplayName(c)) {
             contactsMap.set(phoneKey, {
               name: providerDisplayName(c)!,
@@ -599,10 +599,10 @@ export class EvolutionApiService {
         
         // Usa o remoteJid exato com que a Evolution API gravou o chat no banco do Railway
         const rawRemoteJid = item.remoteJid || item.id || `chat-${index}`;
-        const providerPhone = providerPhoneDigits(item);
+        const providerPhone = canonicalPhoneDigits(providerPhoneDigits(item));
         const identity = whatsappIdentitiesMap.get(providerIdentityKey(rawRemoteJid))
           || phoneVariants(providerPhone).map((phone) => whatsappIdentitiesMap.get(`phone:${phone}`)).find(Boolean);
-        const cleanNumber = isGroup ? '' : (identity?.phone || providerPhone || '');
+        const cleanNumber = isGroup ? '' : (canonicalPhoneDigits(identity?.phone) || providerPhone || '');
         const conversationKey = isGroup ? rawRemoteJid : cleanNumber || rawRemoteJid;
         const altJid = item.lastMessage?.key?.remoteJidAlt;
         const assignment = assignmentsMap.get(rawRemoteJid)

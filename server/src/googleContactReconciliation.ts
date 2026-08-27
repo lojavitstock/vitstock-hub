@@ -51,9 +51,12 @@ export function classifyGooglePhoneMatch(input: {
 export function isProvisionalWhatsapp(candidate: GoogleContactCandidate) {
   const hasManualOverride = Boolean(candidate.manualOverride && Object.keys(candidate.manualOverride).length);
   // Evolution-created contacts historically used both the contacts.source
-  // default ('hub') and the explicit 'whatsapp' value. Either is safe only
-  // when the WhatsApp evidence is present and no human/Google ownership exists.
-  return (candidate.source === 'hub' || candidate.source === 'whatsapp')
+  // default ('hub') and the explicit 'whatsapp' value. Older rows were
+  // backfilled as 'system'; they are eligible only with explicit WhatsApp
+  // evidence and a persisted conversation, never by source alone.
+  const legacySystemWhatsapp = candidate.source === 'system'
+    && (candidate.conversationCount || 0) > 0;
+  return (candidate.source === 'hub' || candidate.source === 'whatsapp' || legacySystemWhatsapp)
     && (candidate.hasWhatsappIdentity || candidate.hasWhatsappPhone)
     && !hasManualOverride
     && !candidate.googleResourceName;
