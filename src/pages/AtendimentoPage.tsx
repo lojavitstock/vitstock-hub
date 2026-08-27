@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState, useEffect } from 'react';
+import React, { useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { 
   Search, 
@@ -43,6 +43,7 @@ import { canRestoreComposerDraft, captureComposerSubmission, readConversationDra
 import { createOutboundTrace } from '../utils/outboundTrace';
 import { findConversationForContactChat, normalizeContactChatPhone } from '../utils/contactChatNavigation';
 import { addConversationTag, createConversationTag, deleteConversationTag, fetchConversationTags, removeConversationTag, updateConversationTag } from '../services/conversationTagsApi';
+import { normalizeConversationTags } from '../utils/conversationTags';
 import {
   canReactToMessage,
   nextHubReactionEmoji,
@@ -91,6 +92,7 @@ export const AtendimentoPage: React.FC = () => {
   const pendingContactChatRef = useRef<Conversation | null>(null);
   const [conversationTags, setConversationTags] = useState<Tag[]>([]);
   const [showConversationTagMenu, setShowConversationTagMenu] = useState(false);
+  const conversationTagMenuRef = useRef<HTMLDivElement>(null);
 
   const {
     conversations,
@@ -126,6 +128,11 @@ export const AtendimentoPage: React.FC = () => {
     userRole: user?.role,
   });
 
+  const activeConversationTags = useMemo(
+    () => normalizeConversationTags(activeConv, conversationTags),
+    [activeConv, conversationTags],
+  );
+
   useEffect(() => {
     const previousConversationId = activeConversationIdRef.current;
     if (previousConversationId && previousConversationId !== activeConvId) {
@@ -133,7 +140,32 @@ export const AtendimentoPage: React.FC = () => {
     }
     activeConversationIdRef.current = activeConvId;
     setReplyTo(null);
+    setShowConversationTagMenu(false);
   }, [activeConvId]);
+
+  useEffect(() => {
+    if (!showConversationTagMenu) return undefined;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !conversationTagMenuRef.current?.contains(target)) {
+        setShowConversationTagMenu(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setShowConversationTagMenu(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showConversationTagMenu]);
 
   useEffect(() => {
     if (!activeConvId || whatsappStatus !== 'connected') return;
@@ -1565,7 +1597,7 @@ export const AtendimentoPage: React.FC = () => {
                     {activeConv.status === 'pending' ? 'Retirar da Entrega' : 'Solicitar Entrega'}
                   </button>
                 )}
-                <div className="relative">
+                <div ref={conversationTagMenuRef} className="relative">
                   <button
                     type="button"
                     onClick={() => setShowConversationTagMenu((open) => !open)}
@@ -1582,7 +1614,8 @@ export const AtendimentoPage: React.FC = () => {
                       {conversationTags.length === 0 ? (
                         <p className="px-2 py-3 text-xs text-slate-500">Crie uma tag na barra lateral.</p>
                       ) : conversationTags.map((tag) => {
-                        const checked = (activeConv.conversationTags || []).some((item) => item.id === tag.id);
+                        const checked = activeConversationTags.some((item) => item.id === tag.id
+                          || Boolean(tag.systemKey && item.systemKey === tag.systemKey));
                         return (
                           <button
                             key={tag.id}
@@ -1694,12 +1727,12 @@ export const AtendimentoPage: React.FC = () => {
               <p className="text-xs text-amber-400 font-mono mt-0.5">{formatPhoneForDisplay(activeConv.contact.phone)}</p>
             </div>
 
-            <div className="py-4 border-b border-zinc-800/80">
+            <div data-testid="conversation-tags-sidebar" className="py-4 border-b border-zinc-800/80">
               <span className="text-xs font-bold uppercase tracking-wider text-zinc-400 block mb-2">
-                Etiquetas
+                TAGS
               </span>
               <div className="flex flex-wrap gap-1.5">
-                {activeConv.contact.tags.map(tag => (
+                {activeConversationTags.length > 0 ? activeConversationTags.map(tag => (
                   <span 
                     key={tag.id}
                     className="text-xs font-bold px-2 py-1 rounded"
@@ -1707,7 +1740,7 @@ export const AtendimentoPage: React.FC = () => {
                   >
                     {tag.name}
                   </span>
-                ))}
+                )) : <span className="text-xs text-zinc-500">Nenhuma tag</span>}
               </div>
             </div>
           </div>

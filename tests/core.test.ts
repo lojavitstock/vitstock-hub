@@ -61,6 +61,7 @@ import {
   parseFrontendOrigins,
 } from '../server/src/config';
 import { normalizeTagName } from '../server/src/conversationTags';
+import { normalizeConversationTags } from '../src/utils/conversationTags';
 import type { Conversation, Message } from '../src/types';
 
 const message = (
@@ -970,6 +971,33 @@ test('gerenciador de tags mantém unicidade de nomes sem diferenciar caixa ou es
   assert.equal(normalizeTagName('  Orçamento  '), 'orçamento');
   assert.equal(normalizeTagName('ORÇAMENTO'), normalizeTagName('orçamento'));
   assert.notEqual(normalizeTagName('Pós-venda'), normalizeTagName('Pós atendimento'));
+});
+
+test('tags da conversa são normalizadas sem converter assignment ou duplicar tráfego', () => {
+  const current = conversation('tagged', {
+    contact: {
+      ...conversation('tagged').contact,
+      tags: [{ id: 'assigned-user-1', name: 'Leonardo', color: '#A78BFA' }],
+    },
+    conversationTags: [
+      { id: 'traffic-manual', name: 'Tráfego', color: '#F97316', systemKey: 'traffic' },
+      { id: 'delivery', name: 'Entregas', color: '#10B981' },
+    ],
+    trafficSource: 'campaign_referral',
+  });
+  const tags = normalizeConversationTags(current, [
+    { id: 'traffic-definition', name: 'Tráfego', color: '#F97316', systemKey: 'traffic' },
+  ]);
+
+  assert.deepEqual(tags.map((tag) => tag.id), ['traffic-manual', 'delivery']);
+  assert.equal(tags.some((tag) => tag.id === 'assigned-user-1'), false);
+});
+
+test('trafficSource real aparece como tag efetiva quando não há link manual', () => {
+  const current = conversation('source-only', { conversationTags: [], trafficSource: 'whatsapp_campaign' });
+  const tags = normalizeConversationTags(current, []);
+
+  assert.deepEqual(tags, [{ id: 'traffic', name: 'Tráfego', color: '#F97316', systemKey: 'traffic' }]);
 });
 
 test('realtime atualiza tags da conversa sem alterar atividade ou identidade das demais', () => {

@@ -10,6 +10,7 @@ test('Atendimento abre a lista e uma conversa sem enviar mensagens', async ({ pa
   test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
 
   try {
+    await page.setViewportSize({ width: 1600, height: 900 });
     await page.goto('/');
     await page.getByLabel('E-mail').fill(email!);
     await page.getByLabel('Senha').fill(password!);
@@ -24,6 +25,7 @@ test('Atendimento abre a lista e uma conversa sem enviar mensagens', async ({ pa
 
     await expect(page.locator('textarea[placeholder*="Digite sua mensagem"]')).toBeVisible();
     await expect(page.locator('[data-message-id]').first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('TAGS', { exact: true })).toBeVisible();
 
     // The tag rail is a single horizontal control with a fixed create action.
     await expect(page.getByRole('button', { name: /^Tudo/ })).toBeVisible();
@@ -90,8 +92,17 @@ test('Atendimento abre a lista e uma conversa sem enviar mensagens', async ({ pa
     await page.getByRole('button', { name: 'Gerenciar tags da conversa' }).click();
     const tagMenu = page.getByRole('menu', { name: 'Tags da conversa' });
     await expect(tagMenu).toBeVisible();
+    await page.getByRole('heading', { name: 'Atendimento' }).click();
+    await expect(tagMenu).toBeHidden();
+    await page.getByRole('button', { name: 'Gerenciar tags da conversa' }).click();
+    await expect(tagMenu).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(tagMenu).toBeHidden();
+    await page.getByRole('button', { name: 'Gerenciar tags da conversa' }).click();
+    await expect(tagMenu).toBeVisible();
     await tagMenu.getByRole('menuitemcheckbox', { name: editedTagName }).click();
     await expect(tagMenu.getByRole('menuitemcheckbox', { name: editedTagName })).toHaveAttribute('aria-checked', 'true');
+    await expect(page.getByTestId('conversation-tags-sidebar').getByText(editedTagName, { exact: true })).toBeVisible();
 
     await page.getByRole('button', { name: 'Gerenciar tags da conversa' }).click();
     await tagManagerButton.click();
@@ -106,6 +117,12 @@ test('Atendimento abre a lista e uma conversa sem enviar mensagens', async ({ pa
     await deleteDialog.getByRole('button', { name: 'Excluir tag' }).click();
     await expect(page.getByTestId('conversation-tag-rail').getByRole('button', { name: editedTagName })).toHaveCount(0);
     await expect(page.getByRole('button', { name: /^Tudo/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(await conversationCards.count()).toBeGreaterThan(1);
+    await page.getByRole('dialog', { name: 'Gerenciar tags' }).getByRole('button', { name: 'Fechar gerenciador de tags' }).nth(1).click();
+    await page.getByRole('button', { name: 'Gerenciar tags da conversa' }).click();
+    await expect(tagMenu).toBeVisible();
+    await conversationCards.nth(1).click();
+    await expect(tagMenu).toBeHidden();
 
     const validAvatar = page.getByRole('button', { name: 'Abrir conversa com Contato QA Avatar Válido' });
     const missingAvatar = page.getByRole('button', { name: 'Abrir conversa com Contato QA Avatar Ausente' });
