@@ -684,9 +684,19 @@ export class EvolutionApiService {
           ? [groupMetadata?.subject, item.groupName, item.subject, item.groupMetadata?.subject, item.chatName, item.name, item.notify, item.verifiedName]
             .find((value: any) => typeof value === 'string' && value.trim() && !/^\+?[\d\s().-]+$/.test(value.trim()))
           : undefined;
+        const contactNameCandidates = [
+          savedName,
+          savedContact?.name,
+          identity?.name,
+          whatsappContact?.name,
+          // pushName belongs to the recipient only for inbound messages.
+          // For fromMe records it identifies the connected account/operator,
+          // so allowing it here can rename the conversation incorrectly.
+          ...(lastMessageFromMe ? [] : [lastMessage?.pushName]),
+        ];
         const displayName = isGroup
           ? (groupName || `Grupo ${rawRemoteJid.split('@')[0]}`)
-          : (providerDisplayName(item, [savedName, savedContact?.name, identity?.name, whatsappContact?.name, lastMessage?.pushName])
+          : (providerDisplayName(item, contactNameCandidates)
             || providerFallbackDisplayName({ ...item, remoteJid: rawRemoteJid, lastMessage }, cleanNumber));
 
         const rawMessageContent = evolutionMessagePreview(lastMessage) || 'Conversa iniciada';

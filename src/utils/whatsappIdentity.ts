@@ -65,6 +65,7 @@ const usableDisplayName = (value: unknown) => {
 };
 
 export function providerDisplayName(input: any, preferred: unknown[] = []) {
+  const lastMessageFromMe = input?.lastMessage?.key?.fromMe === true || input?.lastMessage?.fromMe === true;
   const candidates = [
     ...preferred,
     input?.participantName,
@@ -79,10 +80,12 @@ export function providerDisplayName(input: any, preferred: unknown[] = []) {
     input?.notify,
     input?.verifiedName,
     input?.businessName,
-    input?.lastMessage?.participantName,
-    input?.lastMessage?.pushName,
-    input?.lastMessage?.notify,
-    input?.lastMessage?.verifiedName,
+    ...(lastMessageFromMe ? [] : [
+      input?.lastMessage?.participantName,
+      input?.lastMessage?.pushName,
+      input?.lastMessage?.notify,
+      input?.lastMessage?.verifiedName,
+    ]),
   ];
   return candidates.map(usableDisplayName).find(Boolean);
 }
