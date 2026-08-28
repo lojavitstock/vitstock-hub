@@ -36,6 +36,7 @@ import {
   isProviderReactionEvent,
   providerReactionUpdate,
 } from '../server/src/messageReactions';
+import { resolveProviderMessageTarget } from '../server/src/evolution';
 import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
@@ -1422,6 +1423,49 @@ test('confirmação com ID explícito substitui evento externo antecipado sem du
   assert.deepEqual(merged.map((item) => item.id), ['provider-hub-3']);
   assert.equal(merged[0]?.senderName, 'Leonardo');
   assert.equal(merged[0]?.metadata?.sentOutsideHub, undefined);
+});
+
+test('ID explícito da Evolution mantém a conversation canônica no fluxo LID → PN', () => {
+  const target = resolveProviderMessageTarget(
+    {
+      conversationId: 'conversation-lid',
+      contactId: 'contact-leonardo',
+      conversationRemoteJid: '164794086760597@lid',
+    },
+    '5521999999999@s.whatsapp.net',
+  );
+
+  assert.equal(target.reuseExisting, true);
+  assert.equal(target.conversationId, 'conversation-lid');
+  assert.equal(target.contactId, 'contact-leonardo');
+  assert.equal(target.conversationRemoteJid, '164794086760597@lid');
+  assert.equal(target.providerRemoteJid, '5521999999999@s.whatsapp.net');
+});
+
+test('ID explícito da Evolution mantém a conversation canônica no fluxo PN → LID', () => {
+  const target = resolveProviderMessageTarget(
+    {
+      conversationId: 'conversation-pn',
+      contactId: 'contact-leonardo',
+      conversationRemoteJid: '5521999999999@s.whatsapp.net',
+    },
+    '164794086760597@lid',
+  );
+
+  assert.equal(target.reuseExisting, true);
+  assert.equal(target.conversationId, 'conversation-pn');
+  assert.equal(target.contactId, 'contact-leonardo');
+  assert.equal(target.conversationRemoteJid, '5521999999999@s.whatsapp.net');
+  assert.equal(target.providerRemoteJid, '164794086760597@lid');
+});
+
+test('sem mensagem persistida o provider segue a resolução normal pelo JID recebido', () => {
+  const target = resolveProviderMessageTarget(undefined, '5521999999999@s.whatsapp.net');
+
+  assert.equal(target.reuseExisting, false);
+  assert.equal(target.conversationId, undefined);
+  assert.equal(target.contactId, undefined);
+  assert.equal(target.conversationRemoteJid, '5521999999999@s.whatsapp.net');
 });
 
 test('retry e reprocessamento preservam autoria interna já persistida', () => {

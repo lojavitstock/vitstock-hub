@@ -37,8 +37,8 @@ test('dois operadores QA compartilham SSE e mantêm o lease da conversa', async 
     expect((await meAResponse.json()).user?.name).toBe('QA Admin A');
     expect((await meBResponse.json()).user?.name).toBe('Fernanda QA');
 
-    const anaA = pageA.getByTitle('Ana QA — Olá, preciso de uma cotação QA.');
-    const multiB = pageB.getByTitle('Contato QA com dois números — Thread do telefone principal.');
+    const anaA = pageA.getByRole('button', { name: /Abrir conversa com Ana QA/ }).first();
+    const multiB = pageB.getByRole('button', { name: /Abrir conversa com Contato QA com dois números/ }).first();
     await expect(anaA).toBeVisible();
     await expect(multiB).toBeVisible();
     await anaA.click();

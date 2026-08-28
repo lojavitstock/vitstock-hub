@@ -119,6 +119,26 @@ test('individual identity fallback prefers real names and business metadata', ()
   assert.equal(providerDisplayName({ verifiedName: 'Empresa QA', pushName: 'Contato' }), 'Empresa QA');
 });
 
+test('pushName de uma mensagem outbound não renomeia o destinatário', () => {
+  const outboundChat = {
+    name: 'Leonardo',
+    lastMessage: {
+      key: { fromMe: true },
+      pushName: 'Fernanda',
+    },
+  };
+  const inboundChat = {
+    name: undefined,
+    lastMessage: {
+      key: { fromMe: false },
+      pushName: 'Leonardo',
+    },
+  };
+
+  assert.equal(providerDisplayName(outboundChat), 'Leonardo');
+  assert.equal(providerDisplayName(inboundChat), 'Leonardo');
+});
+
 test('individual historical synthetic name is replaced by explicit PN or opaque fallback', () => {
   assert.equal(providerFallbackDisplayName({ savedName: 'Contato', remoteJidAlt: '5521999000002@s.whatsapp.net' }), '+5521999000002');
   assert.equal(providerFallbackDisplayName({ savedName: 'Contato', remoteJid: '444444444@lid' }), 'Participante …4444');

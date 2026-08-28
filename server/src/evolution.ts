@@ -1606,8 +1606,42 @@ type ProviderPersistenceResult = {
   ignored?: boolean;
   reaction?: boolean;
   originalFound?: boolean;
+  conversationRemoteJid?: string;
   message?: any;
 };
+
+type ExistingProviderMessageIdentity = {
+  conversationId: string;
+  contactId: string;
+  conversationRemoteJid: string;
+};
+
+/**
+ * An explicit provider message id is stronger evidence than the JID carried
+ * by a later webhook.  Keeping this decision pure makes the LID/PN rule easy
+ * to exercise without touching a real database.
+ */
+export function resolveProviderMessageTarget(
+  existing: ExistingProviderMessageIdentity | undefined,
+  incomingRemoteJid: string,
+) {
+  if (existing) {
+    return {
+      conversationId: existing.conversationId,
+      contactId: existing.contactId,
+      conversationRemoteJid: existing.conversationRemoteJid,
+      providerRemoteJid: incomingRemoteJid,
+      reuseExisting: true as const,
+    };
+  }
+  return {
+    conversationId: undefined,
+    contactId: undefined,
+    conversationRemoteJid: incomingRemoteJid,
+    providerRemoteJid: incomingRemoteJid,
+    reuseExisting: false as const,
+  };
+}
 
 async function persistProviderReaction(companyId: string, record: any) {
   const update = providerReactionUpdate(record);
@@ -1892,117 +1926,151 @@ async function persistProviderMessage(
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+    // Serialize duplicate webhook deliveries for the same tenant/message and
+    // resolve the persisted message before looking at the provider JID.  A
+    // webhook may carry PN while the original Hub send used a LID (or vice
+    // versa), but the explicit Evolution id still identifies one message.
+    await client.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1::text))',
+      [`provider-message:${companyId}:${local.id}`],
+    );
     local.metadata = await hydrateQuotedMessageMetadata(client, companyId, local.metadata || {}, local.remoteJid);
     const isGroup = Boolean(local.isGroup) || isWhatsAppGroupJid(local.remoteJid);
     const groupName = isGroup ? local.groupName : undefined;
     const displayGroupName = groupName || `Grupo ${local.remoteJid.split('@')[0]}`;
-    const linkedContact = !isGroup && !local.phone
-      ? await client.query<{ id: string; phone: string }>(
-        `SELECT c.id, COALESCE(primary_phone.phone, c.phone) AS phone
-         FROM contact_channel_identities ci
-         JOIN contacts c ON c.id = ci.contact_id
-         LEFT JOIN LATERAL (
-           SELECT p.phone
-           FROM contact_phones p
-           WHERE p.contact_id = c.id
-           ORDER BY p.is_primary DESC, p.id
-           LIMIT 1
-         ) primary_phone ON true
-         WHERE ci.company_id = $1 AND ci.channel = 'whatsapp' AND ci.identity = $2
-         LIMIT 1`,
-        [companyId, local.remoteJid],
-      )
-      : { rows: [] };
-    const resolvedPhone = local.phone || linkedContact.rows[0]?.phone || '';
-    if (!isGroup && !resolvedPhone) return undefined;
-    const contactPhone = isGroup ? local.remoteJid : phoneForContactStorage(resolvedPhone);
-    const contactName = isGroup
-      ? displayGroupName
-      : local.sender === 'contact'
-        ? (providerContactName({ name: local.senderName }) || `+${resolvedPhone}`)
-        : `+${resolvedPhone}`;
-    const conversationPreview = isGroup
-      ? `${local.senderName || (local.sender === 'attendant' ? 'Atendente' : 'Participante')}: ${local.content}`
-      : local.content;
-    const contact = isGroup
-      ? await client.query<{ id: string }>(
-        `INSERT INTO contacts (company_id, name, phone, avatar_url)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (company_id, phone) DO UPDATE SET
-           name = CASE WHEN $5::boolean AND EXCLUDED.name <> '' THEN EXCLUDED.name ELSE contacts.name END,
-           avatar_url = COALESCE(EXCLUDED.avatar_url, contacts.avatar_url), updated_at = now()
-         RETURNING id`, [companyId, contactName, contactPhone, local.groupAvatarUrl || null, Boolean(groupName)],
-      )
-      : linkedContact.rows[0]?.id
-        ? { rows: [{ id: linkedContact.rows[0].id }] }
-        : { rows: [{ id: (await findOrCreatePhoneContact(client, { companyId, name: contactName, phone: contactPhone })).id }] };
-    const contactId = contact.rows[0]?.id;
-    if (!contactId) throw new Error('Contato não pôde ser preparado para a mensagem recebida');
+    const existingResult = await client.query<ExistingProviderMessageIdentity>(
+      `SELECT m.conversation_id AS "conversationId",
+              c.contact_id AS "contactId",
+              c.evolution_remote_jid AS "conversationRemoteJid"
+       FROM messages m
+       INNER JOIN conversations c ON c.id = m.conversation_id
+       WHERE m.company_id = $1::uuid
+         AND m.evolution_message_id = $2::text
+       LIMIT 1
+       FOR UPDATE`,
+      [companyId, local.id],
+    );
+    const existingIdentity = existingResult.rows[0];
+    const target = resolveProviderMessageTarget(existingIdentity, local.remoteJid);
+    let conversationId = target.conversationId;
+    let contactId = target.contactId;
+    let insertedNewMessage = false;
 
-    const resolvedContactName = local.sender === 'contact'
-      ? providerContactName({ name: local.senderName })
-      : '';
-    if (!isGroup && resolvedContactName) {
-      await client.query(
-        `UPDATE contacts SET
-           name = CASE
-             WHEN source = 'google' THEN name
-             WHEN $3::boolean AND $2 <> '' THEN $2
-             WHEN $2 !~ '^\\+?[0-9\\s().-]+$'
-               AND (name ~ '^\\+?[0-9\\s().-]+$' OR name IN ('Contato', 'WhatsApp Business', 'Você'))
-               THEN $2
-             ELSE name END,
-           avatar_url = COALESCE($4, avatar_url), updated_at = now()
-         WHERE company_id = $1 AND id = $5`,
-        [companyId, resolvedContactName, false, local.groupAvatarUrl || null, contactId],
+    if (existingIdentity) {
+      // The message id is authoritative.  The provider JID is retained as an
+      // explicit identity alias, but it must not activate another conversation.
+      await persistProviderIdentities(
+        client,
+        companyId,
+        existingIdentity.contactId,
+        target.providerRemoteJid,
+        !isGroup ? local.phone || undefined : undefined,
       );
+      local.remoteJid = target.conversationRemoteJid;
+    } else {
+      const linkedContact = !isGroup && !local.phone
+        ? await client.query<{ id: string; phone: string }>(
+          `SELECT c.id, COALESCE(primary_phone.phone, c.phone) AS phone
+           FROM contact_channel_identities ci
+           JOIN contacts c ON c.id = ci.contact_id
+           LEFT JOIN LATERAL (
+             SELECT p.phone
+             FROM contact_phones p
+             WHERE p.contact_id = c.id
+             ORDER BY p.is_primary DESC, p.id
+             LIMIT 1
+           ) primary_phone ON true
+           WHERE ci.company_id = $1 AND ci.channel = 'whatsapp' AND ci.identity = $2
+           LIMIT 1`,
+          [companyId, local.remoteJid],
+        )
+        : { rows: [] };
+      const resolvedPhone = local.phone || linkedContact.rows[0]?.phone || '';
+      if (!isGroup && !resolvedPhone) return undefined;
+      const contactPhone = isGroup ? local.remoteJid : phoneForContactStorage(resolvedPhone);
+      const contactName = isGroup
+        ? displayGroupName
+        : local.sender === 'contact'
+          ? (providerContactName({ name: local.senderName }) || `+${resolvedPhone}`)
+          : `+${resolvedPhone}`;
+      const conversationPreview = isGroup
+        ? `${local.senderName || (local.sender === 'attendant' ? 'Atendente' : 'Participante')}: ${local.content}`
+        : local.content;
+      const contact = isGroup
+        ? await client.query<{ id: string }>(
+          `INSERT INTO contacts (company_id, name, phone, avatar_url)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (company_id, phone) DO UPDATE SET
+             name = CASE WHEN $5::boolean AND EXCLUDED.name <> '' THEN EXCLUDED.name ELSE contacts.name END,
+             avatar_url = COALESCE(EXCLUDED.avatar_url, contacts.avatar_url), updated_at = now()
+           RETURNING id`, [companyId, contactName, contactPhone, local.groupAvatarUrl || null, Boolean(groupName)],
+        )
+        : linkedContact.rows[0]?.id
+          ? { rows: [{ id: linkedContact.rows[0].id }] }
+          : { rows: [{ id: (await findOrCreatePhoneContact(client, { companyId, name: contactName, phone: contactPhone })).id }] };
+      contactId = contact.rows[0]?.id;
+      if (!contactId) throw new Error('Contato não pôde ser preparado para a mensagem recebida');
+
+      const resolvedContactName = local.sender === 'contact'
+        ? providerContactName({ name: local.senderName })
+        : '';
+      if (!isGroup && resolvedContactName) {
+        await client.query(
+          `UPDATE contacts SET
+             name = CASE
+               WHEN source = 'google' THEN name
+               WHEN $3::boolean AND $2 <> '' THEN $2
+               WHEN $2 !~ '^\\+?[0-9\\s().-]+$'
+                 AND (name ~ '^\\+?[0-9\\s().-]+$' OR name IN ('Contato', 'WhatsApp Business', 'Você'))
+                 THEN $2
+               ELSE name END,
+             avatar_url = COALESCE($4, avatar_url), updated_at = now()
+           WHERE company_id = $1 AND id = $5`,
+          [companyId, resolvedContactName, false, local.groupAvatarUrl || null, contactId],
+        );
+      }
+
+      if (!isGroup) {
+        await upsertContactPhone(client, { companyId, contactId, phone: contactPhone, isPrimary: true, source: 'whatsapp' });
+      }
+
+      await persistProviderIdentities(client, companyId, contactId, local.remoteJid, isGroup ? undefined : resolvedPhone);
+
+      conversationId = await findOrCreateConversation(client, {
+        companyId,
+        contactId,
+        remoteJid: local.remoteJid,
+        lastMessage: conversationPreview,
+        lastMessageAt: local.sentAt,
+        reopenResolved: options.reopen && local.sender === 'contact',
+        isGroup,
+        groupName,
+        groupAvatarUrl: local.groupAvatarUrl,
+      });
+      if (!conversationId) throw new Error('Conversa não pôde ser preparada para a mensagem recebida');
+
+      const inserted = await client.query<{ id: string }>(
+          `INSERT INTO messages
+           (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_url, media_type, metadata, status, sent_at, is_internal_note)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false)
+           ON CONFLICT (company_id, evolution_message_id) DO NOTHING
+           RETURNING id`,
+          [
+            companyId,
+            conversationId,
+            local.id,
+            local.sender,
+            local.senderName,
+            local.content,
+            local.mediaUrl || null,
+            local.mediaType || null,
+            JSON.stringify(local.metadata || {}),
+            local.status,
+            local.sentAt,
+          ],
+        );
+      insertedNewMessage = Boolean(inserted.rowCount);
     }
-
-    if (!isGroup) {
-      await upsertContactPhone(client, { companyId, contactId, phone: contactPhone, isPrimary: true, source: 'whatsapp' });
-    }
-
-    await persistProviderIdentities(client, companyId, contactId, local.remoteJid, isGroup ? undefined : resolvedPhone);
-
-    const conversationId = await findOrCreateConversation(client, {
-      companyId,
-      contactId,
-      remoteJid: local.remoteJid,
-      lastMessage: conversationPreview,
-      lastMessageAt: local.sentAt,
-      reopenResolved: options.reopen && local.sender === 'contact',
-      isGroup,
-      groupName,
-      groupAvatarUrl: local.groupAvatarUrl,
-    });
-    if (!conversationId) throw new Error('Conversa não pôde ser preparada para a mensagem recebida');
-
-    const messageParams = [
-      companyId,
-      conversationId,
-      local.id,
-      local.sender,
-      local.senderName,
-      local.content,
-      local.mediaUrl || null,
-      local.mediaType || null,
-      JSON.stringify(local.metadata || {}),
-      local.status,
-      local.sentAt,
-    ];
-
-    // Do not infer Hub authorship by matching timestamp/content to a pending
-    // row. The exact Evolution id returned by the send endpoint is the only
-    // accepted correlation for internal authorship.
-    const inserted = await client.query<{ id: string }>(
-        `INSERT INTO messages
-         (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_url, media_type, metadata, status, sent_at, is_internal_note)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false)
-         ON CONFLICT (company_id, evolution_message_id) DO NOTHING
-         RETURNING id`,
-        messageParams,
-      );
-    const insertedNewMessage = Boolean(inserted.rowCount);
 
     // Reprocessamentos podem trazer metadados ou mídia que não existiam na
     // primeira entrega. Preservamos autoria interna somente quando já existe
@@ -2071,6 +2139,23 @@ async function persistProviderMessage(
       }
     }
 
+    // If this is a confirmed Hub send, repair only the canonical conversation
+    // preview (never the provider-JID row).  The timestamp guard prevents an
+    // older webhook from regressing newer activity.
+    if (existingIdentity && local.metadata?.sentByHub === true && conversationId) {
+      await client.query(
+        `UPDATE conversations
+         SET last_message = $1::text,
+             last_message_at = $2::timestamptz,
+             updated_at = now()
+         WHERE id = $3::uuid
+           AND $2::timestamptz >= COALESCE(last_message_at, to_timestamp(0))
+           AND (last_message IS DISTINCT FROM $1::text
+             OR last_message_at IS DISTINCT FROM $2::timestamptz)`,
+        [local.content, local.sentAt, conversationId],
+      );
+    }
+
     if (insertedNewMessage && options.incrementUnread && local.sender === 'contact') {
       await client.query('UPDATE conversations SET unread_count = unread_count + 1, updated_at = now() WHERE id = $1', [conversationId]);
     }
@@ -2078,6 +2163,7 @@ async function persistProviderMessage(
     localInboxCache.delete(companyId);
     return {
       persisted: insertedNewMessage,
+      conversationRemoteJid: local.remoteJid,
       message: localMessageToRealtimeMessage(local),
     };
   } catch (error) {
@@ -2499,6 +2585,10 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     const providerNames = new Map<string, { phone: string; name: string; avatar_url: string | null }>();
     const rememberProviderContact = (value: any) => {
+      // A fromMe message describes the local operator, never the recipient.
+      // Provider pushName/notify values from such records must not become a
+      // persisted WhatsApp contact name during an inbox snapshot.
+      if (value?.key?.fromMe === true || value?.fromMe === true) return;
       const phone = providerContactPhone(value);
       const name = providerContactName(value);
       if (!phone || !name) return;
@@ -3643,7 +3733,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
             if (persisted?.persisted) {
               persistedMessages += 1;
             }
-            const remoteJid = providerRemoteJid(record);
+            // When a provider confirmation arrives with a PN/LID variant,
+            // publish only the conversation selected by the persisted message
+            // id.  The provider JID remains available as an alias, but must
+            // not wake a second conversation in the inbox.
+            const remoteJid = persisted?.conversationRemoteJid || providerRemoteJid(record);
             if (remoteJid && persisted?.message) {
               publishRealtimeEvent(companyId, 'message.upsert', {
                 remoteJid,
