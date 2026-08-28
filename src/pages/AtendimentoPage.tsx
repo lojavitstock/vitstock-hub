@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState, useEffect } from 'react';
+import React, { useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { 
   Search, 
@@ -25,10 +25,10 @@ import {
   Globe,
   Archive,
 } from 'lucide-react';
-import { Conversation, Message, WhatsappInstance } from '../types';
+import { Conversation, Message, Tag, WhatsappInstance } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { useAuth } from '../auth/AuthContext';
-import { ConversationFilters } from '../components/conversations/ConversationFilters';
+import { ConversationTagRail } from '../components/conversations/ConversationTagRail';
 import { ConversationList } from '../components/conversations/ConversationList';
 import { ContactPhoto } from '../components/conversations/ContactPhoto';
 import { MessageTimeline } from '../components/conversations/MessageTimeline';
@@ -42,13 +42,16 @@ import { toQuotedMessage } from '../utils/quotedMessage';
 import { canRestoreComposerDraft, captureComposerSubmission, readConversationDraft, scheduleComposerFocus, writeConversationDraft } from '../utils/composerSubmission';
 import { createOutboundTrace } from '../utils/outboundTrace';
 import { findConversationForContactChat, normalizeContactChatPhone } from '../utils/contactChatNavigation';
+import { addConversationTag, createConversationTag, deleteConversationTag, fetchConversationTags, removeConversationTag, updateConversationTag } from '../services/conversationTagsApi';
+import { normalizeConversationTags } from '../utils/conversationTags';
+import { isMediaBase64SizeAllowed, isMediaFileSizeAllowed } from '../utils/mediaLimits';
+import { outboundErrorMessage } from '../utils/outboundError';
 import {
   canReactToMessage,
   nextHubReactionEmoji,
   withOptimisticHubReaction,
   type CommonReactionEmoji,
 } from '../utils/messageReactionActions';
-
 
 export const AtendimentoPage: React.FC = () => {
   const instanceName = 'vitstock_atendimento';
@@ -62,6 +65,7 @@ export const AtendimentoPage: React.FC = () => {
 
   const attendantName = user?.name || 'Atendente';
   const [whatsappStatus, setWhatsappStatus] = useState<WhatsappInstance['status']>('connecting');
+  const whatsappConnected = whatsappStatus === 'connected';
   const composerRef = useRef<MessageComposerHandle>(null);
   const composerTextRef = useRef('');
   const composerDraftsRef = useRef(new Map<string, string>());
@@ -87,6 +91,9 @@ export const AtendimentoPage: React.FC = () => {
   const [startingNewChat, setStartingNewChat] = useState(false);
   const [pendingContactChatId, setPendingContactChatId] = useState<string | null>(null);
   const pendingContactChatRef = useRef<Conversation | null>(null);
+  const [conversationTags, setConversationTags] = useState<Tag[]>([]);
+  const [showConversationTagMenu, setShowConversationTagMenu] = useState(false);
+  const conversationTagMenuRef = useRef<HTMLDivElement>(null);
 
   const {
     conversations,
@@ -122,6 +129,11 @@ export const AtendimentoPage: React.FC = () => {
     userRole: user?.role,
   });
 
+  const activeConversationTags = useMemo(
+    () => normalizeConversationTags(activeConv, conversationTags),
+    [activeConv, conversationTags],
+  );
+
   useEffect(() => {
     const previousConversationId = activeConversationIdRef.current;
     if (previousConversationId && previousConversationId !== activeConvId) {
@@ -129,12 +141,77 @@ export const AtendimentoPage: React.FC = () => {
     }
     activeConversationIdRef.current = activeConvId;
     setReplyTo(null);
+    setShowConversationTagMenu(false);
   }, [activeConvId]);
+
+  useEffect(() => {
+    if (!showConversationTagMenu) return undefined;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !conversationTagMenuRef.current?.contains(target)) {
+        setShowConversationTagMenu(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setShowConversationTagMenu(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showConversationTagMenu]);
 
   useEffect(() => {
     if (!activeConvId || whatsappStatus !== 'connected') return;
     composerRef.current?.setText(readConversationDraft(composerDraftsRef.current, activeConvId));
   }, [activeConvId, whatsappStatus]);
+
+  useEffect(() => {
+    if (!whatsappConnected) {
+      setConversationTags([]);
+      setShowConversationTagMenu(false);
+      return undefined;
+    }
+    if (isMock) return undefined;
+    let mounted = true;
+    void fetchConversationTags()
+      .then((result) => {
+        if (mounted) setConversationTags(Array.isArray(result.tags) ? result.tags : []);
+      })
+      .catch(() => {
+        if (mounted) setConversationTags([]);
+      });
+    return () => { mounted = false; };
+  }, [isMock, whatsappConnected]);
+
+  useEffect(() => {
+    if (!isMock || !whatsappConnected) return;
+    const seededTags = conversations.flatMap((conversation) => conversation.conversationTags || []);
+    setConversationTags((previous) => {
+      const byId = new Map(previous.map((tag) => [tag.id, tag]));
+      seededTags.forEach((tag) => byId.set(tag.id, {
+        ...tag,
+        usageCount: conversations.filter((conversation) => (conversation.conversationTags || []).some((item) => item.id === tag.id)).length,
+      }));
+      if (!Array.from(byId.values()).some((tag) => tag.systemKey === 'traffic')) {
+        byId.set('mock-traffic', {
+          id: 'mock-traffic',
+          name: 'Tráfego',
+          color: '#F97316',
+          systemKey: 'traffic',
+          usageCount: conversations.filter((conversation) => Boolean(conversation.trafficSource)).length,
+        });
+      }
+      return Array.from(byId.values());
+    });
+  }, [conversations, isMock, whatsappConnected]);
 
   useEffect(() => {
     if (!activeConv || activeConv.unreadCount <= 0) return;
@@ -634,6 +711,115 @@ export const AtendimentoPage: React.FC = () => {
     }
   }, [activeChatLocked, activeConv, activeLease?.ownerName, attendantName, isMock, setAssignmentFeedback, setMessages, user?.id, whatsappStatus]);
 
+  const handleCreateConversationTag = useCallback(async (name: string, color: string) => {
+    const normalizedName = name.trim();
+    if (!normalizedName) return;
+    if (isMock) {
+      const tag: Tag = { id: `mock-conversation-tag-${Date.now()}`, name: normalizedName, color, usageCount: 0 };
+      setConversationTags((previous) => previous.some((item) => item.name.trim().toLocaleLowerCase() === normalizedName.toLocaleLowerCase())
+        ? previous
+        : [...previous, tag]);
+      return;
+    }
+    try {
+      const result = await createConversationTag(normalizedName, color);
+      if (result.tag) {
+        setConversationTags((previous) => previous.some((item) => item.id === result.tag.id)
+          ? previous.map((item) => item.id === result.tag.id ? result.tag : item)
+          : [...previous, result.tag]);
+      }
+      setAssignmentFeedback('Tag criada.');
+    } catch (error) {
+      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível criar a tag.');
+      throw error;
+    }
+  }, [isMock, setAssignmentFeedback]);
+
+  const handleUpdateConversationTag = useCallback(async (tagId: string, input: { name?: string; color?: string }) => {
+    if (isMock) {
+      setConversationTags((previous) => previous.map((tag) => tag.id === tagId ? { ...tag, ...input } : tag));
+      setConversations((previous) => previous.map((conversation) => ({
+        ...conversation,
+        conversationTags: (conversation.conversationTags || []).map((tag) => tag.id === tagId ? { ...tag, ...input } : tag),
+      })));
+      setAssignmentFeedback('Tag atualizada.');
+      return;
+    }
+    try {
+      const result = await updateConversationTag(tagId, input);
+      if (!result.tag) throw new Error('Não foi possível atualizar a tag.');
+      setConversationTags((previous) => previous.map((tag) => tag.id === tagId ? result.tag : tag));
+      setConversations((previous) => previous.map((conversation) => ({
+        ...conversation,
+        conversationTags: (conversation.conversationTags || []).map((tag) => tag.id === tagId ? result.tag : tag),
+      })));
+      setAssignmentFeedback('Tag atualizada.');
+    } catch (error) {
+      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível atualizar a tag.');
+      throw error;
+    }
+  }, [isMock, setAssignmentFeedback, setConversations]);
+
+  const handleDeleteConversationTag = useCallback(async (tagId: string) => {
+    if (isMock) {
+      setConversationTags((previous) => previous.filter((tag) => tag.id !== tagId));
+      setConversations((previous) => previous.map((conversation) => ({
+        ...conversation,
+        conversationTags: (conversation.conversationTags || []).filter((tag) => tag.id !== tagId),
+      })));
+      if (filterTab === `tag:${tagId}`) setFilterTab('all');
+      setAssignmentFeedback('Tag excluída.');
+      return;
+    }
+    try {
+      await deleteConversationTag(tagId);
+      setConversationTags((previous) => previous.filter((tag) => tag.id !== tagId));
+      setConversations((previous) => previous.map((conversation) => ({
+        ...conversation,
+        conversationTags: (conversation.conversationTags || []).filter((tag) => tag.id !== tagId),
+      })));
+      if (filterTab === `tag:${tagId}`) setFilterTab('all');
+      setAssignmentFeedback('Tag excluída.');
+    } catch (error) {
+      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível excluir a tag.');
+      throw error;
+    }
+  }, [filterTab, isMock, setAssignmentFeedback, setConversations, setFilterTab]);
+
+  const toggleConversationTag = useCallback(async (tag: Tag) => {
+    if (!activeConv) return;
+    const conversationId = activeConv.id;
+    const assigned = (activeConv.conversationTags || []).some((item) => item.id === tag.id);
+    if (isMock) {
+      setConversations((previous) => previous.map((conversation) => conversation.id === conversationId
+        ? {
+            ...conversation,
+            conversationTags: assigned
+              ? (conversation.conversationTags || []).filter((item) => item.id !== tag.id)
+              : [...(conversation.conversationTags || []), tag],
+          }
+        : conversation));
+      setConversationTags((previous) => previous.map((item) => item.id === tag.id
+        ? { ...item, usageCount: Math.max(0, (item.usageCount || 0) + (assigned ? -1 : 1)) }
+        : item));
+      return;
+    }
+    try {
+      const result = assigned
+        ? await removeConversationTag(conversationId, tag.id)
+        : await addConversationTag(conversationId, tag.id);
+      const nextTags = Array.isArray(result.tags) ? result.tags : [];
+      setConversations((previous) => previous.map((conversation) => conversation.id === conversationId
+        ? { ...conversation, conversationTags: nextTags }
+        : conversation));
+      setConversationTags((previous) => previous.map((item) => item.id === tag.id
+        ? { ...item, usageCount: Math.max(0, (item.usageCount || 0) + (assigned ? -1 : 1)) }
+        : item));
+    } catch (error) {
+      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível atualizar as tags.');
+    }
+  }, [activeConv, isMock, setAssignmentFeedback, setConversations]);
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!composerTextRef.current.trim() || !activeConv) return;
@@ -763,7 +949,7 @@ export const AtendimentoPage: React.FC = () => {
         }
         restoreFailedDraft();
         restoreFailedOptimisticActivity(activeConv, newMsg.id);
-        setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar a mensagem.');
+        setAssignmentFeedback(outboundErrorMessage(error, 'Não foi possível enviar a mensagem.'));
         return;
       }
     }
@@ -796,7 +982,7 @@ export const AtendimentoPage: React.FC = () => {
       setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de enviar anexos.');
       return;
     }
-    if (file.size > 10 * 1024 * 1024) {
+    if (!isMediaFileSizeAllowed(file.size)) {
       setAssignmentFeedback('O anexo deve ter no máximo 10 MB.');
       return;
     }
@@ -849,6 +1035,12 @@ export const AtendimentoPage: React.FC = () => {
     const media = dataUrl.split(',')[1];
     if (!media) {
       restoreFailedDraft();
+      setSendingMedia(false);
+      return;
+    }
+    if (!isMediaBase64SizeAllowed(media.length)) {
+      restoreFailedDraft();
+      setAssignmentFeedback('Arquivo excede o limite permitido.');
       setSendingMedia(false);
       return;
     }
@@ -937,7 +1129,7 @@ export const AtendimentoPage: React.FC = () => {
       }
       restoreFailedDraft();
       restoreFailedOptimisticActivity(activeConv, localMessage.id);
-      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível enviar o anexo.');
+      setAssignmentFeedback(outboundErrorMessage(error, 'Não foi possível enviar o anexo.'));
     } finally {
       setSendingMedia(false);
     }
@@ -1049,7 +1241,7 @@ export const AtendimentoPage: React.FC = () => {
     } catch (error) {
       if (activeConversationIdRef.current === conversationId) {
         setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'failed' } : item));
-        setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível reenviar a mensagem.');
+        setAssignmentFeedback(outboundErrorMessage(error, 'Não foi possível reenviar a mensagem.'));
       }
     }
   }, [activeChatLocked, activeConv, activeLease?.ownerName, attendantName, instanceName, isMock, updateConversationActivity, whatsappStatus]);
@@ -1093,7 +1285,7 @@ export const AtendimentoPage: React.FC = () => {
       try {
         result = await EvolutionApiService.sendTextMessage(instanceName, cleanNum, messageText, jid, clientMessageId);
       } catch (error) {
-        setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível iniciar a conversa.');
+        setAssignmentFeedback(outboundErrorMessage(error, 'Não foi possível iniciar a conversa.'));
         setStartingNewChat(false);
         return;
       }
@@ -1144,7 +1336,6 @@ export const AtendimentoPage: React.FC = () => {
     setStartingNewChat(false);
   };
 
-  const whatsappConnected = whatsappStatus === 'connected';
   return (
     <div className="flex h-full w-full bg-[#11181d] overflow-hidden text-slate-100 font-overpass relative">
       
@@ -1316,10 +1507,14 @@ export const AtendimentoPage: React.FC = () => {
               );
             })}
           </div>
-          <ConversationFilters
+          <ConversationTagRail
             conversations={conversations}
+            tags={conversationTags}
             activeFilter={filterTab}
             onFilterChange={setFilterTab}
+            onCreateTag={handleCreateConversationTag}
+            onUpdateTag={handleUpdateConversationTag}
+            onDeleteTag={handleDeleteConversationTag}
             needsResponse={conversationNeedsResponse}
           />
           </> : (
@@ -1409,6 +1604,43 @@ export const AtendimentoPage: React.FC = () => {
                     {activeConv.status === 'pending' ? 'Retirar da Entrega' : 'Solicitar Entrega'}
                   </button>
                 )}
+                <div ref={conversationTagMenuRef} className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setShowConversationTagMenu((open) => !open)}
+                    aria-label="Gerenciar tags da conversa"
+                    aria-expanded={showConversationTagMenu}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-[#46535a] bg-[#2a343a] px-2.5 py-2 text-xs font-semibold text-slate-300 transition-colors hover:border-amber-300/50 hover:text-amber-300"
+                  >
+                    <TagIcon className="h-3.5 w-3.5" />
+                    <span className="hidden xl:inline">Tags</span>
+                  </button>
+                  {showConversationTagMenu && (
+                    <div role="menu" aria-label="Tags da conversa" className="absolute right-0 top-full z-30 mt-2 w-56 rounded-xl border border-[#46535a] bg-[#182126] p-2 shadow-2xl">
+                      <p className="px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-slate-500">Tags da conversa</p>
+                      {conversationTags.length === 0 ? (
+                        <p className="px-2 py-3 text-xs text-slate-500">Crie uma tag na barra lateral.</p>
+                      ) : conversationTags.map((tag) => {
+                        const checked = activeConversationTags.some((item) => item.id === tag.id
+                          || Boolean(tag.systemKey && item.systemKey === tag.systemKey));
+                        return (
+                          <button
+                            key={tag.id}
+                            type="button"
+                            role="menuitemcheckbox"
+                            aria-checked={checked}
+                            onClick={() => void toggleConversationTag(tag)}
+                            className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-xs text-slate-200 hover:bg-white/5"
+                          >
+                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: tag.color }} aria-hidden="true" />
+                            <span className="min-w-0 flex-1 truncate">{tag.name}</span>
+                            <span className={`h-3.5 w-3.5 rounded border ${checked ? 'border-amber-300 bg-amber-300' : 'border-slate-600'}`} aria-hidden="true" />
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
                 <button className="p-2 rounded-lg text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100">
                   <MoreVertical className="w-4 h-4" />
                 </button>
@@ -1502,12 +1734,12 @@ export const AtendimentoPage: React.FC = () => {
               <p className="text-xs text-amber-400 font-mono mt-0.5">{formatPhoneForDisplay(activeConv.contact.phone)}</p>
             </div>
 
-            <div className="py-4 border-b border-zinc-800/80">
+            <div data-testid="conversation-tags-sidebar" className="py-4 border-b border-zinc-800/80">
               <span className="text-xs font-bold uppercase tracking-wider text-zinc-400 block mb-2">
-                Etiquetas
+                TAGS
               </span>
               <div className="flex flex-wrap gap-1.5">
-                {activeConv.contact.tags.map(tag => (
+                {activeConversationTags.length > 0 ? activeConversationTags.map(tag => (
                   <span 
                     key={tag.id}
                     className="text-xs font-bold px-2 py-1 rounded"
@@ -1515,7 +1747,7 @@ export const AtendimentoPage: React.FC = () => {
                   >
                     {tag.name}
                   </span>
-                ))}
+                )) : <span className="text-xs text-zinc-500">Nenhuma tag</span>}
               </div>
             </div>
           </div>

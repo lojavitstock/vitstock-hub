@@ -39,6 +39,7 @@ type ContactIdentityMetadata = {
   google_resource_name?: string | null;
   google_saved?: boolean;
   whatsapp_linked?: boolean;
+  conversation_count?: number;
 };
 
 function isGoogleContact(contact: ContactIdentityMetadata | undefined) {
@@ -49,7 +50,9 @@ function isWhatsappPrincipal(contact: ContactIdentityMetadata | undefined) {
   return Boolean(
     contact
     && !isGoogleContact(contact)
-    && (contact.source === 'hub' || contact.source === 'whatsapp')
+    && (contact.source === 'hub'
+      || contact.source === 'whatsapp'
+      || (contact.source === 'system' && Number(contact.conversation_count || 0) > 0))
     && contact.whatsapp_linked,
   );
 }

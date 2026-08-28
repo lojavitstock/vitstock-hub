@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { mockConversations } from '../services/mockData';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { ChatStatus, Conversation, WhatsappInstance } from '../types';
-import { ConversationFilter } from '../components/conversations/ConversationFilters';
-import { phoneVariants } from '../utils/phone';
+import { ConversationFilter, matchesConversationFilter } from '../utils/conversationTagFilters';
+import { canonicalPhoneDigits, phoneVariants } from '../utils/phone';
 import { reconcileConversations, reconcileConversationsMonotonic } from '../utils/conversationReconciliation';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 import { reconcileRealtimeConversation } from '../utils/realtimeUpdates';
@@ -119,7 +119,7 @@ export const useConversationInbox = ({
         (conversation) => conversation.id === activeConversationIdRef.current,
       );
       const previousActivePhone = previousActiveConversation && !previousActiveConversation.isGroup
-        ? previousActiveConversation.contact.phone.replace(/\D/g, '')
+        ? canonicalPhoneDigits(previousActiveConversation.contact.phone)
         : undefined;
       const mergedChats = realChats.map((conversation) => {
         const locallyReadAt = readOverridesRef.current.get(conversation.id);
@@ -143,7 +143,7 @@ export const useConversationInbox = ({
       setActiveConversationId((previousId) => {
         if (mergedChats.some((conversation) => conversation.id === previousId)) return previousId;
         const replacement = previousActivePhone
-          ? mergedChats.find((conversation) => conversation.contact.phone.replace(/\D/g, '') === previousActivePhone)
+          ? mergedChats.find((conversation) => canonicalPhoneDigits(conversation.contact.phone) === previousActivePhone)
           : undefined;
         return replacement?.id || previousId || mergedChats[0].id;
       });
@@ -250,12 +250,7 @@ export const useConversationInbox = ({
 
   const normalizedConversationSearch = normalizeSearchText(conversationSearch.trim());
   const visibleConversations = useMemo(() => conversations.filter((conversation) => {
-    const matchesFilter = filterTab === 'all'
-      || (filterTab === 'unread' && conversation.unreadCount > 0)
-      || (filterTab === 'unanswered' && conversationNeedsResponse(conversation))
-      || (filterTab === 'groups' && conversation.isGroup === true)
-      || (filterTab === 'delivery' && conversation.status === 'pending')
-      || (filterTab === 'resolved' && conversation.status === 'resolved');
+    const matchesFilter = matchesConversationFilter(conversation, filterTab, conversationNeedsResponse);
     if (!matchesFilter) return false;
     if (!normalizedConversationSearch) return true;
     return [conversation.contact.name, conversation.groupName || '', conversation.contact.phone]

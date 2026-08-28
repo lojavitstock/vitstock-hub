@@ -1,7 +1,7 @@
 import { ChatStatus, WhatsappInstance, Conversation, Message } from '../types';
 import { mockInstances, mockConversations } from './mockData';
 import { evolutionMessagePreview, isEvolutionReactionEvent, normalizeEvolutionMessage } from './evolutionMessageAdapter';
-import { phoneVariants } from '../utils/phone';
+import { canonicalPhoneDigits, phoneVariants } from '../utils/phone';
 import { providerDisplayName, providerFallbackDisplayName, providerIdentityKey, providerPhoneDigits } from '../utils/whatsappIdentity';
 import { callMessageInfo } from '../utils/callMessage';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
@@ -230,6 +230,30 @@ const apiFetch = (path: string, init?: RequestInit) => fetch(`${API_URL}${path}`
   },
 });
 
+export class EvolutionApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = 'EvolutionApiError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+const errorFromResponse = (response: Response, body: any, fallback: string) => (
+  new EvolutionApiError(
+    typeof body?.error === 'string' && body.error.trim()
+      ? body.error.trim()
+      : typeof body?.message === 'string' && body.message.trim()
+        ? body.message.trim()
+        : fallback,
+    response.status,
+    typeof body?.code === 'string' ? body.code : undefined,
+  )
+);
+
 export type EvolutionRealtimeEvent = RealtimeEventPayload;
 
 export class EvolutionApiService {
@@ -438,6 +462,20 @@ export class EvolutionApiService {
       const statusesMap = new Map<string, { status: ChatStatus; updatedAt: number }>();
       const statusesByNumber = new Map<string, { status: ChatStatus; updatedAt: number }>();
       const readStatesMap = new Map<string, number>();
+      const conversationTagsMap = new Map<string, Conversation['conversationTags']>();
+
+      if (Array.isArray(payload.conversationTags)) {
+        payload.conversationTags.forEach((entry: any) => {
+          const remoteJid = String(entry?.remoteJid || '').trim();
+          if (!remoteJid || !Array.isArray(entry?.tags)) return;
+          conversationTagsMap.set(remoteJid, entry.tags.map((tag: any) => ({
+            id: String(tag.id),
+            name: String(tag.name),
+            color: String(tag.color || '#EABB19'),
+            ...(tag.systemKey ? { systemKey: String(tag.systemKey) } : {}),
+          })));
+        });
+      }
 
       if (Array.isArray(payload.assignments)) {
         payload.assignments.forEach((assignment: any) => {
@@ -535,7 +573,7 @@ export class EvolutionApiService {
           const key = providerIdentityKey(identity?.identity);
           if (!key) return;
           const phone = typeof identity?.phone === 'string' && identity.phone.replace(/\D/g, '').length >= 8
-            ? identity.phone.replace(/\D/g, '')
+            ? canonicalPhoneDigits(identity.phone)
             : undefined;
           const value = {
             phone,
@@ -562,7 +600,7 @@ export class EvolutionApiService {
       if (Array.isArray(contactsData)) {
         contactsData.forEach((c: any) => {
           const rawJid = c.remoteJid || c.id || '';
-          const phoneKey = providerPhoneDigits(c);
+          const phoneKey = canonicalPhoneDigits(providerPhoneDigits(c));
           if (phoneKey && providerDisplayName(c)) {
             contactsMap.set(phoneKey, {
               name: providerDisplayName(c)!,
@@ -585,10 +623,10 @@ export class EvolutionApiService {
         
         // Usa o remoteJid exato com que a Evolution API gravou o chat no banco do Railway
         const rawRemoteJid = item.remoteJid || item.id || `chat-${index}`;
-        const providerPhone = providerPhoneDigits(item);
+        const providerPhone = canonicalPhoneDigits(providerPhoneDigits(item));
         const identity = whatsappIdentitiesMap.get(providerIdentityKey(rawRemoteJid))
           || phoneVariants(providerPhone).map((phone) => whatsappIdentitiesMap.get(`phone:${phone}`)).find(Boolean);
-        const cleanNumber = isGroup ? '' : (identity?.phone || providerPhone || '');
+        const cleanNumber = isGroup ? '' : (canonicalPhoneDigits(identity?.phone) || providerPhone || '');
         const conversationKey = isGroup ? rawRemoteJid : cleanNumber || rawRemoteJid;
         const altJid = item.lastMessage?.key?.remoteJidAlt;
         const assignment = assignmentsMap.get(rawRemoteJid)
@@ -686,6 +724,10 @@ export class EvolutionApiService {
           unreadCount,
           status: effectiveStatus,
           needsResponse,
+          conversationTags: conversationTagsMap.get(rawRemoteJid) || item.conversationTags || [],
+          trafficSource: typeof lastMessage?.metadata?.trafficSource === 'string'
+            ? lastMessage.metadata.trafficSource
+            : typeof item.trafficSource === 'string' ? item.trafficSource : undefined,
           department: 'Atendimento Geral',
           assignedAttendant: assignment ? { id: assignment.id, name: assignment.name } : undefined,
           lease,
@@ -868,7 +910,7 @@ export class EvolutionApiService {
       });
 
       const responseData = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(responseData?.error || 'NÃ£o foi possÃ­vel enviar a mensagem');
+      if (!res.ok) throw errorFromResponse(res, responseData, 'Não foi possível enviar a mensagem');
       console.log('[EvolutionAPI] Resposta do envio real:', responseData);
       return responseData;
     } catch (err) {
@@ -1113,7 +1155,7 @@ export class EvolutionApiService {
       }),
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body?.error || 'Não foi possível enviar o anexo');
+    if (!response.ok) throw errorFromResponse(response, body, 'Não foi possível enviar o anexo');
     return body;
   }
 

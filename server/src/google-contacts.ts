@@ -1268,7 +1268,7 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
           `SELECT c.id, c.name, c.phone, c.manual_override, c.source, c.google_resource_name,
               EXISTS (SELECT 1 FROM contact_channel_identities ci WHERE ci.company_id = c.company_id AND ci.contact_id = c.id AND ci.channel = 'whatsapp') AS has_whatsapp_identity,
               EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = c.company_id AND cp.contact_id = c.id AND cp.source = 'whatsapp') AS has_whatsapp_phone,
-              0::int AS conversation_count
+              (SELECT COUNT(*)::int FROM conversations cv WHERE cv.company_id = c.company_id AND cv.contact_id = c.id) AS conversation_count
            FROM contacts c WHERE c.company_id = $1 AND c.google_resource_name = $2 LIMIT 1`,
           [request.user!.companyId, contact.resourceName],
         )
@@ -1277,28 +1277,38 @@ export async function registerGoogleContactRoutes(app: FastifyInstance) {
         `SELECT c.id, c.name, c.phone, c.manual_override, c.source, c.google_resource_name,
             EXISTS (SELECT 1 FROM contact_channel_identities ci WHERE ci.company_id = c.company_id AND ci.contact_id = c.id AND ci.channel = 'whatsapp') AS has_whatsapp_identity,
             EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = c.company_id AND cp.contact_id = c.id AND cp.source = 'whatsapp') AS has_whatsapp_phone,
-            0::int AS conversation_count
+            (SELECT COUNT(*)::int FROM conversations cv WHERE cv.company_id = c.company_id AND cv.contact_id = c.id) AS conversation_count
          FROM contacts c
          WHERE c.company_id = $1
            AND (regexp_replace(c.phone, '\\D', '', 'g') = ANY($2::text[])
                 OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.company_id = c.company_id AND cp.contact_id = c.id AND cp.normalized_phone = ANY($2::text[])))
-         ORDER BY c.id LIMIT 1`, [request.user!.companyId, phoneDigits],
+         ORDER BY c.id`, [request.user!.companyId, phoneDigits],
       );
       const resourceRow = resourceLocal.rows[0];
-      const phoneRow = phoneLocal.rows[0];
-      const safeHubGoogleLink = resourceRow && phoneRow && resourceRow.id !== phoneRow.id
-        && isProvisionalWhatsapp({
-          id: phoneRow.id,
-          source: phoneRow.source,
-          manualOverride: phoneRow.manual_override,
-          hasWhatsappIdentity: phoneRow.has_whatsapp_identity,
-          hasWhatsappPhone: phoneRow.has_whatsapp_phone,
-          googleResourceName: phoneRow.google_resource_name,
-          conversationCount: phoneRow.conversation_count,
-        })
+      const phoneCandidates = phoneLocal.rows.filter((candidate) => candidate.id !== resourceRow?.id);
+      const provisionalPhoneRows = phoneCandidates.filter((candidate) => isProvisionalWhatsapp({
+        id: candidate.id,
+        source: candidate.source,
+        manualOverride: candidate.manual_override,
+        hasWhatsappIdentity: candidate.has_whatsapp_identity,
+        hasWhatsappPhone: candidate.has_whatsapp_phone,
+        googleResourceName: candidate.google_resource_name,
+        conversationCount: candidate.conversation_count,
+      }));
+      const phoneRow = resourceRow
+        ? (provisionalPhoneRows.length === 1 ? provisionalPhoneRows[0] : resourceRow)
+        : phoneLocal.rows[0];
+      const safeHubGoogleLink = Boolean(resourceRow
+        && phoneRow
+        && resourceRow.id !== phoneRow.id
+        && provisionalPhoneRows.length === 1
+        && phoneCandidates.length === 1
         && resourceRow.source === 'google'
         && !resourceRow.has_whatsapp_identity
-        && !resourceRow.has_whatsapp_phone;
+        && !resourceRow.has_whatsapp_phone);
+      if (!resourceRow && phoneLocal.rows.length > 1) {
+        return reply.code(409).send({ error: 'O telefone informado já pertence a outro contato. Revise a duplicidade antes de salvar.', conflict: true });
+      }
       if (resourceRow && phoneRow && resourceRow.id !== phoneRow.id && !safeHubGoogleLink) {
         return reply.code(409).send({ error: 'O telefone informado já pertence a outro contato. Revise a duplicidade antes de salvar.', conflict: true });
       }

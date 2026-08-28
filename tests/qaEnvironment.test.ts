@@ -198,10 +198,34 @@ test('Google identity reconciliation uses exact canonical phone keys', () => {
   assert.notEqual(googlePhoneKey('2199999999'), googlePhoneKey('21999999999'));
 });
 
-test('legacy WhatsApp sources remain eligible only with explicit WhatsApp evidence', () => {
+test('legacy WhatsApp sources remain eligible only with explicit evidence and conversation history', () => {
   assert.equal(isProvisionalWhatsapp({ id: 'legacy', source: 'whatsapp', manualOverride: {}, hasWhatsappIdentity: true, hasWhatsappPhone: false, googleResourceName: null }), true);
-  assert.equal(isProvisionalWhatsapp({ id: 'legacy-system', source: 'system', manualOverride: {}, hasWhatsappIdentity: true, hasWhatsappPhone: true, googleResourceName: null }), false);
+  assert.equal(isProvisionalWhatsapp({ id: 'legacy-system', source: 'system', manualOverride: {}, hasWhatsappIdentity: true, hasWhatsappPhone: true, conversationCount: 1, googleResourceName: null }), true);
+  assert.equal(isProvisionalWhatsapp({ id: 'legacy-system-without-history', source: 'system', manualOverride: {}, hasWhatsappIdentity: true, hasWhatsappPhone: true, conversationCount: 0, googleResourceName: null }), false);
+  assert.equal(isProvisionalWhatsapp({ id: 'legacy-system-no-whatsapp', source: 'system', manualOverride: {}, hasWhatsappIdentity: false, hasWhatsappPhone: false, conversationCount: 1, googleResourceName: null }), false);
   assert.equal(isProvisionalWhatsapp({ id: 'manual', source: 'whatsapp', manualOverride: { name: 'manual' }, hasWhatsappIdentity: true, hasWhatsappPhone: true, googleResourceName: null }), false);
+});
+
+test('Google identity reconciliation accepts one explicit legacy WhatsApp principal', () => {
+  const linked = {
+    id: 'google-contact-legacy-case',
+    source: 'google',
+    manualOverride: {},
+    hasWhatsappIdentity: false,
+    hasWhatsappPhone: false,
+    googleResourceName: 'people/legacy-case',
+    conversationCount: 0,
+  };
+  const legacy = {
+    id: 'legacy-whatsapp-contact',
+    source: 'system',
+    manualOverride: {},
+    hasWhatsappIdentity: true,
+    hasWhatsappPhone: true,
+    googleResourceName: null,
+    conversationCount: 1,
+  };
+  assert.equal(classifyGooglePhoneMatch({ candidates: [linked, legacy], googlePersonCount: 1, resourceName: linked.googleResourceName }), 'safe_reconcile_linked');
 });
 
 test('a linked Hub row is never implicitly archived as a Google duplicate', () => {

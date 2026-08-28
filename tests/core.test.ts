@@ -2,15 +2,16 @@ import { EventEmitter } from 'node:events';
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import type { ServerResponse } from 'node:http';
-import { phoneVariants } from '../src/utils/phone';
+import { canonicalPhoneDigits, phoneVariants } from '../src/utils/phone';
 import { mergeConversationMessages } from '../src/utils/messageMerge';
 import { evolutionMessagePreview, isEvolutionReactionEvent, isWhatsAppGroupJid, normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
 import { callMessageInfo } from '../src/utils/callMessage';
-import { reconcileConversations, reconcileConversationsMonotonic } from '../src/utils/conversationReconciliation';
+import { mergeContactIdentity, reconcileConversations, reconcileConversationsMonotonic } from '../src/utils/conversationReconciliation';
 import { createInFlightRequestCoordinator, createLatestRequestGuard } from '../src/utils/requestCoordinator';
 import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
 import { createMessageNotificationDeduper } from '../src/utils/messageNotification';
 import { conversationNeedsResponse } from '../src/utils/conversationState';
+import { conversationTagCount, isTrafficConversation, matchesConversationFilter } from '../src/utils/conversationTagFilters';
 import { getMessageIdentityValues, getNewIncomingMessageIds } from '../src/utils/messageActivity';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../src/utils/realtimeConfig';
 import {
@@ -21,10 +22,13 @@ import {
 import { publishRealtimeEvent, registerRealtimeClient } from '../server/src/realtime';
 import {
   evolutionMessageIdFromResponse,
+  evolutionMessageReferenceFromResponse,
   evolutionReactionPayload,
   formatHubOutboundText,
   removeHubAgentPrefix,
 } from '../server/src/outboundMessage';
+import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_FILE_BYTES, MAX_MEDIA_REQUEST_BYTES } from '../server/src/mediaLimits';
+import { isMediaBase64SizeAllowed, isMediaFileSizeAllowed } from '../src/utils/mediaLimits';
 import { createOutboundRequestCoordinator, outboundDispatchAction, outboundIdempotencyLockKey } from '../server/src/outboundIdempotency';
 import { isNonRenderableProviderMessage, unwrapProviderMessage } from '../server/src/providerMessagePolicy';
 import {
@@ -36,6 +40,7 @@ import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
 import { canDownloadMessageMedia, messageCopyText, messageMenuActionsFor } from '../src/utils/messageActions';
+import { collectBrokenImages, installBrowserDiagnostics } from './e2e/support/diagnostics';
 import {
   canReactToMessage,
   nextHubReactionEmoji,
@@ -59,6 +64,9 @@ import {
   isAllowedFrontendOrigin,
   parseFrontendOrigins,
 } from '../server/src/config';
+import { normalizeTagName } from '../server/src/conversationTags';
+import { normalizeConversationTags } from '../src/utils/conversationTags';
+import { outboundErrorMessage } from '../src/utils/outboundError';
 import type { Conversation, Message } from '../src/types';
 
 const message = (
@@ -915,6 +923,137 @@ test('reconcilia uma conversa alterada preservando as demais', () => {
   assert.equal(reconciled[1].lastMessage, 'Mensagem atualizada');
 });
 
+test('filtros de conversa usam tags tenant-scoped e tráfego sem N+1', () => {
+  const trafficTag = { id: 'traffic', name: 'Tráfego', color: '#F97316', systemKey: 'traffic' } as const;
+  const vipTag = { id: 'vip', name: 'VIP', color: '#EABB19' } as const;
+  const trafficConversation = conversation('traffic', {
+    conversationTags: [trafficTag, vipTag],
+    trafficSource: 'qa_campaign',
+    unreadCount: 2,
+  });
+  const normalConversation = conversation('normal', { conversationTags: [], unreadCount: 0 });
+  const all = [trafficConversation, normalConversation];
+
+  assert.equal(isTrafficConversation(trafficConversation), true);
+  assert.equal(isTrafficConversation(normalConversation), false);
+  assert.equal(matchesConversationFilter(trafficConversation, 'traffic', conversationNeedsResponse), true);
+  assert.equal(matchesConversationFilter(trafficConversation, 'tag:vip', conversationNeedsResponse), true);
+  assert.equal(matchesConversationFilter(normalConversation, 'tag:vip', conversationNeedsResponse), false);
+  assert.equal(conversationTagCount(all, trafficTag), 1);
+  assert.equal(conversationTagCount(all, vipTag), 1);
+});
+
+test('snapshot pobre de envio não substitui nome e avatar já conhecidos', () => {
+  const previous = conversation('conversation-identity', {
+    contact: {
+      ...conversation('conversation-identity').contact,
+      id: 'contact-rich',
+      name: 'Claudio',
+      avatar: 'https://example.test/claudio.jpg',
+    },
+  });
+  const snapshot = {
+    ...cloneConversation(previous),
+    contact: {
+      ...previous.contact,
+      id: 'contact-sparse',
+      name: '+5521999999999',
+      avatar: '',
+    },
+  };
+  const reconciled = reconcileConversationsMonotonic([previous], [snapshot]);
+
+  assert.equal(reconciled[0]?.contact.name, 'Claudio');
+  assert.equal(reconciled[0]?.contact.avatar, 'https://example.test/claudio.jpg');
+  assert.equal(reconciled[0]?.contact.id, 'contact-rich');
+});
+
+test('canonicalPhoneDigits converge aliases nacionais e internacionais do provedor', () => {
+  assert.equal(canonicalPhoneDigits('21998877665'), '5521998877665');
+  assert.equal(canonicalPhoneDigits('5521998877665'), '5521998877665');
+  assert.equal(canonicalPhoneDigits('+55 (21) 99887-7665'), '5521998877665');
+  assert.equal(canonicalPhoneDigits('164794086760597@lid'), '');
+});
+
+test('contadores e filtros de não lidas e não respondidas usam a mesma população', () => {
+  const conversations = [
+    conversation('a', { unreadCount: 2, needsResponse: true, lastMessageFromMe: false }),
+    conversation('b', { unreadCount: 0, needsResponse: true, lastMessageFromMe: false }),
+    conversation('c', { unreadCount: 3, needsResponse: false, lastMessageFromMe: true }),
+    conversation('d', { unreadCount: 0, needsResponse: false, lastMessageFromMe: true }),
+  ];
+  const needsResponse = conversationNeedsResponse;
+
+  assert.equal(conversations.filter((item) => matchesConversationFilter(item, 'unread', needsResponse)).length, 2);
+  assert.equal(conversations.filter((item) => matchesConversationFilter(item, 'unanswered', needsResponse)).length, 2);
+  assert.equal(conversations.filter((item) => matchesConversationFilter(item, 'all', needsResponse)).length, 4);
+  assert.equal(conversations.filter((item) => item.unreadCount > 0).length, 2);
+  assert.equal(conversations.filter(needsResponse).length, 2);
+});
+
+test('tráfego exige metadata real ou tag sistêmica e não usa texto como heurística', () => {
+  const trafficTag = { id: 'traffic', name: 'Tráfego', color: '#F97316', systemKey: 'traffic' } as const;
+  const realTraffic = conversation('real-traffic', { trafficSource: 'campaign_referral' });
+  const instagramText = conversation('instagram-text', { lastMessage: 'Veja instagram.com/oferta', conversationTags: [] });
+  const manualTraffic = conversation('manual-traffic', { conversationTags: [trafficTag] });
+  const both = conversation('both', { trafficSource: 'campaign_referral', conversationTags: [trafficTag] });
+  const conversations = [realTraffic, instagramText, manualTraffic, both];
+
+  assert.equal(conversations.filter((item) => matchesConversationFilter(item, 'traffic', conversationNeedsResponse)).length, 3);
+  assert.equal(matchesConversationFilter(instagramText, 'traffic', conversationNeedsResponse), false);
+  assert.equal(conversationTagCount(conversations, trafficTag), 3);
+});
+
+test('gerenciador de tags mantém unicidade de nomes sem diferenciar caixa ou espaços', () => {
+  assert.equal(normalizeTagName('  Orçamento  '), 'orçamento');
+  assert.equal(normalizeTagName('ORÇAMENTO'), normalizeTagName('orçamento'));
+  assert.notEqual(normalizeTagName('Pós-venda'), normalizeTagName('Pós atendimento'));
+});
+
+test('tags da conversa são normalizadas sem converter assignment ou duplicar tráfego', () => {
+  const current = conversation('tagged', {
+    contact: {
+      ...conversation('tagged').contact,
+      tags: [{ id: 'assigned-user-1', name: 'Leonardo', color: '#A78BFA' }],
+    },
+    conversationTags: [
+      { id: 'traffic-manual', name: 'Tráfego', color: '#F97316', systemKey: 'traffic' },
+      { id: 'delivery', name: 'Entregas', color: '#10B981' },
+    ],
+    trafficSource: 'campaign_referral',
+  });
+  const tags = normalizeConversationTags(current, [
+    { id: 'traffic-definition', name: 'Tráfego', color: '#F97316', systemKey: 'traffic' },
+  ]);
+
+  assert.deepEqual(tags.map((tag) => tag.id), ['traffic-manual', 'delivery']);
+  assert.equal(tags.some((tag) => tag.id === 'assigned-user-1'), false);
+});
+
+test('trafficSource real aparece como tag efetiva quando não há link manual', () => {
+  const current = conversation('source-only', { conversationTags: [], trafficSource: 'whatsapp_campaign' });
+  const tags = normalizeConversationTags(current, []);
+
+  assert.deepEqual(tags, [{ id: 'traffic', name: 'Tráfego', color: '#F97316', systemKey: 'traffic' }]);
+});
+
+test('realtime atualiza tags da conversa sem alterar atividade ou identidade das demais', () => {
+  const first = conversation('first', { lastMessageAt: 2_000 });
+  const second = conversation('second', { lastMessageAt: 1_000 });
+  const previous = [first, second];
+  const next = reconcileRealtimeConversation(previous, {
+    type: 'conversation.updated',
+    remoteJid: first.id,
+    conversationTags: [{ id: 'tag-1', name: 'VIP', color: '#EABB19' }],
+  });
+
+  assert.ok(next);
+  assert.notStrictEqual(next, previous);
+  assert.equal(next?.[0]?.lastMessage, first.lastMessage);
+  assert.deepEqual(next?.[0]?.conversationTags, [{ id: 'tag-1', name: 'VIP', color: '#EABB19' }]);
+  assert.strictEqual(next?.[1], second);
+});
+
 test('reconcilia nova conversa preservando identidade dos itens antigos', () => {
   const previous = [conversation('a'), conversation('b')];
   const next = [...previous.map(cloneConversation), conversation('c')];
@@ -1179,6 +1318,49 @@ test('extrai o ID explícito da Evolution para texto, reply, mídia, documento e
     assert.equal(evolutionMessageIdFromResponse(payload), expectedId);
   }
   assert.equal(evolutionMessageIdFromResponse({ data: { message: { id: 'sem-key' } } }), undefined);
+});
+
+test('extrai envelopes adicionais de ID da Evolution sem aceitar IDs genéricos', () => {
+  const responses = [
+    [{ id: 'direct-message', status: 'SUCCESS' }, 'id', 'direct-message'],
+    [{ data: { id: 'data-message', status: 'SENT' } }, 'data.id', 'data-message'],
+    [{ messageId: 'message-id' }, 'messageId', 'message-id'],
+    [{ data: { messageId: 'data-message-id' } }, 'data.messageId', 'data-message-id'],
+    [{ messages: [{ key: { id: 'array-message-id' } }] }, 'messages[0].key.id', 'array-message-id'],
+  ] as const;
+
+  for (const [payload, sourcePath, messageId] of responses) {
+    assert.deepEqual(evolutionMessageReferenceFromResponse(payload), {
+      messageId,
+      sourcePath,
+    });
+  }
+  assert.equal(evolutionMessageIdFromResponse({ id: 'instance-id', name: 'vitstock_atendimento' }), undefined);
+  assert.equal(evolutionMessageIdFromResponse({ id: 'instance-id', status: 'OK', instance: 'vitstock_atendimento' }), undefined);
+  assert.equal(evolutionMessageIdFromResponse({ data: { id: 'request-id', resource: 'instance' } }), undefined);
+});
+
+test('contrato de mídia considera base64 e envelope JSON sem ampliar o limite global', () => {
+  assert.equal(MAX_MEDIA_FILE_BYTES, 10_000_000);
+  assert.equal(MAX_MEDIA_BASE64_CHARS, 14_000_000);
+  assert.equal(MAX_MEDIA_REQUEST_BYTES, 16 * 1024 * 1024);
+  assert.ok(Math.ceil(MAX_MEDIA_FILE_BYTES * 4 / 3) < MAX_MEDIA_BASE64_CHARS);
+  assert.equal(isMediaFileSizeAllowed(1_000_000), true);
+  assert.equal(isMediaFileSizeAllowed(MAX_MEDIA_FILE_BYTES), true);
+  assert.equal(isMediaFileSizeAllowed(MAX_MEDIA_FILE_BYTES + 1), false);
+  assert.equal(isMediaBase64SizeAllowed(MAX_MEDIA_BASE64_CHARS), true);
+  assert.equal(isMediaBase64SizeAllowed(MAX_MEDIA_BASE64_CHARS + 1), false);
+});
+
+test('erros outbound preservam feedback específico por status', () => {
+  const leaseError = Object.assign(new Error('A conversa está sendo atendida por Leo'), {
+    status: 409,
+    code: 'conversation_lease_active',
+  });
+  assert.equal(outboundErrorMessage(leaseError, 'Falha'), 'A conversa está sendo atendida por Leo');
+  assert.equal(outboundErrorMessage({ status: 413 }, 'Falha'), 'Arquivo excede o limite permitido.');
+  assert.equal(outboundErrorMessage({ status: 429 }, 'Falha'), 'Muitas tentativas. Aguarde alguns instantes e tente novamente.');
+  assert.equal(outboundErrorMessage({ status: 502 }, 'Falha'), 'O serviço do WhatsApp está indisponível no momento.');
 });
 
 test('mensagem do Henrique preserva conteúdo legítimo iniciado por asteriscos', () => {
@@ -2282,4 +2464,65 @@ test('reply action schedules focus for the composer textarea', () => {
     },
   );
   assert.equal(focused, true);
+});
+
+test('diagnóstico de imagens coleta página estável sem esconder falhas reais', async () => {
+  const diagnostics = { entries: [] as Array<{ kind: string; message: string }> };
+  const page = {
+    isClosed: () => false,
+    locator: () => ({
+      evaluateAll: async () => [{ src: 'https://example.test/avatar.png', alt: 'avatar', conversation: '' }],
+    }),
+  } as any;
+
+  await collectBrokenImages(page, diagnostics as any);
+  assert.equal(diagnostics.entries[0]?.kind, 'broken-image');
+});
+
+test('diagnóstico não falha quando a página navega durante a coleta', async () => {
+  const diagnostics = { entries: [] as Array<{ kind: string; message: string }> };
+  const page = {
+    isClosed: () => false,
+    locator: () => ({
+      evaluateAll: async () => { throw new Error('Execution context was destroyed, most likely because of a navigation'); },
+    }),
+  } as any;
+
+  await assert.doesNotReject(() => collectBrokenImages(page, diagnostics as any));
+  assert.equal(diagnostics.entries[0]?.kind, 'diagnostics-unavailable');
+});
+
+test('diagnóstico não falha quando a página já foi fechada', async () => {
+  const diagnostics = { entries: [] as Array<{ kind: string; message: string }> };
+  const page = { isClosed: () => true } as any;
+
+  await assert.doesNotReject(() => collectBrokenImages(page, diagnostics as any));
+  assert.equal(diagnostics.entries[0]?.kind, 'diagnostics-unavailable');
+});
+
+test('diagnóstico propaga erros inesperados do collector', async () => {
+  const diagnostics = { entries: [] as Array<{ kind: string; message: string }> };
+  const page = {
+    isClosed: () => false,
+    locator: () => ({
+      evaluateAll: async () => { throw new Error('collector failure'); },
+    }),
+  } as any;
+
+  await assert.rejects(() => collectBrokenImages(page, diagnostics as any), /collector failure/);
+});
+
+test('diagnósticos de console.error e pageerror continuam sendo capturados', () => {
+  const listeners = new Map<string, (value: any) => void>();
+  const page = {
+    on: (event: string, listener: (value: any) => void) => { listeners.set(event, listener); },
+    url: () => 'http://localhost:3000/atendimento',
+  } as any;
+  const diagnostics = installBrowserDiagnostics(page);
+
+  listeners.get('console')?.({ type: () => 'error', text: () => 'erro real' });
+  listeners.get('pageerror')?.({ message: 'exceção real' });
+
+  assert.equal(diagnostics.entries.filter((entry) => entry.kind === 'console.error').length, 1);
+  assert.equal(diagnostics.entries.filter((entry) => entry.kind === 'pageerror').length, 1);
 });

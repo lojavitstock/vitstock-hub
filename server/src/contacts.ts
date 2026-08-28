@@ -175,12 +175,12 @@ export async function registerContactRoutes(app: FastifyInstance) {
                       THEN '55' || regexp_replace(dup.phone, '\\D', '', 'g')
                       ELSE regexp_replace(dup.phone, '\\D', '', 'g') END)
             AND NOT (
-              (((c.source IN ('hub', 'whatsapp')) AND c.google_resource_name IS NULL
+              (((c.source IN ('hub', 'whatsapp') OR (c.source = 'system' AND EXISTS (SELECT 1 FROM conversations c_system_cv WHERE c_system_cv.company_id = c.company_id AND c_system_cv.contact_id = c.id AND c_system_cv.is_group = false))) AND c.google_resource_name IS NULL
                  AND (EXISTS (SELECT 1 FROM contact_channel_identities cwi WHERE cwi.company_id = c.company_id AND cwi.contact_id = c.id AND cwi.channel = 'whatsapp')
                       OR EXISTS (SELECT 1 FROM contact_phones cwp WHERE cwp.company_id = c.company_id AND cwp.contact_id = c.id AND cwp.source = 'whatsapp')))
                AND (other_contact.source = 'google' OR other_contact.google_resource_name IS NOT NULL))
               OR
-              (((other_contact.source IN ('hub', 'whatsapp')) AND other_contact.google_resource_name IS NULL
+              (((other_contact.source IN ('hub', 'whatsapp') OR (other_contact.source = 'system' AND EXISTS (SELECT 1 FROM conversations other_system_cv WHERE other_system_cv.company_id = other_contact.company_id AND other_system_cv.contact_id = other_contact.id AND other_system_cv.is_group = false))) AND other_contact.google_resource_name IS NULL
                  AND (EXISTS (SELECT 1 FROM contact_channel_identities owi WHERE owi.company_id = other_contact.company_id AND owi.contact_id = other_contact.id AND owi.channel = 'whatsapp')
                       OR EXISTS (SELECT 1 FROM contact_phones owp WHERE owp.company_id = other_contact.company_id AND owp.contact_id = other_contact.id AND owp.source = 'whatsapp')))
                AND (c.source = 'google' OR c.google_resource_name IS NOT NULL))

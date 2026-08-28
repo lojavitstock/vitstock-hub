@@ -1,8 +1,9 @@
 import React from 'react';
 import { Archive } from 'lucide-react';
 import { Conversation } from '../../types';
+import { ConversationFilter } from '../../utils/conversationTagFilters';
 
-export type ConversationFilter = 'all' | 'unread' | 'unanswered' | 'groups' | 'delivery' | 'resolved';
+export type { ConversationFilter } from '../../utils/conversationTagFilters';
 
 type ConversationFiltersProps = {
   conversations: Conversation[];
@@ -26,7 +27,7 @@ export const ConversationFilters = React.memo<ConversationFiltersProps>(({
   onFilterChange,
   needsResponse,
 }) => {
-  const counts = React.useMemo(() => conversations.reduce<Record<ConversationFilter, number>>((result, conversation) => {
+  const counts = React.useMemo(() => conversations.reduce<Record<string, number>>((result, conversation) => {
     if (conversation.unreadCount > 0) result.unread += 1;
     if (needsResponse(conversation)) result.unanswered += 1;
     if (conversation.isGroup) result.groups += 1;
@@ -45,7 +46,7 @@ export const ConversationFilters = React.memo<ConversationFiltersProps>(({
   return (
   <div className="grid grid-cols-8 gap-1.5 rounded-xl border border-[#3a474e] bg-[#141d22] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.025),0_8px_24px_rgba(0,0,0,0.14)]">
     {FILTERS.map(({ id, label, width }) => {
-      const count = counts[id];
+      const count = counts[id] || 0;
       const isActive = activeFilter === id;
       const isResolved = id === 'resolved';
       const effectiveWidth = id === 'all' || id === 'unread'
