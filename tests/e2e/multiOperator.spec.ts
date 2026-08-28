@@ -48,6 +48,14 @@ test('dois operadores QA compartilham SSE e mantêm o lease da conversa', async 
     const textB = `QA Fernanda ${Date.now()}`;
     const composerA = pageA.locator('textarea[placeholder*="Digite sua mensagem"]');
     const composerB = pageB.locator('textarea[placeholder*="Digite sua mensagem"]');
+    let leaseRemoteJid = '';
+    let leaseNumber = '';
+    pageA.on('request', (request) => {
+      if (!request.url().endsWith('/api/evolution/messages/send')) return;
+      const body = request.postDataJSON() as { remoteJid?: string; number?: string } | null;
+      leaseRemoteJid = body?.remoteJid || '';
+      leaseNumber = body?.number || '';
+    });
     await composerA.fill(textA);
     const sendAResponsePromise = pageA.waitForResponse((response) => response.url().endsWith('/api/evolution/messages/send'));
     await composerA.press('Enter');
@@ -67,10 +75,12 @@ test('dois operadores QA compartilham SSE e mantêm o lease da conversa', async 
 
     // Leo owns Ana's lease after the first send. Fernanda receives the
     // explicit contention response rather than a generic send failure.
+    expect(leaseRemoteJid).toBeTruthy();
+    expect(leaseNumber).toBeTruthy();
     const leaseResponse = await contextB.request.post('http://localhost:3001/api/evolution/messages/send', {
       data: {
-        number: '5521990000001',
-        remoteJid: '5521990000001@s.whatsapp.net',
+        number: leaseNumber,
+        remoteJid: leaseRemoteJid,
         text: `QA blocked ${Date.now()}`,
         clientMessageId: `qa-lease-${Date.now()}`,
       },

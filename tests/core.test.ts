@@ -51,6 +51,7 @@ import { positionMessageActionMenu, positionReactionPalette } from '../src/utils
 import {
   canRestoreComposerDraft,
   captureComposerSubmission,
+  insertComposerText,
   readConversationDraft,
   scheduleComposerFocus,
   writeConversationDraft,
@@ -68,6 +69,7 @@ import {
 import { normalizeTagName } from '../server/src/conversationTags';
 import { normalizeConversationTags } from '../src/utils/conversationTags';
 import { outboundErrorMessage } from '../src/utils/outboundError';
+import { classifyAttachmentFile } from '../src/utils/composerAttachment';
 import type { Conversation, Message } from '../src/types';
 
 const message = (
@@ -2508,6 +2510,20 @@ test('reply action schedules focus for the composer textarea', () => {
     },
   );
   assert.equal(focused, true);
+});
+
+test('attachment selection only classifies supported media without sending', () => {
+  assert.equal(classifyAttachmentFile({ type: 'image/png', name: 'produto.png' }), 'image');
+  assert.equal(classifyAttachmentFile({ type: 'video/mp4', name: 'video.mp4' }), 'video');
+  assert.equal(classifyAttachmentFile({ type: 'application/pdf', name: 'catalogo.pdf' }), 'document');
+  assert.equal(classifyAttachmentFile({ type: '', name: 'contrato.docx' }), 'document');
+  assert.equal(classifyAttachmentFile({ type: 'application/zip', name: 'arquivo.zip' }), null);
+});
+
+test('emoji insertion preserves the current cursor and Unicode sequence', () => {
+  const inserted = insertComposerText({ value: 'Bom tudo', inserted: '👨‍👩‍👧', start: 4, end: 4 });
+  assert.equal(inserted.value, 'Bom 👨‍👩‍👧tudo');
+  assert.equal(inserted.cursor, 4 + '👨‍👩‍👧'.length);
 });
 
 test('diagnóstico de imagens coleta página estável sem esconder falhas reais', async () => {

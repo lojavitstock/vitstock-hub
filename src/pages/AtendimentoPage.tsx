@@ -46,6 +46,7 @@ import { addConversationTag, createConversationTag, deleteConversationTag, fetch
 import { normalizeConversationTags } from '../utils/conversationTags';
 import { isMediaBase64SizeAllowed, isMediaFileSizeAllowed } from '../utils/mediaLimits';
 import { outboundErrorMessage } from '../utils/outboundError';
+import { classifyAttachmentFile, type AttachmentDraft, type ComposerMediaType } from '../utils/composerAttachment';
 import {
   canReactToMessage,
   nextHubReactionEmoji,
@@ -80,6 +81,8 @@ export const AtendimentoPage: React.FC = () => {
     writeConversationDraft(composerDraftsRef.current, conversationId, value);
   }, []);
   const [sendingMedia, setSendingMedia] = useState(false);
+  const [attachmentDraft, setAttachmentDraft] = useState<AttachmentDraft | null>(null);
+  const attachmentDraftRef = useRef<AttachmentDraft | null>(null);
   const [isInternalNote, setIsInternalNote] = useState(false);
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
@@ -94,6 +97,25 @@ export const AtendimentoPage: React.FC = () => {
   const [conversationTags, setConversationTags] = useState<Tag[]>([]);
   const [showConversationTagMenu, setShowConversationTagMenu] = useState(false);
   const conversationTagMenuRef = useRef<HTMLDivElement>(null);
+
+  const replaceAttachmentDraft = useCallback((next: AttachmentDraft | null) => {
+    const previous = attachmentDraftRef.current;
+    if (previous && previous !== next && previous.previewUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+      URL.revokeObjectURL(previous.previewUrl);
+    }
+    attachmentDraftRef.current = next;
+    setAttachmentDraft(next);
+  }, []);
+
+  const clearAttachmentDraft = useCallback(() => replaceAttachmentDraft(null), [replaceAttachmentDraft]);
+
+  useEffect(() => () => {
+    const draft = attachmentDraftRef.current;
+    if (draft?.previewUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+      URL.revokeObjectURL(draft.previewUrl);
+    }
+    attachmentDraftRef.current = null;
+  }, []);
 
   const {
     conversations,
@@ -142,7 +164,13 @@ export const AtendimentoPage: React.FC = () => {
     activeConversationIdRef.current = activeConvId;
     setReplyTo(null);
     setShowConversationTagMenu(false);
-  }, [activeConvId]);
+    clearAttachmentDraft();
+  }, [activeConvId, clearAttachmentDraft]);
+
+  const handleToggleInternalNote = useCallback((value: boolean) => {
+    if (value) clearAttachmentDraft();
+    setIsInternalNote(value);
+  }, [clearAttachmentDraft]);
 
   useEffect(() => {
     if (!showConversationTagMenu) return undefined;
@@ -822,7 +850,12 @@ export const AtendimentoPage: React.FC = () => {
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!composerTextRef.current.trim() || !activeConv) return;
+    const pendingAttachment = attachmentDraftRef.current;
+    if ((!composerTextRef.current.trim() && !pendingAttachment) || !activeConv) return;
+    if (pendingAttachment) {
+      await sendAttachmentDraft(pendingAttachment, e);
+      return;
+    }
     if (activeChatLocked) {
       setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
       return;
@@ -972,7 +1005,8 @@ export const AtendimentoPage: React.FC = () => {
     }
   };
 
-  const handleAttachmentFile = async (file: File) => {
+  const sendAttachmentDraft = async (draft: AttachmentDraft, e: React.FormEvent) => {
+    const file = draft.file;
     if (!file || !activeConv || isInternalNote || sendingMedia) return;
     if (activeChatLocked) {
       setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
@@ -986,19 +1020,8 @@ export const AtendimentoPage: React.FC = () => {
       setAssignmentFeedback('O anexo deve ter no máximo 10 MB.');
       return;
     }
-    const isImage = file.type.startsWith('image/');
-    const isVideo = file.type.startsWith('video/');
+    const mediatype: ComposerMediaType = draft.mediaType;
     const fileExtension = file.name.toLowerCase().split('.').pop() || '';
-    const isDocument = file.type === 'application/pdf'
-      || file.type.startsWith('application/msword')
-      || file.type.startsWith('application/vnd.openxmlformats-officedocument')
-      || ['pdf', 'doc', 'docx'].includes(fileExtension);
-    if (!isImage && !isVideo && !isDocument) {
-      setAssignmentFeedback('Formato não suportado. Envie uma imagem, vídeo ou documento.');
-      return;
-    }
-
-    const mediatype: 'image' | 'video' | 'document' = isImage ? 'image' : isVideo ? 'video' : 'document';
     const label = mediatype === 'image' ? '[Imagem]' : mediatype === 'video' ? '[Vídeo]' : '[Documento]';
     const submission = captureComposerSubmission({
       text: composerTextRef.current,
@@ -1122,6 +1145,7 @@ export const AtendimentoPage: React.FC = () => {
         pendingContactChatRef.current = null;
         setPendingContactChatId(null);
       }
+      if (attachmentDraftRef.current === draft) clearAttachmentDraft();
     } catch (error) {
       traceOutbound('http.completed', { ok: false });
       if (activeConversationIdRef.current === activeConv.id) {
@@ -1135,10 +1159,43 @@ export const AtendimentoPage: React.FC = () => {
     }
   };
 
+  const handleAttachmentSelected = (file: File) => {
+    if (!file || !activeConv || isInternalNote || sendingMedia) return;
+    if (activeChatLocked) {
+      setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
+      return;
+    }
+    if (!isMock && whatsappStatus !== 'connected') {
+      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de selecionar anexos.');
+      return;
+    }
+    if (!isMediaFileSizeAllowed(file.size)) {
+      setAssignmentFeedback('O anexo deve ter no máximo 10 MB.');
+      return;
+    }
+    const mediaType = classifyAttachmentFile(file);
+    if (!mediaType) {
+      setAssignmentFeedback('Formato não suportado. Envie uma imagem, vídeo ou documento.');
+      return;
+    }
+    const previewUrl = typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
+      ? URL.createObjectURL(file)
+      : '';
+    replaceAttachmentDraft({
+      file,
+      mediaType,
+      previewUrl,
+      fileName: file.name,
+      mimeType: file.type,
+      size: file.size,
+    });
+    setAssignmentFeedback('');
+  };
+
   const handleAttachmentChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
-    if (file) await handleAttachmentFile(file);
+    if (file) handleAttachmentSelected(file);
   };
 
   const handleInputPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -1156,7 +1213,7 @@ export const AtendimentoPage: React.FC = () => {
       || Array.from(event.clipboardData.files).find((candidate) => candidate.type.startsWith('image/'));
     if (!file) return;
     event.preventDefault();
-    void handleAttachmentFile(file);
+    handleAttachmentSelected(file);
   };
 
   const retryFailedMessage = useCallback(async (message: Message) => {
@@ -1682,10 +1739,13 @@ export const AtendimentoPage: React.FC = () => {
               attachmentInputRef={attachmentInputRef}
               onSubmit={handleSendMessage}
               onTextChange={handleComposerTextChange}
-              onToggleInternalNote={setIsInternalNote}
+              onToggleInternalNote={handleToggleInternalNote}
               onToggleQuickReply={() => setQuickReplyOpen((open) => !open)}
               onAttachmentChange={handleAttachmentChange}
               onInputPaste={handleInputPaste}
+              attachmentDraft={attachmentDraft}
+              onRemoveAttachment={clearAttachmentDraft}
+              activeConversationId={activeConvId}
               replyTo={replyTo}
               onCancelReply={() => setReplyTo(null)}
             />

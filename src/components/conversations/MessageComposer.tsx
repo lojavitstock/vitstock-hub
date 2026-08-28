@@ -1,7 +1,9 @@
-import React, { forwardRef, useImperativeHandle, useRef, useState } from 'react';
-import { Paperclip, Reply, Send, X, Zap } from 'lucide-react';
+import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { FileText, Paperclip, Reply, Send, Smile, X, Zap } from 'lucide-react';
 import { Message } from '../../types';
 import { quotedMediaLabel, toQuotedMessage } from '../../utils/quotedMessage';
+import { insertComposerText } from '../../utils/composerSubmission';
+import type { AttachmentDraft } from '../../utils/composerAttachment';
 
 type MessageComposerProps = {
   isInternalNote: boolean;
@@ -19,6 +21,9 @@ type MessageComposerProps = {
   onToggleQuickReply: () => void;
   onAttachmentChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onInputPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => void;
+  attachmentDraft?: AttachmentDraft | null;
+  onRemoveAttachment?: () => void;
+  activeConversationId?: string | null;
   replyTo?: Message | null;
   onCancelReply?: () => void;
 };
@@ -33,6 +38,37 @@ const QUICK_REPLIES = [
   { command: '/proposta', label: 'Proposta Comercial PIX', text: 'Segue a proposta comercial para o lote com 5% de desconto no PIX: R$ 58.995,00.' },
   { command: '/frete', label: 'Prazo de Entrega', text: 'O prazo de entrega para Curitiba é de 2 a 3 dias úteis após a confirmação do pagamento.' },
 ];
+
+const EMOJI_CATEGORIES = [
+  { id: 'recent', label: 'Recentes', emojis: [] },
+  { id: 'faces', label: 'Rostos', emojis: ['😀', '😃', '😄', '😁', '😆', '😅', '😂', '🤣', '😊', '🙂', '🙃', '😉', '😌', '😍', '🥰', '😘', '😎', '🤔', '😭', '😡', '😴', '🤗'] },
+  { id: 'people', label: 'Pessoas', emojis: ['👍', '👎', '👏', '🙌', '🙏', '🤝', '💪', '👋', '👌', '✌️', '🤞', '👀', '👨‍💻', '👩‍💼', '🫶', '💅'] },
+  { id: 'animals', label: 'Animais', emojis: ['🐶', '🐱', '🐭', '🐹', '🐰', '🦊', '🐻', '🐼', '🐨', '🐯', '🦁', '🐸', '🐵', '🐔', '🦄', '🐝'] },
+  { id: 'food', label: 'Comida', emojis: ['🍎', '🍊', '🍋', '🍉', '🍇', '🍓', '🍒', '🥑', '🍕', '🍔', '🍟', '🌮', '🍰', '🍪', '☕', '🍻'] },
+  { id: 'activities', label: 'Atividades', emojis: ['⚽', '🏀', '🏈', '⚾', '🎾', '🏆', '🎮', '🎲', '🎵', '🎉', '🔥', '✨', '💯', '🚀'] },
+  { id: 'travel', label: 'Viagens', emojis: ['🚗', '🚕', '🚌', '✈️', '🚲', '⛵', '🏖️', '🏝️', '🗺️', '🌍', '🏠', '🗽'] },
+  { id: 'objects', label: 'Objetos', emojis: ['📱', '💻', '⌚', '📷', '💡', '📌', '✏️', '📎', '📁', '📄', '🔑', '🎁'] },
+  { id: 'symbols', label: 'Símbolos', emojis: ['❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '🤍', '💔', '✅', '❌', '⚠️', '❗', '❓', '⭐', '©️'] },
+  { id: 'flags', label: 'Bandeiras', emojis: ['🇧🇷', '🇺🇸', '🇵🇹', '🇪🇸', '🇫🇷', '🇮🇹', '🇩🇪', '🇬🇧', '🇯🇵', '🇦🇷', '🇲🇽', '🇨🇦'] },
+] as const;
+
+const RECENT_EMOJIS_KEY = 'vitstock:composer:recent-emojis';
+
+const readRecentEmojis = (): string[] => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(RECENT_EMOJIS_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed.filter((emoji): emoji is string => typeof emoji === 'string').slice(0, 18) : [];
+  } catch {
+    return [];
+  }
+};
+
+const formatAttachmentSize = (size: number) => {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+};
 
 export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposerProps>((props, ref) => {
   const [inputText, setInputText] = useState('');
@@ -53,10 +89,73 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   onToggleQuickReply,
   onAttachmentChange,
   onInputPaste,
+  attachmentDraft,
+  onRemoveAttachment,
+  activeConversationId,
   replyTo,
   onCancelReply,
   } = props;
   const replyPreview = replyTo ? toQuotedMessage(replyTo) : undefined;
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const [emojiCategory, setEmojiCategory] = useState('faces');
+  const [recentEmojis, setRecentEmojis] = useState<string[]>(readRecentEmojis);
+  const emojiPickerRef = useRef<HTMLDivElement>(null);
+  const emojiButtonRef = useRef<HTMLButtonElement>(null);
+  const hasAttachment = Boolean(attachmentDraft && !isInternalNote);
+
+  useEffect(() => {
+    setEmojiOpen(false);
+  }, [activeConversationId, isInternalNote]);
+
+  useEffect(() => {
+    if (!emojiOpen) return undefined;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !emojiPickerRef.current?.contains(target) && !emojiButtonRef.current?.contains(target)) {
+        setEmojiOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setEmojiOpen(false);
+        textareaRef.current?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [emojiOpen]);
+
+  const insertEmoji = (emoji: string) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const selectionStart = textarea.selectionStart ?? inputText.length;
+    const selectionEnd = textarea.selectionEnd ?? selectionStart;
+    const next = insertComposerText({ value: inputText, inserted: emoji, start: selectionStart, end: selectionEnd });
+    setInputText(next.value);
+    onTextChange?.(next.value);
+    setRecentEmojis((previous) => {
+      const updated = [emoji, ...previous.filter((item) => item !== emoji)].slice(0, 18);
+      try {
+        window.localStorage.setItem(RECENT_EMOJIS_KEY, JSON.stringify(updated));
+      } catch {
+        // Recentes são apenas uma conveniência local.
+      }
+      return updated;
+    });
+    window.requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(next.cursor, next.cursor);
+    });
+  };
+
+  const selectedEmojiCategory = emojiCategory === 'recent'
+    ? { id: 'recent', label: 'Recentes', emojis: recentEmojis }
+    : EMOJI_CATEGORIES.find((category) => category.id === emojiCategory) || EMOJI_CATEGORIES[1];
   useImperativeHandle(ref, () => ({
     clear: () => {
       setInputText('');
@@ -89,7 +188,7 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
 
     if (event.shiftKey) return;
     event.preventDefault();
-    if (!inputText.trim() || activeChatLocked || sendingMedia || (!isInternalNote && !whatsappConnected)) return;
+    if ((!inputText.trim() && !hasAttachment) || activeChatLocked || sendingMedia || (!isInternalNote && !whatsappConnected)) return;
     event.currentTarget.form?.requestSubmit();
   };
 
@@ -152,13 +251,52 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
         </div>
       )}
 
-      <div className="flex items-center gap-2">
+      {hasAttachment && attachmentDraft && (
+        <div data-testid="attachment-draft" className="mb-3 flex items-center gap-3 rounded-xl border border-amber-400/30 bg-[#2a343a] p-2.5">
+          {attachmentDraft.mediaType === 'image' && attachmentDraft.previewUrl ? (
+            <img src={attachmentDraft.previewUrl} alt={`Prévia de ${attachmentDraft.fileName}`} className="h-16 w-16 rounded-lg object-cover" />
+          ) : attachmentDraft.mediaType === 'video' && attachmentDraft.previewUrl ? (
+            <video src={attachmentDraft.previewUrl} controls preload="metadata" className="h-16 w-24 rounded-lg object-cover" />
+          ) : (
+            <div className="flex h-16 w-16 items-center justify-center rounded-lg bg-red-400/10 text-red-300" aria-hidden="true"><FileText className="h-7 w-7" /></div>
+          )}
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-semibold text-slate-100">{attachmentDraft.fileName}</p>
+            <p className="text-xs text-slate-400">{attachmentDraft.mimeType || 'Arquivo'} · {formatAttachmentSize(attachmentDraft.size)}</p>
+          </div>
+          <button type="button" onClick={onRemoveAttachment} aria-label="Remover anexo" title="Remover anexo" className="rounded-full p-2 text-slate-400 transition-colors hover:bg-white/10 hover:text-red-300"><X className="h-4 w-4" /></button>
+        </div>
+      )}
+
+      <div className="relative flex items-center gap-2">
+        {emojiOpen && !isInternalNote && (
+          <div ref={emojiPickerRef} role="dialog" aria-label="Selecionar emoji" className="absolute bottom-full left-0 z-30 mb-2 w-[min(21rem,calc(100vw-2rem))] rounded-xl border border-slate-600 bg-[#182126] p-2 shadow-2xl">
+            <div className="mb-2 flex gap-1 overflow-x-auto border-b border-slate-700 pb-2">
+              {EMOJI_CATEGORIES.map((category) => (
+                <button key={category.id} type="button" title={category.label} aria-label={`Categoria ${category.label}`} onClick={() => setEmojiCategory(category.id)} className={`shrink-0 rounded px-2 py-1 text-xs ${emojiCategory === category.id ? 'bg-amber-400 text-zinc-950' : 'text-slate-400 hover:bg-white/10'}`}>
+                  {category.id === 'recent' ? '🕘' : category.emojis[0]}
+                </button>
+              ))}
+            </div>
+            <div className="grid max-h-40 grid-cols-8 gap-1 overflow-y-auto">
+              {selectedEmojiCategory.emojis.map((emoji, index) => (
+                <button key={`${emoji}-${index}`} type="button" aria-label={`Inserir emoji ${emoji}`} onClick={() => insertEmoji(emoji)} className="rounded p-1.5 text-xl leading-none hover:bg-white/10">{emoji}</button>
+              ))}
+              {selectedEmojiCategory.emojis.length === 0 && <span className="col-span-8 py-4 text-center text-xs text-slate-500">Nenhum emoji recente</span>}
+            </div>
+          </div>
+        )}
+        {!isInternalNote && (
+          <button ref={emojiButtonRef} type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => setEmojiOpen((open) => !open)} aria-label="Inserir emoji" title="Inserir emoji" className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300">
+            <Smile className="h-4 w-4" />
+          </button>
+        )}
         <input ref={attachmentInputRef} type="file" accept="image/*,video/*,application/pdf,.doc,.docx" className="hidden" onChange={onAttachmentChange} />
-        <button type="button" onClick={() => attachmentInputRef.current?.click()} disabled={activeChatLocked || isInternalNote || sendingMedia || !whatsappConnected} title="Enviar imagem, vídeo ou documento" className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40">
+        <button type="button" onClick={() => attachmentInputRef.current?.click()} disabled={activeChatLocked || isInternalNote || sendingMedia || !whatsappConnected} aria-label="Anexar arquivo" title="Anexar arquivo" className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40">
           <Paperclip className="h-4 w-4" />
         </button>
         <textarea ref={textareaRef} rows={1} value={inputText} onChange={(event) => { setInputText(event.target.value); onTextChange?.(event.target.value); }} onKeyDown={handleKeyDown} onPaste={onInputPaste} disabled={activeChatLocked || sendingMedia} placeholder={isInternalNote ? 'Digite uma nota interna para a equipe...' : 'Digite sua mensagem para o WhatsApp...'} title={!isInternalNote ? 'Cole uma imagem com Ctrl+V para enviar' : undefined} className={`max-h-32 min-h-12 flex-1 resize-y rounded-2xl border bg-[#2a343a] px-4 py-3 text-base leading-6 text-slate-100 placeholder-slate-400 transition-colors focus:outline-none ${isInternalNote ? 'border-amber-400/50 bg-amber-400/5 focus:border-amber-400' : 'border-transparent focus:border-amber-400/70'}`} />
-        <button type="submit" disabled={activeChatLocked || sendingMedia || (!isInternalNote && !whatsappConnected)} className={`flex items-center justify-center rounded-full p-3 font-bold transition-all ${isInternalNote ? 'bg-amber-500 text-zinc-950 hover:bg-amber-400' : 'bg-amber-400 text-zinc-950 shadow-[0_0_12px_rgba(238,187,44,0.3)] hover:bg-amber-300'} disabled:cursor-not-allowed disabled:opacity-40`}>
+        <button type="submit" disabled={activeChatLocked || sendingMedia || (!isInternalNote && !whatsappConnected) || (!inputText.trim() && !hasAttachment)} aria-label="Enviar mensagem" title="Enviar mensagem" className={`flex items-center justify-center rounded-full p-3 font-bold transition-all ${isInternalNote ? 'bg-amber-500 text-zinc-950 hover:bg-amber-400' : 'bg-amber-400 text-zinc-950 shadow-[0_0_12px_rgba(238,187,44,0.3)] hover:bg-amber-300'} disabled:cursor-not-allowed disabled:opacity-40`}>
           <Send className="h-4 w-4" />
         </button>
       </div>
