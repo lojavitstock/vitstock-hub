@@ -37,6 +37,8 @@ import {
   providerReactionUpdate,
 } from '../server/src/messageReactions';
 import { resolveProviderMessageTarget } from '../server/src/evolution';
+import { resolveEvolutionRecipient } from '../server/src/evolutionRecipient';
+import { canonicalInboxIdentity, projectCanonicalInboxChats } from '../server/src/inboxProjection';
 import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
@@ -2510,6 +2512,134 @@ test('reply action schedules focus for the composer textarea', () => {
     },
   );
   assert.equal(focused, true);
+});
+
+test('sendMedia usa o JID completo para destinatários LID e preserva PN/grupo', () => {
+  assert.deepEqual(resolveEvolutionRecipient({
+    remoteJid: 'opaque-123@lid',
+    canonicalPhone: '5521999999999',
+  }), { number: 'opaque-123@lid', strategy: 'lid' });
+  assert.deepEqual(resolveEvolutionRecipient({
+    remoteJid: '5521999999999@s.whatsapp.net',
+    canonicalPhone: '5521999999999',
+  }), { number: '5521999999999', strategy: 'pn' });
+  assert.deepEqual(resolveEvolutionRecipient({
+    remoteJid: '120363000000@g.us',
+    canonicalPhone: '5521999999999',
+  }), { number: '120363000000@g.us', strategy: 'group' });
+});
+
+const inboxProjectionChat = (remoteJid: string, overrides: Record<string, any> = {}) => ({
+  id: remoteJid,
+  remoteJid,
+  updatedAt: '2026-08-30T10:00:00.000Z',
+  unreadCount: 0,
+  lastMessage: {
+    key: { id: `message-${remoteJid}`, remoteJid, fromMe: false },
+    message: { conversation: 'Mensagem' },
+    messageTimestamp: 1_700_000_000,
+  },
+  ...overrides,
+});
+
+test('projeção canônica colapsa LID e PN somente com alias explícito', () => {
+  const lid = inboxProjectionChat('opaque-123@lid', {
+    remoteJidAlt: '5521999999999@s.whatsapp.net',
+    updatedAt: '2026-08-30T12:00:00.000Z',
+    lastMessage: {
+      key: { id: 'lid-new', remoteJid: 'opaque-123@lid', fromMe: false },
+      message: { conversation: 'Atividade mais recente' },
+      messageTimestamp: 1_800_000_000,
+    },
+    conversationTags: [{ id: 'tag-lid', name: 'LID', color: '#fff' }],
+  });
+  const pn = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    name: 'Cliente conhecido',
+    profilePicUrl: 'https://img.test/avatar.png',
+    conversationTags: [{ id: 'tag-pn', name: 'PN', color: '#000' }],
+  });
+  const original = JSON.parse(JSON.stringify([lid, pn]));
+  const projected = projectCanonicalInboxChats([lid, pn]);
+
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0]?.remoteJid, '5521999999999@s.whatsapp.net');
+  assert.equal(projected[0]?.lastMessage?.key?.id, 'lid-new');
+  assert.equal(projected[0]?.remoteJidAlt, '5521999999999@s.whatsapp.net');
+  assert.deepEqual(projected[0]?.conversationTags?.map((tag: any) => tag.id).sort(), ['tag-lid', 'tag-pn']);
+  assert.deepEqual([lid, pn], original);
+});
+
+test('projeção canônica reconhece representação nacional equivalente sem inferir LID', () => {
+  const projected = projectCanonicalInboxChats([
+    inboxProjectionChat('opaque-456@lid', { remoteJidAlt: '5521999999999@s.whatsapp.net' }),
+    inboxProjectionChat('21999999999@s.whatsapp.net'),
+  ]);
+  assert.equal(projected.length, 1);
+  assert.equal(canonicalInboxIdentity({ remoteJid: 'opaque-456@lid' }).explicit, false);
+  assert.equal(canonicalInboxIdentity({ remoteJid: 'opaque-456@lid', remoteJidAlt: '5521999999999@s.whatsapp.net' }).explicit, true);
+});
+
+test('LID opaco e PN diferentes permanecem separados', () => {
+  const projected = projectCanonicalInboxChats([
+    inboxProjectionChat('opaque-unknown@lid'),
+    inboxProjectionChat('5521888888888@s.whatsapp.net'),
+    inboxProjectionChat('5521777777777@s.whatsapp.net'),
+  ]);
+  assert.equal(projected.length, 3);
+});
+
+test('atividade mais recente vence e identidade PN, tags e estado são preservados', () => {
+  const projected = projectCanonicalInboxChats([
+    inboxProjectionChat('5521999999999@s.whatsapp.net', {
+      name: 'Identidade rica',
+      conversationTags: [{ id: 'tag-rich', name: 'Rica', color: '#fff' }],
+      unreadCount: 0,
+      needsResponse: false,
+    }),
+    inboxProjectionChat('opaque-123@lid', {
+      remoteJidAlt: '5521999999999@s.whatsapp.net',
+      updatedAt: '2026-08-30T13:00:00.000Z',
+      unreadCount: 2,
+      needsResponse: true,
+      lastMessage: {
+        key: { id: 'newer-message', remoteJid: 'opaque-123@lid', fromMe: false },
+        message: { conversation: 'Nova atividade' },
+        messageTimestamp: 1_800_000_001,
+      },
+    }),
+  ]);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0]?.remoteJid, '5521999999999@s.whatsapp.net');
+  assert.equal(projected[0]?.lastMessage?.key?.id, 'newer-message');
+  assert.equal(projected[0]?.unreadCount, 2);
+  assert.equal(projected[0]?.needsResponse, true);
+  assert.equal(projected[0]?.name, 'Identidade rica');
+});
+
+test('projeção canônica preserva assignment e lease de qualquer alias explícito', () => {
+  const projected = projectCanonicalInboxChats([
+    inboxProjectionChat('5521999999999@s.whatsapp.net', {
+      assignedAttendant: { id: 'agent-1', name: 'Atendente' },
+      lease: { ownerUserId: 'agent-1', ownerName: 'Atendente', expiresAt: Date.now() + 60_000 },
+    }),
+    inboxProjectionChat('opaque-123@lid', {
+      remoteJidAlt: '5521999999999@s.whatsapp.net',
+      updatedAt: '2026-08-30T13:00:00.000Z',
+    }),
+  ]);
+  assert.equal(projected.length, 1);
+  assert.deepEqual(projected[0]?.assignedAttendant, { id: 'agent-1', name: 'Atendente' });
+  assert.equal(projected[0]?.lease?.ownerUserId, 'agent-1');
+});
+
+test('projeção linear mantém 1000 conversas e uma por identidade explícita', () => {
+  const chats = Array.from({ length: 500 }, (_, index) => inboxProjectionChat(`5521999${String(index).padStart(6, '0')}@s.whatsapp.net`));
+  const aliases = chats.map((chat, index) => inboxProjectionChat(`opaque-${index}@lid`, {
+    remoteJidAlt: chat.remoteJid,
+    updatedAt: '2026-08-31T00:00:00.000Z',
+  }));
+  const projected = projectCanonicalInboxChats([...chats, ...aliases]);
+  assert.equal(projected.length, 500);
 });
 
 test('attachment selection only classifies supported media without sending', () => {

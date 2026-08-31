@@ -15,6 +15,8 @@ import { isNonRenderableProviderMessage, providerMessageType, unwrapProviderMess
 import { canonicalPhone, normalizeContactPhone } from './contactDomain.js';
 import { phoneLookupKeys, upsertContactPhone } from './contactPhones.js';
 import { isWhatsAppLid, providerPhoneDigits, providerPhoneJid } from './whatsappIdentity.js';
+import { resolveEvolutionRecipient } from './evolutionRecipient.js';
+import { projectCanonicalInboxChats } from './inboxProjection.js';
 import { parseGroupMetadata, type GroupMetadata } from './groupMetadata.js';
 import {
   buildParticipantIdentityMap,
@@ -748,6 +750,7 @@ async function loadLocalInboxChats(companyId: string) {
     is_group: boolean;
     group_name: string | null;
     group_avatar_url: string | null;
+    contact_phone: string;
   }>(
     `SELECT c.evolution_remote_jid,
             c.unread_count,
@@ -768,7 +771,8 @@ async function loadLocalInboxChats(companyId: string) {
             latest.sent_at AS message_sent_at,
             c.is_group,
             c.group_name,
-            c.group_avatar_url
+            c.group_avatar_url,
+            ct.phone AS contact_phone
      FROM conversations c
      JOIN contacts ct ON ct.id = c.contact_id
      LEFT JOIN LATERAL (
@@ -790,6 +794,9 @@ async function loadLocalInboxChats(companyId: string) {
     const timestamp = dateValue ? Math.floor(new Date(dateValue).getTime() / 1000) : 0;
     const remoteJid = row.evolution_remote_jid;
     const isGroup = Boolean(row.is_group) || isWhatsAppGroupJid(remoteJid);
+    const contactPhoneJid = !isGroup && row.contact_phone
+      ? providerPhoneJid({ remoteJid: row.contact_phone })
+      : '';
     const rawPreview = row.last_message || '[Conversa iniciada]';
     const preview = isGroup && row.message_sender
       ? `${row.message_sender_name || (row.message_sender === 'attendant' ? 'Atendente' : 'Participante')}: ${rawPreview}`
@@ -797,6 +804,8 @@ async function loadLocalInboxChats(companyId: string) {
     return {
       id: remoteJid,
       remoteJid,
+      ...(contactPhoneJid && contactPhoneJid !== remoteJid ? { remoteJidAlt: contactPhoneJid } : {}),
+      ...(row.contact_phone ? { phone: row.contact_phone } : {}),
       isGroup,
       groupName: row.group_name || undefined,
       groupAvatarUrl: row.group_avatar_url || undefined,
@@ -946,13 +955,20 @@ async function prepareOutboundConversation(input: {
     [input.companyId, contactId, input.remoteJid, input.remoteJid.endsWith('@lid') ? 'lid' : 'remote_jid'],
   );
 
+  const conversationRemoteJid = await resolveOutboundConversationJid(db, {
+    companyId: input.companyId,
+    contactId,
+    number: input.number,
+    remoteJid: input.remoteJid,
+  });
+
   const existing = await db.query<{ id: string }>(
     `SELECT id FROM conversations
      WHERE company_id = $1
        AND evolution_remote_jid = $2
      ORDER BY updated_at DESC
      LIMIT 1`,
-    [input.companyId, input.remoteJid],
+    [input.companyId, conversationRemoteJid],
   );
   if (existing.rows[0]?.id) return existing.rows[0].id;
 
@@ -963,11 +979,50 @@ async function prepareOutboundConversation(input: {
        SET contact_id = EXCLUDED.contact_id,
            updated_at = now()
      RETURNING id`,
-    [input.companyId, contactId, input.remoteJid, isGroup, isGroup ? contactName : null],
+    [input.companyId, contactId, conversationRemoteJid, isGroup, isGroup ? contactName : null],
   );
   const conversationId = created.rows[0]?.id;
   if (!conversationId) throw new Error('Conversa n\u00e3o p\u00f4de ser preparada para o envio');
   return conversationId;
+}
+
+/**
+ * Reuse an explicitly related PN conversation when an outbound request starts
+ * from its opaque LID alias. No phone is inferred from the LID itself: the PN
+ * candidate comes only from the already validated number/contact identity.
+ */
+async function resolveOutboundConversationJid(
+  executor: Pick<Pool | PoolClient, 'query'>,
+  input: { companyId: string; contactId: string; number: string; remoteJid: string },
+) {
+  if (isWhatsAppGroupJid(input.remoteJid)) return input.remoteJid;
+  const phoneJid = canonicalPhoneJid(input.number);
+  const result = await executor.query<{ evolution_remote_jid: string }>(
+    `SELECT c.evolution_remote_jid
+     FROM conversations c
+     WHERE c.company_id = $1::uuid
+       AND c.contact_id = $2::uuid
+       AND (
+         c.evolution_remote_jid = $3::text
+         OR c.evolution_remote_jid = $4::text
+         OR EXISTS (
+           SELECT 1
+           FROM contact_channel_identities ci
+           WHERE ci.company_id = c.company_id
+             AND ci.contact_id = c.contact_id
+             AND ci.channel = 'whatsapp'
+             AND ci.identity = ANY($5::text[])
+         )
+       )
+     ORDER BY CASE
+       WHEN c.evolution_remote_jid = $4::text THEN 0
+       WHEN c.evolution_remote_jid = $3::text THEN 1
+       ELSE 2
+     END, c.updated_at DESC, c.id
+     LIMIT 1`,
+    [input.companyId, input.contactId, input.remoteJid, phoneJid, [input.remoteJid, phoneJid]],
+  );
+  return result.rows[0]?.evolution_remote_jid || input.remoteJid;
 }
 
 async function findConversationForLease(input: { companyId: string; remoteJid: string; phone?: string }) {
@@ -2285,18 +2340,24 @@ async function ensureOutboundMessage(input: {
       [input.companyId, contactId, input.remoteJid, input.remoteJid.endsWith('@lid') ? 'lid' : 'remote_jid'],
     );
 
+    const conversationRemoteJid = await resolveOutboundConversationJid(client, {
+      companyId: input.companyId,
+      contactId,
+      number: input.number,
+      remoteJid: input.remoteJid,
+    });
     const conversationId = await findOrCreateConversation(client, {
-    companyId: input.companyId,
-    contactId,
-    remoteJid: input.remoteJid,
-    lastMessage: conversationPreview,
-    lastMessageAt: new Date(),
-    reopenResolved: true,
-    assignedUserId: input.userId,
-    isGroup,
-    groupName: undefined,
-  });
-  if (!conversationId) throw new Error('Conversa não pôde ser preparada para o envio');
+      companyId: input.companyId,
+      contactId,
+      remoteJid: conversationRemoteJid,
+      lastMessage: conversationPreview,
+      lastMessageAt: new Date(),
+      reopenResolved: true,
+      assignedUserId: input.userId,
+      isGroup,
+      groupName: undefined,
+    });
+    if (!conversationId) throw new Error('Conversa não pôde ser preparada para o envio');
 
   if (input.clientMessageId) {
     const existing = await client.query<{
@@ -2583,6 +2644,10 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     } catch (error) {
       _request.log.warn({ err: error }, 'Não foi possível mesclar o inbox persistido');
     }
+    // The provider and the persisted inbox may expose both a LID and its PN
+    // alias. Collapse only identities with explicit phone evidence before the
+    // snapshot reaches the frontend; opaque LIDs remain independent rows.
+    chatsData = projectCanonicalInboxChats(chatsData);
     const providerNames = new Map<string, { phone: string; name: string; avatar_url: string | null }>();
     const rememberProviderContact = (value: any) => {
       // A fromMe message describes the local operator, never the recipient.
@@ -3363,6 +3428,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     };
     const clientMessageId = parsed.data.clientMessageId || `hub-${randomUUID()}`;
     const canonicalRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : canonicalPhoneJid(number));
+    const evolutionRecipient = resolveEvolutionRecipient({ remoteJid: canonicalRemoteJid, canonicalPhone: number });
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
     traceOutbound(request, 'received', { clientMessageId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
@@ -3434,7 +3500,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
             {
               method: 'POST',
               body: JSON.stringify({
-                number: isWhatsAppGroupJid(canonicalRemoteJid) ? canonicalRemoteJid : number,
+                number: evolutionRecipient.number,
                 mediatype: parsed.data.mediatype,
                 mimetype: parsed.data.mimetype,
                 media: parsed.data.media,
