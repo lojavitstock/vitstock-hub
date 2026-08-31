@@ -38,10 +38,11 @@ import {
   normalizeStoredReactions,
   providerReactionUpdate,
 } from './messageReactions.js';
-import { qaEvolutionResponse } from './qa.js';
+import { hasQaProviderOnlyChat, qaEvolutionResponse } from './qa.js';
 import { loadConversationTags } from './conversationTags.js';
 import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.js';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
+import { resolveConversationForOperation } from './conversationResolver.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -721,6 +722,10 @@ async function refreshEvolutionChatsSnapshot(companyId: string) {
 }
 
 async function fetchEvolutionChatsSnapshot(companyId: string) {
+  // A fixture criada durante um teste QA deve aparecer imediatamente, sem
+  // reaproveitar o snapshot carregado antes da injeção. Fora de QA, o cache
+  // continua seguindo exatamente o fluxo normal do provedor.
+  if (isQaMode && hasQaProviderOnlyChat()) evolutionChatsCache.delete(companyId);
   const now = Date.now();
   const cached = evolutionChatsCache.get(companyId);
   if (cached && cached.expiresAt > now) {
@@ -1036,17 +1041,8 @@ async function resolveOutboundConversationJid(
 }
 
 async function findConversationForLease(input: { companyId: string; remoteJid: string; phone?: string }) {
-  const result = await db.query<{ id: string }>(
-    `SELECT c.id
-     FROM conversations c
-     JOIN contacts contact ON contact.id = c.contact_id
-     WHERE c.company_id = $1::uuid
-       AND c.evolution_remote_jid = $2::text
-     ORDER BY c.updated_at DESC
-     LIMIT 1`,
-    [input.companyId, input.remoteJid],
-  );
-  return result.rows[0]?.id;
+  const conversation = await resolveConversationForOperation(input);
+  return conversation?.id;
 }
 
 const leaseRealtimePayload = (input: { remoteJid: string; phone?: string; lease: ConversationLease }) => ({
@@ -2827,6 +2823,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const parsed = assignmentSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Conversa inválida' });
     const currentUser = request.user!;
+    // A chat can be visible in the provider snapshot before its canonical Hub
+    // row exists. Materialize it once before assigning the conversation.
+    const conversation = await resolveConversationForOperation({
+      companyId: currentUser.companyId,
+      remoteJid: parsed.data.remoteJid,
+      phone: parsed.data.phone,
+    });
+    if (!conversation) return reply.code(404).send({ error: 'Conversa ainda não está disponível para atendimento' });
     const jids = assignmentJids(parsed.data);
     const existing = await db.query<{ assigned_user_id: string | null; user_name: string | null }>(
       `SELECT a.assigned_user_id, u.name AS user_name
@@ -2914,6 +2918,13 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const parsed = conversationStatusSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Status de conversa invÃ¡lido' });
 
+    const conversation = await resolveConversationForOperation({
+      companyId: request.user!.companyId,
+      remoteJid: parsed.data.remoteJid,
+      phone: parsed.data.phone,
+    });
+    if (!conversation) return reply.code(404).send({ error: 'Conversa não encontrada' });
+
     for (const jid of assignmentJids(parsed.data)) {
       await db.query(
         `INSERT INTO conversation_statuses (company_id, evolution_remote_jid, status, updated_by)
@@ -2980,9 +2991,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const parsed = noteSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Nota interna invÃ¡lida' });
 
-    const remoteJid = parsed.data.phone?.replace(/\D/g, '')
-      ? canonicalPhoneJid(parsed.data.phone)
-      : parsed.data.remoteJid;
+    const conversation = await resolveConversationForOperation({
+      companyId: request.user!.companyId,
+      remoteJid: parsed.data.remoteJid,
+      phone: parsed.data.phone,
+    });
+    if (!conversation) return reply.code(404).send({ error: 'Conversa não encontrada' });
+
+    const remoteJid = conversation.remoteJid;
     const result = await db.query<{
       id: string;
       author_name: string;
@@ -3015,7 +3031,13 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.post('/api/evolution/notes/list', { preHandler: requireUser }, async (request, reply) => {
     const parsed = noteLookupSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Conversa invÃ¡lida' });
-    const jids = assignmentJids({ remoteJid: parsed.data.remoteJid, phone: parsed.data.phone });
+    const conversation = await resolveConversationForOperation({
+      companyId: request.user!.companyId,
+      remoteJid: parsed.data.remoteJid,
+      phone: parsed.data.phone,
+    }, { createIfMissing: false });
+    const jids = new Set(assignmentJids({ remoteJid: parsed.data.remoteJid, phone: parsed.data.phone }));
+    if (conversation) jids.add(conversation.remoteJid);
     const result = await db.query<{
       id: string;
       evolution_remote_jid: string;
@@ -3027,7 +3049,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
        FROM conversation_notes
        WHERE company_id = $1 AND evolution_remote_jid = ANY($2::text[])
        ORDER BY created_at ASC`,
-      [request.user!.companyId, jids],
+      [request.user!.companyId, [...jids]],
     );
     return {
       notes: result.rows.map((note) => ({

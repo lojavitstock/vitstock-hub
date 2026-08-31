@@ -9,6 +9,7 @@ import { publishRealtimeEvent } from './realtime.js';
 export type QaGoogleScenario = 'success' | 'conflict' | 'rate-limit' | 'timeout' | 'sync-token-expired' | 'partial' | 'external-delete';
 
 let googleScenario: QaGoogleScenario = 'success';
+let providerOnlyChat: Record<string, any> | null = null;
 
 export function currentQaGoogleScenario() {
   return googleScenario;
@@ -16,6 +17,10 @@ export function currentQaGoogleScenario() {
 
 export function setQaGoogleScenario(value: QaGoogleScenario) {
   googleScenario = value;
+}
+
+export function hasQaProviderOnlyChat() {
+  return providerOnlyChat !== null;
 }
 
 export function qaGoogleFailure() {
@@ -173,8 +178,17 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
               { id: '123456994@lid', pushName: 'Lookup C QA' },
               { id: '123456995@lid', pushName: 'Participante conhecido QA' },
             ]
-            : path.includes('/findChats/') || path.includes('/findContacts/') ? []
-            : path.includes('/chat/findMessages/') ? { messages: { records: requestBody?.remoteJid === '120363000000@g.us' ? qaGroupParticipantRecords() : [] } }
+            : path.includes('/findChats/') ? (providerOnlyChat ? [providerOnlyChat] : [])
+            : path.includes('/findContacts/') ? []
+            : path.includes('/chat/findMessages/') ? {
+              messages: {
+                records: requestBody?.where?.key?.remoteJid === '120363000000@g.us'
+                  ? qaGroupParticipantRecords()
+                  : providerOnlyChat && requestBody?.where?.key?.remoteJid === providerOnlyChat.remoteJid
+                    ? [providerOnlyChat.lastMessage]
+                    : [],
+              },
+            }
               : path.includes('/chat/markMessageAsRead/') ? { status: 'read' }
                 : path.includes('/instance/connect/') ? { code: 'QA_MOCK_CONNECTED' }
             : path.includes('/instance/logout/') ? { status: 'loggedOut' }
@@ -267,6 +281,26 @@ export async function registerQaRoutes(app: FastifyInstance) {
       message: { id: evolutionMessageId, conversationId: input.remoteJid, sender: 'contact', senderName: input.name, content: input.content, status: 'delivered', isInternalNote: false, timestampMs },
     });
     return { injected: true, remoteJid: input.remoteJid, evolutionMessageId };
+  });
+
+  app.post('/api/qa/provider-only', { preHandler: requireAdmin }, async () => {
+    const fixtureSuffix = `${Date.now()}${Math.floor(Math.random() * 10_000).toString().padStart(4, '0')}`.slice(-13);
+    const remoteJid = `55${fixtureSuffix}@s.whatsapp.net`;
+    const name = `Contato QA Provider Only ${fixtureSuffix.slice(-8)}`;
+    providerOnlyChat = {
+      id: remoteJid,
+      remoteJid,
+      pushName: name,
+      unreadCount: 1,
+      updatedAt: new Date().toISOString(),
+      lastMessage: {
+        key: { id: 'qa-provider-only-inbound', remoteJid, fromMe: false },
+        message: { conversation: 'Mensagem inbound sem resposta.' },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        pushName: name,
+      },
+    };
+    return { injected: true, remoteJid, name };
   });
 }
 

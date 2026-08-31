@@ -70,6 +70,7 @@ import {
   parseFrontendOrigins,
 } from '../server/src/config';
 import { normalizeTagName } from '../server/src/conversationTags';
+import { conversationIdentityCandidates } from '../server/src/conversationResolver';
 import { normalizeConversationTags } from '../src/utils/conversationTags';
 import { outboundErrorMessage } from '../src/utils/outboundError';
 import { classifyAttachmentFile, MAX_ATTACHMENTS_PER_MESSAGE, MAX_TOTAL_ATTACHMENT_BYTES, selectAttachmentFiles } from '../src/utils/composerAttachment';
@@ -2770,4 +2771,23 @@ test('diagnósticos de console.error e pageerror continuam sendo capturados', ()
 
   assert.equal(diagnostics.entries.filter((entry) => entry.kind === 'console.error').length, 1);
   assert.equal(diagnostics.entries.filter((entry) => entry.kind === 'pageerror').length, 1);
+});
+
+test('conversation operations use explicit provider identities without inferring opaque LIDs', () => {
+  assert.deepEqual(
+    conversationIdentityCandidates({ companyId: 'qa', remoteJid: '5521990000098@s.whatsapp.net' }),
+    ['5521990000098@s.whatsapp.net'],
+  );
+  assert.deepEqual(
+    conversationIdentityCandidates({ companyId: 'qa', remoteJid: '164700000001@lid', phone: '+55 (21) 99999-0001' }),
+    ['164700000001@lid', '5521999990001@s.whatsapp.net'],
+  );
+  assert.deepEqual(
+    conversationIdentityCandidates({ companyId: 'qa', remoteJid: '164700000001@lid' }),
+    ['164700000001@lid'],
+  );
+  assert.deepEqual(
+    conversationIdentityCandidates({ companyId: 'qa', remoteJid: '120363000000@g.us', phone: '120363000000@g.us' }),
+    ['120363000000@g.us'],
+  );
 });
