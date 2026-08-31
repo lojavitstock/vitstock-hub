@@ -38,6 +38,7 @@ import {
 } from '../server/src/messageReactions';
 import { resolveProviderMessageTarget } from '../server/src/evolution';
 import { resolveEvolutionRecipient } from '../server/src/evolutionRecipient';
+import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
 import { canonicalInboxIdentity, projectCanonicalInboxChats } from '../server/src/inboxProjection';
 import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
@@ -2666,6 +2667,42 @@ test('multi-attachment selection preserves existing files and rejects excess saf
   const oversized = selectAttachmentFiles([file('big.png', 20_000_000)], 0, 10_000_000);
   assert.equal(oversized.accepted.length, 0);
   assert.equal(oversized.rejected, 1);
+});
+
+test('send-media diagnostics classify PN, LID and group without exposing identifiers', () => {
+  assert.deepEqual(evolutionRecipientDiagnostics({ number: '5521999999999', remoteJid: '5521999999999@s.whatsapp.net' }), {
+    recipientType: 'PN',
+    numberKind: 'digits',
+    remoteJidKind: 'pn',
+  });
+  assert.deepEqual(evolutionRecipientDiagnostics({ number: '164794086760597@lid', remoteJid: '164794086760597@lid' }), {
+    recipientType: 'LID',
+    numberKind: 'lid',
+    remoteJidKind: 'lid',
+  });
+  assert.deepEqual(evolutionRecipientDiagnostics({ number: '120363000000@g.us', remoteJid: '120363000000@g.us' }), {
+    recipientType: 'GROUP',
+    numberKind: 'group',
+    remoteJidKind: 'group',
+  });
+});
+
+test('send-media provider diagnostics keep only safe fields and redact identifiers', () => {
+  const sanitized = sanitizeEvolutionProviderError(JSON.stringify({
+    status: 400,
+    error: 'invalid recipient 164794086760597@lid',
+    code: 'invalid_number',
+    message: ['media rejected', '5521999999999'],
+    base64: 'data:image/png;base64,AAECAwQ=',
+    authorization: 'should-not-be-logged',
+  }), ['media rejected']) as Record<string, unknown>;
+  assert.equal(sanitized.status, 400);
+  assert.equal(sanitized.code, 'invalid_number');
+  assert.equal(String(sanitized.error).includes('164794086760597'), false);
+  assert.deepEqual(sanitized.message, ['[redacted-content]', '[redacted-number]']);
+  assert.equal('base64' in sanitized, false);
+  assert.equal('authorization' in sanitized, false);
+  assert.equal(String(sanitizeEvolutionProviderError('Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789')).includes('abcdefghijklmnopqrstuvwxyz'), false);
 });
 
 test('emoji insertion preserves the current cursor and Unicode sequence', () => {

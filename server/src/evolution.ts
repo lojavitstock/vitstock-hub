@@ -41,6 +41,7 @@ import {
 import { qaEvolutionResponse } from './qa.js';
 import { loadConversationTags } from './conversationTags.js';
 import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.js';
+import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -164,6 +165,13 @@ const GROUP_METADATA_TTL_MS = 2 * 60_000;
 const GROUP_METADATA_STALE_MS = 10 * 60_000;
 const outboundTraceEnabled = process.env.OUTBOUND_TRACE === 'true';
 const outboundEvolutionRequests = createOutboundRequestCoordinator<{ ok: boolean; status: number; body: any }>();
+const outboundMediaEvolutionRequests = createOutboundRequestCoordinator<{
+  ok: boolean;
+  status: number;
+  statusText: string;
+  body: any;
+  providerError?: unknown;
+}>();
 
 async function fetchGroupParticipantIdentities(companyId: string, groupJid: string) {
   const normalizedGroupJid = normalizeParticipantJid(groupJid);
@@ -558,7 +566,9 @@ function traceOutbound(request: any, stage: string, input: {
     stage,
     requestId: request.id,
     userId: request.user?.id,
-    remoteJid: input.remoteJid,
+    remoteJidKind: input.remoteJid
+      ? evolutionRecipientDiagnostics({ number: input.remoteJid, remoteJid: input.remoteJid }).remoteJidKind
+      : undefined,
     clientMessageId: input.clientMessageId,
     evolutionMessageId: input.evolutionMessageId,
     evolutionMessageIdSourcePath: input.evolutionMessageIdSourcePath,
@@ -3485,13 +3495,13 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         deduplicated: true,
       };
     }
-    let dispatch: { ok: boolean; status: number; body: any };
+    let dispatch: { ok: boolean; status: number; statusText: string; body: any; providerError?: unknown };
     const evolutionRequestStartedAt = Date.now();
     try {
       const caption = parsed.data.caption?.trim()
         ? formatHubOutboundText(request.user!.name, parsed.data.caption.trim())
         : undefined;
-      dispatch = await outboundEvolutionRequests.run(
+      dispatch = await outboundMediaEvolutionRequests.run(
         `${request.user!.companyId}:${clientMessageId}`,
         async () => {
           traceOutbound(request, 'evolution.request', { clientMessageId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
@@ -3510,10 +3520,23 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
               }),
             },
           );
+          const rawBody = await response.text();
+          let body: unknown;
+          try {
+            body = rawBody ? JSON.parse(rawBody) : undefined;
+          } catch {
+            body = rawBody;
+          }
           return {
             ok: response.ok,
             status: response.status,
-            body: await response.json().catch(() => ({ error: 'Evolution API response invalid' })),
+            statusText: response.statusText,
+            body,
+            providerError: response.ok ? undefined : sanitizeEvolutionProviderError(rawBody, [
+              parsed.data.caption?.trim() || '',
+              caption || '',
+              parsed.data.fileName || '',
+            ]),
           };
         },
       );
@@ -3524,6 +3547,24 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     if (!dispatch.ok) {
       await updateOutboundMessage(localMessage.messageId, 'failed');
+      const recipientDiagnostics = evolutionRecipientDiagnostics({ number: evolutionRecipient.number, remoteJid: canonicalRemoteJid });
+      if (outboundTraceEnabled) {
+        request.log.warn({
+          operation: 'evolution.sendMedia',
+          httpStatus: dispatch.status,
+          statusText: dispatch.statusText,
+          ...recipientDiagnostics,
+          mediatype: parsed.data.mediatype,
+          mimetype: parsed.data.mimetype,
+          fileNameExtension: parsed.data.fileName?.split('.').pop()?.toLowerCase() || undefined,
+          fileSize: null,
+          base64Length: parsed.data.media.length,
+          hasCaption: Boolean(parsed.data.caption?.trim()),
+          captionLength: parsed.data.caption?.trim().length || 0,
+          hasQuote: Boolean(evolutionQuote),
+          providerError: dispatch.providerError,
+        }, 'Evolution send-media rejected');
+      }
       const status = [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(dispatch.status) ? dispatch.status : 502;
       return reply.code(status).send({
         error: status === 502 ? 'Evolution API indisponível' : 'Evolution API rejeitou o anexo',
