@@ -18,14 +18,35 @@ test('provider-only chat accepts tags before the first reply', async ({ page }, 
 
     const fixture = await page.request.post('http://localhost:3001/api/qa/provider-only');
     expect(fixture.ok()).toBe(true);
-    const fixtureBody = await fixture.json() as { name?: string };
+    const fixtureBody = await fixture.json() as { name?: string; remoteJid?: string };
     expect(fixtureBody.name).toBeTruthy();
+    expect(fixtureBody.remoteJid).toBeTruthy();
     await page.reload();
 
     const providerOnly = page.getByRole('button', { name: new RegExp(`Abrir conversa com ${fixtureBody.name}`) });
     await expect(providerOnly).toBeVisible({ timeout: 15_000 });
     await providerOnly.click();
     await expect(page.locator('[data-message-id]').first()).toBeVisible({ timeout: 15_000 });
+
+    const note = await page.request.post('http://localhost:3001/api/evolution/notes', {
+      data: { remoteJid: fixtureBody.remoteJid, content: 'Nota QA antes da primeira resposta' },
+    });
+    expect(note.status()).toBe(200);
+    const noteList = await page.request.post('http://localhost:3001/api/evolution/notes/list', {
+      data: { remoteJid: fixtureBody.remoteJid },
+    });
+    expect(noteList.status()).toBe(200);
+    const notes = ((await noteList.json()) as { notes?: Array<{ content?: string }> }).notes || [];
+    expect(notes.some((item) => item.content === 'Nota QA antes da primeira resposta')).toBe(true);
+
+    const capture = await page.request.post('http://localhost:3001/api/evolution/chats/capture', {
+      data: { remoteJid: fixtureBody.remoteJid },
+    });
+    expect(capture.status()).toBe(200);
+    const release = await page.request.post('http://localhost:3001/api/evolution/chats/release', {
+      data: { remoteJid: fixtureBody.remoteJid },
+    });
+    expect(release.status()).toBe(200);
 
     await page.getByRole('button', { name: 'Gerenciar tags da conversa' }).click();
     const tagMenu = page.getByRole('menu', { name: 'Tags da conversa' });
