@@ -71,7 +71,7 @@ import {
 import { normalizeTagName } from '../server/src/conversationTags';
 import { normalizeConversationTags } from '../src/utils/conversationTags';
 import { outboundErrorMessage } from '../src/utils/outboundError';
-import { classifyAttachmentFile } from '../src/utils/composerAttachment';
+import { classifyAttachmentFile, MAX_ATTACHMENTS_PER_MESSAGE, MAX_TOTAL_ATTACHMENT_BYTES, selectAttachmentFiles } from '../src/utils/composerAttachment';
 import type { Conversation, Message } from '../src/types';
 
 const message = (
@@ -2648,6 +2648,24 @@ test('attachment selection only classifies supported media without sending', () 
   assert.equal(classifyAttachmentFile({ type: 'application/pdf', name: 'catalogo.pdf' }), 'document');
   assert.equal(classifyAttachmentFile({ type: '', name: 'contrato.docx' }), 'document');
   assert.equal(classifyAttachmentFile({ type: 'application/zip', name: 'arquivo.zip' }), null);
+});
+
+test('multi-attachment composer keeps the shared batch limits explicit', () => {
+  assert.equal(MAX_ATTACHMENTS_PER_MESSAGE, 5);
+  assert.equal(MAX_TOTAL_ATTACHMENT_BYTES, 25_000_000);
+  assert.ok(MAX_TOTAL_ATTACHMENT_BYTES < MAX_ATTACHMENTS_PER_MESSAGE * MAX_MEDIA_FILE_BYTES);
+});
+
+test('multi-attachment selection preserves existing files and rejects excess safely', () => {
+  const file = (name: string, size = 100) => ({ name, size, type: 'image/png' });
+  const first = selectAttachmentFiles([file('1.png'), file('2.png'), file('3.png')], 0, 0);
+  assert.deepEqual(first.accepted.map((item) => item.name), ['1.png', '2.png', '3.png']);
+  const sixth = selectAttachmentFiles([file('4.png'), file('5.png'), file('6.png')], 3, 300);
+  assert.deepEqual(sixth.accepted.map((item) => item.name), ['4.png', '5.png']);
+  assert.equal(sixth.rejected, 1);
+  const oversized = selectAttachmentFiles([file('big.png', 20_000_000)], 0, 10_000_000);
+  assert.equal(oversized.accepted.length, 0);
+  assert.equal(oversized.rejected, 1);
 });
 
 test('emoji insertion preserves the current cursor and Unicode sequence', () => {

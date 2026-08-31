@@ -21,8 +21,10 @@ type MessageComposerProps = {
   onToggleQuickReply: () => void;
   onAttachmentChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onInputPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => void;
-  attachmentDraft?: AttachmentDraft | null;
-  onRemoveAttachment?: () => void;
+  attachmentDrafts?: AttachmentDraft[];
+  onRemoveAttachment?: (attachmentId: string) => void;
+  onRemoveAllAttachments?: () => void;
+  mediaSendProgress?: { current: number; total: number } | null;
   activeConversationId?: string | null;
   replyTo?: Message | null;
   onCancelReply?: () => void;
@@ -89,8 +91,10 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   onToggleQuickReply,
   onAttachmentChange,
   onInputPaste,
-  attachmentDraft,
+  attachmentDrafts = [],
   onRemoveAttachment,
+  onRemoveAllAttachments,
+  mediaSendProgress,
   activeConversationId,
   replyTo,
   onCancelReply,
@@ -101,7 +105,7 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   const [recentEmojis, setRecentEmojis] = useState<string[]>(readRecentEmojis);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
   const emojiButtonRef = useRef<HTMLButtonElement>(null);
-  const hasAttachment = Boolean(attachmentDraft && !isInternalNote);
+  const hasAttachment = attachmentDrafts.length > 0 && !isInternalNote;
 
   useEffect(() => {
     setEmojiOpen(false);
@@ -251,22 +255,31 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
         </div>
       )}
 
-      {hasAttachment && attachmentDraft && (
-        <div data-testid="attachment-draft" className="mb-3 flex items-center gap-3 rounded-xl border border-amber-400/30 bg-[#2a343a] p-2.5">
-          {attachmentDraft.mediaType === 'image' && attachmentDraft.previewUrl ? (
-            <img src={attachmentDraft.previewUrl} alt={`Prévia de ${attachmentDraft.fileName}`} className="h-16 w-16 rounded-lg object-cover" />
-          ) : attachmentDraft.mediaType === 'video' && attachmentDraft.previewUrl ? (
-            <video src={attachmentDraft.previewUrl} controls preload="metadata" className="h-16 w-24 rounded-lg object-cover" />
-          ) : (
-            <div className="flex h-16 w-16 items-center justify-center rounded-lg bg-red-400/10 text-red-300" aria-hidden="true"><FileText className="h-7 w-7" /></div>
-          )}
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-semibold text-slate-100">{attachmentDraft.fileName}</p>
-            <p className="text-xs text-slate-400">{attachmentDraft.mimeType || 'Arquivo'} · {formatAttachmentSize(attachmentDraft.size)}</p>
+      {hasAttachment && (
+        <div data-testid="attachment-drafts" className="mb-3 rounded-xl border border-amber-400/30 bg-[#2a343a] p-2.5">
+          <div className="flex max-w-full gap-2 overflow-x-auto pb-1">
+            {attachmentDrafts.map((attachment) => (
+              <div key={attachment.id} data-testid="attachment-draft" className="relative flex w-28 shrink-0 flex-col gap-1 rounded-lg border border-slate-600/60 bg-[#20292f] p-1.5">
+                {attachment.mediaType === 'image' && attachment.previewUrl ? (
+                  <img src={attachment.previewUrl} alt={`Prévia de ${attachment.fileName}`} className="h-16 w-full rounded-md object-cover" />
+                ) : attachment.mediaType === 'video' && attachment.previewUrl ? (
+                  <video src={attachment.previewUrl} controls preload="metadata" className="h-16 w-full rounded-md object-cover" />
+                ) : (
+                  <div className="flex h-16 w-full items-center justify-center rounded-md bg-red-400/10 text-red-300" aria-hidden="true"><FileText className="h-7 w-7" /></div>
+                )}
+                <p className="truncate text-[11px] font-semibold text-slate-100" title={attachment.fileName}>{attachment.fileName}</p>
+                <p className="truncate text-[10px] text-slate-400">{attachment.mimeType || 'Arquivo'} · {formatAttachmentSize(attachment.size)}</p>
+                {attachment.status === 'failed' && <p className="text-[10px] font-semibold text-red-300">Falhou — tente novamente</p>}
+                <button type="button" onClick={() => onRemoveAttachment?.(attachment.id)} aria-label={`Remover anexo ${attachment.fileName}`} title="Remover anexo" className="absolute right-1 top-1 rounded-full bg-black/60 p-1 text-slate-200 transition-colors hover:bg-red-500/80"><X className="h-3 w-3" /></button>
+              </div>
+            ))}
           </div>
-          <button type="button" onClick={onRemoveAttachment} aria-label="Remover anexo" title="Remover anexo" className="rounded-full p-2 text-slate-400 transition-colors hover:bg-white/10 hover:text-red-300"><X className="h-4 w-4" /></button>
+          {attachmentDrafts.length > 1 && onRemoveAllAttachments && (
+            <button type="button" onClick={onRemoveAllAttachments} className="mt-1 text-[11px] font-semibold text-slate-400 hover:text-red-300">Remover todos</button>
+          )}
         </div>
       )}
+      {mediaSendProgress && <p className="mb-2 text-xs font-semibold text-amber-200">Enviando {mediaSendProgress.current} de {mediaSendProgress.total}...</p>}
 
       <div className="relative flex items-center gap-2">
         {emojiOpen && !isInternalNote && (
@@ -291,7 +304,7 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
             <Smile className="h-4 w-4" />
           </button>
         )}
-        <input ref={attachmentInputRef} type="file" accept="image/*,video/*,application/pdf,.doc,.docx" className="hidden" onChange={onAttachmentChange} />
+        <input ref={attachmentInputRef} type="file" multiple accept="image/*,video/*,application/pdf,.doc,.docx" className="hidden" onChange={onAttachmentChange} />
         <button type="button" onClick={() => attachmentInputRef.current?.click()} disabled={activeChatLocked || isInternalNote || sendingMedia || !whatsappConnected} aria-label="Anexar arquivo" title="Anexar arquivo" className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40">
           <Paperclip className="h-4 w-4" />
         </button>

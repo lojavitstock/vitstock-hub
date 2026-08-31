@@ -6,3 +6,7 @@
 export const MAX_MEDIA_FILE_BYTES = 10_000_000;
 export const MAX_MEDIA_BASE64_CHARS = 14_000_000;
 export const MAX_MEDIA_REQUEST_BYTES = 16 * 1024 * 1024;
+// The frontend enforces the batch limit while the API receives one media
+// request at a time. Keeping the contract here documents the shared cap.
+export const MAX_ATTACHMENTS_PER_MESSAGE = 5;
+export const MAX_TOTAL_ATTACHMENT_BYTES = 25_000_000;
