@@ -72,9 +72,43 @@ import {
 import { normalizeTagName } from '../server/src/conversationTags';
 import { conversationIdentityCandidates } from '../server/src/conversationResolver';
 import { normalizeConversationTags } from '../src/utils/conversationTags';
+import { formatConversationTimestamp, formatOperatorLabel } from '../src/components/conversations/conversationFormatters';
 import { outboundErrorMessage } from '../src/utils/outboundError';
 import { classifyAttachmentFile, MAX_ATTACHMENTS_PER_MESSAGE, MAX_TOTAL_ATTACHMENT_BYTES, selectAttachmentFiles } from '../src/utils/composerAttachment';
 import type { Conversation, Message } from '../src/types';
+
+test('formats inbox timestamps by local calendar day', () => {
+  const now = new Date(2026, 8, 1, 12, 0);
+  const timestamp = (year: number, month: number, day: number, hour: number, minute: number) => (
+    new Date(year, month - 1, day, hour, minute).getTime()
+  );
+
+  assert.equal(formatConversationTimestamp(timestamp(2026, 9, 1, 8, 37), '', now), '08:37');
+  assert.equal(formatConversationTimestamp(timestamp(2026, 8, 31, 8, 37), '', now), 'Ontem - 08:37');
+  assert.equal(formatConversationTimestamp(timestamp(2026, 8, 30, 15, 22), '', now), 'Domingo - 15:22');
+  assert.equal(formatConversationTimestamp(timestamp(2026, 8, 29, 19, 40), '', now), 'Sábado - 19:40');
+  assert.equal(formatConversationTimestamp(timestamp(2026, 8, 27, 7, 15), '', now), 'Quinta - 07:15');
+  assert.equal(formatConversationTimestamp(timestamp(2026, 8, 26, 12, 0), '', now), 'Quarta - 12:00');
+  assert.equal(formatConversationTimestamp(timestamp(2026, 8, 25, 9, 5), '', now), '25/08 - 09:05');
+  assert.equal(formatConversationTimestamp(timestamp(2025, 12, 31, 23, 50), '', now), '31/12/2025 - 23:50');
+});
+
+test('formats inbox timestamps across midnight using calendar days', () => {
+  const now = new Date(2026, 8, 1, 0, 15);
+  const yesterday = new Date(2026, 7, 31, 23, 55).getTime();
+  assert.equal(formatConversationTimestamp(yesterday, '', now), 'Ontem - 23:55');
+
+  const yearBoundary = new Date(2025, 11, 31, 23, 55).getTime();
+  assert.equal(formatConversationTimestamp(yearBoundary, '', new Date(2026, 0, 1, 0, 15)), '31/12/2025 - 23:55');
+});
+
+test('formats Hub operator labels without mutating or duplicating punctuation', () => {
+  assert.equal(formatOperatorLabel('Fernanda'), 'Fernanda:');
+  assert.equal(formatOperatorLabel('Leo'), 'Leo:');
+  assert.equal(formatOperatorLabel('Fernanda:'), 'Fernanda:');
+  assert.equal(formatOperatorLabel('  Fernanda  '), 'Fernanda:');
+  assert.equal(formatOperatorLabel(''), '');
+});
 
 const message = (
   id: string,

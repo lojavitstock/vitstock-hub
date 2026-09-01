@@ -1,7 +1,7 @@
 import React from 'react';
 import { Conversation } from '../../types';
 import { ContactPhoto } from './ContactPhoto';
-import { formatMessageTimestamp } from './conversationFormatters';
+import { formatConversationTimestamp } from './conversationFormatters';
 
 type ConversationListItemProps = {
   conversation: Conversation;
@@ -67,7 +67,7 @@ export const ConversationListItem = React.memo<ConversationListItemProps>(({
             {conversation.contact.name}
           </span>
           <span className="shrink-0 pt-0.5 text-[11px] font-semibold tabular-nums text-slate-400">
-            {formatMessageTimestamp(conversation.lastMessageAt, conversation.lastMessageTimestamp)}
+            {formatConversationTimestamp(conversation.lastMessageAt, conversation.lastMessageTimestamp)}
           </span>
         </span>
 

@@ -29,7 +29,7 @@ import { Conversation, Message } from '../../types';
 import { EvolutionApiService } from '../../services/evolutionApi';
 import { ContactPhoto } from './ContactPhoto';
 import { MediaViewer } from './MediaViewer';
-import { formatMessageDay, formatMessageTimestamp } from './conversationFormatters';
+import { formatMessageDay, formatMessageTimestamp, formatOperatorLabel } from './conversationFormatters';
 import { quotedMediaLabel, quotedMessageExcerpt } from '../../utils/quotedMessage';
 import { getDocumentPresentation } from '../../utils/documentMedia';
 import { mediaViewerItemFrom, type MediaViewerItem } from '../../utils/mediaViewer';
@@ -734,7 +734,7 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
                 onCopy={() => void copyMessage(message)}
                 onDownload={canDownloadMessageMedia(message) ? () => void downloadMessage(message) : undefined}
               />}
-              {isMe && <p className="mb-1 text-xs font-bold text-amber-200/75">{message.metadata?.sentOutsideHub ? 'Enviado fora do Vitstock Hub' : message.senderName}</p>}
+              {isMe && <p className="mb-1 text-xs font-bold text-amber-200/75">{message.metadata?.sentOutsideHub ? 'Enviado fora do Vitstock Hub' : formatOperatorLabel(message.senderName)}</p>}
               <QuotedMessageBlock message={message} onOpenOriginal={openQuotedMessage} onLayoutChange={onLayoutChange} />
               <MediaMessageContent message={message} instanceName={instanceName} onOpenViewer={openMediaViewer} onLayoutChange={onLayoutChange} />
               <SpecialMessageContent message={message} contactPhone={activeConversation.isGroup ? undefined : activeConversation.contact.phone} />
@@ -763,7 +763,7 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
       onClick={onJumpToLatest}
       aria-label="Ir para o final da conversa"
       title="Ir para o final da conversa"
-      className="absolute bottom-5 right-6 z-20 flex h-10 w-10 items-center justify-center rounded-full border border-emerald-300/40 bg-[#1f8f70] text-white shadow-lg transition-colors hover:bg-[#27a77f]"
+      className="absolute bottom-5 left-1/2 z-20 flex h-10 w-10 -translate-x-1/2 items-center justify-center rounded-full border border-emerald-300/40 bg-[#1f8f70] text-white shadow-lg transition-colors hover:bg-[#27a77f]"
     >
       <ChevronDown className="h-5 w-5" aria-hidden="true" />
       {newMessagesCount > 0 && <span className="absolute -right-1 -top-1 min-w-4 rounded-full border border-[#152027] bg-amber-400 px-1 text-[10px] font-extrabold leading-4 text-zinc-950">{newMessagesCount}</span>}
