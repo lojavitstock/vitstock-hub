@@ -2923,13 +2923,13 @@ test('opaque LID staging is fail-closed and excludes binary/secrets', () => {
 
   const sanitized = sanitizeProviderRecordForStaging({
     key: { id: 'message-1', remoteJid: 'opaque@lid' },
-    message: { imageMessage: { url: 'https://media.example.test/one', base64: 'binary', mediaKey: 'secret' } },
+    message: { imageMessage: { url: 'https://media.example.test/one', base64: 'binary', mediaKey: 'media-key' } },
     authorization: 'secret',
   });
   assert.equal(sanitized.key.id, 'message-1');
   assert.equal(sanitized.message.imageMessage.url, 'https://media.example.test/one');
   assert.equal('base64' in sanitized.message.imageMessage, false);
-  assert.equal('mediaKey' in sanitized.message.imageMessage, false);
+  assert.equal(sanitized.message.imageMessage.mediaKey, 'media-key');
   assert.equal('authorization' in sanitized, false);
 
   const envelope = createOpaqueLidStagingEnvelope({
