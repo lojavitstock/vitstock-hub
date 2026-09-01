@@ -11,10 +11,12 @@ export type ConversationResolution = {
   created: boolean;
 };
 
-type ConversationResolutionInput = {
+export type ConversationResolutionInput = {
   companyId: string;
   remoteJid: string;
   phone?: string;
+  /** Explicit provider aliases (PN/LID/remoteJidAlt), never heuristics. */
+  identityCandidates?: string[];
 };
 
 type ConversationResolutionOptions = {
@@ -27,7 +29,11 @@ export function conversationIdentityCandidates(input: ConversationResolutionInpu
   const phoneJid = !isWhatsAppGroup(remoteJid) && phone && !isWhatsAppLid(phone)
     ? providerPhoneJid({ remoteJid: phone })
     : '';
-  return Array.from(new Set([remoteJid, phoneJid].filter(Boolean)));
+  return Array.from(new Set([
+    remoteJid,
+    ...(input.identityCandidates || []).map((value) => String(value || '').trim()),
+    phoneJid,
+  ].filter(Boolean)));
 }
 
 function phoneForStorage(value: string) {
@@ -36,13 +42,16 @@ function phoneForStorage(value: string) {
 
 function phoneCandidate(input: ConversationResolutionInput, candidates: string[]) {
   if (isWhatsAppGroup(input.remoteJid)) return '';
+  const providerJid = candidates.find((value) => {
+    const lower = value.toLowerCase();
+    return lower.endsWith('@s.whatsapp.net') || lower.endsWith('@c.us');
+  });
+  if (providerJid) return providerJid.split('@')[0];
   const explicitPhone = String(input.phone || '').trim();
-  if (explicitPhone && !isWhatsAppLid(explicitPhone)) return explicitPhone;
-  const providerJid = candidates.find((value) => value.toLowerCase().endsWith('@s.whatsapp.net'));
-  return providerJid ? providerJid.split('@')[0] : '';
+  return explicitPhone && !isWhatsAppLid(explicitPhone) ? explicitPhone : '';
 }
 
-async function resolveWithClient(
+export async function resolveConversationWithClient(
   client: PoolClient,
   input: ConversationResolutionInput,
   options: ConversationResolutionOptions,
@@ -50,13 +59,24 @@ async function resolveWithClient(
   const remoteJid = String(input.remoteJid || '').trim();
   if (!remoteJid) return undefined;
   const candidates = conversationIdentityCandidates(input);
+  const explicitCandidates = Array.from(new Set([
+    remoteJid,
+    ...(input.identityCandidates || []).map((value) => String(value || '').trim()),
+  ].filter(Boolean)));
   const phone = phoneCandidate(input, candidates);
   const phoneKeys = phone ? phoneLookupKeys(phone) : [];
+  const phoneJid = phone ? providerPhoneJid({ remoteJid: phone }) : '';
+  const fallbackCandidates = phoneJid && !explicitCandidates.includes(phoneJid) ? [phoneJid] : [];
 
   // Serialize materialization of the same explicit provider identity. This
   // keeps two operators from creating duplicate rows for a provider-only chat.
-  const lockKey = `conversation-materialize:${input.companyId}:${[...candidates].sort().join('|')}`;
-  await client.query('SELECT pg_advisory_xact_lock(hashtext($1::text))', [lockKey]);
+  // Lock each explicit identity independently (in stable order). A replay
+  // carrying only a LID and another carrying LID+PN therefore serialize on the
+  // shared LID instead of using two unrelated composite locks.
+  for (const identity of [...explicitCandidates].sort()) {
+    const lockKey = `conversation-materialize:${input.companyId}:${identity}`;
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1::text))', [lockKey]);
+  }
 
   const existing = await client.query<{ id: string; contact_id: string; evolution_remote_jid: string }>(
     `SELECT c.id, c.contact_id, c.evolution_remote_jid
@@ -64,19 +84,50 @@ async function resolveWithClient(
      WHERE c.company_id = $1::uuid
        AND (
          c.evolution_remote_jid = ANY($2::text[])
-         OR EXISTS (
-           SELECT 1
-           FROM contact_channel_identities ci
-           WHERE ci.company_id = c.company_id
-             AND ci.contact_id = c.contact_id
-             AND ci.channel = 'whatsapp'
-             AND (ci.identity = ANY($2::text[]) OR ci.aliases && $2::text[])
+         OR (
+           cardinality($2::text[]) > 0
+           AND EXISTS (
+             SELECT 1
+             FROM contact_channel_identities ci
+             WHERE ci.company_id = c.company_id
+               AND ci.contact_id = c.contact_id
+               AND ci.channel = 'whatsapp'
+               AND (ci.identity = ANY($2::text[]) OR ci.aliases && $2::text[])
+           )
+         )
+         OR (
+           cardinality($3::text[]) > 0
+           AND (
+             c.evolution_remote_jid = ANY($3::text[])
+             OR EXISTS (
+               SELECT 1
+               FROM contact_channel_identities ci
+               WHERE ci.company_id = c.company_id
+                 AND ci.contact_id = c.contact_id
+                 AND ci.channel = 'whatsapp'
+                 AND (ci.identity = ANY($3::text[]) OR ci.aliases && $3::text[])
+             )
+           )
          )
        )
-     ORDER BY CASE WHEN c.evolution_remote_jid = $3::text THEN 0 ELSE 1 END,
-              c.updated_at DESC, c.id
+     ORDER BY CASE
+       WHEN (c.evolution_remote_jid LIKE '%@s.whatsapp.net' OR c.evolution_remote_jid LIKE '%@c.us')
+         AND c.evolution_remote_jid = ANY($2::text[]) THEN 0
+       WHEN EXISTS (
+         SELECT 1
+         FROM contact_channel_identities ci
+         WHERE ci.company_id = c.company_id
+           AND ci.contact_id = c.contact_id
+           AND ci.channel = 'whatsapp'
+           AND (ci.identity = ANY($2::text[]) OR ci.aliases && $2::text[])
+       ) THEN 1
+       WHEN c.evolution_remote_jid = $4::text THEN 2
+       WHEN c.evolution_remote_jid = ANY($2::text[]) THEN 3
+       ELSE 4
+     END,
+     c.created_at ASC, c.updated_at ASC, c.id
      LIMIT 1`,
-    [input.companyId, candidates, remoteJid],
+    [input.companyId, explicitCandidates, fallbackCandidates, remoteJid],
   );
   if (existing.rows[0]) {
     return {
@@ -115,10 +166,27 @@ async function resolveWithClient(
            )
          )
        )
-     ORDER BY c.updated_at DESC, c.id
+     ORDER BY CASE WHEN EXISTS (
+                SELECT 1
+                FROM contact_channel_identities ci
+                WHERE ci.company_id = c.company_id
+                  AND ci.contact_id = c.id
+                  AND ci.channel = 'whatsapp'
+                  AND ci.identity = ANY($2::text[])
+                  AND (ci.identity LIKE '%@s.whatsapp.net' OR ci.identity LIKE '%@c.us')
+              ) THEN 0
+              WHEN EXISTS (
+                SELECT 1
+                FROM contact_channel_identities ci
+                WHERE ci.company_id = c.company_id
+                  AND ci.contact_id = c.id
+                  AND ci.channel = 'whatsapp'
+                  AND (ci.identity = ANY($2::text[]) OR ci.aliases && $2::text[])
+              ) THEN 1 ELSE 2 END,
+              c.updated_at DESC, c.id
      LIMIT 1
      FOR UPDATE`,
-    [input.companyId, candidates, phoneKeys],
+    [input.companyId, explicitCandidates, phoneKeys],
   );
 
   let contactId = contactResult.rows[0]?.id;
@@ -161,10 +229,15 @@ async function resolveWithClient(
     `SELECT id, evolution_remote_jid
      FROM conversations
      WHERE company_id = $1::uuid AND contact_id = $2::uuid
-     ORDER BY CASE WHEN evolution_remote_jid = ANY($3::text[]) THEN 0 ELSE 1 END,
-              updated_at DESC, id
+     ORDER BY CASE
+                WHEN evolution_remote_jid LIKE '%@s.whatsapp.net'
+                  AND evolution_remote_jid = ANY($3::text[]) THEN 0
+                WHEN evolution_remote_jid = ANY($3::text[]) THEN 1
+                ELSE 2
+              END,
+              created_at ASC, updated_at ASC, id
      LIMIT 1`,
-    [input.companyId, contactId, candidates],
+    [input.companyId, contactId, explicitCandidates],
   );
   if (!isGroup && contactConversation.rows[0]) {
     return {
@@ -204,7 +277,7 @@ export async function resolveConversationForOperation(
   const client = await db.connect();
   try {
     await client.query('BEGIN');
-    const result = await resolveWithClient(client, input, options);
+    const result = await resolveConversationWithClient(client, input, options);
     await client.query('COMMIT');
     return result;
   } catch (error) {

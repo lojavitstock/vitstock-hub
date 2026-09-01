@@ -42,7 +42,7 @@ import { hasQaProviderOnlyChat, qaEvolutionResponse } from './qa.js';
 import { loadConversationTags } from './conversationTags.js';
 import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.js';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
-import { resolveConversationForOperation } from './conversationResolver.js';
+import { resolveConversationForOperation, resolveConversationWithClient } from './conversationResolver.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -766,6 +766,7 @@ async function loadLocalInboxChats(companyId: string) {
     group_name: string | null;
     group_avatar_url: string | null;
     contact_phone: string;
+    remote_jid_aliases: string[] | null;
   }>(
     `SELECT c.evolution_remote_jid,
             c.unread_count,
@@ -777,8 +778,8 @@ async function loadLocalInboxChats(companyId: string) {
               END
             ) AS last_message,
             COALESCE(latest.sent_at, c.last_message_at) AS last_message_at,
-            ct.name AS contact_name,
-            ct.avatar_url,
+            canonical_ct.name AS contact_name,
+            canonical_ct.avatar_url,
             latest.evolution_message_id AS message_id,
             latest.sender AS message_sender,
             latest.sender_name AS message_sender_name,
@@ -787,9 +788,57 @@ async function loadLocalInboxChats(companyId: string) {
             c.is_group,
             c.group_name,
             c.group_avatar_url,
-            ct.phone AS contact_phone
+            COALESCE(canonical_phone.phone, canonical_ct.phone, ct.phone) AS contact_phone,
+            COALESCE(channel_aliases.identities, ARRAY[]::text[]) AS remote_jid_aliases
      FROM conversations c
      JOIN contacts ct ON ct.id = c.contact_id
+     LEFT JOIN LATERAL (
+     SELECT ci.contact_id
+       FROM contact_channel_identities ci
+       WHERE ci.company_id = c.company_id
+         AND ci.channel = 'whatsapp'
+         AND (ci.identity = c.evolution_remote_jid OR ci.aliases @> ARRAY[c.evolution_remote_jid]::text[])
+       ORDER BY ci.updated_at DESC, ci.id
+       LIMIT 1
+     ) identity_owner ON true
+     JOIN contacts canonical_ct ON canonical_ct.id = COALESCE(identity_owner.contact_id, c.contact_id)
+     LEFT JOIN LATERAL (
+       SELECT regexp_replace(identity_value, '\\D', '', 'g') AS phone
+       FROM (
+         SELECT ci.identity AS identity_value, ci.updated_at, ci.id
+         FROM contact_channel_identities ci
+         WHERE ci.company_id = canonical_ct.company_id
+           AND ci.contact_id = canonical_ct.id
+           AND ci.channel = 'whatsapp'
+         UNION ALL
+         SELECT alias_value AS identity_value, ci.updated_at, ci.id
+         FROM contact_channel_identities ci
+         CROSS JOIN LATERAL unnest(ci.aliases) AS alias_values(alias_value)
+         WHERE ci.company_id = canonical_ct.company_id
+           AND ci.contact_id = canonical_ct.id
+           AND ci.channel = 'whatsapp'
+       ) identities
+       WHERE identity_value LIKE '%@s.whatsapp.net' OR identity_value LIKE '%@c.us'
+       ORDER BY updated_at DESC, id
+       LIMIT 1
+     ) canonical_phone ON true
+     LEFT JOIN LATERAL (
+       SELECT ARRAY_AGG(DISTINCT identity_value ORDER BY identity_value) AS identities
+       FROM (
+         SELECT ci.identity AS identity_value
+         FROM contact_channel_identities ci
+         WHERE ci.company_id = canonical_ct.company_id
+           AND ci.contact_id = canonical_ct.id
+           AND ci.channel = 'whatsapp'
+         UNION ALL
+         SELECT alias_value AS identity_value
+         FROM contact_channel_identities ci
+         CROSS JOIN LATERAL unnest(ci.aliases) AS alias_values(alias_value)
+         WHERE ci.company_id = canonical_ct.company_id
+           AND ci.contact_id = canonical_ct.id
+           AND ci.channel = 'whatsapp'
+       ) identities
+     ) channel_aliases ON true
      LEFT JOIN LATERAL (
        SELECT m.evolution_message_id, m.sender, m.sender_name, m.content, m.metadata, m.sent_at
        FROM messages m
@@ -819,6 +868,7 @@ async function loadLocalInboxChats(companyId: string) {
     return {
       id: remoteJid,
       remoteJid,
+      ...(row.remote_jid_aliases?.length ? { remoteJidAliases: row.remote_jid_aliases } : {}),
       ...(contactPhoneJid && contactPhoneJid !== remoteJid ? { remoteJidAlt: contactPhoneJid } : {}),
       ...(row.contact_phone ? { phone: row.contact_phone } : {}),
       isGroup,
@@ -892,16 +942,37 @@ async function persistProviderIdentities(
   contactId: string,
   remoteJid: string,
   phone?: string,
+  additionalIdentities: string[] = [],
 ) {
-  const identities = [remoteJid, phone ? providerPhoneJid({ remoteJid: phone }) : '']
+  const identities = [remoteJid, ...additionalIdentities, phone ? providerPhoneJid({ remoteJid: phone }) : '']
     .filter(Boolean)
+    .map((identity) => String(identity).trim())
     .filter((identity, index, values) => values.indexOf(identity) === index);
+  // Only an explicit provider PN/c.us identity is strong enough to rebind a
+  // previously materialized LID row. A local phone fallback alone must never
+  // steal an opaque identity from another contact.
+  const canRebindLid = [remoteJid, ...additionalIdentities]
+    .some((identity) => /@(s\.whatsapp\.net|c\.us)$/i.test(String(identity).trim()));
   for (const identity of identities) {
     await client.query(
       `INSERT INTO contact_channel_identities (company_id, contact_id, channel, identity, identity_type)
        VALUES ($1, $2, 'whatsapp', $3, $4)
-       ON CONFLICT (company_id, channel, identity) DO UPDATE SET contact_id = EXCLUDED.contact_id, updated_at = now()`,
-      [companyId, contactId, identity, isWhatsAppLid(identity) ? 'lid' : identity.endsWith('@g.us') ? 'group' : 'remote_jid'],
+       ON CONFLICT (company_id, channel, identity) DO UPDATE SET
+         contact_id = CASE
+           WHEN $5::boolean
+             AND (contact_channel_identities.identity_type = 'lid'
+               OR contact_channel_identities.identity LIKE '%@lid')
+           THEN EXCLUDED.contact_id
+           ELSE contact_channel_identities.contact_id
+         END,
+         updated_at = CASE
+           WHEN $5::boolean
+             AND (contact_channel_identities.identity_type = 'lid'
+               OR contact_channel_identities.identity LIKE '%@lid')
+           THEN now()
+           ELSE contact_channel_identities.updated_at
+         END`,
+      [companyId, contactId, identity, isWhatsAppLid(identity) ? 'lid' : identity.endsWith('@g.us') ? 'group' : 'remote_jid', canRebindLid],
     );
   }
 }
@@ -1491,10 +1562,76 @@ function providerRemoteJid(record: any) {
   return String(record?.key?.remoteJid || record?.remoteJid || '').trim();
 }
 
+/**
+ * Return only channel identities explicitly supplied by Evolution. A numeric
+ * value without a JID suffix is normalized to its PN representation; opaque
+ * LIDs are kept verbatim and are never converted to a phone number.
+ */
+export function providerIdentityCandidates(record: any) {
+  const remoteJid = providerRemoteJid(record);
+  const isGroup = isWhatsAppGroupJid(remoteJid);
+  const values = [
+    remoteJid,
+    record?.remoteJidAlt,
+    record?.key?.remoteJidAlt,
+    record?.lastMessage?.key?.remoteJidAlt,
+    ...(!isGroup ? [
+      record?.senderPn,
+      record?.participantPn,
+      record?.key?.senderPn,
+      record?.key?.participantPn,
+      record?.lastMessage?.key?.senderPn,
+      record?.lastMessage?.key?.participantPn,
+    ] : []),
+  ];
+  const identities = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const candidate = value.trim();
+    if (!candidate) continue;
+    const lower = candidate.toLowerCase();
+    if (lower.endsWith('@lid') || lower.endsWith('@g.us') || lower.endsWith('@s.whatsapp.net') || lower.endsWith('@c.us')) {
+      identities.add(candidate);
+      continue;
+    }
+    const digits = candidate.replace(/\D/g, '');
+    if (digits.length >= 8 && digits.length <= 20) identities.add(`${digits}@s.whatsapp.net`);
+  }
+  return [...identities];
+}
+
 function providerPhone(record: any) {
   const remoteJid = providerRemoteJid(record);
   if (isWhatsAppGroupJid(remoteJid)) return remoteJid;
   return providerPhoneDigits(record);
+}
+
+function providerMessagePhone(record: any) {
+  const remoteJid = providerRemoteJid(record);
+  if (isWhatsAppGroupJid(remoteJid)) return remoteJid;
+  // Message ids are provider identifiers, not phone evidence.  Keep the
+  // message-to-contact fallback limited to explicit PN/alternate fields so an
+  // opaque LID replay cannot be materialized from a numeric key.id.
+  return providerPhoneDigits({
+    remoteJid: record?.remoteJid,
+    remoteJidAlt: record?.remoteJidAlt,
+    senderPn: record?.senderPn,
+    participantPn: record?.participantPn,
+    key: {
+      remoteJid: record?.key?.remoteJid,
+      remoteJidAlt: record?.key?.remoteJidAlt,
+      senderPn: record?.key?.senderPn,
+      participantPn: record?.key?.participantPn,
+    },
+    lastMessage: {
+      key: {
+        remoteJid: record?.lastMessage?.key?.remoteJid,
+        remoteJidAlt: record?.lastMessage?.key?.remoteJidAlt,
+        senderPn: record?.lastMessage?.key?.senderPn,
+        participantPn: record?.lastMessage?.key?.participantPn,
+      },
+    },
+  });
 }
 
 function providerMessageId(record: any) {
@@ -1532,7 +1669,7 @@ function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
   return {
     id: providerMessageId(record),
     remoteJid,
-    phone: isGroup ? remoteJid : providerPhone(record) || resolvedFallbackPhone,
+    phone: isGroup ? remoteJid : providerMessagePhone(record) || resolvedFallbackPhone,
     isGroup,
     groupName: groupName || undefined,
     groupAvatarUrl: isGroup
@@ -1886,6 +2023,7 @@ async function findOrCreateConversation(
     companyId: string;
     contactId: string;
     remoteJid: string;
+    identityCandidates?: string[];
     lastMessage: string;
     lastMessageAt: Date;
     reopenResolved: boolean;
@@ -1983,6 +2121,7 @@ async function persistProviderMessage(
   }
   const local = providerRecordToLocalMessage(record, options.fallbackPhone);
   if (!local.id || !local.remoteJid) return undefined;
+  const identityCandidates = providerIdentityCandidates(record);
 
   const client = await db.connect();
   try {
@@ -1999,6 +2138,9 @@ async function persistProviderMessage(
     const isGroup = Boolean(local.isGroup) || isWhatsAppGroupJid(local.remoteJid);
     const groupName = isGroup ? local.groupName : undefined;
     const displayGroupName = groupName || `Grupo ${local.remoteJid.split('@')[0]}`;
+    const conversationPreview = isGroup
+      ? `${local.senderName || (local.sender === 'attendant' ? 'Atendente' : 'Participante')}: ${local.content}`
+      : local.content;
     const existingResult = await client.query<ExistingProviderMessageIdentity>(
       `SELECT m.conversation_id AS "conversationId",
               c.contact_id AS "contactId",
@@ -2016,6 +2158,14 @@ async function persistProviderMessage(
     let conversationId = target.conversationId;
     let contactId = target.contactId;
     let insertedNewMessage = false;
+    const canonicalConversation = existingIdentity
+      ? undefined
+      : await resolveConversationWithClient(client, {
+        companyId,
+        remoteJid: local.remoteJid,
+        phone: local.phone,
+        identityCandidates,
+      }, { createIfMissing: false });
 
     if (existingIdentity) {
       // The message id is authoritative.  The provider JID is retained as an
@@ -2025,11 +2175,40 @@ async function persistProviderMessage(
         companyId,
         existingIdentity.contactId,
         target.providerRemoteJid,
-        !isGroup ? local.phone || undefined : undefined,
+        undefined,
+        identityCandidates,
       );
       local.remoteJid = target.conversationRemoteJid;
+    } else if (canonicalConversation) {
+      // Explicit PN/LID evidence already points at an established Hub
+      // conversation. Keep the provider JID as an alias, but persist the
+      // replayed message on the canonical conversation selected by the shared
+      // resolver (never on a newly materialized LID row).
+      conversationId = canonicalConversation.id;
+      contactId = canonicalConversation.contactId;
+      await persistProviderIdentities(
+        client,
+        companyId,
+        contactId,
+        local.remoteJid,
+        undefined,
+        identityCandidates,
+      );
+      conversationId = await findOrCreateConversation(client, {
+        companyId,
+        contactId,
+        remoteJid: canonicalConversation.remoteJid,
+        identityCandidates,
+        lastMessage: conversationPreview,
+        lastMessageAt: local.sentAt,
+        reopenResolved: options.reopen && local.sender === 'contact',
+        isGroup,
+        groupName,
+        groupAvatarUrl: local.groupAvatarUrl,
+      });
+      local.remoteJid = canonicalConversation.remoteJid;
     } else {
-      const linkedContact = !isGroup && !local.phone
+      const linkedContact = !isGroup
         ? await client.query<{ id: string; phone: string }>(
           `SELECT c.id, COALESCE(primary_phone.phone, c.phone) AS phone
            FROM contact_channel_identities ci
@@ -2041,12 +2220,23 @@ async function persistProviderMessage(
              ORDER BY p.is_primary DESC, p.id
              LIMIT 1
            ) primary_phone ON true
-           WHERE ci.company_id = $1 AND ci.channel = 'whatsapp' AND ci.identity = $2
+           WHERE ci.company_id = $1
+             AND ci.channel = 'whatsapp'
+             AND (ci.identity = ANY($2::text[]) OR ci.aliases && $2::text[])
+           ORDER BY CASE
+             WHEN ci.identity = ANY($2::text[])
+               AND (ci.identity LIKE '%@s.whatsapp.net' OR ci.identity LIKE '%@c.us') THEN 0
+             WHEN ci.identity = $3::text THEN 1
+             ELSE 2
+           END, ci.updated_at DESC, ci.id
            LIMIT 1`,
-          [companyId, local.remoteJid],
+          [companyId, identityCandidates, local.remoteJid],
         )
         : { rows: [] };
-      const resolvedPhone = local.phone || linkedContact.rows[0]?.phone || '';
+      // A phone candidate is only a fallback. When an explicit alias resolves
+      // an existing contact, retain that contact's canonical phone even if
+      // the replay payload carries an inconsistent numeric candidate.
+      const resolvedPhone = linkedContact.rows[0]?.phone || local.phone || '';
       if (!isGroup && !resolvedPhone) return undefined;
       const contactPhone = isGroup ? local.remoteJid : phoneForContactStorage(resolvedPhone);
       const contactName = isGroup
@@ -2054,9 +2244,6 @@ async function persistProviderMessage(
         : local.sender === 'contact'
           ? (providerContactName({ name: local.senderName }) || `+${resolvedPhone}`)
           : `+${resolvedPhone}`;
-      const conversationPreview = isGroup
-        ? `${local.senderName || (local.sender === 'attendant' ? 'Atendente' : 'Participante')}: ${local.content}`
-        : local.content;
       const contact = isGroup
         ? await client.query<{ id: string }>(
           `INSERT INTO contacts (company_id, name, phone, avatar_url)
@@ -2095,12 +2282,20 @@ async function persistProviderMessage(
         await upsertContactPhone(client, { companyId, contactId, phone: contactPhone, isPrimary: true, source: 'whatsapp' });
       }
 
-      await persistProviderIdentities(client, companyId, contactId, local.remoteJid, isGroup ? undefined : resolvedPhone);
+      await persistProviderIdentities(
+        client,
+        companyId,
+        contactId,
+        local.remoteJid,
+        isGroup ? undefined : resolvedPhone,
+        identityCandidates,
+      );
 
       conversationId = await findOrCreateConversation(client, {
         companyId,
         contactId,
         remoteJid: local.remoteJid,
+        identityCandidates,
         lastMessage: conversationPreview,
         lastMessageAt: local.sentAt,
         reopenResolved: options.reopen && local.sender === 'contact',
@@ -2109,29 +2304,32 @@ async function persistProviderMessage(
         groupAvatarUrl: local.groupAvatarUrl,
       });
       if (!conversationId) throw new Error('Conversa não pôde ser preparada para a mensagem recebida');
-
-      const inserted = await client.query<{ id: string }>(
-          `INSERT INTO messages
-           (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_url, media_type, metadata, status, sent_at, is_internal_note)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false)
-           ON CONFLICT (company_id, evolution_message_id) DO NOTHING
-           RETURNING id`,
-          [
-            companyId,
-            conversationId,
-            local.id,
-            local.sender,
-            local.senderName,
-            local.content,
-            local.mediaUrl || null,
-            local.mediaType || null,
-            JSON.stringify(local.metadata || {}),
-            local.status,
-            local.sentAt,
-          ],
-        );
-      insertedNewMessage = Boolean(inserted.rowCount);
     }
+
+    if (!conversationId || !contactId) {
+      throw new Error('Conversa não pôde ser preparada para a mensagem recebida');
+    }
+    const inserted = await client.query<{ id: string }>(
+      `INSERT INTO messages
+       (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_url, media_type, metadata, status, sent_at, is_internal_note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false)
+       ON CONFLICT (company_id, evolution_message_id) DO NOTHING
+       RETURNING id`,
+      [
+        companyId,
+        conversationId,
+        local.id,
+        local.sender,
+        local.senderName,
+        local.content,
+        local.mediaUrl || null,
+        local.mediaType || null,
+        JSON.stringify(local.metadata || {}),
+        local.status,
+        local.sentAt,
+      ],
+    );
+    insertedNewMessage = Boolean(inserted.rowCount);
 
     // Reprocessamentos podem trazer metadados ou mídia que não existiam na
     // primeira entrega. Preservamos autoria interna somente quando já existe
@@ -2321,10 +2519,23 @@ async function ensureOutboundMessage(input: {
       idempotencyLockMs = Date.now() - lockStartedAt;
     }
     const isGroup = isWhatsAppGroupJid(input.remoteJid);
+    const identityCandidates = isGroup
+      ? [input.remoteJid]
+      : [input.remoteJid, canonicalPhoneJid(input.number)];
+    const canonicalConversation = isGroup
+      ? undefined
+      : await resolveConversationWithClient(client, {
+        companyId: input.companyId,
+        remoteJid: input.remoteJid,
+        phone: input.number,
+        identityCandidates,
+      }, { createIfMissing: false });
     const contactPhone = isGroup ? input.remoteJid : phoneForContactStorage(input.number);
     const contactName = isGroup ? `Grupo ${input.remoteJid.split('@')[0]}` : contactPhone;
     const conversationPreview = isGroup ? `${input.userName}: ${input.content}` : input.content;
-    const contact = isGroup
+    const contact = canonicalConversation
+      ? { rows: [{ id: canonicalConversation.contactId }] }
+      : isGroup
       ? await client.query<{ id: string }>(
         `INSERT INTO contacts (company_id, name, phone)
          VALUES ($1, $2, $3)
@@ -2335,18 +2546,20 @@ async function ensureOutboundMessage(input: {
     const contactId = contact.rows[0]?.id;
   if (!contactId) throw new Error('Contato não pôde ser preparado para o envio');
 
-    if (!isGroup) {
+    if (!isGroup && !canonicalConversation) {
       await upsertContactPhone(client, { companyId: input.companyId, contactId, phone: contactPhone, isPrimary: true, source: 'whatsapp' });
     }
 
-    await client.query(
-      `INSERT INTO contact_channel_identities (company_id, contact_id, channel, identity, identity_type)
-       VALUES ($1, $2, 'whatsapp', $3, $4)
-       ON CONFLICT (company_id, channel, identity) DO UPDATE SET contact_id = EXCLUDED.contact_id, updated_at = now()`,
-      [input.companyId, contactId, input.remoteJid, input.remoteJid.endsWith('@lid') ? 'lid' : 'remote_jid'],
+    await persistProviderIdentities(
+      client,
+      input.companyId,
+      contactId,
+      input.remoteJid,
+      undefined,
+      identityCandidates,
     );
 
-    const conversationRemoteJid = await resolveOutboundConversationJid(client, {
+    const conversationRemoteJid = canonicalConversation?.remoteJid || await resolveOutboundConversationJid(client, {
       companyId: input.companyId,
       contactId,
       number: input.number,
@@ -2356,6 +2569,7 @@ async function ensureOutboundMessage(input: {
       companyId: input.companyId,
       contactId,
       remoteJid: conversationRemoteJid,
+      identityCandidates,
       lastMessage: conversationPreview,
       lastMessageAt: new Date(),
       reopenResolved: true,

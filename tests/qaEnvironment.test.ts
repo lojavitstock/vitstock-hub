@@ -286,5 +286,5 @@ test('outbound conversation lookup types and binds only its referenced parameter
   const query = buildExistingConversationQuery({ companyId: 'company-a', remoteJid: '5521990000001@s.whatsapp.net' });
   assert.match(query.text, /company_id = \$1::uuid/);
   assert.match(query.text, /evolution_remote_jid = \$2::text/);
-  assert.deepEqual(query.values, ['company-a', '5521990000001@s.whatsapp.net']);
+  assert.deepEqual(query.values, ['company-a', '5521990000001@s.whatsapp.net', []]);
 });

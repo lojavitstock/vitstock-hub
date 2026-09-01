@@ -36,7 +36,7 @@ import {
   isProviderReactionEvent,
   providerReactionUpdate,
 } from '../server/src/messageReactions';
-import { resolveProviderMessageTarget } from '../server/src/evolution';
+import { providerIdentityCandidates, resolveProviderMessageTarget } from '../server/src/evolution';
 import { resolveEvolutionRecipient } from '../server/src/evolutionRecipient';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
 import { canonicalInboxIdentity, projectCanonicalInboxChats } from '../server/src/inboxProjection';
@@ -71,6 +71,7 @@ import {
 } from '../server/src/config';
 import { normalizeTagName } from '../server/src/conversationTags';
 import { conversationIdentityCandidates } from '../server/src/conversationResolver';
+import { buildExistingConversationQuery } from '../server/src/conversationQueries';
 import { normalizeConversationTags } from '../src/utils/conversationTags';
 import { formatConversationTimestamp, formatOperatorLabel } from '../src/components/conversations/conversationFormatters';
 import { outboundErrorMessage } from '../src/utils/outboundError';
@@ -2615,6 +2616,21 @@ test('projeção canônica reconhece representação nacional equivalente sem in
   assert.equal(canonicalInboxIdentity({ remoteJid: 'opaque-456@lid', remoteJidAlt: '5521999999999@s.whatsapp.net' }).explicit, true);
 });
 
+test('projeção canônica usa aliases persistidos do contato para colapsar replay LID/PN', () => {
+  const projected = projectCanonicalInboxChats([
+    inboxProjectionChat('opaque-persisted@lid', {
+      remoteJidAliases: ['opaque-persisted@lid', '5521999999999@s.whatsapp.net'],
+      lastMessage: { key: { id: 'replay-message', remoteJid: 'opaque-persisted@lid' }, message: { conversation: 'Replay' }, messageTimestamp: 1_800_000_010 },
+    }),
+    inboxProjectionChat('5521999999999@s.whatsapp.net', {
+      lastMessage: { key: { id: 'pn-message', remoteJid: '5521999999999@s.whatsapp.net' }, message: { conversation: 'Anterior' }, messageTimestamp: 1_800_000_000 },
+    }),
+  ]);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0]?.remoteJid, '5521999999999@s.whatsapp.net');
+  assert.equal(projected[0]?.lastMessage?.key?.id, 'replay-message');
+});
+
 test('LID opaco e PN diferentes permanecem separados', () => {
   const projected = projectCanonicalInboxChats([
     inboxProjectionChat('opaque-unknown@lid'),
@@ -2824,4 +2840,37 @@ test('conversation operations use explicit provider identities without inferring
     conversationIdentityCandidates({ companyId: 'qa', remoteJid: '120363000000@g.us', phone: '120363000000@g.us' }),
     ['120363000000@g.us'],
   );
+});
+
+test('provider replay identities retain explicit PN/LID aliases and ignore message ids', () => {
+  assert.deepEqual(
+    providerIdentityCandidates({
+      key: {
+        remoteJid: '164700000001@lid',
+        remoteJidAlt: '5521999990001@s.whatsapp.net',
+        id: '5521999990001',
+      },
+      senderPn: '5521999990001@s.whatsapp.net',
+    }),
+    ['164700000001@lid', '5521999990001@s.whatsapp.net'],
+  );
+  assert.deepEqual(
+    providerIdentityCandidates({ key: { remoteJid: '120363000000@g.us' }, senderPn: '5521888888888@s.whatsapp.net' }),
+    ['120363000000@g.us'],
+  );
+});
+
+test('conversation lookup gives explicit PN precedence over replay LID rows', () => {
+  const query = buildExistingConversationQuery({
+    companyId: 'company-a',
+    remoteJid: '164700000001@lid',
+    identityCandidates: ['164700000001@lid', '5521999990001@s.whatsapp.net'],
+  });
+  assert.match(query.text, /evolution_remote_jid LIKE '%@s\.whatsapp\.net'/);
+  assert.match(query.text, /contact_channel_identities/);
+  assert.deepEqual(query.values, [
+    'company-a',
+    '164700000001@lid',
+    ['164700000001@lid', '5521999990001@s.whatsapp.net'],
+  ]);
 });
