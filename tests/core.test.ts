@@ -72,6 +72,14 @@ import {
 import { normalizeTagName } from '../server/src/conversationTags';
 import { conversationIdentityCandidates } from '../server/src/conversationResolver';
 import { buildExistingConversationQuery } from '../server/src/conversationQueries';
+import {
+  OPAQUE_LID_STAGING_TTL_MS,
+  buildReplayAliasMap,
+  createOpaqueLidStagingEnvelope,
+  preEnrichProviderReplayRecords,
+  sanitizeProviderRecordForStaging,
+  shouldStageOpaqueLidMessage,
+} from '../server/src/opaqueLidStaging';
 import { normalizeConversationTags } from '../src/utils/conversationTags';
 import { formatConversationTimestamp, formatOperatorLabel } from '../src/components/conversations/conversationFormatters';
 import { outboundErrorMessage } from '../src/utils/outboundError';
@@ -2873,4 +2881,63 @@ test('conversation lookup gives explicit PN precedence over replay LID rows', ()
     '164700000001@lid',
     ['164700000001@lid', '5521999990001@s.whatsapp.net'],
   ]);
+});
+
+test('replay pre-enrichment resolves opaque LID regardless of alias order', () => {
+  const records = [
+    { key: { id: 'opaque-first', remoteJid: 'opaque-replay@lid' }, message: { conversation: 'one' } },
+    { key: { id: 'alias-middle', remoteJid: 'opaque-replay@lid' }, remoteJidAlt: '5521999990001@s.whatsapp.net', message: { conversation: 'two' } },
+    { key: { id: 'opaque-last', remoteJid: 'opaque-replay@lid' }, message: { conversation: 'three' } },
+  ];
+  const candidates = (record: any) => providerIdentityCandidates(record);
+  const aliasMap = buildReplayAliasMap(records, candidates);
+  assert.equal(aliasMap.get('opaque-replay@lid'), '5521999990001@s.whatsapp.net');
+  const enriched = preEnrichProviderReplayRecords(records, candidates);
+  assert.equal(enriched[0]?.remoteJidAlt, '5521999990001@s.whatsapp.net');
+  assert.equal(enriched[2]?.remoteJidAlt, '5521999990001@s.whatsapp.net');
+  assert.equal(enriched[1], records[1]);
+
+  const reversedAlias = {
+    key: { id: 'alias-reversed', remoteJid: '5521999990001@s.whatsapp.net' },
+    remoteJidAlt: 'opaque-replay@lid',
+    message: { conversation: 'alias' },
+  };
+  assert.equal(buildReplayAliasMap([reversedAlias], candidates).get('opaque-replay@lid'), '5521999990001@s.whatsapp.net');
+});
+
+test('ambiguous replay aliases remain unresolved instead of merging identities', () => {
+  const records = [
+    { key: { remoteJid: 'ambiguous@lid' }, remoteJidAlt: '5521999990001@s.whatsapp.net' },
+    { key: { remoteJid: 'ambiguous@lid' }, remoteJidAlt: '5521999990002@s.whatsapp.net' },
+  ];
+  assert.equal(buildReplayAliasMap(records, providerIdentityCandidates).size, 0);
+  assert.deepEqual(preEnrichProviderReplayRecords(records, providerIdentityCandidates), records);
+});
+
+test('opaque LID staging is fail-closed and excludes binary/secrets', () => {
+  assert.equal(shouldStageOpaqueLidMessage({ remoteJid: 'opaque@lid', isGroup: false, hasCanonicalConversation: false }), true);
+  assert.equal(shouldStageOpaqueLidMessage({ remoteJid: 'opaque@lid', isGroup: false, hasCanonicalConversation: true }), false);
+  assert.equal(shouldStageOpaqueLidMessage({ remoteJid: 'opaque@lid', isGroup: false, hasCanonicalConversation: false, phone: '5521999990001' }), false);
+  assert.equal(shouldStageOpaqueLidMessage({ remoteJid: '120363000000@g.us', isGroup: true, hasCanonicalConversation: false }), false);
+  assert.equal(OPAQUE_LID_STAGING_TTL_MS, 15 * 60_000);
+
+  const sanitized = sanitizeProviderRecordForStaging({
+    key: { id: 'message-1', remoteJid: 'opaque@lid' },
+    message: { imageMessage: { url: 'https://media.example.test/one', base64: 'binary', mediaKey: 'secret' } },
+    authorization: 'secret',
+  });
+  assert.equal(sanitized.key.id, 'message-1');
+  assert.equal(sanitized.message.imageMessage.url, 'https://media.example.test/one');
+  assert.equal('base64' in sanitized.message.imageMessage, false);
+  assert.equal('mediaKey' in sanitized.message.imageMessage, false);
+  assert.equal('authorization' in sanitized, false);
+
+  const envelope = createOpaqueLidStagingEnvelope({
+    key: { id: 'media-message', remoteJid: 'opaque@lid', fromMe: true, participant: 'opaque@lid' },
+    message: { documentMessage: { url: 'https://media.example.test/doc', mimetype: 'application/pdf' } },
+  }, { incrementUnread: false, reopen: true });
+  assert.deepEqual(envelope.record.key, {
+    id: 'media-message', remoteJid: 'opaque@lid', fromMe: true, participant: 'opaque@lid',
+  });
+  assert.equal(envelope.record.message.documentMessage.url, 'https://media.example.test/doc');
 });

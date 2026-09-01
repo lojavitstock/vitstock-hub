@@ -43,6 +43,14 @@ import { loadConversationTags } from './conversationTags.js';
 import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.js';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
 import { resolveConversationForOperation, resolveConversationWithClient } from './conversationResolver.js';
+import {
+  OPAQUE_LID_STAGING_CLEANUP_INTERVAL_MS,
+  OPAQUE_LID_STAGING_TTL_MS,
+  createOpaqueLidStagingEnvelope,
+  preEnrichProviderReplayRecords,
+  shouldStageOpaqueLidMessage,
+  type OpaqueLidStagingEnvelope,
+} from './opaqueLidStaging.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -173,6 +181,8 @@ const outboundMediaEvolutionRequests = createOutboundRequestCoordinator<{
   body: any;
   providerError?: unknown;
 }>();
+let opaqueLidStagingCleanupAt = 0;
+let opaqueLidStagingCleanupInFlight: Promise<void> | undefined;
 
 async function fetchGroupParticipantIdentities(companyId: string, groupJid: string) {
   const normalizedGroupJid = normalizeParticipantJid(groupJid);
@@ -1600,6 +1610,124 @@ export function providerIdentityCandidates(record: any) {
   return [...identities];
 }
 
+async function stageOpaqueLidMessage(
+  client: Pick<PoolClient, 'query'>,
+  companyId: string,
+  record: any,
+  local: ReturnType<typeof providerRecordToLocalMessage>,
+  options: { incrementUnread: boolean; reopen: boolean; fallbackPhone?: string },
+) {
+  const envelope = createOpaqueLidStagingEnvelope(record, options);
+  await client.query(
+    `INSERT INTO evolution_message_staging
+       (company_id, evolution_message_id, opaque_jid, provider_message, expires_at)
+     VALUES ($1::uuid, $2::text, $3::text, $4::jsonb, $5::timestamptz)
+     ON CONFLICT (company_id, evolution_message_id) DO UPDATE SET
+       opaque_jid = EXCLUDED.opaque_jid,
+       provider_message = EXCLUDED.provider_message,
+       expires_at = EXCLUDED.expires_at,
+       last_attempt_at = now(),
+       attempt_count = evolution_message_staging.attempt_count + 1`,
+    [
+      companyId,
+      local.id,
+      local.remoteJid,
+      JSON.stringify(envelope),
+      new Date(Date.now() + OPAQUE_LID_STAGING_TTL_MS),
+    ],
+  );
+}
+
+async function cleanupExpiredOpaqueLidStaging() {
+  const now = Date.now();
+  if (opaqueLidStagingCleanupInFlight) return opaqueLidStagingCleanupInFlight;
+  if (now - opaqueLidStagingCleanupAt < OPAQUE_LID_STAGING_CLEANUP_INTERVAL_MS) return;
+  opaqueLidStagingCleanupAt = now;
+  opaqueLidStagingCleanupInFlight = (async () => {
+    try {
+      const expired = await db.query(
+        `WITH expired AS (
+           SELECT id
+           FROM evolution_message_staging
+           WHERE expires_at <= now()
+           ORDER BY expires_at ASC
+           LIMIT 100
+         )
+         DELETE FROM evolution_message_staging staging
+         USING expired
+         WHERE staging.id = expired.id
+         RETURNING staging.id`,
+      );
+      if (expired.rowCount) {
+        console.info('[EVOLUTION_STAGING]', JSON.stringify({ expired: expired.rowCount }));
+      }
+    } catch (error) {
+      // The migration runs before the application starts. Keep this cleanup
+      // best-effort so a transient database/schema issue never blocks intake.
+      console.warn('[EVOLUTION_STAGING] cleanup unavailable', error instanceof Error ? error.message : String(error));
+    }
+  })().finally(() => {
+    opaqueLidStagingCleanupInFlight = undefined;
+  });
+  return opaqueLidStagingCleanupInFlight;
+}
+
+function stagingEnvelopeFromRow(value: any): OpaqueLidStagingEnvelope | undefined {
+  if (!value || typeof value !== 'object' || !value.record || typeof value.record !== 'object') return undefined;
+  const options = value.options && typeof value.options === 'object' ? value.options : {};
+  return {
+    record: value.record,
+    options: {
+      incrementUnread: options.incrementUnread === true,
+      reopen: options.reopen === true,
+      ...(typeof options.fallbackPhone === 'string' && options.fallbackPhone ? { fallbackPhone: options.fallbackPhone } : {}),
+    },
+  };
+}
+
+async function reconcileOpaqueLidStaging(companyId: string, opaqueJid: string) {
+  if (!opaqueJid.toLowerCase().endsWith('@lid')) return;
+  const staged = await db.query<{ id: string; provider_message: OpaqueLidStagingEnvelope }>(
+    `SELECT id, provider_message
+     FROM evolution_message_staging
+     WHERE company_id = $1::uuid
+       AND opaque_jid = $2::text
+       AND expires_at > now()
+     ORDER BY received_at ASC, id ASC
+     LIMIT 200`,
+    [companyId, opaqueJid],
+  );
+  for (const row of staged.rows) {
+    const envelope = stagingEnvelopeFromRow(row.provider_message);
+    if (!envelope) continue;
+    try {
+      const persisted = await persistProviderMessage(companyId, envelope.record, {
+        ...envelope.options,
+        // The outer loop owns deletion and batching. Prevent the normal
+        // post-commit hook from recursively reopening the same staged rows.
+        skipOpaqueLidReconcile: true,
+      });
+      if (!persisted || persisted.staged) continue;
+      await db.query(
+        'DELETE FROM evolution_message_staging WHERE id = $1::uuid AND company_id = $2::uuid',
+        [row.id, companyId],
+      );
+      if (persisted.message) {
+        publishRealtimeEvent(companyId, 'message.upsert', {
+          remoteJid: persisted.conversationRemoteJid || providerRemoteJid(envelope.record),
+          phone: providerPhone(envelope.record),
+          messageId: persisted.message.id,
+          timestampMs: persisted.message.timestampMs,
+          fromMe: envelope.record?.key?.fromMe === true,
+          message: persisted.message,
+        });
+      }
+    } catch (error) {
+      console.warn('[EVOLUTION_STAGING] reconciliation failed', error instanceof Error ? error.message : String(error));
+    }
+  }
+}
+
 function providerPhone(record: any) {
   const remoteJid = providerRemoteJid(record);
   if (isWhatsAppGroupJid(remoteJid)) return remoteJid;
@@ -1802,6 +1930,7 @@ function storedMessageToRealtimeMessage(row: any) {
 type ProviderPersistenceResult = {
   persisted: boolean;
   ignored?: boolean;
+  staged?: boolean;
   reaction?: boolean;
   originalFound?: boolean;
   conversationRemoteJid?: string;
@@ -2111,7 +2240,7 @@ async function findOrCreateConversation(
 async function persistProviderMessage(
   companyId: string,
   record: any,
-  options: { incrementUnread: boolean; reopen: boolean; fallbackPhone?: string },
+  options: { incrementUnread: boolean; reopen: boolean; fallbackPhone?: string; skipOpaqueLidReconcile?: boolean },
 ): Promise<ProviderPersistenceResult | undefined> {
   if (isNonRenderableProviderMessage(record)) {
     return { persisted: false, ignored: true, message: undefined };
@@ -2158,6 +2287,7 @@ async function persistProviderMessage(
     let conversationId = target.conversationId;
     let contactId = target.contactId;
     let insertedNewMessage = false;
+    const opaqueJidsToReconcile = new Set<string>();
     const canonicalConversation = existingIdentity
       ? undefined
       : await resolveConversationWithClient(client, {
@@ -2166,6 +2296,17 @@ async function persistProviderMessage(
         phone: local.phone,
         identityCandidates,
       }, { createIfMissing: false });
+
+    if (shouldStageOpaqueLidMessage({
+      remoteJid: local.remoteJid,
+      isGroup,
+      hasCanonicalConversation: Boolean(canonicalConversation),
+      phone: local.phone,
+    })) {
+      await stageOpaqueLidMessage(client, companyId, record, local, options);
+      await client.query('COMMIT');
+      return { persisted: false, staged: true, message: undefined };
+    }
 
     if (existingIdentity) {
       // The message id is authoritative.  The provider JID is retained as an
@@ -2309,6 +2450,15 @@ async function persistProviderMessage(
     if (!conversationId || !contactId) {
       throw new Error('Conversa não pôde ser preparada para a mensagem recebida');
     }
+    // Any successfully resolved record can be the explicit alias event that
+    // unlocks staged rows. A provider payload may place the LID in remoteJid
+    // or remoteJidAlt, so collect every LID candidate rather than relying on
+    // one primary field.
+    if (!options.skipOpaqueLidReconcile) {
+      for (const identity of identityCandidates) {
+        if (identity.toLowerCase().endsWith('@lid')) opaqueJidsToReconcile.add(identity);
+      }
+    }
     const inserted = await client.query<{ id: string }>(
       `INSERT INTO messages
        (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_url, media_type, metadata, status, sent_at, is_internal_note)
@@ -2420,6 +2570,11 @@ async function persistProviderMessage(
     }
     await client.query('COMMIT');
     localInboxCache.delete(companyId);
+    if (!options.skipOpaqueLidReconcile) {
+      for (const opaqueJid of opaqueJidsToReconcile) {
+        await reconcileOpaqueLidStaging(companyId, opaqueJid);
+      }
+    }
     return {
       persisted: insertedNewMessage,
       conversationRemoteJid: local.remoteJid,
@@ -3281,6 +3436,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/evolution/messages', { preHandler: requireUser }, async (request, reply) => {
+    void cleanupExpiredOpaqueLidStaging();
     const parsed = jidSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Conversa inválida' });
     // Alguns contatos alternam entre o JID do telefone e o JID interno (@lid).
@@ -3410,9 +3566,10 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       });
     }
 
+    const replayRecords = preEnrichProviderReplayRecords([...recordsById.values()], providerIdentityCandidates);
     const enrichedProviderRecords = await enrichProviderParticipantRecords(
       request.user!.companyId,
-      [...recordsById.values()],
+      replayRecords,
     );
     const enrichedRecordsById = new Map<string, any>();
     for (const record of enrichedProviderRecords) {
@@ -4034,6 +4191,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   });
 
   app.post('/webhooks/evolution', async (request, reply) => {
+    void cleanupExpiredOpaqueLidStaging();
     const providedSecret = request.headers['x-webhook-secret'];
     const value = Array.isArray(providedSecret) ? providedSecret[0] : providedSecret;
     if (!matchesWebhookSecret(value)) return reply.code(401).send({ error: 'Webhook não autorizado' });
@@ -4064,7 +4222,8 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       }));
 
       if (companyId) {
-        const enrichedRecords = await enrichProviderParticipantRecords(companyId, records);
+        const replayRecords = preEnrichProviderReplayRecords(records, providerIdentityCandidates);
+        const enrichedRecords = await enrichProviderParticipantRecords(companyId, replayRecords);
         for (const record of enrichedRecords) {
           try {
             traceOutbound(request, `webhook.${normalizedEvent}`, {
