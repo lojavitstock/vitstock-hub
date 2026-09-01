@@ -113,7 +113,13 @@ test('Atendimento mantém o final, preserva leitura e oferece retorno ao final',
   await expect(page.getByRole('button', { name: 'Ir para o final da conversa' })).toBeVisible();
 
   // Caso C: o botão independe de mensagens novas e retorna ao final.
-  await page.getByRole('button', { name: 'Ir para o final da conversa' }).click();
+  const jumpButton = page.getByRole('button', { name: 'Ir para o final da conversa' });
+  const timelineBox = await container.boundingBox();
+  const jumpButtonBox = await jumpButton.boundingBox();
+  expect(timelineBox).not.toBeNull();
+  expect(jumpButtonBox).not.toBeNull();
+  expect(Math.abs((timelineBox!.x + timelineBox!.width / 2) - (jumpButtonBox!.x + jumpButtonBox!.width / 2))).toBeLessThanOrEqual(2);
+  await jumpButton.click();
   await expect.poll(async () => (await getScrollMetrics(container)).distanceFromBottom).toBeLessThanOrEqual(4);
   await expect(page.getByRole('button', { name: 'Ir para o final da conversa' })).toBeHidden();
 
@@ -122,7 +128,9 @@ test('Atendimento mantém o final, preserva leitura e oferece retorno ao final',
   const composer = page.locator('textarea[placeholder*="Digite sua mensagem"]');
   await composer.fill(outboundText);
   await composer.press('Enter');
-  await expect(container.getByText(outboundText, { exact: true })).toBeVisible({ timeout: 15_000 });
+  const outboundMessage = container.locator('[data-message-id]').filter({ hasText: outboundText }).last();
+  await expect(outboundMessage).toBeVisible({ timeout: 15_000 });
+  await expect(outboundMessage.locator('p').first()).toHaveText(/:$/);
   await expect.poll(async () => (await getScrollMetrics(container)).distanceFromBottom).toBeLessThanOrEqual(4);
 
   // Caso E: prepend de histórico conserva a posição visual atual.

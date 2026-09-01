@@ -23,6 +23,8 @@ export function phoneDigitsFromProviderValues(values: unknown[]) {
 
 export function providerPhoneCandidates(value: any) {
   return [
+    ...(Array.isArray(value?.remoteJidAliases) ? value.remoteJidAliases : []),
+    ...(Array.isArray(value?.whatsappIdentities) ? value.whatsappIdentities : []),
     value?.remoteJidAlt,
     value?.lastMessage?.key?.remoteJidAlt,
     value?.key?.remoteJidAlt,
