@@ -4,6 +4,8 @@
  */
 export const MAX_MEDIA_FILE_BYTES = 10_000_000;
 export const MAX_MEDIA_BASE64_CHARS = 14_000_000;
+export const MAX_ATTACHMENTS_PER_MESSAGE = 5;
+export const MAX_TOTAL_ATTACHMENT_BYTES = 25_000_000;
 
 export const formatMediaSize = (bytes: number) => `${Math.round(bytes / 1_000_000)} MB`;
 

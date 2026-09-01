@@ -47,6 +47,14 @@ import { normalizeConversationTags } from '../utils/conversationTags';
 import { isMediaBase64SizeAllowed, isMediaFileSizeAllowed } from '../utils/mediaLimits';
 import { outboundErrorMessage } from '../utils/outboundError';
 import {
+  classifyAttachmentFile,
+  createAttachmentId,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  selectAttachmentFiles,
+  type AttachmentDraft,
+  type ComposerMediaType,
+} from '../utils/composerAttachment';
+import {
   canReactToMessage,
   nextHubReactionEmoji,
   withOptimisticHubReaction,
@@ -80,6 +88,9 @@ export const AtendimentoPage: React.FC = () => {
     writeConversationDraft(composerDraftsRef.current, conversationId, value);
   }, []);
   const [sendingMedia, setSendingMedia] = useState(false);
+  const [attachmentDrafts, setAttachmentDrafts] = useState<AttachmentDraft[]>([]);
+  const attachmentDraftsRef = useRef<AttachmentDraft[]>([]);
+  const [mediaSendProgress, setMediaSendProgress] = useState<{ current: number; total: number } | null>(null);
   const [isInternalNote, setIsInternalNote] = useState(false);
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
@@ -94,6 +105,37 @@ export const AtendimentoPage: React.FC = () => {
   const [conversationTags, setConversationTags] = useState<Tag[]>([]);
   const [showConversationTagMenu, setShowConversationTagMenu] = useState(false);
   const conversationTagMenuRef = useRef<HTMLDivElement>(null);
+
+  const revokeAttachmentPreview = useCallback((draft: AttachmentDraft) => {
+    if (draft.previewUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+      URL.revokeObjectURL(draft.previewUrl);
+    }
+  }, []);
+
+  const replaceAttachmentDrafts = useCallback((next: AttachmentDraft[]) => {
+    const nextIds = new Set(next.map((draft) => draft.id));
+    attachmentDraftsRef.current.forEach((draft) => {
+      if (!nextIds.has(draft.id)) revokeAttachmentPreview(draft);
+    });
+    attachmentDraftsRef.current = next;
+    setAttachmentDrafts(next);
+  }, [revokeAttachmentPreview]);
+
+  const clearAttachmentDrafts = useCallback(() => replaceAttachmentDrafts([]), [replaceAttachmentDrafts]);
+
+  const removeAttachmentDraft = useCallback((attachmentId: string) => {
+    const removed = attachmentDraftsRef.current.find((draft) => draft.id === attachmentId);
+    const next = attachmentDraftsRef.current.filter((draft) => draft.id !== attachmentId);
+    if (removed?.captionEligible && next.length > 0 && !next.some((draft) => draft.captionEligible)) {
+      next[0] = { ...next[0], captionEligible: true };
+    }
+    replaceAttachmentDrafts(next);
+  }, [replaceAttachmentDrafts]);
+
+  useEffect(() => () => {
+    attachmentDraftsRef.current.forEach(revokeAttachmentPreview);
+    attachmentDraftsRef.current = [];
+  }, [revokeAttachmentPreview]);
 
   const {
     conversations,
@@ -142,7 +184,13 @@ export const AtendimentoPage: React.FC = () => {
     activeConversationIdRef.current = activeConvId;
     setReplyTo(null);
     setShowConversationTagMenu(false);
-  }, [activeConvId]);
+    clearAttachmentDrafts();
+  }, [activeConvId, clearAttachmentDrafts]);
+
+  const handleToggleInternalNote = useCallback((value: boolean) => {
+    if (value) clearAttachmentDrafts();
+    setIsInternalNote(value);
+  }, [clearAttachmentDrafts]);
 
   useEffect(() => {
     if (!showConversationTagMenu) return undefined;
@@ -822,7 +870,12 @@ export const AtendimentoPage: React.FC = () => {
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!composerTextRef.current.trim() || !activeConv) return;
+    const pendingAttachments = attachmentDraftsRef.current;
+    if ((!composerTextRef.current.trim() && pendingAttachments.length === 0) || !activeConv) return;
+    if (pendingAttachments.length > 0) {
+      await sendAttachmentDrafts(pendingAttachments.slice());
+      return;
+    }
     if (activeChatLocked) {
       setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
       return;
@@ -972,8 +1025,8 @@ export const AtendimentoPage: React.FC = () => {
     }
   };
 
-  const handleAttachmentFile = async (file: File) => {
-    if (!file || !activeConv || isInternalNote || sendingMedia) return;
+  const sendAttachmentDrafts = async (drafts: AttachmentDraft[]) => {
+    if (drafts.length === 0 || !activeConv || isInternalNote || sendingMedia) return;
     if (activeChatLocked) {
       setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
       return;
@@ -982,24 +1035,8 @@ export const AtendimentoPage: React.FC = () => {
       setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de enviar anexos.');
       return;
     }
-    if (!isMediaFileSizeAllowed(file.size)) {
-      setAssignmentFeedback('O anexo deve ter no máximo 10 MB.');
-      return;
-    }
-    const isImage = file.type.startsWith('image/');
-    const isVideo = file.type.startsWith('video/');
-    const fileExtension = file.name.toLowerCase().split('.').pop() || '';
-    const isDocument = file.type === 'application/pdf'
-      || file.type.startsWith('application/msword')
-      || file.type.startsWith('application/vnd.openxmlformats-officedocument')
-      || ['pdf', 'doc', 'docx'].includes(fileExtension);
-    if (!isImage && !isVideo && !isDocument) {
-      setAssignmentFeedback('Formato não suportado. Envie uma imagem, vídeo ou documento.');
-      return;
-    }
 
-    const mediatype: 'image' | 'video' | 'document' = isImage ? 'image' : isVideo ? 'video' : 'document';
-    const label = mediatype === 'image' ? '[Imagem]' : mediatype === 'video' ? '[Vídeo]' : '[Documento]';
+    const conversation = activeConv;
     const submission = captureComposerSubmission({
       text: composerTextRef.current,
       replyTarget: replyTo,
@@ -1009,136 +1046,208 @@ export const AtendimentoPage: React.FC = () => {
     const quotedMessage = submission.replyTarget ? toQuotedMessage(submission.replyTarget) : undefined;
     setReplyTo(null);
     setSendingMedia(true);
+    setMediaSendProgress({ current: 0, total: drafts.length });
     composerRef.current?.clear();
     const clearedDraftRevision = composerDraftRevisionRef.current;
+    let succeeded = 0;
+    let failed = 0;
+    let firstOptimisticMessageId: string | null = null;
+    let optimisticActivityUpdated = false;
     const restoreFailedDraft = () => {
-      if (activeConversationIdRef.current === activeConv.id && canRestoreComposerDraft(composerDraftRevisionRef.current, clearedDraftRevision)) {
+      if (!caption) return;
+      if (activeConversationIdRef.current === conversation.id && canRestoreComposerDraft(composerDraftRevisionRef.current, clearedDraftRevision)) {
         composerRef.current?.setText(caption);
-      } else if (caption && !readConversationDraft(composerDraftsRef.current, activeConv.id)) {
-        writeConversationDraft(composerDraftsRef.current, activeConv.id, caption);
+      } else if (!readConversationDraft(composerDraftsRef.current, conversation.id)) {
+        writeConversationDraft(composerDraftsRef.current, conversation.id, caption);
       }
     };
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result));
-      reader.onerror = () => reject(new Error('Não foi possível ler o anexo'));
-      reader.readAsDataURL(file);
-    }).catch((error) => {
-      setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível ler o anexo.');
-      return '';
-    });
-    if (!dataUrl) {
-      restoreFailedDraft();
-      setSendingMedia(false);
-      return;
-    }
-    const media = dataUrl.split(',')[1];
-    if (!media) {
-      restoreFailedDraft();
-      setSendingMedia(false);
-      return;
-    }
-    if (!isMediaBase64SizeAllowed(media.length)) {
-      restoreFailedDraft();
-      setAssignmentFeedback('Arquivo excede o limite permitido.');
-      setSendingMedia(false);
-      return;
-    }
-    const clientMessageId = `media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const localMessage: Message = {
-      id: clientMessageId,
-      conversationId: activeConv.id,
-      sender: 'attendant',
-      senderName: attendantName,
-      content: caption || label,
-      mediaUrl: dataUrl,
-      mediaType: mediatype,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      timestampMs: Date.now(),
-      status: 'pending',
-      metadata: {
-        sentByHub: true,
-        sentByUserId: user?.id,
-        sentByUserName: attendantName,
-        clientMessageId,
-        ...(mediatype === 'document'
-          ? { document: { fileName: file.name, mimeType: file.type || undefined, fileSize: file.size } }
-          : {}),
-        ...(quotedMessage ? { quotedMessage } : {}),
-      },
+    const updateDraftStatus = (id: string, status: 'pending' | 'failed') => {
+      const next = attachmentDraftsRef.current.map((draft) => draft.id === id ? { ...draft, status } : draft);
+      attachmentDraftsRef.current = next;
+      setAttachmentDrafts(next);
     };
-    const traceOutbound = createOutboundTrace({ clientMessageId: localMessage.id, conversationId: activeConv.id, kind: 'media' });
-    traceOutbound('submit');
-    setAssignmentFeedback('');
-    setMessages((previous) => [...previous, localMessage]);
-    traceOutbound('optimistic.rendered');
-    window.setTimeout(() => scrollToBottom('outbound.media.optimistic'), 0);
-    updateConversationActivity(activeConv.id, {
-      lastMessage: activeConv.isGroup ? `${attendantName}: ${caption || label}` : (caption || label),
-      lastMessageTimestamp: formatMessageTimestamp(localMessage.timestampMs, 'Agora'),
-      lastMessageAt: localMessage.timestampMs || Date.now(),
-      lastMessageFromMe: true,
-      lastMessageKey: { id: localMessage.id, remoteJid: activeConv.id, fromMe: true },
-      unreadCount: 0,
-      needsResponse: false,
-      moveToFront: true,
-    });
+    const removeDraft = (id: string) => {
+      replaceAttachmentDrafts(attachmentDraftsRef.current.filter((draft) => draft.id !== id));
+    };
+
     try {
-      traceOutbound('http.started');
-      const result = await EvolutionApiService.sendMediaMessage({
-        instanceName,
-        number: activeConv.contact.phone,
-        remoteJid: activeConv.id,
-        mediatype,
-        mimetype: file.type || (mediatype === 'image' ? 'image/jpeg' : mediatype === 'video' ? 'video/mp4' : fileExtension === 'pdf' ? 'application/pdf' : 'application/octet-stream'),
-        media,
-        fileName: file.name,
-        caption: caption || undefined,
-        clientMessageId: localMessage.id,
-        quotedMessage,
-      });
-      traceOutbound('http.completed', { ok: true, evolutionMessageId: result?.message?.evolutionMessageId || result?.message?.id || null });
-      if (activeConversationIdRef.current === activeConv.id) {
-        const providerMessageId = result?.message?.evolutionMessageId || result?.message?.id;
-        setMessages((previous) => previous.map((message) => message.id === localMessage.id ? {
-          ...message,
-          id: providerMessageId || message.id,
-          status: result?.message?.status || result?.status || 'sent',
-          ...(providerMessageId ? { rawKey: { id: providerMessageId, remoteJid: activeConv.id, fromMe: true } } : {}),
-        } : message));
-        traceOutbound('optimistic.acknowledged', { status: result?.message?.status || result?.status || 'sent' });
+      for (let index = 0; index < drafts.length; index += 1) {
+        const draft = drafts[index];
+        setMediaSendProgress({ current: index + 1, total: drafts.length });
+        updateDraftStatus(draft.id, 'pending');
+        const file = draft.file;
+        const mediatype: ComposerMediaType = draft.mediaType;
+        const fileExtension = file.name.toLowerCase().split('.').pop() || '';
+        const label = mediatype === 'image' ? '[Imagem]' : mediatype === 'video' ? '[Vídeo]' : '[Documento]';
+        const captionForAttachment = draft.captionEligible ? caption : '';
+        const quoteForAttachment = draft.captionEligible ? quotedMessage : undefined;
+        const clientMessageId = draft.clientMessageId || `media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        if (!draft.clientMessageId) {
+          const withId = attachmentDraftsRef.current.map((item) => item.id === draft.id ? { ...item, clientMessageId } : item);
+          attachmentDraftsRef.current = withId;
+          setAttachmentDrafts(withId);
+        }
+        if (!isMediaFileSizeAllowed(file.size)) {
+          failed += 1;
+          updateDraftStatus(draft.id, 'failed');
+          setAssignmentFeedback('Um ou mais anexos excedem o limite de 10 MB.');
+          continue;
+        }
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(new Error('Não foi possível ler o anexo'));
+          reader.readAsDataURL(file);
+        }).catch((error) => {
+          setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível ler o anexo.');
+          return '';
+        });
+        const media = dataUrl.split(',')[1];
+        if (!dataUrl || !media || !isMediaBase64SizeAllowed(media.length)) {
+          failed += 1;
+          updateDraftStatus(draft.id, 'failed');
+          if (dataUrl && media && !isMediaBase64SizeAllowed(media.length)) setAssignmentFeedback('Arquivo excede o limite permitido.');
+          continue;
+        }
+        const localMessage: Message = {
+          id: clientMessageId,
+          conversationId: conversation.id,
+          sender: 'attendant',
+          senderName: attendantName,
+          content: captionForAttachment || label,
+          mediaUrl: dataUrl,
+          mediaType: mediatype,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          timestampMs: Date.now(),
+          status: 'pending',
+          metadata: {
+            sentByHub: true,
+            sentByUserId: user?.id,
+            sentByUserName: attendantName,
+            clientMessageId,
+            ...(mediatype === 'document'
+              ? { document: { fileName: file.name, mimeType: file.type || undefined, fileSize: file.size } }
+              : {}),
+            ...(quoteForAttachment ? { quotedMessage: quoteForAttachment } : {}),
+          },
+        };
+        firstOptimisticMessageId ||= localMessage.id;
+        const traceOutbound = createOutboundTrace({ clientMessageId: localMessage.id, conversationId: conversation.id, kind: 'media' });
+        traceOutbound('submit');
+        setAssignmentFeedback('');
+        setMessages((previous) => previous.some((message) => message.id === localMessage.id)
+          ? previous.map((message) => message.id === localMessage.id ? { ...message, ...localMessage, status: 'pending' } : message)
+          : [...previous, localMessage]);
+        traceOutbound('optimistic.rendered');
+        window.setTimeout(() => scrollToBottom('outbound.media.optimistic'), 0);
+        if (!optimisticActivityUpdated) {
+          updateConversationActivity(conversation.id, {
+            lastMessage: conversation.isGroup ? `${attendantName}: ${captionForAttachment || label}` : (captionForAttachment || label),
+            lastMessageTimestamp: formatMessageTimestamp(localMessage.timestampMs, 'Agora'),
+            lastMessageAt: localMessage.timestampMs || Date.now(),
+            lastMessageFromMe: true,
+            lastMessageKey: { id: localMessage.id, remoteJid: conversation.id, fromMe: true },
+            unreadCount: 0,
+            needsResponse: false,
+            moveToFront: true,
+          });
+          optimisticActivityUpdated = true;
+        }
+        try {
+          traceOutbound('http.started');
+          const result = await EvolutionApiService.sendMediaMessage({
+            instanceName,
+            number: conversation.contact.phone,
+            remoteJid: conversation.id,
+            mediatype,
+            mimetype: file.type || (mediatype === 'image' ? 'image/jpeg' : mediatype === 'video' ? 'video/mp4' : fileExtension === 'pdf' ? 'application/pdf' : 'application/octet-stream'),
+            media,
+            fileName: file.name,
+            caption: captionForAttachment || undefined,
+            clientMessageId: localMessage.id,
+            quotedMessage: quoteForAttachment,
+          });
+          succeeded += 1;
+          traceOutbound('http.completed', { ok: true, evolutionMessageId: result?.message?.evolutionMessageId || result?.message?.id || null });
+          if (activeConversationIdRef.current === conversation.id) {
+            const providerMessageId = result?.message?.evolutionMessageId || result?.message?.id;
+            setMessages((previous) => previous.map((message) => message.id === localMessage.id ? {
+              ...message,
+              id: providerMessageId || message.id,
+              status: result?.message?.status || result?.status || 'sent',
+              ...(providerMessageId ? { rawKey: { id: providerMessageId, remoteJid: conversation.id, fromMe: true } } : {}),
+            } : message));
+            traceOutbound('optimistic.acknowledged', { status: result?.message?.status || result?.status || 'sent' });
+          }
+          const dailyResponder = result?.dailyResponder;
+          if (dailyResponder?.id && dailyResponder?.name) setConversations((previous) => previous.map((item) => item.id === conversation.id ? {
+            ...item,
+            contact: { ...item.contact, tags: [{ id: `daily-responder-${dailyResponder.id}`, name: `👤 ${dailyResponder.name}`, color: '#A78BFA' }] },
+          } : item));
+          removeDraft(draft.id);
+        } catch (error) {
+          failed += 1;
+          traceOutbound('http.completed', { ok: false });
+          updateDraftStatus(draft.id, 'failed');
+          if (activeConversationIdRef.current === conversation.id) {
+            setMessages((previous) => previous.map((message) => message.id === localMessage.id ? { ...message, status: 'failed' } : message));
+          }
+          setAssignmentFeedback(outboundErrorMessage(error, 'Não foi possível enviar um ou mais anexos.'));
+        }
       }
-      const dailyResponder = result?.dailyResponder;
-      if (dailyResponder?.id && dailyResponder?.name) setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id ? {
-        ...conversation,
-        contact: dailyResponder?.id && dailyResponder?.name
-          ? {
-              ...conversation.contact,
-              tags: [{ id: `daily-responder-${dailyResponder.id}`, name: `👤 ${dailyResponder.name}`, color: '#A78BFA' }],
-            }
-          : conversation.contact,
-      } : conversation));
-      if (pendingContactChatId === activeConv.id) {
+    } finally {
+      if (failed > 0) {
+        restoreFailedDraft();
+        if (succeeded === 0 && firstOptimisticMessageId) restoreFailedOptimisticActivity(conversation, firstOptimisticMessageId);
+        setAssignmentFeedback(`${succeeded} anexo(s) enviado(s); ${failed} pendente(s) para tentar novamente.`);
+      } else if (succeeded > 0 && pendingContactChatId === conversation.id) {
         pendingContactChatRef.current = null;
         setPendingContactChatId(null);
       }
-    } catch (error) {
-      traceOutbound('http.completed', { ok: false });
-      if (activeConversationIdRef.current === activeConv.id) {
-        setMessages((previous) => previous.map((message) => message.id === localMessage.id ? { ...message, status: 'failed' } : message));
-      }
-      restoreFailedDraft();
-      restoreFailedOptimisticActivity(activeConv, localMessage.id);
-      setAssignmentFeedback(outboundErrorMessage(error, 'Não foi possível enviar o anexo.'));
-    } finally {
       setSendingMedia(false);
+      setMediaSendProgress(null);
     }
   };
 
+  const handleAttachmentSelected = (files: File[]) => {
+    if (files.length === 0 || !activeConv || isInternalNote || sendingMedia) return;
+    if (activeChatLocked) {
+      setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
+      return;
+    }
+    if (!isMock && whatsappStatus !== 'connected') {
+      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de selecionar anexos.');
+      return;
+    }
+    const currentBytes = attachmentDraftsRef.current.reduce((total, draft) => total + draft.size, 0);
+    const selected = selectAttachmentFiles(files, attachmentDraftsRef.current.length, currentBytes);
+    const accepted: AttachmentDraft[] = [];
+    selected.accepted.forEach((file) => {
+      const mediaType = classifyAttachmentFile(file)!;
+      const previewUrl = typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
+        ? URL.createObjectURL(file)
+        : '';
+      accepted.push({
+        id: createAttachmentId(),
+        file,
+        mediaType,
+        previewUrl,
+        fileName: file.name,
+        mimeType: file.type,
+        size: file.size,
+        captionEligible: attachmentDraftsRef.current.length === 0 && accepted.length === 0,
+      });
+    });
+    if (accepted.length > 0) replaceAttachmentDrafts([...attachmentDraftsRef.current, ...accepted]);
+    setAssignmentFeedback(selected.rejected > 0
+      ? `${selected.rejected} anexo(s) não foram adicionados. Limite: ${MAX_ATTACHMENTS_PER_MESSAGE} arquivos, 10 MB por arquivo e 25 MB no total.`
+      : '');
+  };
+
   const handleAttachmentChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
+    const files = Array.from(event.target.files || []);
     event.target.value = '';
-    if (file) await handleAttachmentFile(file);
+    handleAttachmentSelected(files);
   };
 
   const handleInputPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -1151,12 +1260,13 @@ export const AtendimentoPage: React.FC = () => {
       setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de enviar imagens.');
       return;
     }
-    const imageItem = Array.from(event.clipboardData.items).find((item) => item.kind === 'file' && item.type.startsWith('image/'));
-    const file = imageItem?.getAsFile()
-      || Array.from(event.clipboardData.files).find((candidate) => candidate.type.startsWith('image/'));
-    if (!file) return;
+    const files = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (files.length === 0) return;
     event.preventDefault();
-    void handleAttachmentFile(file);
+    handleAttachmentSelected(files);
   };
 
   const retryFailedMessage = useCallback(async (message: Message) => {
@@ -1682,10 +1792,15 @@ export const AtendimentoPage: React.FC = () => {
               attachmentInputRef={attachmentInputRef}
               onSubmit={handleSendMessage}
               onTextChange={handleComposerTextChange}
-              onToggleInternalNote={setIsInternalNote}
+              onToggleInternalNote={handleToggleInternalNote}
               onToggleQuickReply={() => setQuickReplyOpen((open) => !open)}
               onAttachmentChange={handleAttachmentChange}
               onInputPaste={handleInputPaste}
+              attachmentDrafts={attachmentDrafts}
+              onRemoveAttachment={removeAttachmentDraft}
+              onRemoveAllAttachments={clearAttachmentDrafts}
+              mediaSendProgress={mediaSendProgress}
+              activeConversationId={activeConvId}
               replyTo={replyTo}
               onCancelReply={() => setReplyTo(null)}
             />

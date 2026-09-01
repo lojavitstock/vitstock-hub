@@ -15,6 +15,8 @@ import { isNonRenderableProviderMessage, providerMessageType, unwrapProviderMess
 import { canonicalPhone, normalizeContactPhone } from './contactDomain.js';
 import { phoneLookupKeys, upsertContactPhone } from './contactPhones.js';
 import { isWhatsAppLid, providerPhoneDigits, providerPhoneJid } from './whatsappIdentity.js';
+import { resolveEvolutionRecipient } from './evolutionRecipient.js';
+import { projectCanonicalInboxChats } from './inboxProjection.js';
 import { parseGroupMetadata, type GroupMetadata } from './groupMetadata.js';
 import {
   buildParticipantIdentityMap,
@@ -36,9 +38,11 @@ import {
   normalizeStoredReactions,
   providerReactionUpdate,
 } from './messageReactions.js';
-import { qaEvolutionResponse } from './qa.js';
+import { hasQaProviderOnlyChat, qaEvolutionResponse } from './qa.js';
 import { loadConversationTags } from './conversationTags.js';
 import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.js';
+import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
+import { resolveConversationForOperation } from './conversationResolver.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -162,6 +166,13 @@ const GROUP_METADATA_TTL_MS = 2 * 60_000;
 const GROUP_METADATA_STALE_MS = 10 * 60_000;
 const outboundTraceEnabled = process.env.OUTBOUND_TRACE === 'true';
 const outboundEvolutionRequests = createOutboundRequestCoordinator<{ ok: boolean; status: number; body: any }>();
+const outboundMediaEvolutionRequests = createOutboundRequestCoordinator<{
+  ok: boolean;
+  status: number;
+  statusText: string;
+  body: any;
+  providerError?: unknown;
+}>();
 
 async function fetchGroupParticipantIdentities(companyId: string, groupJid: string) {
   const normalizedGroupJid = normalizeParticipantJid(groupJid);
@@ -556,7 +567,9 @@ function traceOutbound(request: any, stage: string, input: {
     stage,
     requestId: request.id,
     userId: request.user?.id,
-    remoteJid: input.remoteJid,
+    remoteJidKind: input.remoteJid
+      ? evolutionRecipientDiagnostics({ number: input.remoteJid, remoteJid: input.remoteJid }).remoteJidKind
+      : undefined,
     clientMessageId: input.clientMessageId,
     evolutionMessageId: input.evolutionMessageId,
     evolutionMessageIdSourcePath: input.evolutionMessageIdSourcePath,
@@ -709,6 +722,10 @@ async function refreshEvolutionChatsSnapshot(companyId: string) {
 }
 
 async function fetchEvolutionChatsSnapshot(companyId: string) {
+  // A fixture criada durante um teste QA deve aparecer imediatamente, sem
+  // reaproveitar o snapshot carregado antes da injeção. Fora de QA, o cache
+  // continua seguindo exatamente o fluxo normal do provedor.
+  if (isQaMode && hasQaProviderOnlyChat()) evolutionChatsCache.delete(companyId);
   const now = Date.now();
   const cached = evolutionChatsCache.get(companyId);
   if (cached && cached.expiresAt > now) {
@@ -748,6 +765,7 @@ async function loadLocalInboxChats(companyId: string) {
     is_group: boolean;
     group_name: string | null;
     group_avatar_url: string | null;
+    contact_phone: string;
   }>(
     `SELECT c.evolution_remote_jid,
             c.unread_count,
@@ -768,7 +786,8 @@ async function loadLocalInboxChats(companyId: string) {
             latest.sent_at AS message_sent_at,
             c.is_group,
             c.group_name,
-            c.group_avatar_url
+            c.group_avatar_url,
+            ct.phone AS contact_phone
      FROM conversations c
      JOIN contacts ct ON ct.id = c.contact_id
      LEFT JOIN LATERAL (
@@ -790,6 +809,9 @@ async function loadLocalInboxChats(companyId: string) {
     const timestamp = dateValue ? Math.floor(new Date(dateValue).getTime() / 1000) : 0;
     const remoteJid = row.evolution_remote_jid;
     const isGroup = Boolean(row.is_group) || isWhatsAppGroupJid(remoteJid);
+    const contactPhoneJid = !isGroup && row.contact_phone
+      ? providerPhoneJid({ remoteJid: row.contact_phone })
+      : '';
     const rawPreview = row.last_message || '[Conversa iniciada]';
     const preview = isGroup && row.message_sender
       ? `${row.message_sender_name || (row.message_sender === 'attendant' ? 'Atendente' : 'Participante')}: ${rawPreview}`
@@ -797,6 +819,8 @@ async function loadLocalInboxChats(companyId: string) {
     return {
       id: remoteJid,
       remoteJid,
+      ...(contactPhoneJid && contactPhoneJid !== remoteJid ? { remoteJidAlt: contactPhoneJid } : {}),
+      ...(row.contact_phone ? { phone: row.contact_phone } : {}),
       isGroup,
       groupName: row.group_name || undefined,
       groupAvatarUrl: row.group_avatar_url || undefined,
@@ -946,13 +970,20 @@ async function prepareOutboundConversation(input: {
     [input.companyId, contactId, input.remoteJid, input.remoteJid.endsWith('@lid') ? 'lid' : 'remote_jid'],
   );
 
+  const conversationRemoteJid = await resolveOutboundConversationJid(db, {
+    companyId: input.companyId,
+    contactId,
+    number: input.number,
+    remoteJid: input.remoteJid,
+  });
+
   const existing = await db.query<{ id: string }>(
     `SELECT id FROM conversations
      WHERE company_id = $1
        AND evolution_remote_jid = $2
      ORDER BY updated_at DESC
      LIMIT 1`,
-    [input.companyId, input.remoteJid],
+    [input.companyId, conversationRemoteJid],
   );
   if (existing.rows[0]?.id) return existing.rows[0].id;
 
@@ -963,25 +994,55 @@ async function prepareOutboundConversation(input: {
        SET contact_id = EXCLUDED.contact_id,
            updated_at = now()
      RETURNING id`,
-    [input.companyId, contactId, input.remoteJid, isGroup, isGroup ? contactName : null],
+    [input.companyId, contactId, conversationRemoteJid, isGroup, isGroup ? contactName : null],
   );
   const conversationId = created.rows[0]?.id;
   if (!conversationId) throw new Error('Conversa n\u00e3o p\u00f4de ser preparada para o envio');
   return conversationId;
 }
 
-async function findConversationForLease(input: { companyId: string; remoteJid: string; phone?: string }) {
-  const result = await db.query<{ id: string }>(
-    `SELECT c.id
+/**
+ * Reuse an explicitly related PN conversation when an outbound request starts
+ * from its opaque LID alias. No phone is inferred from the LID itself: the PN
+ * candidate comes only from the already validated number/contact identity.
+ */
+async function resolveOutboundConversationJid(
+  executor: Pick<Pool | PoolClient, 'query'>,
+  input: { companyId: string; contactId: string; number: string; remoteJid: string },
+) {
+  if (isWhatsAppGroupJid(input.remoteJid)) return input.remoteJid;
+  const phoneJid = canonicalPhoneJid(input.number);
+  const result = await executor.query<{ evolution_remote_jid: string }>(
+    `SELECT c.evolution_remote_jid
      FROM conversations c
-     JOIN contacts contact ON contact.id = c.contact_id
      WHERE c.company_id = $1::uuid
-       AND c.evolution_remote_jid = $2::text
-     ORDER BY c.updated_at DESC
+       AND c.contact_id = $2::uuid
+       AND (
+         c.evolution_remote_jid = $3::text
+         OR c.evolution_remote_jid = $4::text
+         OR EXISTS (
+           SELECT 1
+           FROM contact_channel_identities ci
+           WHERE ci.company_id = c.company_id
+             AND ci.contact_id = c.contact_id
+             AND ci.channel = 'whatsapp'
+             AND ci.identity = ANY($5::text[])
+         )
+       )
+     ORDER BY CASE
+       WHEN c.evolution_remote_jid = $4::text THEN 0
+       WHEN c.evolution_remote_jid = $3::text THEN 1
+       ELSE 2
+     END, c.updated_at DESC, c.id
      LIMIT 1`,
-    [input.companyId, input.remoteJid],
+    [input.companyId, input.contactId, input.remoteJid, phoneJid, [input.remoteJid, phoneJid]],
   );
-  return result.rows[0]?.id;
+  return result.rows[0]?.evolution_remote_jid || input.remoteJid;
+}
+
+async function findConversationForLease(input: { companyId: string; remoteJid: string; phone?: string }) {
+  const conversation = await resolveConversationForOperation(input);
+  return conversation?.id;
 }
 
 const leaseRealtimePayload = (input: { remoteJid: string; phone?: string; lease: ConversationLease }) => ({
@@ -2285,18 +2346,24 @@ async function ensureOutboundMessage(input: {
       [input.companyId, contactId, input.remoteJid, input.remoteJid.endsWith('@lid') ? 'lid' : 'remote_jid'],
     );
 
+    const conversationRemoteJid = await resolveOutboundConversationJid(client, {
+      companyId: input.companyId,
+      contactId,
+      number: input.number,
+      remoteJid: input.remoteJid,
+    });
     const conversationId = await findOrCreateConversation(client, {
-    companyId: input.companyId,
-    contactId,
-    remoteJid: input.remoteJid,
-    lastMessage: conversationPreview,
-    lastMessageAt: new Date(),
-    reopenResolved: true,
-    assignedUserId: input.userId,
-    isGroup,
-    groupName: undefined,
-  });
-  if (!conversationId) throw new Error('Conversa não pôde ser preparada para o envio');
+      companyId: input.companyId,
+      contactId,
+      remoteJid: conversationRemoteJid,
+      lastMessage: conversationPreview,
+      lastMessageAt: new Date(),
+      reopenResolved: true,
+      assignedUserId: input.userId,
+      isGroup,
+      groupName: undefined,
+    });
+    if (!conversationId) throw new Error('Conversa não pôde ser preparada para o envio');
 
   if (input.clientMessageId) {
     const existing = await client.query<{
@@ -2583,6 +2650,10 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     } catch (error) {
       _request.log.warn({ err: error }, 'Não foi possível mesclar o inbox persistido');
     }
+    // The provider and the persisted inbox may expose both a LID and its PN
+    // alias. Collapse only identities with explicit phone evidence before the
+    // snapshot reaches the frontend; opaque LIDs remain independent rows.
+    chatsData = projectCanonicalInboxChats(chatsData);
     const providerNames = new Map<string, { phone: string; name: string; avatar_url: string | null }>();
     const rememberProviderContact = (value: any) => {
       // A fromMe message describes the local operator, never the recipient.
@@ -2752,6 +2823,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const parsed = assignmentSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Conversa inválida' });
     const currentUser = request.user!;
+    // A chat can be visible in the provider snapshot before its canonical Hub
+    // row exists. Materialize it once before assigning the conversation.
+    const conversation = await resolveConversationForOperation({
+      companyId: currentUser.companyId,
+      remoteJid: parsed.data.remoteJid,
+      phone: parsed.data.phone,
+    });
+    if (!conversation) return reply.code(404).send({ error: 'Conversa ainda não está disponível para atendimento' });
     const jids = assignmentJids(parsed.data);
     const existing = await db.query<{ assigned_user_id: string | null; user_name: string | null }>(
       `SELECT a.assigned_user_id, u.name AS user_name
@@ -2839,6 +2918,13 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const parsed = conversationStatusSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Status de conversa invÃ¡lido' });
 
+    const conversation = await resolveConversationForOperation({
+      companyId: request.user!.companyId,
+      remoteJid: parsed.data.remoteJid,
+      phone: parsed.data.phone,
+    });
+    if (!conversation) return reply.code(404).send({ error: 'Conversa não encontrada' });
+
     for (const jid of assignmentJids(parsed.data)) {
       await db.query(
         `INSERT INTO conversation_statuses (company_id, evolution_remote_jid, status, updated_by)
@@ -2905,9 +2991,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const parsed = noteSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Nota interna invÃ¡lida' });
 
-    const remoteJid = parsed.data.phone?.replace(/\D/g, '')
-      ? canonicalPhoneJid(parsed.data.phone)
-      : parsed.data.remoteJid;
+    const conversation = await resolveConversationForOperation({
+      companyId: request.user!.companyId,
+      remoteJid: parsed.data.remoteJid,
+      phone: parsed.data.phone,
+    });
+    if (!conversation) return reply.code(404).send({ error: 'Conversa não encontrada' });
+
+    const remoteJid = conversation.remoteJid;
     const result = await db.query<{
       id: string;
       author_name: string;
@@ -2940,7 +3031,13 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.post('/api/evolution/notes/list', { preHandler: requireUser }, async (request, reply) => {
     const parsed = noteLookupSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Conversa invÃ¡lida' });
-    const jids = assignmentJids({ remoteJid: parsed.data.remoteJid, phone: parsed.data.phone });
+    const conversation = await resolveConversationForOperation({
+      companyId: request.user!.companyId,
+      remoteJid: parsed.data.remoteJid,
+      phone: parsed.data.phone,
+    }, { createIfMissing: false });
+    const jids = new Set(assignmentJids({ remoteJid: parsed.data.remoteJid, phone: parsed.data.phone }));
+    if (conversation) jids.add(conversation.remoteJid);
     const result = await db.query<{
       id: string;
       evolution_remote_jid: string;
@@ -2952,7 +3049,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
        FROM conversation_notes
        WHERE company_id = $1 AND evolution_remote_jid = ANY($2::text[])
        ORDER BY created_at ASC`,
-      [request.user!.companyId, jids],
+      [request.user!.companyId, [...jids]],
     );
     return {
       notes: result.rows.map((note) => ({
@@ -3363,6 +3460,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     };
     const clientMessageId = parsed.data.clientMessageId || `hub-${randomUUID()}`;
     const canonicalRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : canonicalPhoneJid(number));
+    const evolutionRecipient = resolveEvolutionRecipient({ remoteJid: canonicalRemoteJid, canonicalPhone: number });
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
     traceOutbound(request, 'received', { clientMessageId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
@@ -3419,13 +3517,13 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         deduplicated: true,
       };
     }
-    let dispatch: { ok: boolean; status: number; body: any };
+    let dispatch: { ok: boolean; status: number; statusText: string; body: any; providerError?: unknown };
     const evolutionRequestStartedAt = Date.now();
     try {
       const caption = parsed.data.caption?.trim()
         ? formatHubOutboundText(request.user!.name, parsed.data.caption.trim())
         : undefined;
-      dispatch = await outboundEvolutionRequests.run(
+      dispatch = await outboundMediaEvolutionRequests.run(
         `${request.user!.companyId}:${clientMessageId}`,
         async () => {
           traceOutbound(request, 'evolution.request', { clientMessageId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
@@ -3434,7 +3532,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
             {
               method: 'POST',
               body: JSON.stringify({
-                number: isWhatsAppGroupJid(canonicalRemoteJid) ? canonicalRemoteJid : number,
+                number: evolutionRecipient.number,
                 mediatype: parsed.data.mediatype,
                 mimetype: parsed.data.mimetype,
                 media: parsed.data.media,
@@ -3444,10 +3542,23 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
               }),
             },
           );
+          const rawBody = await response.text();
+          let body: unknown;
+          try {
+            body = rawBody ? JSON.parse(rawBody) : undefined;
+          } catch {
+            body = rawBody;
+          }
           return {
             ok: response.ok,
             status: response.status,
-            body: await response.json().catch(() => ({ error: 'Evolution API response invalid' })),
+            statusText: response.statusText,
+            body,
+            providerError: response.ok ? undefined : sanitizeEvolutionProviderError(rawBody, [
+              parsed.data.caption?.trim() || '',
+              caption || '',
+              parsed.data.fileName || '',
+            ]),
           };
         },
       );
@@ -3458,6 +3569,24 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     if (!dispatch.ok) {
       await updateOutboundMessage(localMessage.messageId, 'failed');
+      const recipientDiagnostics = evolutionRecipientDiagnostics({ number: evolutionRecipient.number, remoteJid: canonicalRemoteJid });
+      if (outboundTraceEnabled) {
+        request.log.warn({
+          operation: 'evolution.sendMedia',
+          httpStatus: dispatch.status,
+          statusText: dispatch.statusText,
+          ...recipientDiagnostics,
+          mediatype: parsed.data.mediatype,
+          mimetype: parsed.data.mimetype,
+          fileNameExtension: parsed.data.fileName?.split('.').pop()?.toLowerCase() || undefined,
+          fileSize: null,
+          base64Length: parsed.data.media.length,
+          hasCaption: Boolean(parsed.data.caption?.trim()),
+          captionLength: parsed.data.caption?.trim().length || 0,
+          hasQuote: Boolean(evolutionQuote),
+          providerError: dispatch.providerError,
+        }, 'Evolution send-media rejected');
+      }
       const status = [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(dispatch.status) ? dispatch.status : 502;
       return reply.code(status).send({
         error: status === 502 ? 'Evolution API indisponível' : 'Evolution API rejeitou o anexo',

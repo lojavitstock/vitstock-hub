@@ -42,3 +42,18 @@ export const scheduleComposerFocus = (
   focus: () => void,
   schedule: (callback: FrameRequestCallback) => number = window.requestAnimationFrame,
 ) => schedule(() => focus());
+
+export const insertComposerText = ({
+  value,
+  inserted,
+  start,
+  end,
+}: {
+  value: string;
+  inserted: string;
+  start: number;
+  end: number;
+}) => ({
+  value: `${value.slice(0, start)}${inserted}${value.slice(end)}`,
+  cursor: start + inserted.length,
+});
