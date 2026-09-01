@@ -2297,7 +2297,7 @@ async function persistProviderMessage(
         identityCandidates,
       }, { createIfMissing: false });
 
-    if (shouldStageOpaqueLidMessage({
+    if (!existingIdentity && shouldStageOpaqueLidMessage({
       remoteJid: local.remoteJid,
       isGroup,
       hasCanonicalConversation: Boolean(canonicalConversation),
