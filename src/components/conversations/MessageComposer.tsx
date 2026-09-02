@@ -1,5 +1,5 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { FileText, Paperclip, Reply, Send, Smile, X, Zap } from 'lucide-react';
+import { FileText, Paperclip, Plus, Reply, Send, Smile, X, Zap } from 'lucide-react';
 import { Message, QuickReply } from '../../types';
 import { quotedMediaLabel, toQuotedMessage } from '../../utils/quotedMessage';
 import { insertComposerText } from '../../utils/composerSubmission';
@@ -23,6 +23,8 @@ type MessageComposerProps = {
   quickReplies?: QuickReply[];
   quickReplyContext?: QuickReplyContext;
   onUseQuickReply?: (reply: QuickReply) => void;
+  canCreateQuickReply?: boolean;
+  onCreateQuickReply?: () => void;
   onAttachmentChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onInputPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => void;
   attachmentDrafts?: AttachmentDraft[];
@@ -91,6 +93,8 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   quickReplies = [],
   quickReplyContext,
   onUseQuickReply,
+  canCreateQuickReply = false,
+  onCreateQuickReply,
   onAttachmentChange,
   onInputPaste,
   attachmentDrafts = [],
@@ -362,7 +366,15 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
         {(quickReplyOpen || slashOpen) && !isInternalNote && (
           <div ref={quickReplyPopoverRef} role="dialog" aria-label="Mensagens rápidas" className="absolute bottom-full left-0 z-30 mb-2 w-[min(24rem,calc(100vw-2rem))] rounded-xl border border-amber-400/30 bg-[#182126] p-3 shadow-2xl">
             {quickReplyOpen && (
-              <input autoFocus value={quickReplySearch} onChange={(event) => setQuickReplySearch(event.target.value)} placeholder="Buscar atalho, título ou mensagem" aria-label="Buscar mensagens rápidas" className="mb-2 w-full rounded-lg border border-slate-700 bg-[#20292f] px-3 py-2 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              <>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-300"><Zap className="h-3.5 w-3.5 text-amber-300" /> Respostas rápidas</span>
+                  {canCreateQuickReply && onCreateQuickReply && (
+                    <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onCreateQuickReply} aria-label="Criar resposta rápida" title="Criar resposta rápida" className="flex h-6 w-6 items-center justify-center rounded-md border border-amber-400/30 text-amber-300 transition-colors hover:border-amber-300 hover:bg-amber-400/10"><Plus className="h-3.5 w-3.5" /></button>
+                  )}
+                </div>
+                <input autoFocus value={quickReplySearch} onChange={(event) => setQuickReplySearch(event.target.value)} placeholder="Buscar atalho, título ou mensagem" aria-label="Buscar mensagens rápidas" className="mb-2 w-full rounded-lg border border-slate-700 bg-[#20292f] px-3 py-2 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              </>
             )}
             <div role="listbox" aria-label="Opções de mensagens rápidas" className="max-h-56 space-y-1 overflow-y-auto">
               {(quickReplyOpen ? buttonReplies : slashReplies).map((reply, index) => (
@@ -372,7 +384,18 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
                   <span className="mt-0.5 block truncate text-xs text-slate-400">{reply.body}</span>
                 </button>
               ))}
-              {((quickReplyOpen ? buttonReplies : slashReplies).length === 0) && <p className="py-3 text-center text-xs text-slate-500">Nenhuma mensagem rápida encontrada.</p>}
+              {((quickReplyOpen ? buttonReplies : slashReplies).length === 0) && (
+                quickReplyOpen ? (
+                  <div className="py-3 text-center">
+                    <p className="text-xs text-slate-500">Nenhuma resposta rápida cadastrada.</p>
+                    {canCreateQuickReply && onCreateQuickReply ? (
+                      <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onCreateQuickReply} className="mt-2 inline-flex items-center gap-1 rounded-md border border-amber-400/30 px-2.5 py-1.5 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-400/10"><Plus className="h-3.5 w-3.5" /> Criar resposta</button>
+                    ) : (
+                      <p className="mt-1 text-xs text-slate-500">Peça a um administrador para cadastrar.</p>
+                    )}
+                  </div>
+                ) : <p className="py-3 text-center text-xs text-slate-500">Nenhuma mensagem rápida encontrada.</p>
+              )}
             </div>
           </div>
         )}

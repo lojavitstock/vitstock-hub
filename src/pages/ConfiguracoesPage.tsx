@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Users, Zap, Layers, Plus, KeyRound, Loader2, QrCode, UserPlus, Power, Save, X, PencilLine, Plug } from 'lucide-react';
 import { Attendant, QuickReply } from '../types';
 import { apiRequest } from '../services/api';
@@ -33,6 +33,7 @@ const isSettingsTab = (value: string | null): value is SettingsTab => (
 
 export const ConfiguracoesPage: React.FC = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<SettingsTab>(() => isSettingsTab(searchParams.get('tab')) ? searchParams.get('tab') as SettingsTab : 'attendants');
   const [attendants, setAttendants] = useState<Attendant[]>([]);
@@ -122,6 +123,22 @@ export const ConfiguracoesPage: React.FC = () => {
     if (activeTab === 'quickReplies') void loadQuickReplies();
   }, [activeTab, loadQuickReplies]);
 
+  const openNewQuickReply = useCallback(() => {
+    setQuickRepliesError('');
+    setQuickRepliesFeedback('');
+    setEditingQuickReplyId(null);
+    setQuickReplyForm({ shortcut: '/', title: '', body: '' });
+    setShowQuickReplyForm(true);
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'quickReplies' || searchParams.get('action') !== 'new') return;
+    if (user?.role === 'admin') openNewQuickReply();
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('action');
+    setSearchParams(nextParams, { replace: true });
+  }, [activeTab, openNewQuickReply, searchParams, setSearchParams, user?.role]);
+
   const resetQuickReplyForm = () => {
     setQuickReplyForm({ shortcut: '/', title: '', body: '' });
     setEditingQuickReplyId(null);
@@ -138,6 +155,7 @@ export const ConfiguracoesPage: React.FC = () => {
 
   const handleSaveQuickReply = async (event: React.FormEvent) => {
     event.preventDefault();
+    const returnToAtendimento = searchParams.get('from') === 'atendimento';
     setQuickRepliesError('');
     setQuickRepliesFeedback('');
     setSavingQuickReply(true);
@@ -152,6 +170,7 @@ export const ConfiguracoesPage: React.FC = () => {
           setQuickRepliesFeedback('Mensagem rápida criada.');
         }
         resetQuickReplyForm();
+        if (returnToAtendimento) navigate('/atendimento');
         return;
       }
       if (editingQuickReplyId) {
@@ -164,6 +183,7 @@ export const ConfiguracoesPage: React.FC = () => {
         setQuickRepliesFeedback('Mensagem rápida criada.');
       }
       resetQuickReplyForm();
+      if (returnToAtendimento) navigate('/atendimento');
     } catch (error) {
       setQuickRepliesError(error instanceof Error ? error.message : 'Não foi possível salvar a mensagem rápida.');
     } finally {
@@ -568,7 +588,7 @@ export const ConfiguracoesPage: React.FC = () => {
               <p className="mt-1 text-sm text-zinc-400">Atalhos compartilhados pela empresa para responder com agilidade.</p>
             </div>
             {user?.role === 'admin' && (
-              <button type="button" onClick={() => { setQuickRepliesError(''); setQuickRepliesFeedback(''); setEditingQuickReplyId(null); setQuickReplyForm({ shortcut: '/', title: '', body: '' }); setShowQuickReplyForm(true); }} className="btn-primary text-sm"><Plus className="h-4 w-4" /> Criar atalho</button>
+              <button type="button" onClick={openNewQuickReply} className="btn-primary text-sm" aria-label="Nova resposta"><Plus className="h-4 w-4" /> Nova resposta</button>
             )}
           </div>
 
@@ -615,7 +635,19 @@ export const ConfiguracoesPage: React.FC = () => {
                 {user?.role === 'admin' && <div className="flex shrink-0 gap-2"><button type="button" onClick={() => openQuickReplyEditor(reply)} className="rounded-lg border border-amber-400/20 px-3 py-1.5 text-xs font-bold text-amber-300 hover:bg-amber-400/10">Editar</button><button type="button" onClick={() => void handleDeleteQuickReply(reply)} className="rounded-lg border border-red-400/20 px-3 py-1.5 text-xs font-bold text-red-300 hover:bg-red-400/10">Excluir</button></div>}
               </div>
             ))}
-            {!quickRepliesLoading && quickReplies.length === 0 && <div className="rounded-xl border border-dashed border-zinc-800 p-10 text-center text-sm text-zinc-500">Nenhuma mensagem rápida cadastrada.</div>}
+            {!quickRepliesLoading && quickReplies.length === 0 && (
+              <div className="rounded-xl border border-dashed border-zinc-800 p-10 text-center">
+                <p className="text-sm text-zinc-300">Nenhuma resposta rápida cadastrada.</p>
+                {user?.role === 'admin' ? (
+                  <>
+                    <p className="mt-2 text-sm text-zinc-500">Crie atalhos para responder seus clientes com mais agilidade.</p>
+                    <button type="button" onClick={openNewQuickReply} className="btn-primary mt-5 text-sm" aria-label="Criar primeira resposta"><Plus className="h-4 w-4" /> Criar primeira resposta</button>
+                  </>
+                ) : (
+                  <p className="mt-2 text-sm text-zinc-500">Peça a um administrador para cadastrar respostas rápidas.</p>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}

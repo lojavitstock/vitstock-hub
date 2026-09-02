@@ -225,6 +225,11 @@ export const AtendimentoPage: React.FC = () => {
       });
   }, [isMock]);
 
+  const handleCreateQuickReply = useCallback(() => {
+    setQuickReplyOpen(false);
+    navigate('/configuracoes?tab=quickReplies&action=new&from=atendimento');
+  }, [navigate]);
+
   useEffect(() => {
     if (!whatsappConnected) setQuickReplyOpen(false);
   }, [whatsappConnected]);
@@ -1832,6 +1837,8 @@ export const AtendimentoPage: React.FC = () => {
                 agentName: user?.name,
                 companyName: user?.companyName,
               }}
+              canCreateQuickReply={user?.role === 'admin'}
+              onCreateQuickReply={handleCreateQuickReply}
               activeChatLocked={activeChatLocked}
               whatsappConnected={whatsappConnected}
               leaseOwnerName={activeLease?.ownerName}
