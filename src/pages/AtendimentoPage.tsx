@@ -225,6 +225,10 @@ export const AtendimentoPage: React.FC = () => {
       });
   }, [isMock]);
 
+  useEffect(() => {
+    if (!whatsappConnected) setQuickReplyOpen(false);
+  }, [whatsappConnected]);
+
   const handleToggleInternalNote = useCallback((value: boolean) => {
     if (value) clearAttachmentDrafts();
     setQuickReplyOpen(false);
