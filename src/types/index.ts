@@ -18,6 +18,23 @@ export interface Tag {
   usageCount?: number;
 }
 
+export type QuickReplyScope = 'COMPANY' | 'USER';
+
+export interface QuickReply {
+  id: string;
+  companyId: string;
+  userId?: string;
+  scope: QuickReplyScope;
+  shortcut: string;
+  title: string;
+  body: string;
+  position: number;
+  usageCount: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Contact {
   id: string;
   name: string;

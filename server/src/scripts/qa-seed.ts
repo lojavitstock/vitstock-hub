@@ -71,6 +71,14 @@ async function seed() {
     const group = await addContact(companyA, 'Grupo QA (fora de Contatos)', '120363000000@g.us');
     await addConversation(companyA, group, '120363000000@g.us', 'Mensagem de grupo QA.', true);
 
+    await client.query(
+      `INSERT INTO quick_replies (company_id, scope, shortcut, title, body, position)
+       VALUES
+         ($1, 'COMPANY', '/proposta', 'Proposta Comercial PIX', 'Segue a proposta comercial para o lote com 5% de desconto no PIX: R$ 58.995,00.', 0),
+         ($1, 'COMPANY', '/frete', 'Prazo de Entrega', 'O prazo de entrega para Curitiba é de 2 a 3 dias úteis após a confirmação do pagamento.', 1)`,
+      [companyA],
+    );
+
     // Massa suficiente para validar paginação, busca e ordenação sem alterar
     // os fixtures especiais usados pelos cenários funcionais.
     for (let index = 1; index <= 65; index += 1) {

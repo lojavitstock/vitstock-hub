@@ -15,6 +15,30 @@ const loginAndOpenConversation = async (page: import('@playwright/test').Page) =
   await expect(page.locator('textarea[placeholder*="Digite sua mensagem"]')).toBeVisible();
 };
 
+test('mensagens rápidas inserem texto pelo botão e pelo atalho slash sem enviar', async ({ page }) => {
+  test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
+  await loginAndOpenConversation(page);
+  const sendRequests: string[] = [];
+  page.on('request', (request) => {
+    if (request.url().includes('/api/evolution/messages/send')) sendRequests.push(request.url());
+  });
+  const textarea = page.locator('textarea[placeholder*="Digite sua mensagem"]');
+  const quickReplyButton = page.getByRole('button', { name: 'Mensagens rápidas' });
+  await expect(quickReplyButton).toBeVisible();
+  await quickReplyButton.click();
+  const quickReplyDialog = page.getByRole('dialog', { name: 'Mensagens rápidas' });
+  await expect(quickReplyDialog).toBeVisible();
+  await quickReplyDialog.getByRole('option').filter({ hasText: '/proposta' }).click();
+  await expect(textarea).toHaveValue(/Segue a proposta comercial/);
+  expect(sendRequests).toHaveLength(0);
+
+  await textarea.fill('/fre');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(textarea).toHaveValue(/O prazo de entrega para Curitiba/);
+  expect(sendRequests).toHaveLength(0);
+});
+
 test('imagem colada vira draft local e não envia até o submit', async ({ page }) => {
   test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
   await loginAndOpenConversation(page);

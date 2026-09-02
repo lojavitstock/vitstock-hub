@@ -72,6 +72,8 @@ import {
 import { normalizeTagName } from '../server/src/conversationTags';
 import { conversationIdentityCandidates } from '../server/src/conversationResolver';
 import { buildExistingConversationQuery } from '../server/src/conversationQueries';
+import { filterQuickReplies, findQuickReplyToken, insertQuickReplyAtToken, resolveQuickReplyBody } from '../src/utils/quickReplies';
+import { normalizeQuickReplyShortcut } from '../server/src/quickReplies';
 import {
   OPAQUE_LID_STAGING_TTL_MS,
   buildReplayAliasMap,
@@ -2940,4 +2942,31 @@ test('opaque LID staging is fail-closed and excludes binary/secrets', () => {
     id: 'media-message', remoteJid: 'opaque@lid', fromMe: true, participant: 'opaque@lid',
   });
   assert.equal(envelope.record.message.documentMessage.url, 'https://media.example.test/doc');
+});
+
+test('quick replies filter by shortcut, title and body without case sensitivity', () => {
+  const replies = [
+    { id: '1', shortcut: '/saudacao', title: 'Boas-vindas', body: 'Olá!', scope: 'COMPANY' as const },
+    { id: '2', shortcut: '/frete', title: 'Entrega', body: 'Prazo de entrega', scope: 'COMPANY' as const },
+  ] as any;
+  assert.deepEqual(filterQuickReplies(replies, 'SAUDA'), [replies[0]]);
+  assert.deepEqual(filterQuickReplies(replies, 'ENTREGA'), [replies[1]]);
+  assert.deepEqual(filterQuickReplies(replies, 'prazo'), [replies[1]]);
+});
+
+test('quick replies resolve variables with safe fallbacks', () => {
+  assert.equal(resolveQuickReplyBody('Oi {primeiro_nome}, {nome}! {atendente} da {empresa}.', {
+    contactName: 'Ana QA', agentName: 'Leonardo', companyName: 'Vitstock Hub',
+  }), 'Oi Ana, Ana QA! Leonardo da Vitstock Hub.');
+  const fallback = resolveQuickReplyBody('{nome}|{primeiro_nome}|{atendente}|{empresa}', {});
+  assert.equal(fallback, '||Atendente|Vitstock');
+  assert.doesNotMatch(fallback, /undefined|null/);
+});
+
+test('quick reply slash selection replaces only its token and preserves composer text', () => {
+  const value = 'Bom dia! /sau tudo bem?';
+  const token = findQuickReplyToken(value, 13);
+  assert.deepEqual(token, { start: 9, end: 13, value: '/sau' });
+  assert.deepEqual(insertQuickReplyAtToken(value, token!, 'Olá, Ana!'), { value: 'Bom dia! Olá, Ana! tudo bem?', cursor: 18 });
+  assert.equal(normalizeQuickReplyShortcut(' /SAU '), '/sau');
 });

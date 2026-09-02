@@ -1,4 +1,17 @@
-import { Conversation, Deal, Campaign, WhatsappInstance, Attendant } from '../types';
+import { Conversation, Deal, Campaign, WhatsappInstance, Attendant, QuickReply } from '../types';
+
+export const mockQuickReplies: QuickReply[] = [
+  {
+    id: 'quick-reply-proposta', companyId: 'mock-company', scope: 'COMPANY', shortcut: '/proposta', title: 'Proposta Comercial PIX',
+    body: 'Segue a proposta comercial para o lote com 5% de desconto no PIX: R$ 58.995,00.', position: 0, usageCount: 0, isActive: true,
+    createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+  },
+  {
+    id: 'quick-reply-frete', companyId: 'mock-company', scope: 'COMPANY', shortcut: '/frete', title: 'Prazo de Entrega',
+    body: 'O prazo de entrega para Curitiba é de 2 a 3 dias úteis após a confirmação do pagamento.', position: 1, usageCount: 0, isActive: true,
+    createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+  },
+];
 
 export const mockAttendants: Attendant[] = [
   { id: '1', name: 'Leo Vitorino', avatar: '/VITSTOCK®/PERFIL/2.png', role: 'admin', online: true },

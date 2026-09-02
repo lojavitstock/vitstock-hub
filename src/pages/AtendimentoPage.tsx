@@ -25,7 +25,7 @@ import {
   Globe,
   Archive,
 } from 'lucide-react';
-import { Conversation, Message, Tag, WhatsappInstance } from '../types';
+import { Conversation, Message, QuickReply, Tag, WhatsappInstance } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { useAuth } from '../auth/AuthContext';
 import { ConversationTagRail } from '../components/conversations/ConversationTagRail';
@@ -46,6 +46,8 @@ import { addConversationTag, createConversationTag, deleteConversationTag, fetch
 import { normalizeConversationTags } from '../utils/conversationTags';
 import { isMediaBase64SizeAllowed, isMediaFileSizeAllowed } from '../utils/mediaLimits';
 import { outboundErrorMessage } from '../utils/outboundError';
+import { fetchQuickReplies, markQuickReplyUsed } from '../services/quickRepliesApi';
+import { mockQuickReplies } from '../services/mockData';
 import {
   classifyAttachmentFile,
   createAttachmentId,
@@ -93,6 +95,7 @@ export const AtendimentoPage: React.FC = () => {
   const [mediaSendProgress, setMediaSendProgress] = useState<{ current: number; total: number } | null>(null);
   const [isInternalNote, setIsInternalNote] = useState(false);
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
+  const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   // Estado para Nova Conversa por Telefone
   const [showNewChatModal, setShowNewChatModal] = useState(false);
@@ -183,12 +186,48 @@ export const AtendimentoPage: React.FC = () => {
     }
     activeConversationIdRef.current = activeConvId;
     setReplyTo(null);
+    setQuickReplyOpen(false);
     setShowConversationTagMenu(false);
     clearAttachmentDrafts();
   }, [activeConvId, clearAttachmentDrafts]);
 
+  useEffect(() => {
+    if (isMock) {
+      setQuickReplies(mockQuickReplies);
+      return undefined;
+    }
+    if (!user?.id) {
+      setQuickReplies([]);
+      return undefined;
+    }
+    let mounted = true;
+    void fetchQuickReplies()
+      .then((result) => {
+        if (mounted) setQuickReplies(Array.isArray(result.quickReplies) ? result.quickReplies : []);
+      })
+      .catch(() => {
+        if (mounted) setQuickReplies([]);
+      });
+    return () => { mounted = false; };
+  }, [isMock, user?.id]);
+
+  const handleQuickReplyUse = useCallback((reply: QuickReply) => {
+    if (isMock) {
+      setQuickReplies((current) => current.map((item) => item.id === reply.id ? { ...item, usageCount: item.usageCount + 1 } : item));
+      return;
+    }
+    void markQuickReplyUsed(reply.id)
+      .then((result) => {
+        if (result.quickReply) setQuickReplies((current) => current.map((item) => item.id === reply.id ? result.quickReply : item));
+      })
+      .catch(() => {
+        // A falha no contador não deve impedir a inserção da mensagem.
+      });
+  }, [isMock]);
+
   const handleToggleInternalNote = useCallback((value: boolean) => {
     if (value) clearAttachmentDrafts();
+    setQuickReplyOpen(false);
     setIsInternalNote(value);
   }, [clearAttachmentDrafts]);
 
@@ -1783,6 +1822,12 @@ export const AtendimentoPage: React.FC = () => {
               ref={composerRef}
               isInternalNote={isInternalNote}
               quickReplyOpen={quickReplyOpen}
+              quickReplies={quickReplies}
+              quickReplyContext={{
+                contactName: activeConv?.contact.name,
+                agentName: user?.name,
+                companyName: user?.companyName,
+              }}
               activeChatLocked={activeChatLocked}
               whatsappConnected={whatsappConnected}
               leaseOwnerName={activeLease?.ownerName}
@@ -1794,6 +1839,7 @@ export const AtendimentoPage: React.FC = () => {
               onTextChange={handleComposerTextChange}
               onToggleInternalNote={handleToggleInternalNote}
               onToggleQuickReply={() => setQuickReplyOpen((open) => !open)}
+              onUseQuickReply={handleQuickReplyUse}
               onAttachmentChange={handleAttachmentChange}
               onInputPaste={handleInputPaste}
               attachmentDrafts={attachmentDrafts}
