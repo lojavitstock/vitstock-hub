@@ -2970,3 +2970,7 @@ test('quick reply slash selection replaces only its token and preserves composer
   assert.deepEqual(insertQuickReplyAtToken(value, token!, 'Olá, Ana!'), { value: 'Bom dia! Olá, Ana! tudo bem?', cursor: 18 });
   assert.equal(normalizeQuickReplyShortcut(' /SAU '), '/sau');
 });
+
+test('quick reply slash trigger opens for a bare slash', () => {
+  assert.deepEqual(findQuickReplyToken('Olá /', 5), { start: 4, end: 5, value: '/' });
+});

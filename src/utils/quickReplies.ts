@@ -37,7 +37,7 @@ export const findQuickReplyToken = (value: string, cursor: number): QuickReplyTo
   let start = safeCursor;
   while (start > 0 && !/\s/.test(value[start - 1] || '')) start -= 1;
   const token = value.slice(start, safeCursor);
-  if (!token.startsWith('/') || token.length < 2 || /\s/.test(token)) return null;
+  if (!token.startsWith('/') || /\s/.test(token)) return null;
   return { start, end: safeCursor, value: token };
 };
 
