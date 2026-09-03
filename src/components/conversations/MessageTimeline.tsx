@@ -37,6 +37,7 @@ import { canDownloadMessageMedia, messageCopyText } from '../../utils/messageAct
 import { COMMON_REACTION_EMOJIS, canReactToMessage, type CommonReactionEmoji } from '../../utils/messageReactionActions';
 import { positionMessageActionMenu, positionReactionPalette, type PopoverPosition } from '../../utils/messagePopoverPosition';
 import { providerDisplayName, providerFallbackDisplayName } from '../../utils/whatsappIdentity';
+import { WhatsAppFormattedText } from './WhatsAppFormattedText';
 
 type MessageTimelineProps = {
   messages: Message[];
@@ -739,7 +740,7 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
               <MediaMessageContent message={message} instanceName={instanceName} onOpenViewer={openMediaViewer} onLayoutChange={onLayoutChange} />
               <SpecialMessageContent message={message} contactPhone={activeConversation.isGroup ? undefined : activeConversation.contact.phone} />
               <InteractiveMessageContent message={message} />
-              {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap">{message.content}</p>}
+              {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap"><WhatsAppFormattedText text={message.content} /></p>}
               {message.metadata?.reactions?.length ? <ReactionBadges reactions={message.metadata.reactions} align={isMe ? 'right' : 'left'} /> : null}
             </div>
             <div className={`mt-4 flex items-center gap-1 text-xs text-zinc-500 ${isMe ? 'justify-end' : ''}`}>

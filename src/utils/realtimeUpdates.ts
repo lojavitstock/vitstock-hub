@@ -2,6 +2,7 @@ import type { Conversation, Message, Tag } from '../types';
 import { phoneVariants } from './phone';
 import { mergeConversationMessages } from './messageMerge';
 import { mergeContactIdentity, reconcileConversations } from './conversationReconciliation';
+import { stripWhatsAppFormatting } from './whatsappFormatting';
 
 export type RealtimeEventPayload = {
   type: string;
@@ -87,9 +88,14 @@ const mediaPreview = (mediaType?: Message['mediaType']) => {
   return '';
 };
 
-const comparableMessagePreview = (message: Message) => (
-  message.content.trim().replace(/^\*[^*\r\n]+\*\s*(?:\r?\n|$)/, '').trim()
-);
+const comparableMessagePreview = (message: Message) => {
+  const normalized = stripWhatsAppFormatting(message.content).trim();
+  // The Hub's generated operator signature is transport-only. Ignore it when
+  // comparing a provider echo with the canonical preview already in the inbox.
+  return /^\*[^*\r\n]+:?\*\r?\n/.test(message.content)
+    ? normalized.replace(/^[^\r\n]+\r?\n/, '').trim()
+    : normalized;
+};
 
 const messageKeyForConversation = (message: Message, event: RealtimeEventPayload, conversation: Conversation) => {
   const rawKey = message.rawKey;

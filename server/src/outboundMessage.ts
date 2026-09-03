@@ -72,15 +72,15 @@ export const evolutionMessageIdFromResponse = (payload: unknown) => (
 
 /** The Evolution payload retains the human-readable sender signature. */
 export const formatHubOutboundText = (authorName: string, content: string) => {
-  const author = authorName.trim();
-  return author ? `*${author}*\n${content}` : content;
+  const author = authorName.trim().replace(/:+$/, '').trim();
+  return author ? `*${author}:*\n${content}` : content;
 };
 
 /** Removes only the server-generated leading signature from a Hub message. */
 export const removeHubAgentPrefix = (content: string, authorName?: string) => {
-  const author = authorName?.trim();
+  const author = authorName?.trim().replace(/:+$/, '').trim();
   if (!author) return content;
-  return content.replace(new RegExp(`^\\*${escapeRegExp(author)}\\*\\r?\\n`), '');
+  return content.replace(new RegExp(`^\\*${escapeRegExp(author)}:?\\*\\r?\\n`), '');
 };
 
 /** Uses the exact provider key; no message text or timestamp is involved. */

@@ -46,6 +46,7 @@ import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
 import { canDownloadMessageMedia, messageCopyText, messageMenuActionsFor } from '../src/utils/messageActions';
+import { parseWhatsAppFormatting, stripWhatsAppFormatting } from '../src/utils/whatsappFormatting';
 import { collectBrokenImages, installBrowserDiagnostics } from './e2e/support/diagnostics';
 import {
   canReactToMessage,
@@ -74,8 +75,8 @@ import {
 import { normalizeTagName } from '../server/src/conversationTags';
 import { conversationIdentityCandidates } from '../server/src/conversationResolver';
 import { buildExistingConversationQuery } from '../server/src/conversationQueries';
-import { filterQuickReplies, findQuickReplyToken, insertQuickReplyAtToken, resolveQuickReplyBody } from '../src/utils/quickReplies';
-import { normalizeQuickReplyShortcut } from '../server/src/quickReplies';
+import { filterQuickReplies, findQuickReplyToken, insertQuickReplyAtToken, quickReplyShortcutError, resolveQuickReplyBody } from '../src/utils/quickReplies';
+import { normalizeQuickReplyShortcut, quickReplyShortcutError as serverQuickReplyShortcutError } from '../server/src/quickReplies';
 import {
   OPAQUE_LID_STAGING_TTL_MS,
   buildReplayAliasMap,
@@ -1353,7 +1354,7 @@ test('assinatura enviada à Evolution não contamina o conteúdo exibido do Leon
     messageTimestamp: 1_700_000_110,
   }, 0, 'conversation-1', 'Atendente');
 
-  assert.equal(evolutionPayload, '*Leonardo*\nNova Iguaçu consigo entregar via correios');
+  assert.equal(evolutionPayload, '*Leonardo:*\nNova Iguaçu consigo entregar via correios');
   assert.equal(removeHubAgentPrefix(evolutionPayload, 'Leonardo'), 'Nova Iguaçu consigo entregar via correios');
   assert.equal(confirmed.senderName, 'Leonardo');
   assert.equal(confirmed.content, 'Nova Iguaçu consigo entregar via correios');
@@ -1432,7 +1433,7 @@ test('mensagem do Henrique preserva conteúdo legítimo iniciado por asteriscos'
     messageTimestamp: 1_700_000_111,
   }, 0, 'conversation-1', 'Atendente');
 
-  assert.equal(evolutionPayload, '*Henrique*\n*Oferta especial* para hoje');
+  assert.equal(evolutionPayload, '*Henrique:*\n*Oferta especial* para hoje');
   assert.equal(confirmed.senderName, 'Henrique');
   assert.equal(confirmed.content, '*Oferta especial* para hoje');
 });
@@ -3052,4 +3053,36 @@ test('quick reply slash selection replaces only its token and preserves composer
 
 test('quick reply slash trigger opens for a bare slash', () => {
   assert.deepEqual(findQuickReplyToken('Olá /', 5), { start: 4, end: 5, value: '/' });
+});
+
+test('atalhos rápidos rejeitam acentos, espaços e caracteres especiais com orientação específica', () => {
+  for (const shortcut of ['/saudacao', '/pos-venda', '/garantia_1', '/pix']) {
+    assert.equal(quickReplyShortcutError(shortcut), undefined);
+    assert.equal(serverQuickReplyShortcutError(shortcut), undefined);
+  }
+  assert.match(quickReplyShortcutError('/saudação')!, /sem acento/);
+  assert.match(serverQuickReplyShortcutError('/saudação')!, /sem acento/);
+  assert.match(quickReplyShortcutError('/bom dia')!, /não pode conter espaços/);
+  assert.match(serverQuickReplyShortcutError('/bom dia')!, /não pode conter espaços/);
+  assert.match(quickReplyShortcutError('/teste!')!, /sem acento/);
+  assert.match(serverQuickReplyShortcutError('/teste!')!, /sem acento/);
+  assert.match(quickReplyShortcutError('/')!, /letras sem acento/);
+  assert.match(serverQuickReplyShortcutError('/')!, /letras sem acento/);
+});
+
+test('prefixo externo do operador usa um único dois-pontos sem alterar autoria interna', () => {
+  assert.equal(formatHubOutboundText(' Fernanda: ', 'Olá'), '*Fernanda:*\nOlá');
+  assert.equal(removeHubAgentPrefix('*Fernanda:*\nOlá', 'Fernanda'), 'Olá');
+  assert.equal(removeHubAgentPrefix('*Fernanda*\nOlá', 'Fernanda'), 'Olá');
+  assert.equal(formatHubOutboundText('', 'Olá'), 'Olá');
+});
+
+test('formatação nativa do WhatsApp é renderizada sem quebrar texto literal ou URLs', () => {
+  const tokens = parseWhatsAppFormatting('Olá, *Leonardo*! _pronto_ ~antigo~ ```código```');
+  assert.deepEqual(tokens.map((token) => token.type), ['text', 'bold', 'text', 'italic', 'text', 'strikethrough', 'text', 'monospace']);
+  assert.equal(stripWhatsAppFormatting('*Fernanda:* Segue o _orçamento_.'), 'Fernanda: Segue o orçamento.');
+  assert.equal(stripWhatsAppFormatting('https://meu_site.com/teste'), 'https://meu_site.com/teste');
+  assert.equal(stripWhatsAppFormatting('2 * 5 = 10'), '2 * 5 = 10');
+  assert.equal(stripWhatsAppFormatting('*Leonardo'), '*Leonardo');
+  assert.equal(stripWhatsAppFormatting('*_texto_*'), 'texto');
 });

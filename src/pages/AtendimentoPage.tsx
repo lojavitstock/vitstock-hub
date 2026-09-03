@@ -1870,7 +1870,7 @@ export const AtendimentoPage: React.FC = () => {
                 agentName: user?.name,
                 companyName: user?.companyName,
               }}
-              canCreateQuickReply={user?.role === 'admin'}
+              canCreateQuickReply={Boolean(user)}
               onCreateQuickReply={handleCreateQuickReply}
               activeChatLocked={activeChatLocked}
               whatsappConnected={whatsappConnected}

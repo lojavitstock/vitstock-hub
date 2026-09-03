@@ -391,7 +391,7 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
                     {canCreateQuickReply && onCreateQuickReply ? (
                       <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onCreateQuickReply} className="mt-2 inline-flex items-center gap-1 rounded-md border border-amber-400/30 px-2.5 py-1.5 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-400/10"><Plus className="h-3.5 w-3.5" /> Criar resposta</button>
                     ) : (
-                      <p className="mt-1 text-xs text-slate-500">Peça a um administrador para cadastrar.</p>
+                      <p className="mt-1 text-xs text-slate-500">Nenhuma resposta rápida disponível.</p>
                     )}
                   </div>
                 ) : <p className="py-3 text-center text-xs text-slate-500">Nenhuma mensagem rápida encontrada.</p>

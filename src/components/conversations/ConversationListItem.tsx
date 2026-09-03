@@ -2,6 +2,7 @@ import React from 'react';
 import { Conversation } from '../../types';
 import { ContactPhoto } from './ContactPhoto';
 import { formatConversationTimestamp } from './conversationFormatters';
+import { stripWhatsAppFormatting } from '../../utils/whatsappFormatting';
 
 type ConversationListItemProps = {
   conversation: Conversation;
@@ -41,12 +42,13 @@ export const ConversationListItem = React.memo<ConversationListItemProps>(({
   onSelect,
 }) => {
   const handleSelect = () => onSelect(conversation);
+  const preview = stripWhatsAppFormatting(conversation.lastMessage);
 
   return (
     <button
       type="button"
       onClick={handleSelect}
-      title={`${conversation.contact.name} — ${conversation.lastMessage}`}
+      title={`${conversation.contact.name} — ${preview}`}
       aria-label={`Abrir conversa com ${conversation.contact.name}`}
       className={`relative flex min-h-[96px] w-full items-start gap-3 border-b border-[#273239] border-l-4 px-3.5 py-3 text-left transition-all duration-150 focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-300/80 ${
         needsAttention
@@ -72,7 +74,7 @@ export const ConversationListItem = React.memo<ConversationListItemProps>(({
         </span>
 
         <span className={`mb-2 block truncate text-[13px] leading-5 ${needsAttention ? 'font-bold text-red-100' : needsResponse ? 'font-bold text-slate-200' : isUnread ? 'font-semibold text-sky-100' : 'text-slate-300'}`}>
-          {conversation.lastMessage}
+          {preview}
         </span>
 
         <span className="flex flex-wrap items-center gap-1.5">

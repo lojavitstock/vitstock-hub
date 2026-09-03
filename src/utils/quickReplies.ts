@@ -14,6 +14,15 @@ export type QuickReplyToken = {
 
 export const normalizeQuickReplyShortcut = (value: string) => value.trim().toLocaleLowerCase();
 
+export const quickReplyShortcutError = (value: string): string | undefined => {
+  const shortcut = value.trim();
+  if (!shortcut) return 'Informe um atalho começando com /.';
+  if (/\s/.test(shortcut)) return 'O atalho não pode conter espaços. Use letras sem acento, números, hífen (-) ou sublinhado (_).';
+  if (/[^\x00-\x7F]/.test(shortcut)) return 'Use apenas letras sem acento, números, hífen (-) e sublinhado (_).';
+  if (!/^\/[a-z0-9][a-z0-9_-]*$/i.test(shortcut)) return 'Use apenas letras sem acento, números, hífen (-) e sublinhado (_).';
+  return undefined;
+};
+
 export const filterQuickReplies = (replies: QuickReply[], query: string) => {
   const normalized = query.trim().toLocaleLowerCase();
   if (!normalized) return replies;
