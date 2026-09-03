@@ -3081,8 +3081,30 @@ test('formatação nativa do WhatsApp é renderizada sem quebrar texto literal o
   const tokens = parseWhatsAppFormatting('Olá, *Leonardo*! _pronto_ ~antigo~ ```código```');
   assert.deepEqual(tokens.map((token) => token.type), ['text', 'bold', 'text', 'italic', 'text', 'strikethrough', 'text', 'monospace']);
   assert.equal(stripWhatsAppFormatting('*Fernanda:* Segue o _orçamento_.'), 'Fernanda: Segue o orçamento.');
+  assert.equal(stripWhatsAppFormatting('~tachado~'), 'tachado');
   assert.equal(stripWhatsAppFormatting('https://meu_site.com/teste'), 'https://meu_site.com/teste');
   assert.equal(stripWhatsAppFormatting('2 * 5 = 10'), '2 * 5 = 10');
   assert.equal(stripWhatsAppFormatting('*Leonardo'), '*Leonardo');
   assert.equal(stripWhatsAppFormatting('*_texto_*'), 'texto');
+});
+
+test('corpo Hub iniciado por formatação não é confundido com assinatura após recarregar', () => {
+  const formattedBodies = ['*negrito*', '_italico_', '~tachado~', '```mono```', '*negrito*\ncontinuação'];
+  for (const body of formattedBodies) {
+    const persisted = normalizeEvolutionMessage({
+      key: { id: `persisted-${body}`, fromMe: true },
+      metadataScope: 'persisted_message',
+      metadata: { sentByHub: true, sentByUserId: 'user-e2e', sentByUserName: 'E2E Preview' },
+      message: { conversation: body },
+    }, 0, 'conversation-1', 'Atendente');
+    assert.equal(persisted.content, body);
+
+    const providerEcho = normalizeEvolutionMessage({
+      key: { id: `echo-${body}`, fromMe: true },
+      metadataScope: 'persisted_message',
+      metadata: { sentByHub: true, sentByUserId: 'user-e2e', sentByUserName: 'E2E Preview' },
+      message: { conversation: formatHubOutboundText('E2E Preview', body) },
+    }, 0, 'conversation-1', 'Atendente');
+    assert.equal(providerEcho.content, body);
+  }
 });
