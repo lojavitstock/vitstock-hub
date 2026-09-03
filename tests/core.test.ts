@@ -39,6 +39,8 @@ import {
 import { providerIdentityCandidates, resolveProviderMessageTarget } from '../server/src/evolution';
 import { resolveEvolutionRecipient } from '../server/src/evolutionRecipient';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
+import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
+import { providerMessageKeyFromRecord } from '../server/src/providerMessageKey';
 import { canonicalInboxIdentity, projectCanonicalInboxChats } from '../server/src/inboxProjection';
 import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
@@ -72,6 +74,8 @@ import {
 import { normalizeTagName } from '../server/src/conversationTags';
 import { conversationIdentityCandidates } from '../server/src/conversationResolver';
 import { buildExistingConversationQuery } from '../server/src/conversationQueries';
+import { filterQuickReplies, findQuickReplyToken, insertQuickReplyAtToken, resolveQuickReplyBody } from '../src/utils/quickReplies';
+import { normalizeQuickReplyShortcut } from '../server/src/quickReplies';
 import {
   OPAQUE_LID_STAGING_TTL_MS,
   buildReplayAliasMap,
@@ -1809,6 +1813,83 @@ test('resposta de atendente mantém referência explícita no estado otimista e 
   assert.equal(merged[1]?.senderName, 'Henrique');
 });
 
+test('reply failure trace is sanitized and distinguishes provider keys from legacy fallback', () => {
+  const providerTrace = buildReplyFailureTrace({
+    replyTraceId: 'reply-test-123',
+    companyId: 'company-secret',
+    conversationId: '5521999999999@s.whatsapp.net',
+    localMessageId: 'local-message-123',
+    clientMessageId: 'client-message-123',
+    requestId: 'request-123',
+    quote: {
+      messageId: 'hub-message-123',
+      providerKeySource: 'providerKey',
+      mediaType: 'audio',
+      key: {
+        id: 'evolution-message-123',
+        remoteJid: 'opaque-123@lid',
+        participant: 'participant-123@lid',
+        fromMe: false,
+      },
+    },
+    recipient: { number: 'opaque-123@lid', remoteJid: 'opaque-123@lid' },
+    messageType: 'audio',
+    backendStatus: 400,
+    errorCode: 'evolution_provider_error',
+    failureOrigin: 'evolution_rejected',
+    evolutionStatus: 400,
+    evolutionStatusText: 'Bad Request',
+    providerError: { code: 'bad_request', message: 'invalid jid opaque-123@lid 5521999999999@s.whatsapp.net', secret: 'do-not-log' },
+  });
+
+  assert.equal(providerTrace.event, 'reply_send_failure');
+  assert.equal(providerTrace.replyTraceId, 'reply-test-123');
+  assert.equal(providerTrace.replyTarget.providerKeyPresent, true);
+  assert.equal(providerTrace.replyTarget.providerKeyRemoteJidType, 'LID');
+  assert.equal(providerTrace.outbound.quoteSource, 'providerKey');
+  assert.equal(providerTrace.outbound.payloadQuoteStructurallyValid, true);
+  assert.equal(providerTrace.evolution.providerError?.message, 'invalid jid [redacted-jid] [redacted-jid]');
+  assert.doesNotMatch(JSON.stringify(providerTrace), /opaque-123@lid|5521999999999|do-not-log/);
+
+  const legacyTrace = buildReplyFailureTrace({
+    replyTraceId: 'reply-legacy-123',
+    quote: {
+      messageId: 'legacy-message-123',
+      providerKeySource: 'legacyFallback',
+      key: { id: 'legacy-message-123', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
+    },
+    recipient: { number: '5521999999999', remoteJid: '5521999999999@s.whatsapp.net' },
+    messageType: 'text',
+    failureOrigin: 'evolution_network',
+  });
+  assert.equal(legacyTrace.outbound.quoteSource, 'legacyFallback');
+  assert.equal(legacyTrace.replyTarget.evolutionMessageIdPresent, false);
+});
+
+test('provider key capture covers every reply-relevant provider message type', () => {
+  const messageShapes = [
+    'conversation',
+    'audioMessage',
+    'imageMessage',
+    'videoMessage',
+    'documentMessage',
+    'stickerMessage',
+  ];
+  for (const [index, messageShape] of messageShapes.entries()) {
+    const key = providerMessageKeyFromRecord({
+      key: {
+        id: `provider-${index}`,
+        remoteJid: index === 1 ? 'opaque@lid' : '5521999999999@s.whatsapp.net',
+        participant: index === 2 ? 'participant@s.whatsapp.net' : undefined,
+        fromMe: false,
+      },
+      message: { [messageShape]: {} },
+    });
+    assert.equal(key?.id, `provider-${index}`);
+    assert.equal(key?.remoteJid, index === 1 ? 'opaque@lid' : '5521999999999@s.whatsapp.net');
+  }
+});
+
 test('normaliza resposta inbound da Evolution quando contextInfo vem ao lado de message', () => {
   const reply = normalizeEvolutionMessage({
     key: { id: 'reply-from-customer', fromMe: false },
@@ -2940,4 +3021,35 @@ test('opaque LID staging is fail-closed and excludes binary/secrets', () => {
     id: 'media-message', remoteJid: 'opaque@lid', fromMe: true, participant: 'opaque@lid',
   });
   assert.equal(envelope.record.message.documentMessage.url, 'https://media.example.test/doc');
+});
+
+test('quick replies filter by shortcut, title and body without case sensitivity', () => {
+  const replies = [
+    { id: '1', shortcut: '/saudacao', title: 'Boas-vindas', body: 'Olá!', scope: 'COMPANY' as const },
+    { id: '2', shortcut: '/frete', title: 'Entrega', body: 'Prazo de entrega', scope: 'COMPANY' as const },
+  ] as any;
+  assert.deepEqual(filterQuickReplies(replies, 'SAUDA'), [replies[0]]);
+  assert.deepEqual(filterQuickReplies(replies, 'ENTREGA'), [replies[1]]);
+  assert.deepEqual(filterQuickReplies(replies, 'prazo'), [replies[1]]);
+});
+
+test('quick replies resolve variables with safe fallbacks', () => {
+  assert.equal(resolveQuickReplyBody('Oi {primeiro_nome}, {nome}! {atendente} da {empresa}.', {
+    contactName: 'Ana QA', agentName: 'Leonardo', companyName: 'Vitstock Hub',
+  }), 'Oi Ana, Ana QA! Leonardo da Vitstock Hub.');
+  const fallback = resolveQuickReplyBody('{nome}|{primeiro_nome}|{atendente}|{empresa}', {});
+  assert.equal(fallback, '||Atendente|Vitstock');
+  assert.doesNotMatch(fallback, /undefined|null/);
+});
+
+test('quick reply slash selection replaces only its token and preserves composer text', () => {
+  const value = 'Bom dia! /sau tudo bem?';
+  const token = findQuickReplyToken(value, 13);
+  assert.deepEqual(token, { start: 9, end: 13, value: '/sau' });
+  assert.deepEqual(insertQuickReplyAtToken(value, token!, 'Olá, Ana!'), { value: 'Bom dia! Olá, Ana! tudo bem?', cursor: 18 });
+  assert.equal(normalizeQuickReplyShortcut(' /SAU '), '/sau');
+});
+
+test('quick reply slash trigger opens for a bare slash', () => {
+  assert.deepEqual(findQuickReplyToken('Olá /', 5), { start: 4, end: 5, value: '/' });
 });

@@ -17,6 +17,12 @@ async function seed() {
     const adminHash = await hashPassword(qaPassword);
     const attendantHash = await hashPassword(qaPassword);
     const adminA = (await client.query<{ id: string }>(`INSERT INTO users (company_id, name, email, password_hash, role, must_change_password) VALUES ($1, 'QA Admin A', 'qa-admin-a@vitstock.test', $2, 'admin', false) RETURNING id`, [companyA, adminHash])).rows[0]!.id;
+    await client.query(`
+      INSERT INTO users (company_id, name, email, password_hash, role, active, must_change_password)
+      VALUES ($1, 'E2E Preview Admin', 'e2e-preview@vitstock.test', $2, 'admin', true, false)
+      ON CONFLICT (company_id, email) DO UPDATE
+      SET role = 'admin'
+    `, [companyA, adminHash]);
     await client.query(`INSERT INTO users (company_id, name, email, password_hash, role, must_change_password) VALUES ($1, 'QA Operacional A', 'qa-operational-a@vitstock.test', $2, 'attendant', false)`, [companyA, attendantHash]);
     await client.query(`INSERT INTO users (company_id, name, email, password_hash, role, must_change_password) VALUES ($1, 'Fernanda QA', 'qa-fernanda@vitstock.test', $2, 'attendant', false)`, [companyA, attendantHash]);
     await client.query(`INSERT INTO users (company_id, name, email, password_hash, role, must_change_password) VALUES ($1, 'QA Admin B', 'qa-admin-b@vitstock.test', $2, 'admin', false)`, [companyB, adminHash]);
@@ -70,6 +76,14 @@ async function seed() {
     await addConversation(companyA, avatarMissing, '5521990000013@s.whatsapp.net', 'Avatar ausente para QA.');
     const group = await addContact(companyA, 'Grupo QA (fora de Contatos)', '120363000000@g.us');
     await addConversation(companyA, group, '120363000000@g.us', 'Mensagem de grupo QA.', true);
+
+    await client.query(
+      `INSERT INTO quick_replies (company_id, scope, shortcut, title, body, position)
+       VALUES
+         ($1, 'COMPANY', '/proposta', 'Proposta Comercial PIX', 'Segue a proposta comercial para o lote com 5% de desconto no PIX: R$ 58.995,00.', 0),
+         ($1, 'COMPANY', '/frete', 'Prazo de Entrega', 'O prazo de entrega para Curitiba é de 2 a 3 dias úteis após a confirmação do pagamento.', 1)`,
+      [companyA],
+    );
 
     // Massa suficiente para validar paginação, busca e ordenação sem alterar
     // os fixtures especiais usados pelos cenários funcionais.

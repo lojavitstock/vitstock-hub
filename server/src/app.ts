@@ -9,6 +9,7 @@ import { registerGoogleContactRoutes } from './google-contacts.js';
 import { registerContactRoutes } from './contacts.js';
 import { registerQaRoutes } from './qa.js';
 import { registerConversationTagRoutes } from './conversationTags.js';
+import { registerQuickReplyRoutes } from './quickReplies.js';
 
 export async function createApp() {
   const app = Fastify({
@@ -67,6 +68,7 @@ export async function createApp() {
   await registerGoogleContactRoutes(app);
   await registerContactRoutes(app);
   await registerConversationTagRoutes(app);
+  await registerQuickReplyRoutes(app);
   await registerQaRoutes(app);
 
   app.setErrorHandler((error, request, reply) => {

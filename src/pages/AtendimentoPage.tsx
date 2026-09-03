@@ -25,7 +25,7 @@ import {
   Globe,
   Archive,
 } from 'lucide-react';
-import { Conversation, Message, Tag, WhatsappInstance } from '../types';
+import { Conversation, Message, QuickReply, Tag, WhatsappInstance } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { useAuth } from '../auth/AuthContext';
 import { ConversationTagRail } from '../components/conversations/ConversationTagRail';
@@ -40,12 +40,14 @@ import { conversationNeedsResponse, useConversationInbox } from '../hooks/useCon
 import { useContactPanel } from '../hooks/useContactPanel';
 import { toQuotedMessage } from '../utils/quotedMessage';
 import { canRestoreComposerDraft, captureComposerSubmission, readConversationDraft, scheduleComposerFocus, writeConversationDraft } from '../utils/composerSubmission';
-import { createOutboundTrace } from '../utils/outboundTrace';
+import { createOutboundTrace, createReplyTraceId, traceReplySendFailure } from '../utils/outboundTrace';
 import { findConversationForContactChat, normalizeContactChatPhone } from '../utils/contactChatNavigation';
 import { addConversationTag, createConversationTag, deleteConversationTag, fetchConversationTags, removeConversationTag, updateConversationTag } from '../services/conversationTagsApi';
 import { normalizeConversationTags } from '../utils/conversationTags';
 import { isMediaBase64SizeAllowed, isMediaFileSizeAllowed } from '../utils/mediaLimits';
 import { outboundErrorMessage } from '../utils/outboundError';
+import { fetchQuickReplies, markQuickReplyUsed } from '../services/quickRepliesApi';
+import { mockQuickReplies } from '../services/mockData';
 import {
   classifyAttachmentFile,
   createAttachmentId,
@@ -93,6 +95,7 @@ export const AtendimentoPage: React.FC = () => {
   const [mediaSendProgress, setMediaSendProgress] = useState<{ current: number; total: number } | null>(null);
   const [isInternalNote, setIsInternalNote] = useState(false);
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
+  const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   // Estado para Nova Conversa por Telefone
   const [showNewChatModal, setShowNewChatModal] = useState(false);
@@ -183,12 +186,57 @@ export const AtendimentoPage: React.FC = () => {
     }
     activeConversationIdRef.current = activeConvId;
     setReplyTo(null);
+    setQuickReplyOpen(false);
     setShowConversationTagMenu(false);
     clearAttachmentDrafts();
   }, [activeConvId, clearAttachmentDrafts]);
 
+  useEffect(() => {
+    if (isMock) {
+      setQuickReplies(mockQuickReplies);
+      return undefined;
+    }
+    if (!user?.id) {
+      setQuickReplies([]);
+      return undefined;
+    }
+    let mounted = true;
+    void fetchQuickReplies()
+      .then((result) => {
+        if (mounted) setQuickReplies(Array.isArray(result.quickReplies) ? result.quickReplies : []);
+      })
+      .catch(() => {
+        if (mounted) setQuickReplies([]);
+      });
+    return () => { mounted = false; };
+  }, [isMock, user?.id]);
+
+  const handleQuickReplyUse = useCallback((reply: QuickReply) => {
+    if (isMock) {
+      setQuickReplies((current) => current.map((item) => item.id === reply.id ? { ...item, usageCount: item.usageCount + 1 } : item));
+      return;
+    }
+    void markQuickReplyUsed(reply.id)
+      .then((result) => {
+        if (result.quickReply) setQuickReplies((current) => current.map((item) => item.id === reply.id ? result.quickReply : item));
+      })
+      .catch(() => {
+        // A falha no contador não deve impedir a inserção da mensagem.
+      });
+  }, [isMock]);
+
+  const handleCreateQuickReply = useCallback(() => {
+    setQuickReplyOpen(false);
+    navigate('/configuracoes?tab=quickReplies&action=new&from=atendimento');
+  }, [navigate]);
+
+  useEffect(() => {
+    if (!whatsappConnected) setQuickReplyOpen(false);
+  }, [whatsappConnected]);
+
   const handleToggleInternalNote = useCallback((value: boolean) => {
     if (value) clearAttachmentDrafts();
+    setQuickReplyOpen(false);
     setIsInternalNote(value);
   }, [clearAttachmentDrafts]);
 
@@ -893,6 +941,7 @@ export const AtendimentoPage: React.FC = () => {
     const newMsgText = submission.text;
     const isInternalNoteToSend = submission.isInternalNote;
     const quotedMessage = submission.replyTarget ? toQuotedMessage(submission.replyTarget) : undefined;
+    const replyTraceId = quotedMessage ? createReplyTraceId() : undefined;
     const clientMessageId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setReplyTo(null);
     composerRef.current?.clear();
@@ -931,6 +980,7 @@ export const AtendimentoPage: React.FC = () => {
         clientMessageId: newMsg.id,
         conversationId: activeConv.id,
         kind: 'text',
+        replyTraceId,
         submitSource: submitter ? 'click' : 'keyboard',
       })
       : null;
@@ -973,7 +1023,7 @@ export const AtendimentoPage: React.FC = () => {
     if (!isInternalNoteToSend && !isMock) {
       try {
       traceOutbound?.('http.started');
-      const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, newMsgText, activeConv.id, newMsg.id, quotedMessage);
+      const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, newMsgText, activeConv.id, newMsg.id, quotedMessage, replyTraceId);
       traceOutbound?.('http.completed', { ok: true, evolutionMessageId: result?.message?.evolutionMessageId || result?.message?.id || null });
       if (activeConversationIdRef.current === activeConv.id) {
         const providerMessageId = result?.message?.evolutionMessageId || result?.message?.id;
@@ -997,6 +1047,15 @@ export const AtendimentoPage: React.FC = () => {
       }
       } catch (error) {
         traceOutbound?.('http.completed', { ok: false });
+        if (quotedMessage && replyTraceId) traceReplySendFailure({
+          replyTraceId,
+          conversationId: activeConv.id,
+          localMessageId: newMsg.id,
+          quote: quotedMessage,
+          kind: 'text',
+          status: typeof error === 'object' && error !== null && 'status' in error ? Number((error as { status?: unknown }).status) : undefined,
+          errorCode: typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: unknown }).code || '') : undefined,
+        });
         if (activeConversationIdRef.current === activeConv.id) {
           setMessages((previous) => previous.map((message) => message.id === newMsg.id ? { ...message, status: 'failed' } : message));
         }
@@ -1081,6 +1140,7 @@ export const AtendimentoPage: React.FC = () => {
         const label = mediatype === 'image' ? '[Imagem]' : mediatype === 'video' ? '[Vídeo]' : '[Documento]';
         const captionForAttachment = draft.captionEligible ? caption : '';
         const quoteForAttachment = draft.captionEligible ? quotedMessage : undefined;
+        const replyTraceId = quoteForAttachment ? createReplyTraceId() : undefined;
         const clientMessageId = draft.clientMessageId || `media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         if (!draft.clientMessageId) {
           const withId = attachmentDraftsRef.current.map((item) => item.id === draft.id ? { ...item, clientMessageId } : item);
@@ -1132,7 +1192,7 @@ export const AtendimentoPage: React.FC = () => {
           },
         };
         firstOptimisticMessageId ||= localMessage.id;
-        const traceOutbound = createOutboundTrace({ clientMessageId: localMessage.id, conversationId: conversation.id, kind: 'media' });
+        const traceOutbound = createOutboundTrace({ clientMessageId: localMessage.id, conversationId: conversation.id, kind: 'media', replyTraceId });
         traceOutbound('submit');
         setAssignmentFeedback('');
         setMessages((previous) => previous.some((message) => message.id === localMessage.id)
@@ -1166,6 +1226,7 @@ export const AtendimentoPage: React.FC = () => {
             caption: captionForAttachment || undefined,
             clientMessageId: localMessage.id,
             quotedMessage: quoteForAttachment,
+            replyTraceId,
           });
           succeeded += 1;
           traceOutbound('http.completed', { ok: true, evolutionMessageId: result?.message?.evolutionMessageId || result?.message?.id || null });
@@ -1188,6 +1249,15 @@ export const AtendimentoPage: React.FC = () => {
         } catch (error) {
           failed += 1;
           traceOutbound('http.completed', { ok: false });
+          if (quoteForAttachment && replyTraceId) traceReplySendFailure({
+            replyTraceId,
+            conversationId: conversation.id,
+            localMessageId: localMessage.id,
+            quote: quoteForAttachment,
+            kind: mediatype,
+            status: typeof error === 'object' && error !== null && 'status' in error ? Number((error as { status?: unknown }).status) : undefined,
+            errorCode: typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: unknown }).code || '') : undefined,
+          });
           updateDraftStatus(draft.id, 'failed');
           if (activeConversationIdRef.current === conversation.id) {
             setMessages((previous) => previous.map((message) => message.id === localMessage.id ? { ...message, status: 'failed' } : message));
@@ -1287,6 +1357,7 @@ export const AtendimentoPage: React.FC = () => {
       && message.metadata.clientMessageId.trim()
       ? message.metadata.clientMessageId
       : message.id;
+    const replyTraceId = message.metadata?.quotedMessage ? createReplyTraceId() : undefined;
     if (!retryText && !message.mediaUrl) return;
     setAssignmentFeedback('');
     setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'pending' } : item));
@@ -1320,11 +1391,12 @@ export const AtendimentoPage: React.FC = () => {
           caption: retryText || undefined,
           clientMessageId,
           quotedMessage: message.metadata?.quotedMessage,
+          replyTraceId,
         });
       } else if (message.mediaType) {
         throw new Error('O arquivo original não está disponível para nova tentativa.');
       } else {
-        result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, retryText, activeConv.id, clientMessageId, message.metadata?.quotedMessage);
+        result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, retryText, activeConv.id, clientMessageId, message.metadata?.quotedMessage, replyTraceId);
       }
       if (activeConversationIdRef.current === conversationId) {
         const providerMessageId = result?.message?.evolutionMessageId || result?.message?.id;
@@ -1349,6 +1421,15 @@ export const AtendimentoPage: React.FC = () => {
         } : conversation));
       }
     } catch (error) {
+      if (message.metadata?.quotedMessage && replyTraceId) traceReplySendFailure({
+        replyTraceId,
+        conversationId: conversationId,
+        localMessageId: message.id,
+        quote: message.metadata.quotedMessage,
+        kind: message.mediaType || 'text',
+        status: typeof error === 'object' && error !== null && 'status' in error ? Number((error as { status?: unknown }).status) : undefined,
+        errorCode: typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: unknown }).code || '') : undefined,
+      });
       if (activeConversationIdRef.current === conversationId) {
         setMessages((previous) => previous.map((item) => item.id === message.id ? { ...item, status: 'failed' } : item));
         setAssignmentFeedback(outboundErrorMessage(error, 'Não foi possível reenviar a mensagem.'));
@@ -1783,6 +1864,14 @@ export const AtendimentoPage: React.FC = () => {
               ref={composerRef}
               isInternalNote={isInternalNote}
               quickReplyOpen={quickReplyOpen}
+              quickReplies={quickReplies}
+              quickReplyContext={{
+                contactName: activeConv?.contact.name,
+                agentName: user?.name,
+                companyName: user?.companyName,
+              }}
+              canCreateQuickReply={user?.role === 'admin'}
+              onCreateQuickReply={handleCreateQuickReply}
               activeChatLocked={activeChatLocked}
               whatsappConnected={whatsappConnected}
               leaseOwnerName={activeLease?.ownerName}
@@ -1794,6 +1883,7 @@ export const AtendimentoPage: React.FC = () => {
               onTextChange={handleComposerTextChange}
               onToggleInternalNote={handleToggleInternalNote}
               onToggleQuickReply={() => setQuickReplyOpen((open) => !open)}
+              onUseQuickReply={handleQuickReplyUse}
               onAttachmentChange={handleAttachmentChange}
               onInputPaste={handleInputPaste}
               attachmentDrafts={attachmentDrafts}

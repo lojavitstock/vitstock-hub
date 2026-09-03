@@ -18,6 +18,23 @@ export interface Tag {
   usageCount?: number;
 }
 
+export type QuickReplyScope = 'COMPANY' | 'USER';
+
+export interface QuickReply {
+  id: string;
+  companyId: string;
+  userId?: string;
+  scope: QuickReplyScope;
+  shortcut: string;
+  title: string;
+  body: string;
+  position: number;
+  usageCount: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Contact {
   id: string;
   name: string;
@@ -71,8 +88,22 @@ export interface Message {
     sentByUserName?: string;
     sentOutsideHub?: boolean;
     clientMessageId?: string;
+    /** Explicit Evolution/Baileys identity retained for media replies after reload. */
+    providerKey?: {
+      id: string;
+      remoteJid?: string;
+      remoteJidAlt?: string;
+      fromMe?: boolean;
+      participant?: string;
+      participantAlt?: string;
+      addressingMode?: string;
+      senderPn?: string;
+      participantPn?: string;
+    };
     quotedMessage?: {
       messageId: string;
+      /** How the sender obtained the provider identity used for quoting. */
+      providerKeySource?: 'providerKey' | 'legacyFallback';
       authorName?: string;
       sender?: 'contact' | 'attendant' | 'system';
       content?: string;
@@ -80,8 +111,13 @@ export interface Message {
       key?: {
         id: string;
         remoteJid?: string;
+        remoteJidAlt?: string;
         fromMe?: boolean;
         participant?: string;
+        participantAlt?: string;
+        addressingMode?: string;
+        senderPn?: string;
+        participantPn?: string;
       };
     };
     document?: {

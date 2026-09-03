@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Users, Zap, Layers, Plus, KeyRound, Loader2, QrCode, UserPlus, Power, Save, X, PencilLine, Plug } from 'lucide-react';
-import { Attendant } from '../types';
+import { Attendant, QuickReply } from '../types';
 import { apiRequest } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
-import { mockAttendants } from '../services/mockData';
+import { mockAttendants, mockQuickReplies } from '../services/mockData';
 import { ConexoesPage } from './ConexoesPage';
 import { GoogleContactsIntegrationCard } from '../components/settings/GoogleContactsIntegrationCard';
+import { createQuickReply, deleteQuickReply, fetchQuickReplies, updateQuickReply } from '../services/quickRepliesApi';
 
 type SettingsTab = 'attendants' | 'departments' | 'quickReplies' | 'security' | 'connections' | 'integracoes';
 type AttendantFormState = {
@@ -14,6 +15,11 @@ type AttendantFormState = {
   email: string;
   password: string;
   role: 'attendant' | 'admin';
+};
+type QuickReplyFormState = {
+  shortcut: string;
+  title: string;
+  body: string;
 };
 
 const isSettingsTab = (value: string | null): value is SettingsTab => (
@@ -27,6 +33,7 @@ const isSettingsTab = (value: string | null): value is SettingsTab => (
 
 export const ConfiguracoesPage: React.FC = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<SettingsTab>(() => isSettingsTab(searchParams.get('tab')) ? searchParams.get('tab') as SettingsTab : 'attendants');
   const [attendants, setAttendants] = useState<Attendant[]>([]);
@@ -46,6 +53,15 @@ export const ConfiguracoesPage: React.FC = () => {
   const [passwordFeedback, setPasswordFeedback] = useState('');
   const [passwordError, setPasswordError] = useState('');
   const [savingPassword, setSavingPassword] = useState(false);
+  const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
+  const [quickRepliesLoading, setQuickRepliesLoading] = useState(false);
+  const [quickRepliesError, setQuickRepliesError] = useState('');
+  const [quickRepliesFeedback, setQuickRepliesFeedback] = useState('');
+  const [quickReplySearch, setQuickReplySearch] = useState('');
+  const [showQuickReplyForm, setShowQuickReplyForm] = useState(false);
+  const [editingQuickReplyId, setEditingQuickReplyId] = useState<string | null>(null);
+  const [savingQuickReply, setSavingQuickReply] = useState(false);
+  const [quickReplyForm, setQuickReplyForm] = useState<QuickReplyFormState>({ shortcut: '/', title: '', body: '' });
 
   useEffect(() => {
     const requestedTab = searchParams.get('tab');
@@ -83,6 +99,116 @@ export const ConfiguracoesPage: React.FC = () => {
     if (activeTab === 'attendants' && user?.role === 'admin') void loadAttendants();
     if (activeTab === 'attendants' && user?.role !== 'admin') setAttendants([]);
   }, [activeTab, loadAttendants, user]);
+
+  const loadQuickReplies = useCallback(async () => {
+    if (!user) return;
+    setQuickRepliesLoading(true);
+    setQuickRepliesError('');
+    if (import.meta.env.VITE_USE_MOCK_DATA === 'true') {
+      setQuickReplies(mockQuickReplies);
+      setQuickRepliesLoading(false);
+      return;
+    }
+    try {
+      const response = await fetchQuickReplies();
+      setQuickReplies(response.quickReplies || []);
+    } catch (error) {
+      setQuickRepliesError(error instanceof Error ? error.message : 'Não foi possível carregar as mensagens rápidas.');
+    } finally {
+      setQuickRepliesLoading(false);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (activeTab === 'quickReplies') void loadQuickReplies();
+  }, [activeTab, loadQuickReplies]);
+
+  const openNewQuickReply = useCallback(() => {
+    setQuickRepliesError('');
+    setQuickRepliesFeedback('');
+    setEditingQuickReplyId(null);
+    setQuickReplyForm({ shortcut: '/', title: '', body: '' });
+    setShowQuickReplyForm(true);
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'quickReplies' || searchParams.get('action') !== 'new') return;
+    if (user?.role === 'admin') openNewQuickReply();
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('action');
+    setSearchParams(nextParams, { replace: true });
+  }, [activeTab, openNewQuickReply, searchParams, setSearchParams, user?.role]);
+
+  const resetQuickReplyForm = () => {
+    setQuickReplyForm({ shortcut: '/', title: '', body: '' });
+    setEditingQuickReplyId(null);
+    setShowQuickReplyForm(false);
+  };
+
+  const openQuickReplyEditor = (reply: QuickReply) => {
+    setQuickRepliesError('');
+    setQuickRepliesFeedback('');
+    setEditingQuickReplyId(reply.id);
+    setQuickReplyForm({ shortcut: reply.shortcut, title: reply.title, body: reply.body });
+    setShowQuickReplyForm(true);
+  };
+
+  const handleSaveQuickReply = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const returnToAtendimento = searchParams.get('from') === 'atendimento';
+    setQuickRepliesError('');
+    setQuickRepliesFeedback('');
+    setSavingQuickReply(true);
+    try {
+      const payload = { shortcut: quickReplyForm.shortcut, title: quickReplyForm.title, body: quickReplyForm.body, scope: 'COMPANY' as const };
+      if (import.meta.env.VITE_USE_MOCK_DATA === 'true') {
+        if (editingQuickReplyId) {
+          setQuickReplies((current) => current.map((item) => item.id === editingQuickReplyId ? { ...item, ...payload, updatedAt: new Date().toISOString() } : item));
+          setQuickRepliesFeedback('Mensagem rápida atualizada.');
+        } else {
+          setQuickReplies((current) => [...current, { ...payload, id: `mock-quick-${Date.now()}`, companyId: 'mock-company', position: current.length, usageCount: 0, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }]);
+          setQuickRepliesFeedback('Mensagem rápida criada.');
+        }
+        resetQuickReplyForm();
+        if (returnToAtendimento) navigate('/atendimento');
+        return;
+      }
+      if (editingQuickReplyId) {
+        const result = await updateQuickReply(editingQuickReplyId, payload);
+        setQuickReplies((current) => current.map((item) => item.id === editingQuickReplyId ? result.quickReply : item));
+        setQuickRepliesFeedback('Mensagem rápida atualizada.');
+      } else {
+        const result = await createQuickReply(payload);
+        setQuickReplies((current) => [...current, result.quickReply]);
+        setQuickRepliesFeedback('Mensagem rápida criada.');
+      }
+      resetQuickReplyForm();
+      if (returnToAtendimento) navigate('/atendimento');
+    } catch (error) {
+      setQuickRepliesError(error instanceof Error ? error.message : 'Não foi possível salvar a mensagem rápida.');
+    } finally {
+      setSavingQuickReply(false);
+    }
+  };
+
+  const handleDeleteQuickReply = async (reply: QuickReply) => {
+    if (!window.confirm(`Excluir ${reply.shortcut}?`)) return;
+    setQuickRepliesError('');
+    setQuickRepliesFeedback('');
+    if (import.meta.env.VITE_USE_MOCK_DATA === 'true') {
+      setQuickReplies((current) => current.filter((item) => item.id !== reply.id));
+      setQuickRepliesFeedback('Mensagem rápida removida.');
+      return;
+    }
+    try {
+      await deleteQuickReply(reply.id);
+      setQuickReplies((current) => current.filter((item) => item.id !== reply.id));
+      if (editingQuickReplyId === reply.id) resetQuickReplyForm();
+      setQuickRepliesFeedback('Mensagem rápida removida.');
+    } catch (error) {
+      setQuickRepliesError(error instanceof Error ? error.message : 'Não foi possível remover a mensagem rápida.');
+    }
+  };
 
   const resetAttendantForm = () => {
     setAttendantForm({ name: '', email: '', password: '', role: 'attendant' });
@@ -456,27 +582,72 @@ export const ConfiguracoesPage: React.FC = () => {
 
       {activeTab === 'quickReplies' && (
         <div className="max-w-3xl space-y-4">
-          <div className="flex items-center justify-between">
-            <h3 className="text-lg font-extrabold text-zinc-100">Respostas Rápidas Configuradas</h3>
-            <button className="btn-primary text-sm"><Plus className="h-4 w-4" /> Criar Atalho</button>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-lg font-extrabold text-zinc-100">Respostas Rápidas</h3>
+              <p className="mt-1 text-sm text-zinc-400">Atalhos compartilhados pela empresa para responder com agilidade.</p>
+            </div>
+            {user?.role === 'admin' && (
+              <button type="button" onClick={openNewQuickReply} className="btn-primary text-sm" aria-label="Nova resposta"><Plus className="h-4 w-4" /> Nova resposta</button>
+            )}
           </div>
 
-          <div className="space-y-3">
-            <div className="p-4 rounded-xl bg-[#0C0C0E] border border-zinc-800 flex items-start justify-between">
-              <div>
-                <span className="text-xs font-mono font-bold text-amber-400 block mb-1">/proposta</span>
-                <p className="text-xs text-zinc-300">Segue a proposta comercial para o lote com 5% de desconto no PIX.</p>
+          {showQuickReplyForm && user?.role === 'admin' && (
+            <form onSubmit={handleSaveQuickReply} className="space-y-4 rounded-xl border border-amber-400/25 bg-amber-400/5 p-5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-base font-extrabold text-zinc-100">{editingQuickReplyId ? 'Editar mensagem rápida' : 'Nova mensagem rápida'}</h4>
+                  <p className="mt-1 text-sm text-zinc-400">Use variáveis como {'{nome}'}, {'{primeiro_nome}'}, {'{atendente}'} e {'{empresa}'}.</p>
+                </div>
+                <button type="button" onClick={resetQuickReplyForm} className="rounded-lg p-2 text-zinc-400 hover:bg-white/5 hover:text-zinc-100" aria-label="Fechar formulário"><X className="h-5 w-5" /></button>
               </div>
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-zinc-800 text-zinc-400">Vendas</span>
-            </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="block text-sm font-bold text-zinc-300">Atalho
+                  <input required pattern="/[A-Za-z0-9][A-Za-z0-9_-]*" value={quickReplyForm.shortcut} onChange={(event) => setQuickReplyForm((current) => ({ ...current, shortcut: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 font-mono text-base text-zinc-100 outline-none focus:border-amber-400" placeholder="/saudacao" />
+                </label>
+                <label className="block text-sm font-bold text-zinc-300">Título
+                  <input required maxLength={120} value={quickReplyForm.title} onChange={(event) => setQuickReplyForm((current) => ({ ...current, title: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 text-base text-zinc-100 outline-none focus:border-amber-400" placeholder="Saudação inicial" />
+                </label>
+              </div>
+              <label className="block text-sm font-bold text-zinc-300">Mensagem
+                <textarea required maxLength={10000} rows={4} value={quickReplyForm.body} onChange={(event) => setQuickReplyForm((current) => ({ ...current, body: event.target.value }))} className="mt-1.5 w-full resize-y rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 text-base leading-6 text-zinc-100 outline-none focus:border-amber-400" placeholder="Olá, {primeiro_nome}! Como posso ajudar?" />
+              </label>
+              <div className="flex justify-end border-t border-amber-400/15 pt-4">
+                <button type="submit" disabled={savingQuickReply} className="btn-primary text-sm disabled:cursor-not-allowed disabled:opacity-60">{savingQuickReply ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}{savingQuickReply ? 'Salvando...' : 'Salvar mensagem'}</button>
+              </div>
+            </form>
+          )}
 
-            <div className="p-4 rounded-xl bg-[#0C0C0E] border border-zinc-800 flex items-start justify-between">
-              <div>
-                <span className="text-xs font-mono font-bold text-amber-400 block mb-1">/frete</span>
-                <p className="text-xs text-zinc-300">O prazo de entrega para Curitiba é de 2 a 3 dias úteis após a confirmação do pagamento.</p>
+          {quickRepliesError && <p role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{quickRepliesError}</p>}
+          {quickRepliesFeedback && <p role="status" className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-sm text-emerald-300">{quickRepliesFeedback}</p>}
+          <input value={quickReplySearch} onChange={(event) => setQuickReplySearch(event.target.value)} placeholder="Buscar por atalho, título ou mensagem" aria-label="Buscar mensagens rápidas" className="w-full rounded-lg border border-zinc-800 bg-[#0C0C0E] px-3 py-3 text-sm text-zinc-100 outline-none focus:border-amber-400" />
+          <div className="space-y-3">
+            {quickRepliesLoading ? <div className="flex items-center justify-center gap-2 rounded-xl border border-zinc-800 bg-[#0C0C0E] p-10 text-sm text-zinc-400"><Loader2 className="h-5 w-5 animate-spin text-amber-400" /> Carregando mensagens rápidas...</div> : quickReplies.filter((reply) => {
+              const query = quickReplySearch.trim().toLocaleLowerCase();
+              return !query || [reply.shortcut, reply.title, reply.body].some((field) => field.toLocaleLowerCase().includes(query));
+            }).map((reply) => (
+              <div key={reply.id} className="flex items-start justify-between gap-4 rounded-xl border border-zinc-800 bg-[#0C0C0E] p-4">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2"><span className="font-mono text-sm font-bold text-amber-400">{reply.shortcut}</span><span className="text-sm font-semibold text-zinc-100">{reply.title}</span></div>
+                  <p className="mt-2 whitespace-pre-wrap break-words text-sm text-zinc-300">{reply.body}</p>
+                  <p className="mt-2 text-xs text-zinc-500">Usada {reply.usageCount} vez(es) · Empresa</p>
+                </div>
+                {user?.role === 'admin' && <div className="flex shrink-0 gap-2"><button type="button" onClick={() => openQuickReplyEditor(reply)} className="rounded-lg border border-amber-400/20 px-3 py-1.5 text-xs font-bold text-amber-300 hover:bg-amber-400/10">Editar</button><button type="button" onClick={() => void handleDeleteQuickReply(reply)} className="rounded-lg border border-red-400/20 px-3 py-1.5 text-xs font-bold text-red-300 hover:bg-red-400/10">Excluir</button></div>}
               </div>
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-zinc-800 text-zinc-400">Logística</span>
-            </div>
+            ))}
+            {!quickRepliesLoading && quickReplies.length === 0 && (
+              <div className="rounded-xl border border-dashed border-zinc-800 p-10 text-center">
+                <p className="text-sm text-zinc-300">Nenhuma resposta rápida cadastrada.</p>
+                {user?.role === 'admin' ? (
+                  <>
+                    <p className="mt-2 text-sm text-zinc-500">Crie atalhos para responder seus clientes com mais agilidade.</p>
+                    <button type="button" onClick={openNewQuickReply} className="btn-primary mt-5 text-sm" aria-label="Criar primeira resposta"><Plus className="h-4 w-4" /> Criar primeira resposta</button>
+                  </>
+                ) : (
+                  <p className="mt-2 text-sm text-zinc-500">Peça a um administrador para cadastrar respostas rápidas.</p>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}

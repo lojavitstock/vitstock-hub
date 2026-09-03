@@ -1,9 +1,10 @@
-import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
-import { FileText, Paperclip, Reply, Send, Smile, X, Zap } from 'lucide-react';
-import { Message } from '../../types';
+import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { FileText, Paperclip, Plus, Reply, Send, Smile, X, Zap } from 'lucide-react';
+import { Message, QuickReply } from '../../types';
 import { quotedMediaLabel, toQuotedMessage } from '../../utils/quotedMessage';
 import { insertComposerText } from '../../utils/composerSubmission';
 import type { AttachmentDraft } from '../../utils/composerAttachment';
+import { filterQuickReplies, findQuickReplyToken, insertQuickReplyAtToken, resolveQuickReplyBody, type QuickReplyContext } from '../../utils/quickReplies';
 
 type MessageComposerProps = {
   isInternalNote: boolean;
@@ -19,6 +20,11 @@ type MessageComposerProps = {
   onTextChange?: (value: string) => void;
   onToggleInternalNote: (value: boolean) => void;
   onToggleQuickReply: () => void;
+  quickReplies?: QuickReply[];
+  quickReplyContext?: QuickReplyContext;
+  onUseQuickReply?: (reply: QuickReply) => void;
+  canCreateQuickReply?: boolean;
+  onCreateQuickReply?: () => void;
   onAttachmentChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onInputPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => void;
   attachmentDrafts?: AttachmentDraft[];
@@ -35,11 +41,6 @@ export type MessageComposerHandle = {
   setText: (value: string) => void;
   focus: () => void;
 };
-
-const QUICK_REPLIES = [
-  { command: '/proposta', label: 'Proposta Comercial PIX', text: 'Segue a proposta comercial para o lote com 5% de desconto no PIX: R$ 58.995,00.' },
-  { command: '/frete', label: 'Prazo de Entrega', text: 'O prazo de entrega para Curitiba é de 2 a 3 dias úteis após a confirmação do pagamento.' },
-];
 
 const EMOJI_CATEGORIES = [
   { id: 'recent', label: 'Recentes', emojis: [] },
@@ -89,6 +90,11 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   onTextChange,
   onToggleInternalNote,
   onToggleQuickReply,
+  quickReplies = [],
+  quickReplyContext,
+  onUseQuickReply,
+  canCreateQuickReply = false,
+  onCreateQuickReply,
   onAttachmentChange,
   onInputPaste,
   attachmentDrafts = [],
@@ -105,11 +111,80 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   const [recentEmojis, setRecentEmojis] = useState<string[]>(readRecentEmojis);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
   const emojiButtonRef = useRef<HTMLButtonElement>(null);
+  const quickReplyPopoverRef = useRef<HTMLDivElement>(null);
+  const quickReplyButtonRef = useRef<HTMLButtonElement>(null);
+  const [quickReplySearch, setQuickReplySearch] = useState('');
+  const [quickReplyCursor, setQuickReplyCursor] = useState(0);
+  const [slashOpen, setSlashOpen] = useState(false);
+  const [slashIndex, setSlashIndex] = useState(0);
   const hasAttachment = attachmentDrafts.length > 0 && !isInternalNote;
+
+  const slashToken = useMemo(
+    () => !isInternalNote ? findQuickReplyToken(inputText, quickReplyCursor) : null,
+    [inputText, quickReplyCursor, isInternalNote],
+  );
+  const slashReplies = useMemo(
+    () => slashToken ? filterQuickReplies(quickReplies, slashToken.value.slice(1)) : [],
+    [quickReplies, slashToken],
+  );
+  const buttonReplies = useMemo(() => filterQuickReplies(quickReplies, quickReplySearch), [quickReplies, quickReplySearch]);
 
   useEffect(() => {
     setEmojiOpen(false);
+    setQuickReplySearch('');
+    setSlashOpen(false);
   }, [activeConversationId, isInternalNote]);
+
+  useEffect(() => {
+    setSlashOpen(Boolean(slashToken && slashReplies.length > 0 && !quickReplyOpen));
+    setSlashIndex(0);
+  }, [quickReplyOpen, slashReplies.length, slashToken?.value]);
+
+  useEffect(() => {
+    if (!quickReplyOpen && !slashOpen) return undefined;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !quickReplyPopoverRef.current?.contains(target) && !quickReplyButtonRef.current?.contains(target)) {
+        setSlashOpen(false);
+        if (quickReplyOpen) onToggleQuickReply();
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        setSlashOpen(false);
+        if (quickReplyOpen) onToggleQuickReply();
+        textareaRef.current?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [quickReplyOpen, slashOpen, onToggleQuickReply]);
+
+  const selectQuickReply = (reply: QuickReply, token: ReturnType<typeof findQuickReplyToken> = null) => {
+    const textarea = textareaRef.current;
+    const start = token?.start ?? textarea?.selectionStart ?? quickReplyCursor;
+    const end = token?.end ?? textarea?.selectionEnd ?? start;
+    const body = resolveQuickReplyBody(reply.body, quickReplyContext);
+    const next = token
+      ? insertQuickReplyAtToken(inputText, token, body)
+      : insertComposerText({ value: inputText, inserted: body, start, end });
+    setInputText(next.value);
+    setQuickReplyCursor(next.cursor);
+    onTextChange?.(next.value);
+    onUseQuickReply?.(reply);
+    setSlashOpen(false);
+    if (quickReplyOpen) onToggleQuickReply();
+    window.requestAnimationFrame(() => {
+      textarea?.focus();
+      textarea?.setSelectionRange(next.cursor, next.cursor);
+    });
+  };
 
   useEffect(() => {
     if (!emojiOpen) return undefined;
@@ -163,16 +238,41 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   useImperativeHandle(ref, () => ({
     clear: () => {
       setInputText('');
+      setQuickReplyCursor(0);
       onTextChange?.('');
     },
     setText: (value: string) => {
       setInputText(value);
+      setQuickReplyCursor(value.length);
       onTextChange?.(value);
     },
     focus: () => textareaRef.current?.focus(),
   }), [onTextChange]);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const token = slashToken;
+    if (event.key === 'ArrowDown' && slashOpen && slashReplies.length > 0) {
+      event.preventDefault();
+      setSlashIndex((current) => (current + 1) % slashReplies.length);
+      return;
+    }
+    if (event.key === 'ArrowUp' && slashOpen && slashReplies.length > 0) {
+      event.preventDefault();
+      setSlashIndex((current) => (current - 1 + slashReplies.length) % slashReplies.length);
+      return;
+    }
+    if (event.key === 'Escape' && (slashOpen || quickReplyOpen)) {
+      event.preventDefault();
+      setSlashOpen(false);
+      if (quickReplyOpen) onToggleQuickReply();
+      return;
+    }
+    if (event.key === 'Enter' && !event.ctrlKey && !event.shiftKey && slashOpen && token && slashReplies.length > 0 && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      const reply = slashReplies[slashIndex] || slashReplies[0];
+      if (reply) selectQuickReply(reply, token);
+      return;
+    }
     if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
 
     if (event.ctrlKey) {
@@ -198,22 +298,6 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
 
   return (
   <>
-    {quickReplyOpen && (
-      <div className="mx-5 space-y-2 rounded-lg border border-amber-400/30 bg-zinc-900 p-3 shadow-2xl animate-fade-in">
-        <div className="flex items-center justify-between text-xs font-bold text-amber-400">
-          <span className="flex items-center gap-1.5"><Zap className="h-3.5 w-3.5" /> Respostas Rápidas</span>
-          <button type="button" onClick={onToggleQuickReply} className="text-zinc-500 hover:text-zinc-300">✕</button>
-        </div>
-        <div className="grid grid-cols-2 gap-2 text-xs">
-          {QUICK_REPLIES.map((reply) => (
-            <button key={reply.command} type="button" onClick={() => { setInputText(reply.text); onTextChange?.(reply.text); onToggleQuickReply(); }} className="rounded border border-zinc-700/60 bg-zinc-800/80 p-2 text-left text-zinc-300 hover:bg-amber-400/20 hover:text-amber-300">
-              <span className="block font-bold text-amber-400">{reply.command}</span> {reply.label}
-            </button>
-          ))}
-        </div>
-      </div>
-    )}
-
     <form onSubmit={onSubmit} className="border-t border-[#344047] bg-[#20292f] p-4">
       {replyPreview && !isInternalNote && (
         <div className="mb-3 flex items-start gap-2 rounded-lg border-l-2 border-emerald-300 bg-[#28343a] px-3 py-2 text-left shadow-sm">
@@ -243,9 +327,6 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
         </button>
         <button type="button" onClick={() => onToggleInternalNote(true)} className={`flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-bold transition-all ${isInternalNote ? 'border border-amber-400/40 bg-amber-400/20 text-amber-400' : 'text-zinc-400 hover:text-zinc-200'}`}>
           🔒 Nota Interna
-        </button>
-        <button type="button" onClick={onToggleQuickReply} className="ml-auto flex items-center gap-1 rounded border border-amber-400/20 bg-amber-400/10 px-3 py-1.5 text-sm font-bold text-amber-400 hover:text-amber-300">
-          <Zap className="h-3.5 w-3.5" /> Resposta Rápida
         </button>
       </div>
 
@@ -282,6 +363,42 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
       {mediaSendProgress && <p className="mb-2 text-xs font-semibold text-amber-200">Enviando {mediaSendProgress.current} de {mediaSendProgress.total}...</p>}
 
       <div className="relative flex items-center gap-2">
+        {(quickReplyOpen || slashOpen) && !isInternalNote && (
+          <div ref={quickReplyPopoverRef} role="dialog" aria-label="Mensagens rápidas" className="absolute bottom-full left-0 z-30 mb-2 w-[min(24rem,calc(100vw-2rem))] rounded-xl border border-amber-400/30 bg-[#182126] p-3 shadow-2xl">
+            {quickReplyOpen && (
+              <>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-300"><Zap className="h-3.5 w-3.5 text-amber-300" /> Respostas rápidas</span>
+                  {canCreateQuickReply && onCreateQuickReply && (
+                    <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onCreateQuickReply} aria-label="Criar resposta rápida" title="Criar resposta rápida" className="flex h-6 w-6 items-center justify-center rounded-md border border-amber-400/30 text-amber-300 transition-colors hover:border-amber-300 hover:bg-amber-400/10"><Plus className="h-3.5 w-3.5" /></button>
+                  )}
+                </div>
+                <input autoFocus value={quickReplySearch} onChange={(event) => setQuickReplySearch(event.target.value)} placeholder="Buscar atalho, título ou mensagem" aria-label="Buscar mensagens rápidas" className="mb-2 w-full rounded-lg border border-slate-700 bg-[#20292f] px-3 py-2 text-sm text-slate-100 outline-none focus:border-amber-400" />
+              </>
+            )}
+            <div role="listbox" aria-label="Opções de mensagens rápidas" className="max-h-56 space-y-1 overflow-y-auto">
+              {(quickReplyOpen ? buttonReplies : slashReplies).map((reply, index) => (
+                <button key={reply.id} type="button" role="option" aria-selected={!quickReplyOpen && index === slashIndex} onMouseDown={(event) => event.preventDefault()} onClick={() => selectQuickReply(reply, slashOpen ? slashToken : null)} className={`block w-full rounded-lg border border-transparent px-3 py-2 text-left text-sm transition-colors hover:border-amber-400/30 hover:bg-amber-400/10 ${!quickReplyOpen && index === slashIndex ? 'border-amber-400/30 bg-amber-400/10' : ''}`}>
+                  <span className="mr-2 font-mono font-bold text-amber-300">{reply.shortcut}</span>
+                  <span className="font-semibold text-slate-100">{reply.title}</span>
+                  <span className="mt-0.5 block truncate text-xs text-slate-400">{reply.body}</span>
+                </button>
+              ))}
+              {((quickReplyOpen ? buttonReplies : slashReplies).length === 0) && (
+                quickReplyOpen ? (
+                  <div className="py-3 text-center">
+                    <p className="text-xs text-slate-500">Nenhuma resposta rápida cadastrada.</p>
+                    {canCreateQuickReply && onCreateQuickReply ? (
+                      <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onCreateQuickReply} className="mt-2 inline-flex items-center gap-1 rounded-md border border-amber-400/30 px-2.5 py-1.5 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-400/10"><Plus className="h-3.5 w-3.5" /> Criar resposta</button>
+                    ) : (
+                      <p className="mt-1 text-xs text-slate-500">Peça a um administrador para cadastrar.</p>
+                    )}
+                  </div>
+                ) : <p className="py-3 text-center text-xs text-slate-500">Nenhuma mensagem rápida encontrada.</p>
+              )}
+            </div>
+          </div>
+        )}
         {emojiOpen && !isInternalNote && (
           <div ref={emojiPickerRef} role="dialog" aria-label="Selecionar emoji" className="absolute bottom-full left-0 z-30 mb-2 w-[min(21rem,calc(100vw-2rem))] rounded-xl border border-slate-600 bg-[#182126] p-2 shadow-2xl">
             <div className="mb-2 flex gap-1 overflow-x-auto border-b border-slate-700 pb-2">
@@ -300,7 +417,7 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
           </div>
         )}
         {!isInternalNote && (
-          <button ref={emojiButtonRef} type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => setEmojiOpen((open) => !open)} aria-label="Inserir emoji" title="Inserir emoji" className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300">
+          <button ref={emojiButtonRef} type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => { if (quickReplyOpen) onToggleQuickReply(); setEmojiOpen((open) => !open); }} aria-label="Inserir emoji" title="Inserir emoji" className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300">
             <Smile className="h-4 w-4" />
           </button>
         )}
@@ -308,7 +425,10 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
         <button type="button" onClick={() => attachmentInputRef.current?.click()} disabled={activeChatLocked || isInternalNote || sendingMedia || !whatsappConnected} aria-label="Anexar arquivo" title="Anexar arquivo" className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40">
           <Paperclip className="h-4 w-4" />
         </button>
-        <textarea ref={textareaRef} rows={1} value={inputText} onChange={(event) => { setInputText(event.target.value); onTextChange?.(event.target.value); }} onKeyDown={handleKeyDown} onPaste={onInputPaste} disabled={activeChatLocked || sendingMedia} placeholder={isInternalNote ? 'Digite uma nota interna para a equipe...' : 'Digite sua mensagem para o WhatsApp...'} title={!isInternalNote ? 'Cole uma imagem com Ctrl+V para enviar' : undefined} className={`max-h-32 min-h-12 flex-1 resize-y rounded-2xl border bg-[#2a343a] px-4 py-3 text-base leading-6 text-slate-100 placeholder-slate-400 transition-colors focus:outline-none ${isInternalNote ? 'border-amber-400/50 bg-amber-400/5 focus:border-amber-400' : 'border-transparent focus:border-amber-400/70'}`} />
+        {!isInternalNote && <button ref={quickReplyButtonRef} type="button" disabled={activeChatLocked || sendingMedia} onMouseDown={(event) => event.preventDefault()} onClick={() => { setEmojiOpen(false); setQuickReplySearch(''); setSlashOpen(false); onToggleQuickReply(); }} aria-label="Mensagens rápidas" title="Mensagens rápidas" className={`shrink-0 rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40 ${quickReplyOpen ? 'text-amber-300' : ''}`}>
+          <Zap className="h-4 w-4" />
+        </button>}
+        <textarea ref={textareaRef} rows={1} value={inputText} onChange={(event) => { setInputText(event.target.value); setQuickReplyCursor(event.target.selectionStart); onTextChange?.(event.target.value); }} onSelect={(event) => setQuickReplyCursor(event.currentTarget.selectionStart)} onKeyDown={handleKeyDown} onPaste={onInputPaste} disabled={activeChatLocked || sendingMedia} placeholder={isInternalNote ? 'Digite uma nota interna para a equipe...' : 'Digite sua mensagem para o WhatsApp...'} title={!isInternalNote ? 'Cole uma imagem com Ctrl+V para enviar' : undefined} className={`max-h-32 min-h-12 flex-1 resize-y rounded-2xl border bg-[#2a343a] px-4 py-3 text-base leading-6 text-slate-100 placeholder-slate-400 transition-colors focus:outline-none ${isInternalNote ? 'border-amber-400/50 bg-amber-400/5 focus:border-amber-400' : 'border-transparent focus:border-amber-400/70'}`} />
         <button type="submit" disabled={activeChatLocked || sendingMedia || (!isInternalNote && !whatsappConnected) || (!inputText.trim() && !hasAttachment)} aria-label="Enviar mensagem" title="Enviar mensagem" className={`flex items-center justify-center rounded-full p-3 font-bold transition-all ${isInternalNote ? 'bg-amber-500 text-zinc-950 hover:bg-amber-400' : 'bg-amber-400 text-zinc-950 shadow-[0_0_12px_rgba(238,187,44,0.3)] hover:bg-amber-300'} disabled:cursor-not-allowed disabled:opacity-40`}>
           <Send className="h-4 w-4" />
         </button>
