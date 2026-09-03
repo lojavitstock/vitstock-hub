@@ -38,6 +38,7 @@ import {
   normalizeStoredReactions,
   providerReactionUpdate,
 } from './messageReactions.js';
+import { providerMessageKeyFromRecord, providerMessageKeyFromStoredMessage } from './providerMessageKey.js';
 import { hasQaProviderOnlyChat, qaEvolutionResponse } from './qa.js';
 import { loadConversationTags } from './conversationTags.js';
 import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.js';
@@ -86,8 +87,13 @@ const sendTextSchema = z.object({
     key: z.object({
       id: z.string().trim().min(1).max(256),
       remoteJid: z.string().trim().min(3).max(128).optional(),
+      remoteJidAlt: z.string().trim().min(3).max(128).optional(),
       fromMe: z.boolean().optional(),
       participant: z.string().trim().min(3).max(128).optional(),
+      participantAlt: z.string().trim().min(3).max(128).optional(),
+      addressingMode: z.string().trim().min(1).max(64).optional(),
+      senderPn: z.string().trim().min(3).max(128).optional(),
+      participantPn: z.string().trim().min(3).max(128).optional(),
     }).optional(),
   }).optional(),
 });
@@ -1237,6 +1243,12 @@ function quotedMessageFromContext(context: any): QuotedMessage | undefined {
     ...(mediaType ? { mediaType } : {}),
     key: {
       id: messageId,
+      ...(firstProviderText(context?.quotedMessage?.key?.remoteJid) ? { remoteJid: firstProviderText(context?.quotedMessage?.key?.remoteJid) } : {}),
+      ...(firstProviderText(context?.quotedMessage?.key?.remoteJidAlt) ? { remoteJidAlt: firstProviderText(context?.quotedMessage?.key?.remoteJidAlt) } : {}),
+      ...(firstProviderText(context?.quotedMessage?.key?.participantAlt) ? { participantAlt: firstProviderText(context?.quotedMessage?.key?.participantAlt) } : {}),
+      ...(firstProviderText(context?.quotedMessage?.key?.addressingMode) ? { addressingMode: firstProviderText(context?.quotedMessage?.key?.addressingMode) } : {}),
+      ...(firstProviderText(context?.quotedMessage?.key?.senderPn) ? { senderPn: firstProviderText(context?.quotedMessage?.key?.senderPn) } : {}),
+      ...(firstProviderText(context?.quotedMessage?.key?.participantPn) ? { participantPn: firstProviderText(context?.quotedMessage?.key?.participantPn) } : {}),
       ...(participant ? { participant } : {}),
     },
   };
@@ -1255,8 +1267,13 @@ function normalizedQuotedMessage(quoted: QuotedMessage | undefined, fallbackRemo
     key: {
       id: messageId,
       remoteJid: quoted.key?.remoteJid || fallbackRemoteJid,
+      ...(quoted.key?.remoteJidAlt ? { remoteJidAlt: quoted.key.remoteJidAlt } : {}),
       ...(typeof quoted.key?.fromMe === 'boolean' ? { fromMe: quoted.key.fromMe } : {}),
       ...(quoted.key?.participant ? { participant: quoted.key.participant } : {}),
+      ...(quoted.key?.participantAlt ? { participantAlt: quoted.key.participantAlt } : {}),
+      ...(quoted.key?.addressingMode ? { addressingMode: quoted.key.addressingMode } : {}),
+      ...(quoted.key?.senderPn ? { senderPn: quoted.key.senderPn } : {}),
+      ...(quoted.key?.participantPn ? { participantPn: quoted.key.participantPn } : {}),
     },
   };
 }
@@ -1268,8 +1285,13 @@ function evolutionQuotedPayload(quoted: QuotedMessage | undefined, fallbackRemot
     key: {
       id: normalized.key!.id,
       remoteJid: normalized.key!.remoteJid,
+      ...(normalized.key!.remoteJidAlt ? { remoteJidAlt: normalized.key!.remoteJidAlt } : {}),
       fromMe: normalized.key!.fromMe,
       ...(normalized.key!.participant ? { participant: normalized.key!.participant } : {}),
+      ...(normalized.key!.participantAlt ? { participantAlt: normalized.key!.participantAlt } : {}),
+      ...(normalized.key!.addressingMode ? { addressingMode: normalized.key!.addressingMode } : {}),
+      ...(normalized.key!.senderPn ? { senderPn: normalized.key!.senderPn } : {}),
+      ...(normalized.key!.participantPn ? { participantPn: normalized.key!.participantPn } : {}),
     },
   };
 }
@@ -1777,6 +1799,8 @@ function providerRecordToLocalMessage(record: any, fallbackPhone = '') {
   const fromMe = record?.key?.fromMe === true;
   const message = unwrapProviderMessage(record?.message);
   const metadata = providerMessageMetadata(record, message, fromMe);
+  const providerKey = providerMessageKeyFromRecord(record, providerMessageId(record));
+  if (providerKey) metadata.providerKey = providerKey;
   const remoteJid = providerRemoteJid(record);
   const isGroup = isWhatsAppGroupJid(remoteJid);
   const resolvedFallbackPhone = providerPhoneDigits({ remoteJid: fallbackPhone });
@@ -1849,11 +1873,15 @@ function localMessageToProviderRecord(row: any) {
   const id = row.evolution_message_id || row.id;
   const timestamp = Math.floor(new Date(row.sent_at).getTime() / 1000);
   const metadata = { ...(row.metadata || {}) };
+  const providerKey = providerMessageKeyFromStoredMessage(row, id);
   const key = {
-    id,
-    remoteJid,
-    fromMe: row.sender === 'attendant',
-    ...(metadata.participantJid ? { participant: metadata.participantJid } : {}),
+    ...providerKey,
+    id: providerKey.id || id,
+    remoteJid: providerKey.remoteJid || remoteJid,
+    fromMe: typeof providerKey.fromMe === 'boolean' ? providerKey.fromMe : row.sender === 'attendant',
+    ...(providerKey.participant || metadata.participantJid
+      ? { participant: providerKey.participant || metadata.participantJid }
+      : {}),
   };
   if (Array.isArray(metadata.reactions)) {
     metadata.reactions = normalizeStoredReactions(metadata.reactions);
@@ -1901,6 +1929,7 @@ function localMessageToProviderRecord(row: any) {
 function storedMessageToRealtimeMessage(row: any) {
   const timestampMs = new Date(row.sent_at).getTime();
   const id = row.evolution_message_id || row.id;
+  const providerKey = providerMessageKeyFromStoredMessage(row, id);
   return {
     id,
     conversationId: row.evolution_remote_jid,
@@ -1915,10 +1944,13 @@ function storedMessageToRealtimeMessage(row: any) {
     mediaType: row.media_type || undefined,
     metadata: row.metadata || {},
     rawKey: {
-      id,
-      remoteJid: row.evolution_remote_jid,
-      fromMe: row.sender === 'attendant',
-      ...(row.metadata?.participantJid ? { participant: row.metadata.participantJid } : {}),
+      ...providerKey,
+      id: providerKey.id || id,
+      remoteJid: providerKey.remoteJid || row.evolution_remote_jid,
+      fromMe: typeof providerKey.fromMe === 'boolean' ? providerKey.fromMe : row.sender === 'attendant',
+      ...(providerKey.participant || row.metadata?.participantJid
+        ? { participant: providerKey.participant || row.metadata.participantJid }
+        : {}),
     },
     timestampMs,
     timestamp: new Date(timestampMs).toISOString(),

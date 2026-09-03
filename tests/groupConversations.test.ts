@@ -8,6 +8,8 @@ import {
 import { reconcileConversations } from '../src/utils/conversationReconciliation';
 import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
 import { applyProviderReaction, providerReactionUpdate } from '../server/src/messageReactions';
+import { providerMessageKeyFromRecord, providerMessageKeyFromStoredMessage } from '../server/src/providerMessageKey';
+import { toQuotedMessage } from '../src/utils/quotedMessage';
 import type { Conversation, Message } from '../src/types';
 
 const groupJid = '120363012345678901@g.us';
@@ -59,6 +61,45 @@ test('group inbound stores participant jid metadata', () => {
 test('group raw key preserves participant', () => {
   const message = normalizeEvolutionMessage({ key: { id: '1', remoteJid: groupJid, participant: participantJid }, pushName: 'Maria', message: { conversation: 'Oi' } }, 0, groupJid, 'Atendente');
   assert.equal(message.rawKey.participant, participantJid);
+});
+test('media provider key survives canonical conversation projection', () => {
+  const key = providerMessageKeyFromRecord({
+    key: {
+      id: 'audio-lid-1',
+      remoteJid: 'opaque-audio@lid',
+      remoteJidAlt: '5521999999999@s.whatsapp.net',
+      fromMe: false,
+      participant: 'opaque-audio@lid',
+      participantPn: '5521999999999@s.whatsapp.net',
+    },
+    message: { audioMessage: { mimetype: 'audio/ogg' } },
+  });
+  assert.deepEqual(key, {
+    id: 'audio-lid-1',
+    remoteJid: 'opaque-audio@lid',
+    remoteJidAlt: '5521999999999@s.whatsapp.net',
+    fromMe: false,
+    participant: 'opaque-audio@lid',
+    participantPn: '5521999999999@s.whatsapp.net',
+  });
+
+  const restored = providerMessageKeyFromStoredMessage({
+    evolution_message_id: 'audio-lid-1',
+    evolution_remote_jid: '5521999999999@s.whatsapp.net',
+    sender: 'contact',
+    metadata: { providerKey: key },
+  }, 'audio-lid-1');
+  assert.equal(restored.id, 'audio-lid-1');
+  assert.equal(restored.remoteJid, 'opaque-audio@lid');
+  assert.equal(restored.remoteJidAlt, '5521999999999@s.whatsapp.net');
+  assert.equal(restored.participantPn, '5521999999999@s.whatsapp.net');
+  const quote = toQuotedMessage({
+    id: 'audio-lid-1', conversationId: '5521999999999@s.whatsapp.net', sender: 'contact',
+    content: '[Mensagem de áudio]', timestamp: '10:00', timestampMs: 1, status: 'read',
+    metadata: { providerKey: restored },
+  });
+  assert.equal(quote.key?.remoteJid, 'opaque-audio@lid');
+  assert.equal(quote.key?.participantPn, '5521999999999@s.whatsapp.net');
 });
 test('group quoted message preserves participant', () => {
   const message = normalizeEvolutionMessage({ key: { id: '1', remoteJid: groupJid, participant: participantJid }, pushName: 'Maria', message: { extendedTextMessage: { text: 'reply', contextInfo: { stanzaId: 'original', participant: participantJid, quotedMessage: { conversation: 'old' } } } } }, 0, groupJid, 'Atendente');

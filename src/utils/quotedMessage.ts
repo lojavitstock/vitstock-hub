@@ -26,7 +26,7 @@ export const messageAuthorLabel = (message: Message) => {
 export const toQuotedMessage = (message: Message): QuotedMessage => {
   const key = message.rawKey && typeof message.rawKey === 'object'
     ? message.rawKey
-    : undefined;
+    : message.metadata?.providerKey;
   const id = typeof key?.id === 'string' && key.id.trim() ? key.id : message.id;
 
   return {
@@ -38,8 +38,13 @@ export const toQuotedMessage = (message: Message): QuotedMessage => {
     key: {
       id,
       remoteJid: typeof key?.remoteJid === 'string' ? key.remoteJid : message.conversationId,
+      ...(typeof key?.remoteJidAlt === 'string' ? { remoteJidAlt: key.remoteJidAlt } : {}),
       fromMe: typeof key?.fromMe === 'boolean' ? key.fromMe : message.sender === 'attendant',
       ...(typeof key?.participant === 'string' ? { participant: key.participant } : {}),
+      ...(typeof key?.participantAlt === 'string' ? { participantAlt: key.participantAlt } : {}),
+      ...(typeof key?.addressingMode === 'string' ? { addressingMode: key.addressingMode } : {}),
+      ...(typeof key?.senderPn === 'string' ? { senderPn: key.senderPn } : {}),
+      ...(typeof key?.participantPn === 'string' ? { participantPn: key.participantPn } : {}),
     },
   };
 };

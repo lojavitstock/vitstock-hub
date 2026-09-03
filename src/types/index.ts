@@ -88,6 +88,18 @@ export interface Message {
     sentByUserName?: string;
     sentOutsideHub?: boolean;
     clientMessageId?: string;
+    /** Explicit Evolution/Baileys identity retained for media replies after reload. */
+    providerKey?: {
+      id: string;
+      remoteJid?: string;
+      remoteJidAlt?: string;
+      fromMe?: boolean;
+      participant?: string;
+      participantAlt?: string;
+      addressingMode?: string;
+      senderPn?: string;
+      participantPn?: string;
+    };
     quotedMessage?: {
       messageId: string;
       authorName?: string;
@@ -97,8 +109,13 @@ export interface Message {
       key?: {
         id: string;
         remoteJid?: string;
+        remoteJidAlt?: string;
         fromMe?: boolean;
         participant?: string;
+        participantAlt?: string;
+        addressingMode?: string;
+        senderPn?: string;
+        participantPn?: string;
       };
     };
     document?: {
