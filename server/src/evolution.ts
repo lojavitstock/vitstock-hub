@@ -43,6 +43,7 @@ import { hasQaProviderOnlyChat, qaEvolutionResponse } from './qa.js';
 import { loadConversationTags } from './conversationTags.js';
 import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.js';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
+import { buildReplyFailureTrace } from './replyFailureTrace.js';
 import { resolveConversationForOperation, resolveConversationWithClient } from './conversationResolver.js';
 import {
   OPAQUE_LID_STAGING_CLEANUP_INTERVAL_MS,
@@ -73,13 +74,16 @@ const isWhatsAppGroupJid = (value: string | undefined | null) => (
 const evolutionRecipientSchema = z.string().min(3).max(128).refine((value) => (
   /^\d{8,20}$/.test(value) || isWhatsAppGroupJid(value)
 ), 'destinatário Evolution inválido');
+const replyTraceIdSchema = z.string().trim().min(8).max(128).regex(/^[A-Za-z0-9._:-]+$/);
 const sendTextSchema = z.object({
   number: evolutionRecipientSchema,
   text: z.string().min(1).max(4096),
   remoteJid: z.string().min(3).max(128).optional(),
   clientMessageId: z.string().trim().min(1).max(128).optional(),
+  replyTraceId: replyTraceIdSchema.optional(),
   quotedMessage: z.object({
     messageId: z.string().trim().min(1).max(256),
+    providerKeySource: z.enum(['providerKey', 'legacyFallback']).optional(),
     authorName: z.string().trim().min(1).max(200).optional(),
     sender: z.enum(['contact', 'attendant', 'system']).optional(),
     content: z.string().max(4096).optional(),
@@ -106,6 +110,7 @@ const sendMediaSchema = z.object({
   fileName: z.string().max(180).optional(),
   caption: z.string().max(4096).optional(),
   clientMessageId: z.string().trim().min(1).max(128).optional(),
+  replyTraceId: replyTraceIdSchema.optional(),
   quotedMessage: sendTextSchema.shape.quotedMessage,
 });
 const sendReactionSchema = z.object({
@@ -179,7 +184,13 @@ const GROUP_PARTICIPANT_STALE_MS = 60 * 60_000;
 const GROUP_METADATA_TTL_MS = 2 * 60_000;
 const GROUP_METADATA_STALE_MS = 10 * 60_000;
 const outboundTraceEnabled = process.env.OUTBOUND_TRACE === 'true';
-const outboundEvolutionRequests = createOutboundRequestCoordinator<{ ok: boolean; status: number; body: any }>();
+const outboundEvolutionRequests = createOutboundRequestCoordinator<{
+  ok: boolean;
+  status: number;
+  statusText: string;
+  body: any;
+  providerError?: unknown;
+}>();
 const outboundMediaEvolutionRequests = createOutboundRequestCoordinator<{
   ok: boolean;
   status: number;
@@ -567,6 +578,7 @@ async function enrichLocalParticipantRecords(companyId: string, records: any[]) 
 
 function traceOutbound(request: any, stage: string, input: {
   clientMessageId?: string;
+  replyTraceId?: string;
   remoteJid?: string;
   evolutionMessageId?: string;
   evolutionMessageIdSourcePath?: string;
@@ -587,6 +599,7 @@ function traceOutbound(request: any, stage: string, input: {
       ? evolutionRecipientDiagnostics({ number: input.remoteJid, remoteJid: input.remoteJid }).remoteJidKind
       : undefined,
     clientMessageId: input.clientMessageId,
+    replyTraceId: input.replyTraceId,
     evolutionMessageId: input.evolutionMessageId,
     evolutionMessageIdSourcePath: input.evolutionMessageIdSourcePath,
     deduplicated: input.deduplicated,
@@ -597,6 +610,18 @@ function traceOutbound(request: any, stage: string, input: {
     evolutionRequestMs: input.evolutionRequestMs,
     timestampMs: Date.now(),
   }));
+}
+
+function traceReplyFailure(request: any, input: Parameters<typeof buildReplyFailureTrace>[0]) {
+  if (!outboundTraceEnabled || !input.quote) return;
+  request.log.warn(
+    buildReplyFailureTrace({
+      ...input,
+      companyId: request.user?.companyId,
+      requestId: request.id,
+    }),
+    'Reply send failure',
+  );
 }
 
 async function persistGroupMetadata(companyId: string, groups: GroupMetadata[]) {
@@ -1260,6 +1285,7 @@ function normalizedQuotedMessage(quoted: QuotedMessage | undefined, fallbackRemo
   if (!messageId) return undefined;
   return {
     messageId,
+    ...(quoted.providerKeySource ? { providerKeySource: quoted.providerKeySource } : {}),
     ...(quoted.authorName ? { authorName: quoted.authorName } : {}),
     ...(quoted.sender ? { sender: quoted.sender } : {}),
     ...(quoted.content ? { content: quoted.content } : {}),
@@ -3682,13 +3708,29 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.post('/api/evolution/messages/send', { preHandler: requireUser }, async (request, reply) => {
     const outboundStartedAt = Date.now();
     const parsed = sendTextSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Mensagem inválida' });
+    if (!parsed.success) {
+      const body = request.body as any;
+      if (body?.quotedMessage) traceReplyFailure(request, {
+        replyTraceId: body?.replyTraceId,
+        conversationId: body?.remoteJid,
+        localMessageId: body?.clientMessageId,
+        clientMessageId: body?.clientMessageId,
+        quote: body.quotedMessage,
+        recipient: { number: body?.number, remoteJid: body?.remoteJid },
+        messageType: body?.quotedMessage?.mediaType || 'text',
+        backendStatus: 400,
+        errorCode: 'invalid_message_payload',
+        failureOrigin: 'request_validation',
+      });
+      return reply.code(400).send({ error: 'Mensagem inválida', code: 'invalid_message_payload' });
+    }
     const { number, text, remoteJid, quotedMessage } = parsed.data;
     const clientMessageId = parsed.data.clientMessageId || `hub-${randomUUID()}`;
+    const replyTraceId = quotedMessage ? (parsed.data.replyTraceId || `reply-${randomUUID()}`) : undefined;
     const canonicalRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : canonicalPhoneJid(number));
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
-    traceOutbound(request, 'received', { clientMessageId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
+    traceOutbound(request, 'received', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
     const leaseAcquisition = await acquireOutboundLease({
       companyId: request.user!.companyId,
       user: request.user!,
@@ -3696,6 +3738,17 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       remoteJid: canonicalRemoteJid,
     });
     if (!leaseAcquisition.acquired) {
+      traceReplyFailure(request, {
+        replyTraceId,
+        conversationId: canonicalRemoteJid,
+        clientMessageId,
+        quote: normalizedQuote,
+        recipient: { number, remoteJid: canonicalRemoteJid },
+        messageType: normalizedQuote?.mediaType || 'text',
+        backendStatus: 409,
+        errorCode: 'conversation_lease_active',
+        failureOrigin: 'backend_rejected',
+      });
       return reply.code(409).send({
         error: `Atendimento em andamento por ${leaseAcquisition.lease.ownerName}`,
         code: 'conversation_lease_active',
@@ -3707,18 +3760,36 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       phone: number,
       lease: leaseAcquisition.lease,
     }));
-    const localMessage = await ensureOutboundMessage({
-      companyId: request.user!.companyId,
-      userId: request.user!.id,
-      userName: request.user!.name,
-      number,
-      remoteJid: canonicalRemoteJid,
-      content: text,
-      clientMessageId,
-      quotedMessage: normalizedQuote,
-    });
+    let localMessage: Awaited<ReturnType<typeof ensureOutboundMessage>>;
+    try {
+      localMessage = await ensureOutboundMessage({
+        companyId: request.user!.companyId,
+        userId: request.user!.id,
+        userName: request.user!.name,
+        number,
+        remoteJid: canonicalRemoteJid,
+        content: text,
+        clientMessageId,
+        quotedMessage: normalizedQuote,
+      });
+    } catch (error) {
+      traceReplyFailure(request, {
+        replyTraceId,
+        conversationId: canonicalRemoteJid,
+        localMessageId: clientMessageId,
+        clientMessageId,
+        quote: normalizedQuote,
+        recipient: { number, remoteJid: canonicalRemoteJid },
+        messageType: normalizedQuote?.mediaType || 'text',
+        backendStatus: 500,
+        errorCode: 'persistence_failed',
+        failureOrigin: 'backend_rejected',
+      });
+      throw error;
+    }
     traceOutbound(request, 'outbox.prepared', {
       clientMessageId,
+      replyTraceId,
       remoteJid: canonicalRemoteJid,
       evolutionMessageId: localMessage.evolutionMessageId || undefined,
       deduplicated: localMessage.deduplicated,
@@ -3738,13 +3809,13 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         deduplicated: true,
       };
     }
-    let dispatch: { ok: boolean; status: number; body: any };
+    let dispatch: { ok: boolean; status: number; statusText: string; body: any; providerError?: unknown };
     const evolutionRequestStartedAt = Date.now();
     try {
       dispatch = await outboundEvolutionRequests.run(
         `${request.user!.companyId}:${clientMessageId}`,
         async () => {
-          traceOutbound(request, 'evolution.request', { clientMessageId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
+          traceOutbound(request, 'evolution.request', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
           const response = await evolutionRequest(
             `/message/sendText/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
             {
@@ -3758,32 +3829,70 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
               }),
             },
           );
+          const rawBody = await response.text();
+          let body: unknown;
+          try {
+            body = rawBody ? JSON.parse(rawBody) : undefined;
+          } catch {
+            body = rawBody;
+          }
           return {
             ok: response.ok,
             status: response.status,
-            body: await response.json().catch(() => ({ error: 'Evolution API response invalid' })),
+            statusText: response.statusText,
+            body,
+            providerError: response.ok ? undefined : sanitizeEvolutionProviderError(rawBody, [text]),
           };
         },
       );
     } catch (error) {
       await updateOutboundMessage(localMessage.messageId, 'failed');
+      traceReplyFailure(request, {
+        replyTraceId,
+        conversationId: canonicalRemoteJid,
+        localMessageId: localMessage.messageId,
+        clientMessageId,
+        quote: normalizedQuote,
+        recipient: { number, remoteJid: canonicalRemoteJid },
+        messageType: normalizedQuote?.mediaType || 'text',
+        backendStatus: 502,
+        errorCode: 'evolution_unavailable',
+        failureOrigin: 'evolution_network',
+      });
       request.log.warn({ err: error }, 'Falha de comunicação com a Evolution API');
-      return reply.code(502).send({ error: 'Evolution API unavailable', messageId: localMessage.messageId });
+      return reply.code(502).send({ error: 'Evolution API unavailable', messageId: localMessage.messageId, ...(replyTraceId ? { replyTraceId } : {}) });
     }
     if (!dispatch.ok) {
       await updateOutboundMessage(localMessage.messageId, 'failed');
       const status = [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(dispatch.status) ? dispatch.status : 502;
+      traceReplyFailure(request, {
+        replyTraceId,
+        conversationId: canonicalRemoteJid,
+        localMessageId: localMessage.messageId,
+        clientMessageId,
+        quote: normalizedQuote,
+        recipient: { number, remoteJid: canonicalRemoteJid },
+        messageType: normalizedQuote?.mediaType || 'text',
+        backendStatus: status,
+        errorCode: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
+        failureOrigin: 'evolution_rejected',
+        evolutionStatus: dispatch.status,
+        evolutionStatusText: dispatch.statusText,
+        providerError: dispatch.providerError,
+      });
       return reply.code(status).send({
         error: status === 502 ? 'Evolution API unavailable' : 'Evolution API rejected the message',
         code: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
         providerStatus: dispatch.status,
         messageId: localMessage.messageId,
+        ...(replyTraceId ? { replyTraceId } : {}),
       });
     }
     const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
     const evolutionMessageId = evolutionMessageReference?.messageId;
     traceOutbound(request, 'evolution.response', {
       clientMessageId,
+      replyTraceId,
       remoteJid: canonicalRemoteJid,
       evolutionMessageId,
       evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
@@ -3794,6 +3903,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
     traceOutbound(request, 'persistence.confirmed', {
       clientMessageId,
+      replyTraceId,
       remoteJid: canonicalRemoteJid,
       evolutionMessageId,
       evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
@@ -3831,6 +3941,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     });
     traceOutbound(request, 'sse.published', {
       clientMessageId,
+      replyTraceId,
       remoteJid: canonicalRemoteJid,
       evolutionMessageId: realtimeMessageId,
       elapsedMs: Date.now() - outboundStartedAt,
@@ -3854,7 +3965,30 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.post('/api/evolution/messages/send-media', { preHandler: requireUser, bodyLimit: MAX_MEDIA_REQUEST_BYTES }, async (request, reply) => {
     const outboundStartedAt = Date.now();
     const parsed = sendMediaSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Anexo inválido' });
+    if (!parsed.success) {
+      const body = request.body as any;
+      if (body?.quotedMessage) traceReplyFailure(request, {
+        replyTraceId: body?.replyTraceId,
+        conversationId: body?.remoteJid,
+        localMessageId: body?.clientMessageId,
+        clientMessageId: body?.clientMessageId,
+        quote: body.quotedMessage,
+        recipient: { number: body?.number, remoteJid: body?.remoteJid },
+        messageType: body?.quotedMessage?.mediaType || body?.mediatype || 'media',
+        backendStatus: 400,
+        errorCode: 'invalid_media_payload',
+        failureOrigin: 'request_validation',
+        media: {
+          mediatype: body?.mediatype,
+          mimetype: body?.mimetype,
+          extension: typeof body?.fileName === 'string' ? body.fileName.split('.').pop()?.toLowerCase() : undefined,
+          base64Length: typeof body?.media === 'string' ? body.media.length : undefined,
+          hasCaption: typeof body?.caption === 'string' && Boolean(body.caption.trim()),
+          captionLength: typeof body?.caption === 'string' ? body.caption.trim().length : undefined,
+        },
+      });
+      return reply.code(400).send({ error: 'Anexo inválido', code: 'invalid_media_payload' });
+    }
     const { number, text, remoteJid, quotedMessage } = {
       number: parsed.data.number,
       text: parsed.data.caption?.trim() || `[${parsed.data.mediatype}]`,
@@ -3862,11 +3996,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       quotedMessage: parsed.data.quotedMessage,
     };
     const clientMessageId = parsed.data.clientMessageId || `hub-${randomUUID()}`;
+    const replyTraceId = quotedMessage ? (parsed.data.replyTraceId || `reply-${randomUUID()}`) : undefined;
     const canonicalRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : canonicalPhoneJid(number));
     const evolutionRecipient = resolveEvolutionRecipient({ remoteJid: canonicalRemoteJid, canonicalPhone: number });
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
-    traceOutbound(request, 'received', { clientMessageId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
+    traceOutbound(request, 'received', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
     const leaseAcquisition = await acquireOutboundLease({
       companyId: request.user!.companyId,
       user: request.user!,
@@ -3874,6 +4009,25 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       remoteJid: canonicalRemoteJid,
     });
     if (!leaseAcquisition.acquired) {
+      traceReplyFailure(request, {
+        replyTraceId,
+        conversationId: canonicalRemoteJid,
+        clientMessageId,
+        quote: normalizedQuote,
+        recipient: { number, remoteJid: canonicalRemoteJid },
+        messageType: normalizedQuote?.mediaType || parsed.data.mediatype,
+        backendStatus: 409,
+        errorCode: 'conversation_lease_active',
+        failureOrigin: 'backend_rejected',
+        media: {
+          mediatype: parsed.data.mediatype,
+          mimetype: parsed.data.mimetype,
+          extension: parsed.data.fileName?.split('.').pop()?.toLowerCase(),
+          base64Length: parsed.data.media.length,
+          hasCaption: Boolean(parsed.data.caption?.trim()),
+          captionLength: parsed.data.caption?.trim().length || 0,
+        },
+      });
       return reply.code(409).send({
         error: `Atendimento em andamento por ${leaseAcquisition.lease.ownerName}`,
         code: 'conversation_lease_active',
@@ -3885,22 +4039,48 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       phone: number,
       lease: leaseAcquisition.lease,
     }));
-    const localMessage = await ensureOutboundMessage({
-      companyId: request.user!.companyId,
-      userId: request.user!.id,
-      userName: request.user!.name,
-      number,
-      remoteJid: canonicalRemoteJid,
-      content: text,
-      mediaType: parsed.data.mediatype,
-      document: parsed.data.mediatype === 'document'
-        ? { fileName: parsed.data.fileName, mimeType: parsed.data.mimetype }
-        : undefined,
-      clientMessageId,
-      quotedMessage: normalizedQuote,
-    });
+    let localMessage: Awaited<ReturnType<typeof ensureOutboundMessage>>;
+    try {
+      localMessage = await ensureOutboundMessage({
+        companyId: request.user!.companyId,
+        userId: request.user!.id,
+        userName: request.user!.name,
+        number,
+        remoteJid: canonicalRemoteJid,
+        content: text,
+        mediaType: parsed.data.mediatype,
+        document: parsed.data.mediatype === 'document'
+          ? { fileName: parsed.data.fileName, mimeType: parsed.data.mimetype }
+          : undefined,
+        clientMessageId,
+        quotedMessage: normalizedQuote,
+      });
+    } catch (error) {
+      traceReplyFailure(request, {
+        replyTraceId,
+        conversationId: canonicalRemoteJid,
+        localMessageId: clientMessageId,
+        clientMessageId,
+        quote: normalizedQuote,
+        recipient: { number: evolutionRecipient.number, remoteJid: canonicalRemoteJid },
+        messageType: normalizedQuote?.mediaType || parsed.data.mediatype,
+        backendStatus: 500,
+        errorCode: 'persistence_failed',
+        failureOrigin: 'backend_rejected',
+        media: {
+          mediatype: parsed.data.mediatype,
+          mimetype: parsed.data.mimetype,
+          extension: parsed.data.fileName?.split('.').pop()?.toLowerCase(),
+          base64Length: parsed.data.media.length,
+          hasCaption: Boolean(parsed.data.caption?.trim()),
+          captionLength: parsed.data.caption?.trim().length || 0,
+        },
+      });
+      throw error;
+    }
     traceOutbound(request, 'outbox.prepared', {
       clientMessageId,
+      replyTraceId,
       remoteJid: canonicalRemoteJid,
       evolutionMessageId: localMessage.evolutionMessageId || undefined,
       deduplicated: localMessage.deduplicated,
@@ -3929,7 +4109,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       dispatch = await outboundMediaEvolutionRequests.run(
         `${request.user!.companyId}:${clientMessageId}`,
         async () => {
-          traceOutbound(request, 'evolution.request', { clientMessageId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
+          traceOutbound(request, 'evolution.request', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
           const response = await evolutionRequest(
             `/message/sendMedia/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
             {
@@ -3967,12 +4147,56 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       );
     } catch (error) {
       await updateOutboundMessage(localMessage.messageId, 'failed');
+      traceReplyFailure(request, {
+        replyTraceId,
+        conversationId: canonicalRemoteJid,
+        localMessageId: localMessage.messageId,
+        clientMessageId,
+        quote: normalizedQuote,
+        recipient: { number: evolutionRecipient.number, remoteJid: canonicalRemoteJid },
+        messageType: normalizedQuote?.mediaType || parsed.data.mediatype,
+        backendStatus: 502,
+        errorCode: 'evolution_unavailable',
+        failureOrigin: 'evolution_network',
+        media: {
+          mediatype: parsed.data.mediatype,
+          mimetype: parsed.data.mimetype,
+          extension: parsed.data.fileName?.split('.').pop()?.toLowerCase(),
+          base64Length: parsed.data.media.length,
+          hasCaption: Boolean(parsed.data.caption?.trim()),
+          captionLength: parsed.data.caption?.trim().length || 0,
+        },
+      });
       request.log.warn({ err: error }, 'Falha de comunicação com a Evolution API ao enviar anexo');
-      return reply.code(502).send({ error: 'Evolution API indisponível', messageId: localMessage.messageId });
+      return reply.code(502).send({ error: 'Evolution API indisponível', messageId: localMessage.messageId, ...(replyTraceId ? { replyTraceId } : {}) });
     }
     if (!dispatch.ok) {
       await updateOutboundMessage(localMessage.messageId, 'failed');
       const recipientDiagnostics = evolutionRecipientDiagnostics({ number: evolutionRecipient.number, remoteJid: canonicalRemoteJid });
+      const status = [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(dispatch.status) ? dispatch.status : 502;
+      traceReplyFailure(request, {
+        replyTraceId,
+        conversationId: canonicalRemoteJid,
+        localMessageId: localMessage.messageId,
+        clientMessageId,
+        quote: normalizedQuote,
+        recipient: { number: evolutionRecipient.number, remoteJid: canonicalRemoteJid },
+        messageType: normalizedQuote?.mediaType || parsed.data.mediatype,
+        backendStatus: status,
+        errorCode: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
+        failureOrigin: 'evolution_rejected',
+        evolutionStatus: dispatch.status,
+        evolutionStatusText: dispatch.statusText,
+        providerError: dispatch.providerError,
+        media: {
+          mediatype: parsed.data.mediatype,
+          mimetype: parsed.data.mimetype,
+          extension: parsed.data.fileName?.split('.').pop()?.toLowerCase(),
+          base64Length: parsed.data.media.length,
+          hasCaption: Boolean(parsed.data.caption?.trim()),
+          captionLength: parsed.data.caption?.trim().length || 0,
+        },
+      });
       if (outboundTraceEnabled) {
         request.log.warn({
           operation: 'evolution.sendMedia',
@@ -3990,18 +4214,19 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
           providerError: dispatch.providerError,
         }, 'Evolution send-media rejected');
       }
-      const status = [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(dispatch.status) ? dispatch.status : 502;
       return reply.code(status).send({
         error: status === 502 ? 'Evolution API indisponível' : 'Evolution API rejeitou o anexo',
         code: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
         providerStatus: dispatch.status,
         messageId: localMessage.messageId,
+        ...(replyTraceId ? { replyTraceId } : {}),
       });
     }
     const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
     const evolutionMessageId = evolutionMessageReference?.messageId;
     traceOutbound(request, 'evolution.response', {
       clientMessageId,
+      replyTraceId,
       remoteJid: canonicalRemoteJid,
       evolutionMessageId,
       evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
@@ -4012,6 +4237,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
     traceOutbound(request, 'persistence.confirmed', {
       clientMessageId,
+      replyTraceId,
       remoteJid: canonicalRemoteJid,
       evolutionMessageId,
       evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
@@ -4053,6 +4279,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     });
     traceOutbound(request, 'sse.published', {
       clientMessageId,
+      replyTraceId,
       remoteJid: canonicalRemoteJid,
       evolutionMessageId: realtimeMessageId,
       elapsedMs: Date.now() - outboundStartedAt,

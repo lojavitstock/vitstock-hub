@@ -102,6 +102,8 @@ export interface Message {
     };
     quotedMessage?: {
       messageId: string;
+      /** How the sender obtained the provider identity used for quoting. */
+      providerKeySource?: 'providerKey' | 'legacyFallback';
       authorName?: string;
       sender?: 'contact' | 'attendant' | 'system';
       content?: string;

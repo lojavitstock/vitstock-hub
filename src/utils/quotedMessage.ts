@@ -31,6 +31,7 @@ export const toQuotedMessage = (message: Message): QuotedMessage => {
 
   return {
     messageId: id,
+    providerKeySource: message.metadata?.providerKey ? 'providerKey' : 'legacyFallback',
     authorName: messageAuthorLabel(message),
     sender: message.sender,
     content: message.content,
