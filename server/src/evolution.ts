@@ -745,7 +745,7 @@ async function refreshEvolutionChatsSnapshot(companyId: string) {
     ]);
     const snapshot = {
       chats: Array.isArray(chats) ? filterConversationalProviderChats(chats) : [],
-      contacts: Array.isArray(contacts) ? contacts : [],
+      contacts: Array.isArray(contacts) ? filterConversationalProviderChats(contacts) : [],
     };
     evolutionChatsCache.set(companyId, {
       ...snapshot,
@@ -3023,7 +3023,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       }
     }
     let chatsData = filterConversationalProviderChats(snapshot.chats);
-    const contactsData = snapshot.contacts;
+    const contactsData = filterConversationalProviderChats(snapshot.contacts);
     // Inbox previews and conversation history use the same persisted
     // participant resolver. This is read-only enrichment; provider data is
     // not refetched per chat and no message is written here.
@@ -3097,6 +3097,8 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     chatsData = projectCanonicalInboxChats(chatsData);
     const providerNames = new Map<string, { phone: string; name: string; avatar_url: string | null }>();
     const rememberProviderContact = (value: any) => {
+      const entityJid = String(value?.remoteJid || value?.id || value?.key?.remoteJid || '').trim();
+      if (!isConversationalProviderJid(entityJid)) return;
       // A fromMe message describes the local operator, never the recipient.
       // Provider pushName/notify values from such records must not become a
       // persisted WhatsApp contact name during an inbox snapshot.
