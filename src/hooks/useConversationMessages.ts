@@ -25,6 +25,7 @@ type UseConversationMessagesOptions = {
 };
 
 const HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const MESSAGES_PAGE_SIZE = 100;
 const MAX_SCROLL_STATES = 100;
 
 type ConversationScrollState = {
@@ -74,6 +75,7 @@ export const useConversationMessages = ({
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const historyExpandedRef = useRef(false);
+  const hasMoreMessagesRef = useRef(false);
   const newMessagesCountByConversationRef = useRef(new Map<string, number>());
   const scrollStatesRef = useRef(new Map<string, ConversationScrollState>());
   const scrollGenerationRef = useRef(0);
@@ -364,6 +366,7 @@ export const useConversationMessages = ({
       messagesRef.current = cachedEntry.messages;
       latestTimestampRef.current = cachedEntry.latestTimestamp;
       historyExpandedRef.current = cachedEntry.historyExpanded;
+      hasMoreMessagesRef.current = cachedEntry.hasMoreMessages;
       setMessages(cachedEntry.messages);
       setHasMoreMessages(cachedEntry.hasMoreMessages);
       setHistoryExpanded(cachedEntry.historyExpanded);
@@ -371,6 +374,7 @@ export const useConversationMessages = ({
       setMessages([]);
       messagesRef.current = [];
       latestTimestampRef.current = undefined;
+      hasMoreMessagesRef.current = false;
       setHasMoreMessages(false);
       historyExpandedRef.current = false;
       setHistoryExpanded(false);
@@ -383,39 +387,47 @@ export const useConversationMessages = ({
       shouldScroll: boolean,
       requestId: number,
       trackIncoming = false,
+      paginationSource: 'local' | 'reconciliation' = 'local',
     ) => {
       if (!isSubscribed || !requestGuard.isLatest(requestId)) return;
-      const cutoff = Date.now() - HISTORY_WINDOW_MS;
-      const recentMessages = historyExpandedRef.current
-        ? page.messages
-        : page.messages.filter((message) => !message.timestampMs || message.timestampMs >= cutoff);
-      const hasHiddenHistory = !historyExpandedRef.current && page.messages.some(
-        (message) => Boolean(message.timestampMs && message.timestampMs < cutoff),
-      );
-      const nextHasMoreMessages = page.hasMore || hasHiddenHistory;
-      setHasMoreMessages(nextHasMoreMessages);
+      // The local page is the presentation source of truth and must contain
+      // the latest persisted messages regardless of age. The seven-day window
+      // is used only by the provider reconciliation request below.
+      const renderableMessages = page.messages;
       const previousMessages = messagesRef.current;
       const stickyAtArrival = stickToBottomRef.current;
-      const incomingIds = new Set(getNewIncomingMessageIds(previousMessages, recentMessages, trackIncoming));
+      const incomingIds = new Set(getNewIncomingMessageIds(previousMessages, renderableMessages, trackIncoming));
       let reconciledMessages = previousMessages;
-      if (recentMessages.length > 0) {
+      if (renderableMessages.length > 0) {
         latestTimestampRef.current = Math.max(
           latestTimestampRef.current || 0,
-          ...recentMessages.map((message) => message.timestampMs || 0),
+          ...renderableMessages.map((message) => message.timestampMs || 0),
         );
-        reconciledMessages = mergeConversationMessages(previousMessages, recentMessages);
+        reconciledMessages = mergeConversationMessages(previousMessages, renderableMessages);
         if (reconciledMessages !== previousMessages) {
           messagesRef.current = reconciledMessages;
           setMessages((currentMessages) => currentMessages === previousMessages
             ? reconciledMessages
-            : mergeConversationMessages(currentMessages, recentMessages));
+            : mergeConversationMessages(currentMessages, renderableMessages));
           traceScroll('messages.snapshot.applied', activeConversationId, {
-            receivedMessages: recentMessages.length,
+            receivedMessages: renderableMessages.length,
             previousMessages: previousMessages.length,
             shouldScroll,
             trackIncoming,
+            paginationSource,
           });
         }
+      }
+      // Reconciliation uses an activity window whose hasMore value describes
+      // provider history, not the visible local page. Never let that value
+      // create a history button for an old-only conversation. If provider
+      // records grow the visible set beyond one page, preserve pagination.
+      const nextHasMoreMessages = paginationSource === 'local'
+        ? page.hasMore
+        : hasMoreMessagesRef.current || reconciledMessages.length > MESSAGES_PAGE_SIZE;
+      hasMoreMessagesRef.current = nextHasMoreMessages;
+      if (paginationSource === 'local' || reconciledMessages.length > MESSAGES_PAGE_SIZE) {
+        setHasMoreMessages(nextHasMoreMessages);
       }
       if (trackIncoming) {
         registerNewMessages(
@@ -430,7 +442,7 @@ export const useConversationMessages = ({
         historyExpanded: historyExpandedRef.current,
         latestTimestamp: latestTimestampRef.current,
       });
-      if (recentMessages.length === 0) return;
+      if (renderableMessages.length === 0) return;
       if (shouldScroll) window.requestAnimationFrame(() => {
         if (
           scrollGenerationRef.current === scrollGeneration
@@ -457,13 +469,22 @@ export const useConversationMessages = ({
       const conversation = conversationsRef.current.find((item) => item.id === activeConversationId);
       const phone = conversation?.isGroup ? '' : conversation?.contact.phone || activeConversationId;
       const reconcile = shouldReconcile;
-      const afterTimestamp = reconcile
+      const reconciliationAfterTimestamp = reconcile
         ? Math.max(0, Date.now() - HISTORY_WINDOW_MS)
         : latestTimestampRef.current
           ? Math.max(0, latestTimestampRef.current - 1000)
           : undefined;
+      // Initial rendering always asks for the latest persisted page. Applying
+      // the reconciliation window to this request was what hid old local
+      // history before the provider sync completed.
+      const localAfterTimestamp = firstFetch ? undefined : reconciliationAfterTimestamp;
       let localMessagesAvailable = false;
-      traceScroll('messages.fetch.started', activeConversationId, { source, reconcile, afterTimestamp: afterTimestamp ?? null });
+      traceScroll('messages.fetch.started', activeConversationId, {
+        source,
+        reconcile,
+        afterTimestamp: localAfterTimestamp ?? null,
+        reconciliationAfterTimestamp: reconciliationAfterTimestamp ?? null,
+      });
 
       try {
         // A leitura local é deliberadamente rápida. A reconciliação com a
@@ -476,12 +497,12 @@ export const useConversationMessages = ({
           attendantLabel,
           false,
           undefined,
-          afterTimestamp,
+          localAfterTimestamp,
         );
         shouldReconcile = false;
         if (!isSubscribed) return;
         localMessagesAvailable = page.messages.length > 0;
-        applyMessagesPage(page, shouldScroll, requestId, !firstFetch || hasCachedMessages);
+        applyMessagesPage(page, shouldScroll, requestId, !firstFetch || hasCachedMessages, 'local');
 
         if (reconcile && !reconciliationInProgress) {
           reconciliationInProgress = true;
@@ -493,11 +514,11 @@ export const useConversationMessages = ({
             attendantLabel,
             true,
             undefined,
-            afterTimestamp,
+            reconciliationAfterTimestamp,
           )
             .then((reconciledPage) => {
               traceScroll('messages.reconciliation.received', activeConversationId, { source, receivedMessages: reconciledPage.messages.length });
-              applyMessagesPage(reconciledPage, shouldScroll, reconciliationRequestId, hasCachedMessages);
+              applyMessagesPage(reconciledPage, shouldScroll, reconciliationRequestId, hasCachedMessages, 'reconciliation');
             })
             .catch(() => undefined)
             .finally(() => {
@@ -720,6 +741,7 @@ export const useConversationMessages = ({
             : mergeConversationMessages(currentMessages, page.messages));
         }
       }
+      hasMoreMessagesRef.current = page.hasMore;
       setHasMoreMessages(page.hasMore);
       writeConversationMessagesCache(messageCacheRef.current, activeConversationId, {
         messages: nextMessages,
