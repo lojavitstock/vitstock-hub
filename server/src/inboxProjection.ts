@@ -2,6 +2,7 @@ import { canonicalPhone } from './contactDomain.js';
 import { isWhatsAppGroup, isWhatsAppLid, providerPhoneDigits } from './whatsappIdentity.js';
 import { isNonRenderableProviderMessage } from './providerMessagePolicy.js';
 import { isProviderReactionEvent } from './messageReactions.js';
+import { filterConversationalProviderChats } from './providerJidPolicy.js';
 
 type InboxChat = Record<string, any>;
 
@@ -271,7 +272,7 @@ const mergeBucket = (items: Array<{ chat: InboxChat; index: number }>, identity:
  */
 export function projectCanonicalInboxChats(chats: InboxChat[]) {
   const buckets = new Map<string, Array<{ chat: InboxChat; index: number }>>();
-  chats.forEach((chat, index) => {
+  filterConversationalProviderChats(chats).forEach((chat, index) => {
     const identity = canonicalInboxIdentity(chat);
     const bucket = buckets.get(identity.key) || [];
     bucket.push({ chat, index });

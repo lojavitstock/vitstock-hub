@@ -3,6 +3,7 @@ import { db } from './db.js';
 import { canonicalPhone, normalizeContactPhone } from './contactDomain.js';
 import { phoneLookupKeys, upsertContactPhone } from './contactPhones.js';
 import { isWhatsAppGroup, isWhatsAppLid, providerPhoneJid } from './whatsappIdentity.js';
+import { isConversationalProviderJid } from './providerJidPolicy.js';
 
 export type ConversationResolution = {
   id: string;
@@ -57,7 +58,7 @@ export async function resolveConversationWithClient(
   options: ConversationResolutionOptions,
 ): Promise<ConversationResolution | undefined> {
   const remoteJid = String(input.remoteJid || '').trim();
-  if (!remoteJid) return undefined;
+  if (!isConversationalProviderJid(remoteJid)) return undefined;
   const candidates = conversationIdentityCandidates(input);
   const explicitCandidates = Array.from(new Set([
     remoteJid,
@@ -274,6 +275,7 @@ export async function resolveConversationForOperation(
   input: ConversationResolutionInput,
   options: ConversationResolutionOptions = {},
 ) {
+  if (!isConversationalProviderJid(input.remoteJid)) return undefined;
   const client = await db.connect();
   try {
     await client.query('BEGIN');

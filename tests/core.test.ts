@@ -41,6 +41,7 @@ import { resolveEvolutionRecipient } from '../server/src/evolutionRecipient';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
 import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
 import { providerMessageKeyFromRecord } from '../server/src/providerMessageKey';
+import { classifyProviderJid, filterConversationalProviderChats, isConversationalProviderJid } from '../server/src/providerJidPolicy';
 import {
   canonicalInboxIdentity,
   inboxActivityTimestamp,
@@ -95,6 +96,36 @@ import { formatConversationTimestamp, formatOperatorLabel } from '../src/compone
 import { outboundErrorMessage } from '../src/utils/outboundError';
 import { classifyAttachmentFile, MAX_ATTACHMENTS_PER_MESSAGE, MAX_TOTAL_ATTACHMENT_BYTES, selectAttachmentFiles } from '../src/utils/composerAttachment';
 import type { Conversation, Message } from '../src/types';
+
+test('classifies provider JIDs and filters non-conversational entities fail-closed', () => {
+  assert.equal(classifyProviderJid('5521999999999@s.whatsapp.net'), 'PN');
+  assert.equal(classifyProviderJid('5521999999999@c.us'), 'PN');
+  assert.equal(classifyProviderJid('123456789@lid'), 'LID');
+  assert.equal(classifyProviderJid('120363000000@g.us'), 'GROUP');
+  assert.equal(classifyProviderJid('g1-rio@newsletter'), 'NEWSLETTER');
+  assert.equal(classifyProviderJid('status@broadcast'), 'STATUS_BROADCAST');
+  assert.equal(classifyProviderJid('123@broadcast'), 'OTHER_BROADCAST');
+  assert.equal(classifyProviderJid('unsupported@entity'), 'UNKNOWN');
+  assert.equal(isConversationalProviderJid('120363000000@g.us'), true);
+  assert.equal(isConversationalProviderJid('g1-rio@newsletter'), false);
+  const chats = filterConversationalProviderChats([
+    { id: '5521999999999@s.whatsapp.net' },
+    { id: '123456789@lid' },
+    { id: '120363000000@g.us' },
+    { id: 'g1-rio@newsletter' },
+    { id: 'status@broadcast' },
+    { id: 'unsupported@entity' },
+  ]);
+  assert.deepEqual(chats.map((chat) => chat.id), [
+    '5521999999999@s.whatsapp.net',
+    '123456789@lid',
+    '120363000000@g.us',
+  ]);
+  assert.deepEqual(projectCanonicalInboxChats([
+    ...chats,
+    { id: 'g1-rio@newsletter', remoteJid: 'g1-rio@newsletter', lastMessage: { message: { conversation: 'post' } } },
+  ]).map((chat) => chat.id), chats.map((chat) => chat.id));
+});
 
 test('formats inbox timestamps by local calendar day', () => {
   const now = new Date(2026, 8, 1, 12, 0);

@@ -45,6 +45,7 @@ import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.j
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
 import { buildReplyFailureTrace } from './replyFailureTrace.js';
 import { resolveConversationForOperation, resolveConversationWithClient } from './conversationResolver.js';
+import { filterConversationalProviderChats, isConversationalProviderJid } from './providerJidPolicy.js';
 import {
   OPAQUE_LID_STAGING_CLEANUP_INTERVAL_MS,
   OPAQUE_LID_STAGING_TTL_MS,
@@ -743,7 +744,7 @@ async function refreshEvolutionChatsSnapshot(companyId: string) {
       contactsResponse.json().catch(() => []),
     ]);
     const snapshot = {
-      chats: Array.isArray(chats) ? chats : [],
+      chats: Array.isArray(chats) ? filterConversationalProviderChats(chats) : [],
       contacts: Array.isArray(contacts) ? contacts : [],
     };
     evolutionChatsCache.set(companyId, {
@@ -890,6 +891,13 @@ async function loadLocalInboxChats(companyId: string) {
        LIMIT 1
      ) latest ON true
      WHERE c.company_id = $1
+       AND (
+         LOWER(c.evolution_remote_jid) LIKE '%@s.whatsapp.net'
+         OR LOWER(c.evolution_remote_jid) LIKE '%@c.us'
+         OR LOWER(c.evolution_remote_jid) LIKE '%@lid'
+         OR LOWER(c.evolution_remote_jid) LIKE '%@g.us'
+         OR c.evolution_remote_jid ~ '^[0-9]{8,20}$'
+       )
      ORDER BY COALESCE(latest.sent_at, c.last_message_at, c.updated_at) DESC`,
     [companyId],
   );
@@ -939,8 +947,8 @@ async function loadLocalInboxChats(companyId: string) {
 
 async function fetchLocalInboxChats(companyId: string) {
   const cached = localInboxCache.get(companyId);
-  if (cached && cached.expiresAt > Date.now()) return cached.chats;
-  const chats = await loadLocalInboxChats(companyId);
+  if (cached && cached.expiresAt > Date.now()) return filterConversationalProviderChats(cached.chats);
+  const chats = filterConversationalProviderChats(await loadLocalInboxChats(companyId));
   localInboxCache.set(companyId, { chats, expiresAt: Date.now() + 5_000 });
   return chats;
 }
@@ -2300,6 +2308,12 @@ async function persistProviderMessage(
   record: any,
   options: { incrementUnread: boolean; reopen: boolean; fallbackPhone?: string; skipOpaqueLidReconcile?: boolean },
 ): Promise<ProviderPersistenceResult | undefined> {
+  // Newsletters, broadcasts and unknown provider entities are not customer
+  // conversations. Ignore them before opening a transaction or materializing
+  // contacts/conversations, while still acknowledging their webhook safely.
+  if (!isConversationalProviderJid(providerRemoteJid(record))) {
+    return { persisted: false, ignored: true, message: undefined };
+  }
   if (isNonRenderableProviderMessage(record)) {
     return { persisted: false, ignored: true, message: undefined };
   }
@@ -3008,7 +3022,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         _request.log.warn({ err: error }, 'Inbox local indisponÃ­vel durante a resposta vazia da Evolution');
       }
     }
-    let chatsData = snapshot.chats;
+    let chatsData = filterConversationalProviderChats(snapshot.chats);
     const contactsData = snapshot.contacts;
     // Inbox previews and conversation history use the same persisted
     // participant resolver. This is read-only enrichment; provider data is
@@ -3294,6 +3308,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.post('/api/evolution/chats/release', { preHandler: requireUser }, async (request, reply) => {
     const parsed = assignmentSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Conversa inválida' });
+    if (!isConversationalProviderJid(parsed.data.remoteJid)) {
+      return reply.code(404).send({ error: 'Conversa não encontrada' });
+    }
     const currentUser = request.user!;
     const jids = assignmentJids(parsed.data);
     const existing = await db.query<{ assigned_user_id: string | null }>(
@@ -3374,6 +3391,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
 
   app.post('/api/evolution/chats/read', { preHandler: requireUser }, async (request, reply) => {
     const parsed = conversationReadSchema.safeParse(request.body);
+    if (parsed.success && !isConversationalProviderJid(parsed.data.remoteJid)) {
+      return reply.code(404).send({ error: 'Conversa não encontrada' });
+    }
     let providerMarked = false;
     if (parsed.success && parsed.data.messageKey && !parsed.data.messageKey.fromMe) {
       try {
@@ -3497,6 +3517,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     void cleanupExpiredOpaqueLidStaging();
     const parsed = jidSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Conversa inválida' });
+    if (!isConversationalProviderJid(parsed.data.remoteJid)) {
+      return reply.code(404).send({ error: 'Conversa não encontrada' });
+    }
     // Alguns contatos alternam entre o JID do telefone e o JID interno (@lid).
     // Buscamos os dois para preservar todo o historico da conversa.
     const jids = new Set([parsed.data.remoteJid]);
@@ -3615,6 +3638,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       if (!Array.isArray(records)) continue;
       records.forEach((record: any, index: number) => {
         if (isNonRenderableProviderMessage(record)) return;
+        if (!isConversationalProviderJid(providerRemoteJid(record))) return;
         if (isProviderReactionEvent(record)) {
           reactionRecords.push(record);
           return;
@@ -3745,6 +3769,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const clientMessageId = parsed.data.clientMessageId || `hub-${randomUUID()}`;
     const replyTraceId = quotedMessage ? (parsed.data.replyTraceId || `reply-${randomUUID()}`) : undefined;
     const canonicalRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : canonicalPhoneJid(number));
+    if (!isConversationalProviderJid(canonicalRemoteJid)) {
+      return reply.code(400).send({ error: 'Destinatário não conversacional', code: 'unsupported_provider_entity' });
+    }
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
     traceOutbound(request, 'received', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
@@ -4015,6 +4042,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const clientMessageId = parsed.data.clientMessageId || `hub-${randomUUID()}`;
     const replyTraceId = quotedMessage ? (parsed.data.replyTraceId || `reply-${randomUUID()}`) : undefined;
     const canonicalRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : canonicalPhoneJid(number));
+    if (!isConversationalProviderJid(canonicalRemoteJid)) {
+      return reply.code(400).send({ error: 'Destinatário não conversacional', code: 'unsupported_provider_entity' });
+    }
     const evolutionRecipient = resolveEvolutionRecipient({ remoteJid: canonicalRemoteJid, canonicalPhone: number });
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
@@ -4321,6 +4351,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     if (!parsed.success) return reply.code(400).send({ error: 'Reação inválida' });
 
     const { number, remoteJid, messageId, emoji } = parsed.data;
+    if (!isConversationalProviderJid(remoteJid)) {
+      return reply.code(400).send({ error: 'Conversa não encontrada', code: 'unsupported_provider_entity' });
+    }
     const phone = number.replace(/\D/g, '');
     // The frontend supplies an id only to address a visible message. The
     // target itself is always resolved inside the authenticated company.
