@@ -22,6 +22,8 @@ export type RealtimeEventPayload = {
   conversationTags?: Tag[];
   trafficSource?: string | null;
   messageTimestamp?: number;
+  /** Historical/reconciliation events must not increment unread again. */
+  incrementUnread?: boolean;
   message?: Message;
   [key: string]: unknown;
 };
@@ -136,7 +138,7 @@ const updateConversationFromMessage = (
 
   const isSameMessage = conversation.lastMessageKey?.id === message.id;
   const nextStatus = conversation.status === 'resolved' && isIncoming ? 'open' : conversation.status;
-  const nextUnreadCount = isIncoming && !isSameMessage
+  const nextUnreadCount = isIncoming && !isSameMessage && event.incrementUnread !== false
     ? conversation.unreadCount + 1
     : conversation.unreadCount;
   const next: Conversation = {

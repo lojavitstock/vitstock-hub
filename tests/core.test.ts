@@ -41,7 +41,12 @@ import { resolveEvolutionRecipient } from '../server/src/evolutionRecipient';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
 import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
 import { providerMessageKeyFromRecord } from '../server/src/providerMessageKey';
-import { canonicalInboxIdentity, projectCanonicalInboxChats } from '../server/src/inboxProjection';
+import {
+  canonicalInboxIdentity,
+  inboxActivityTimestamp,
+  mergeInboxActivity,
+  projectCanonicalInboxChats,
+} from '../server/src/inboxProjection';
 import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
@@ -421,6 +426,69 @@ test('SSE atualiza preview de conversa não aberta sem carregar histórico', () 
   assert.equal(updated?.[0]?.lastMessage, 'atualização do cliente');
   assert.equal(updated?.[0]?.unreadCount, 1);
   assert.strictEqual(updated?.[1], current[0]);
+});
+
+test('SSE de reconciliação atualiza atividade sem incrementar unread novamente', () => {
+  const current = [conversation('120363000000@g.us', {
+    isGroup: true,
+    unreadCount: 2,
+    lastMessage: 'Mensagem antiga',
+    lastMessageAt: 1_700_000_000_000,
+    lastMessageFromMe: false,
+  })];
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'message.upsert',
+    remoteJid: '120363000000@g.us',
+    incrementUnread: false,
+    message: {
+      ...message('reconciled-new', 1_800_000_000_000, 'Mensagem reconciliada', 'delivered', {
+        conversationId: '120363000000@g.us',
+        sender: 'contact',
+        senderName: 'Participante',
+      }),
+    },
+  });
+
+  assert.equal(updated?.[0]?.lastMessage, 'Participante: Mensagem reconciliada');
+  assert.equal(updated?.[0]?.lastMessageAt, 1_800_000_000_000);
+  assert.equal(updated?.[0]?.unreadCount, 2);
+  assert.equal(updated?.[0]?.needsResponse, true);
+});
+
+test('grupo reconciliado atualiza a Inbox e permanece estável contra polling antigo', () => {
+  const original = conversation('120363000000@g.us', {
+    isGroup: true,
+    lastMessage: '08:27',
+    lastMessageAt: 1_700_000_000_000,
+    lastMessageFromMe: false,
+  });
+  const current = [original, conversation('120363999999@g.us', {
+    isGroup: true,
+    lastMessage: '08:00',
+    lastMessageAt: 1_699_000_000_000,
+  })];
+  const reconciled = reconcileRealtimeConversation(current, {
+    type: 'message.upsert',
+    remoteJid: '120363000000@g.us',
+    incrementUnread: false,
+    message: {
+      ...message('group-1041', 1_800_000_000_000, '10:41', 'delivered', {
+        conversationId: '120363000000@g.us',
+        sender: 'contact',
+        senderName: 'Participante',
+      }),
+    },
+  });
+
+  assert.ok(reconciled);
+  assert.equal(reconciled?.[0]?.lastMessage, 'Participante: 10:41');
+  assert.equal(reconciled?.[0]?.lastMessageAt, 1_800_000_000_000);
+  const stalePolling = reconcileConversationsMonotonic(reconciled || current, [
+    { ...original, unreadCount: 0 },
+    current[1]!,
+  ]);
+  assert.equal(stalePolling[0]?.lastMessage, 'Participante: 10:41');
+  assert.equal(stalePolling[0]?.lastMessageAt, 1_800_000_000_000);
 });
 
 test('SSE recebido com conversationId interno ainda atualiza JID @lid', () => {
@@ -3053,6 +3121,114 @@ test('quick reply slash selection replaces only its token and preserves composer
 
 test('quick reply slash trigger opens for a bare slash', () => {
   assert.deepEqual(findQuickReplyToken('Olá /', 5), { start: 4, end: 5, value: '/' });
+});
+
+test('merge do inbox prefere atividade local renderizável mais recente', () => {
+  const provider = inboxProjectionChat('120363000000@g.us', {
+    lastMessage: {
+      key: { id: 'provider-old', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { conversation: '08:27' },
+      messageTimestamp: 1_700_000_000,
+    },
+  });
+  const local = inboxProjectionChat('120363000000@g.us', {
+    updatedAt: '2026-09-04T13:41:00.000Z',
+    lastMessage: {
+      key: { id: 'local-new', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { conversation: '10:41' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(merged.lastMessage?.key?.id, 'local-new');
+  assert.equal(merged.lastMessage?.message?.conversation, '10:41');
+  assert.equal(inboxActivityTimestamp(merged), 1_800_000_000_000);
+});
+
+test('merge do inbox aceita provider mais novo quando local está atrasado', () => {
+  const provider = inboxProjectionChat('120363000000@g.us', {
+    lastMessage: {
+      key: { id: 'provider-new', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { conversation: '11:02' },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+  const local = inboxProjectionChat('120363000000@g.us', {
+    lastMessage: {
+      key: { id: 'local-old', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { conversation: '10:41' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(merged.lastMessage?.key?.id, 'provider-new');
+  assert.equal(inboxActivityTimestamp(merged), 1_900_000_000_000);
+});
+
+test('merge do inbox usa a projeção local como desempate em timestamp igual', () => {
+  const provider = inboxProjectionChat('120363000000@g.us', {
+    lastMessage: {
+      key: { id: 'provider-copy', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { conversation: 'cópia do provedor' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+  const local = inboxProjectionChat('120363000000@g.us', {
+    lastMessage: {
+      key: { id: 'canonical-copy', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { conversation: 'cópia canônica' },
+      // Local projections may expose milliseconds directly.
+      messageTimestamp: 1_800_000_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(merged.lastMessage?.key?.id, 'canonical-copy');
+  assert.equal(merged.lastMessage?.message?.conversation, 'cópia canônica');
+  assert.equal(inboxActivityTimestamp(merged), 1_800_000_000_000);
+});
+
+test('reação mais nova não substitui atividade renderizável do inbox', () => {
+  const providerReaction = inboxProjectionChat('120363000000@g.us', {
+    lastMessage: {
+      key: { id: 'reaction-event', remoteJid: '120363000000@g.us', fromMe: false },
+      message: {
+        reactionMessage: {
+          key: { id: 'local-new' },
+          text: '❤️',
+        },
+      },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+  const local = inboxProjectionChat('120363000000@g.us', {
+    lastMessage: {
+      key: { id: 'local-new', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { conversation: '10:41' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(providerReaction, local);
+  assert.equal(merged.lastMessage?.key?.id, 'local-new');
+  assert.equal(inboxActivityTimestamp(merged), 1_800_000_000_000);
+});
+
+test('reação sem projeção local não cria atividade no inbox', () => {
+  const reaction = inboxProjectionChat('120363000000@g.us', {
+    updatedAt: '2026-09-04T14:00:00.000Z',
+    lastMessage: {
+      key: { id: 'reaction-event', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { reactionMessage: { key: { id: 'original' }, text: '❤️' } },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(reaction);
+  assert.equal(merged.lastMessage, undefined);
+  assert.equal(inboxActivityTimestamp(merged), 0);
 });
 
 test('atalhos rápidos rejeitam acentos, espaços e caracteres especiais com orientação específica', () => {

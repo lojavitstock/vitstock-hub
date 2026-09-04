@@ -16,7 +16,7 @@ import { canonicalPhone, normalizeContactPhone } from './contactDomain.js';
 import { phoneLookupKeys, upsertContactPhone } from './contactPhones.js';
 import { isWhatsAppLid, providerPhoneDigits, providerPhoneJid } from './whatsappIdentity.js';
 import { resolveEvolutionRecipient } from './evolutionRecipient.js';
-import { projectCanonicalInboxChats } from './inboxProjection.js';
+import { mergeInboxActivity, projectCanonicalInboxChats } from './inboxProjection.js';
 import { parseGroupMetadata, type GroupMetadata } from './groupMetadata.js';
 import {
   buildParticipantIdentityMap,
@@ -3047,8 +3047,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       const remoteJid = String(chat?.remoteJid || chat?.id || '');
       return { ...chat, conversationTags: conversationTags.get(remoteJid) || [] };
     });
-    // O webhook pode chegar antes da próxima atualização da Evolution. Mesclamos
-    // o estado local recente sem substituir o snapshot do provedor.
+    // O webhook/reconciliação pode persistir atividade antes da próxima
+    // atualização da Evolution. Mesclamos a projeção local por timestamp
+    // canônico, preservando a atividade renderizável mais recente.
     try {
       const localChats = await fetchLocalInboxChats(_request.user!.companyId);
       const knownRemoteJids = new Set(chatsData.map((chat: any) => String(chat?.remoteJid || chat?.id || '')));
@@ -3059,13 +3060,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         .filter(([phone]) => Boolean(phone)));
       chatsData = chatsData.map((chat: any) => {
         // A reaction is a metadata update, not a chat activity. Evolution may
-        // still expose it as lastMessage in findChats, so always replace it
-        // with the last persisted user-visible message before serializing the
-        // inbox snapshot.
-        if (!isNonRenderableProviderMessage(chat?.lastMessage) && !isProviderReactionEvent(chat?.lastMessage)) return chat;
-        return localByRemoteJid.get(String(chat?.remoteJid || chat?.id || ''))
+        // still expose it as lastMessage in findChats; mergeInboxActivity
+        // compares it with the latest persisted renderable message before
+        // serializing the inbox snapshot.
+        const local = localByRemoteJid.get(String(chat?.remoteJid || chat?.id || ''))
           || localByPhone.get(providerContactPhone(chat))
-          || { ...chat, lastMessage: undefined };
+        return mergeInboxActivity(chat, local);
       });
       const missingLocalChats = localChats.filter((chat: any) => {
         const remoteJid = String(chat?.remoteJid || chat?.id || '');
@@ -3683,6 +3683,23 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       request.user!.companyId,
       reconciledMessages.rows.map(localMessageToProviderRecord),
     );
+    // A background history reconciliation can discover a message that was
+    // absent from the Inbox snapshot. Publish the latest persisted
+    // renderable activity through the existing realtime protocol so the
+    // Inbox converges without a full refetch. Reaction-only records never
+    // enter recordsById and therefore cannot create activity here.
+    if (recordsById.size > 0 && reconciledMessages.rows[0]) {
+      const latestActivity = storedMessageToRealtimeMessage(reconciledMessages.rows[0]);
+      publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
+        remoteJid: latestActivity.conversationId,
+        phone: parsed.data.phone,
+        messageId: latestActivity.id,
+        timestampMs: latestActivity.timestampMs,
+        fromMe: latestActivity.sender === 'attendant',
+        incrementUnread: false,
+        message: latestActivity,
+      });
+    }
     const mergedRecords = new Map<string, any>();
     for (const record of recordsById.values()) {
       const id = String(record?.key?.id || record?.id || '');

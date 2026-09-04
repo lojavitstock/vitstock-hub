@@ -1,5 +1,7 @@
 import { canonicalPhone } from './contactDomain.js';
 import { isWhatsAppGroup, isWhatsAppLid, providerPhoneDigits } from './whatsappIdentity.js';
+import { isNonRenderableProviderMessage } from './providerMessagePolicy.js';
+import { isProviderReactionEvent } from './messageReactions.js';
 
 type InboxChat = Record<string, any>;
 
@@ -49,16 +51,78 @@ export function canonicalInboxIdentity(chat: InboxChat): CanonicalInboxIdentity 
   return { key: `jid:${lowerRemoteJid}`, remoteJid, canonicalPhone: '', explicit: false };
 }
 
+const numericTimestampMs = (value: unknown) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    if (typeof value === 'string') {
+      const parsed = Date.parse(value);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    }
+    return 0;
+  }
+  // Evolution normally returns epoch seconds, while local projections and
+  // realtime payloads use milliseconds. Normalize both forms before any
+  // comparison so a provider snapshot cannot win merely due to units.
+  return numeric < 10_000_000_000 ? Math.floor(numeric * 1000) : Math.floor(numeric);
+};
+
 const activityTimestamp = (chat: InboxChat) => {
-  const messageTimestamp = Number(chat.lastMessage?.messageTimestamp);
-  if (Number.isFinite(messageTimestamp) && messageTimestamp > 0) return messageTimestamp * 1000;
-  const lastMessageAt = Number(chat.lastMessageAt);
-  if (Number.isFinite(lastMessageAt) && lastMessageAt > 0) return lastMessageAt;
+  const messageTimestamp = numericTimestampMs(chat.lastMessage?.messageTimestamp);
+  if (messageTimestamp > 0) return messageTimestamp;
+  const lastMessageAt = numericTimestampMs(chat.lastMessageAt);
+  if (lastMessageAt > 0) return lastMessageAt;
   const updatedAt = Date.parse(stringValue(chat.updatedAt));
   return Number.isFinite(updatedAt) ? updatedAt : 0;
 };
 
+const hasRenderableActivity = (chat: InboxChat) => {
+  const message = chat?.lastMessage;
+  if (!message || typeof message !== 'object') return false;
+  if (isNonRenderableProviderMessage(message) || isProviderReactionEvent(message)) return false;
+  return activityTimestamp(chat) > 0;
+};
+
+/**
+ * Returns the canonical numeric activity timestamp used by Inbox ordering.
+ * Reactions and provider-only protocol records are deliberately excluded.
+ */
+export function inboxActivityTimestamp(chat: InboxChat) {
+  return hasRenderableActivity(chat) ? activityTimestamp(chat) : 0;
+}
+
+/**
+ * Combines a provider chat with its persisted local projection without
+ * allowing an older provider snapshot to hide a newer renderable message.
+ * Equal timestamps prefer the persisted projection because it carries the
+ * canonical message identity and preview.
+ */
+export function mergeInboxActivity(providerChat: InboxChat, localChat?: InboxChat) {
+  const providerTimestamp = inboxActivityTimestamp(providerChat);
+  const localTimestamp = localChat ? inboxActivityTimestamp(localChat) : 0;
+
+  if (!localChat || (!localTimestamp && providerTimestamp > 0) || providerTimestamp > localTimestamp) {
+    return providerTimestamp > 0
+      ? providerChat
+      : { ...providerChat, lastMessage: undefined };
+  }
+
+  if (localTimestamp > 0 || providerTimestamp === 0) {
+    return {
+      ...providerChat,
+      lastMessage: localChat.lastMessage,
+      ...(localChat.updatedAt ? { updatedAt: localChat.updatedAt } : {}),
+      ...(localChat.lastMessageAt ? { lastMessageAt: localChat.lastMessageAt } : {}),
+    };
+  }
+
+  return providerChat;
+}
+
 const stateTimestamp = (chat: InboxChat) => {
+  // A reaction/protocol record is metadata, never a state/activity source for
+  // the inbox. Keep it from winning alias-bucket state selection by virtue of
+  // a newer provider `updatedAt` value.
+  if (chat?.lastMessage && !hasRenderableActivity(chat)) return 0;
   const updatedAt = Date.parse(stringValue(chat.updatedAt));
   return Number.isFinite(updatedAt) ? updatedAt : activityTimestamp(chat);
 };
@@ -131,7 +195,7 @@ const choosePrimary = (items: Array<{ chat: InboxChat; index: number }>) => item
 const chooseActivity = (items: Array<{ chat: InboxChat; index: number }>) => items
   .slice()
   .sort((left, right) => (
-    activityTimestamp(right.chat) - activityTimestamp(left.chat)
+    inboxActivityTimestamp(right.chat) - inboxActivityTimestamp(left.chat)
     || stateTimestamp(right.chat) - stateTimestamp(left.chat)
     || left.index - right.index
   ))[0];
@@ -140,7 +204,7 @@ const chooseState = (items: Array<{ chat: InboxChat; index: number }>) => items
   .slice()
   .sort((left, right) => (
     stateTimestamp(right.chat) - stateTimestamp(left.chat)
-    || activityTimestamp(right.chat) - activityTimestamp(left.chat)
+    || inboxActivityTimestamp(right.chat) - inboxActivityTimestamp(left.chat)
     || left.index - right.index
   ))[0];
 
@@ -220,6 +284,6 @@ export function projectCanonicalInboxChats(chats: InboxChat[]) {
       const identity = canonicalInboxIdentity(firstItem.chat);
       return { chat: mergeBucket(items, identity), index: Math.min(...items.map((item) => item.index)), key };
     })
-    .sort((left, right) => activityTimestamp(right.chat) - activityTimestamp(left.chat) || left.index - right.index)
+    .sort((left, right) => inboxActivityTimestamp(right.chat) - inboxActivityTimestamp(left.chat) || left.index - right.index)
     .map(({ chat }) => chat);
 }
