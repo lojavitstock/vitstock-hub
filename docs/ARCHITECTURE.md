@@ -319,6 +319,28 @@ WhatsApp
 
 `evolution.ts` unwraps supported provider message wrappers, derives message content, media, quoted context and message-scoped metadata, persists the data, then publishes a normalized realtime message. Provider reaction events are treated specially: they update metadata on their explicit target message instead of creating a standalone timeline message.
 
+### Evolution webhook contract and self-heal
+
+The backend keeps the instance webhook contract declarative. After startup and
+at a low-frequency interval, it calls `GET /webhook/find/{instance}`, compares
+the effective configuration, and calls `POST /webhook/set/{instance}` only when
+drift is detected. The expected contract is the public backend URL followed by
+`/webhooks/evolution`, the `MESSAGES_UPSERT` event, `byEvents=false`,
+`base64=false` and the `x-webhook-secret` header. The header value is never
+written to logs or exposed in API responses.
+
+For Evolution API 2.3.7, the set request uses the provider shape
+`{ webhook: { enabled, url, headers, byEvents, base64, events } }`; the find
+response is normalized from the persisted top-level webhook fields. If the
+provider omits or masks the header value, the Hub reports an unknown webhook
+state and does not repeatedly overwrite a value it cannot compare safely.
+
+Webhook reconciliation is best effort: provider failures do not prevent the
+backend from starting, and concurrent checks share one in-flight operation.
+`GET /api/evolution/status` exposes the additive `webhook` state separately
+from the WhatsApp connection state; `open` therefore does not imply a healthy
+webhook integration.
+
 The frontend `evolutionMessageAdapter.ts` independently adapts API/provider snapshots into `Message` values. It handles common text, media captions, interactive messages, calls, contact cards, locations, sticker/audio/video/document placeholders and provider metadata.
 
 ### Sent messages
@@ -469,6 +491,7 @@ Operational routes use the authenticated server boundary. The deliberately publi
 - `DATABASE_URL`;
 - `SESSION_SECRET`;
 - `WEBHOOK_SECRET`;
+- `BACKEND_PUBLIC_URL` (or the existing `VITE_API_URL` compatibility source);
 - `FRONTEND_URL` and optional `ALLOWED_FRONTEND_ORIGINS`;
 - `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, `EVOLUTION_INSTANCE_NAME`;
 - optional Google OAuth client values;

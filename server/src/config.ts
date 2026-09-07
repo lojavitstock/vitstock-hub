@@ -16,6 +16,16 @@ export function parseFrontendOrigins(value: string): string[] {
     .filter((origin) => origin.length > 0 && !origin.includes('*'));
 }
 
+const backendPublicUrlSchema = z.preprocess(
+  (value) => {
+    if (typeof value === 'string' && value.trim()) return value;
+    return typeof process.env.VITE_API_URL === 'string' && process.env.VITE_API_URL.trim()
+      ? process.env.VITE_API_URL
+      : undefined;
+  },
+  z.string().url().transform(normalizeFrontendOrigin).optional(),
+);
+
 const configSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   QA_MODE: z.preprocess((value) => value === true || value === 'true', z.boolean()).default(false),
@@ -24,6 +34,7 @@ const configSchema = z.object({
   SESSION_SECRET: z.string().min(43),
   WEBHOOK_SECRET: z.string().min(43),
   FRONTEND_URL: z.string().url().transform(normalizeFrontendOrigin),
+  BACKEND_PUBLIC_URL: backendPublicUrlSchema,
   ALLOWED_FRONTEND_ORIGINS: z.string().optional().default(''),
   EVOLUTION_API_URL: z.string().url(),
   EVOLUTION_API_KEY: z.string().min(16),
@@ -53,7 +64,7 @@ export function isLocalHost(value: string) {
   }
 }
 
-export function validateQaRuntimeSafety(input: Pick<typeof config, 'DATABASE_URL' | 'EVOLUTION_API_URL' | 'GOOGLE_CLIENT_ID' | 'GOOGLE_CLIENT_SECRET'>) {
+export function validateQaRuntimeSafety(input: Pick<typeof config, 'DATABASE_URL' | 'EVOLUTION_API_URL' | 'BACKEND_PUBLIC_URL' | 'GOOGLE_CLIENT_ID' | 'GOOGLE_CLIENT_SECRET'>) {
   let databaseUrl: URL;
   let evolutionUrl: URL;
   try {
@@ -69,6 +80,17 @@ export function validateQaRuntimeSafety(input: Pick<typeof config, 'DATABASE_URL
   }
   if (!isLocalHost(input.EVOLUTION_API_URL) || evolutionUrl.port !== '3999') {
     throw new Error('QA_MODE exige Evolution mock local na porta 3999');
+  }
+  if (input.BACKEND_PUBLIC_URL) {
+    let backendUrl: URL;
+    try {
+      backendUrl = new URL(input.BACKEND_PUBLIC_URL);
+    } catch {
+      throw new Error('QA_MODE exige URL pública local válida para o backend');
+    }
+    if (!isLocalHost(input.BACKEND_PUBLIC_URL) || backendUrl.port !== '3001') {
+      throw new Error('QA_MODE exige backend local na porta 3001');
+    }
   }
   if (!input.GOOGLE_CLIENT_ID?.startsWith('qa-local-') || !input.GOOGLE_CLIENT_SECRET?.startsWith('qa-local-')) {
     throw new Error('QA_MODE exige credenciais fictícias do Google QA; chamadas externas estão bloqueadas');

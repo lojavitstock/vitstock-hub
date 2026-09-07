@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
@@ -8,6 +8,12 @@ import { db } from './db.js';
 import { buildHasOlderMessagesQuery } from './hasOlderMessagesQuery.js';
 import { buildExistingConversationQuery } from './conversationQueries.js';
 import { publishRealtimeEvent, registerRealtimeClient } from './realtime.js';
+import {
+  buildEvolutionWebhookContract,
+  createEvolutionWebhookMonitor,
+  EVOLUTION_WEBHOOK_RECONCILE_INTERVAL_MS,
+  matchesWebhookSecret,
+} from './evolutionWebhook.js';
 import { acquireConversationLease, type ConversationLease } from './conversationLease.js';
 import { evolutionMessageReferenceFromResponse, evolutionReactionPayload, formatHubOutboundText, removeHubAgentPrefix } from './outboundMessage.js';
 import { createOutboundRequestCoordinator, outboundDispatchAction, outboundIdempotencyLockKey } from './outboundIdempotency.js';
@@ -159,13 +165,6 @@ const conversationReadSchema = z.object({
     fromMe: z.boolean().optional(),
   }).passthrough().optional(),
 });
-
-function matchesWebhookSecret(value: string | undefined) {
-  if (!value) return false;
-  const actual = Buffer.from(value);
-  const expected = Buffer.from(config.WEBHOOK_SECRET);
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
-}
 
 async function evolutionRequest(path: string, init?: RequestInit, timeoutMs = 15_000) {
   if (isQaMode) return qaEvolutionResponse(path, init);
@@ -3032,6 +3031,32 @@ async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed
 }
 
 export async function registerEvolutionRoutes(app: FastifyInstance) {
+  const webhookMonitor = createEvolutionWebhookMonitor({
+    contract: buildEvolutionWebhookContract({
+      publicBackendUrl: config.BACKEND_PUBLIC_URL,
+      instanceName: config.EVOLUTION_INSTANCE_NAME,
+      webhookSecret: config.WEBHOOK_SECRET,
+    }),
+    request: (path, init) => evolutionRequest(path, init),
+    logger: (level, details, message) => {
+      if (level === 'warn') app.log.warn(details, message);
+      else app.log.info(details, message);
+    },
+  });
+  let webhookReconcileTimer: NodeJS.Timeout | undefined;
+  app.addHook('onReady', () => {
+    if (config.NODE_ENV === 'test') return;
+    void webhookMonitor.ensure();
+    webhookReconcileTimer = setInterval(() => {
+      void webhookMonitor.ensure();
+    }, EVOLUTION_WEBHOOK_RECONCILE_INTERVAL_MS);
+    webhookReconcileTimer.unref?.();
+  });
+  app.addHook('onClose', async () => {
+    if (webhookReconcileTimer) clearInterval(webhookReconcileTimer);
+    webhookReconcileTimer = undefined;
+  });
+
   app.get('/api/evolution/events', { preHandler: requireUser }, async (request, reply) => {
     // EventSource não passa pelo ciclo normal de resposta do Fastify: o stream
     // fica aberto e recebe somente eventos da empresa do usuário autenticado.
@@ -3053,10 +3078,18 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/evolution/status', { preHandler: requireUser }, async (_request, reply) => {
-    return forwardEvolutionRequest(
-      `/instance/connectionState/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
-      reply,
-    );
+    if (webhookMonitor.shouldCheck()) void webhookMonitor.ensure();
+    let response: Response;
+    try {
+      response = await evolutionRequest(`/instance/connectionState/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`);
+    } catch (error) {
+      _request.log.warn({ err: error, path: '/instance/connectionState' }, 'Evolution API não respondeu');
+      return reply.code(502).send({ error: 'Evolution API indisponível no momento', webhook: webhookMonitor.snapshot() });
+    }
+    const body = await response.json().catch(() => ({ error: 'Resposta inválida da Evolution API' }));
+    if (!response.ok) return reply.code(502).send({ error: 'Evolution API indisponível', webhook: webhookMonitor.snapshot() });
+    if (body && typeof body === 'object' && !Array.isArray(body)) return { ...body, webhook: webhookMonitor.snapshot() };
+    return { connection: body, webhook: webhookMonitor.snapshot() };
   });
 
   app.get('/api/evolution/connect', { preHandler: requireAdmin }, async (_request, reply) => {
@@ -4596,7 +4629,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     void cleanupExpiredOpaqueLidStaging();
     const providedSecret = request.headers['x-webhook-secret'];
     const value = Array.isArray(providedSecret) ? providedSecret[0] : providedSecret;
-    if (!matchesWebhookSecret(value)) return reply.code(401).send({ error: 'Webhook não autorizado' });
+    if (!matchesWebhookSecret(value, config.WEBHOOK_SECRET)) return reply.code(401).send({ error: 'Webhook não autorizado' });
 
     const body = request.body as any;
     const event = String(body?.event || body?.type || 'unknown');

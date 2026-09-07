@@ -44,6 +44,7 @@ console.log('Para encerrar, pressione Ctrl+C.\n');
 start('backend', ['run', 'server:dev'], {
   NODE_ENV: 'development',
   PORT: '3001',
+  BACKEND_PUBLIC_URL: 'http://localhost:3001',
   FRONTEND_URL: 'http://localhost:3000',
 });
 

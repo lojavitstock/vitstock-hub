@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 
 os.userInfo = () => ({ username: 'vitstock-tests' });
 createRequire(import.meta.url)('node:os').userInfo = os.userInfo;
+process.env.NODE_ENV ||= 'test';
 const preload = resolve('tests/os-userinfo.cjs').replaceAll('\\', '/');
 process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, `--require="${preload}"`]
   .filter(Boolean)

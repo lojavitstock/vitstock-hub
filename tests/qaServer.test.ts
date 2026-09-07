@@ -7,6 +7,7 @@ process.env.NODE_ENV = 'test';
 process.env.QA_MODE = 'true';
 process.env.PORT = '3001';
 process.env.DATABASE_URL = 'postgres://postgres:postgres@127.0.0.1:55432/vitstock_qa';
+process.env.BACKEND_PUBLIC_URL = 'http://127.0.0.1:3001';
 process.env.SESSION_SECRET = 'qa-session-secret-012345678901234567890123456789';
 process.env.WEBHOOK_SECRET = 'qa-webhook-secret-012345678901234567890123456789';
 process.env.FRONTEND_URL = 'http://localhost:3000';

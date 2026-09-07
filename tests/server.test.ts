@@ -72,3 +72,17 @@ test('Fastify app bloqueia endpoint mutativo não autenticado com 401 ou 403', a
   assert.ok([401, 403].includes(response.statusCode), `Status retornado: ${response.statusCode}`);
   await app.close();
 });
+
+test('webhook Evolution sem header é rejeitado antes do processamento', async () => {
+  const app = await createApp();
+  const response = await app.inject({
+    method: 'POST',
+    url: '/webhooks/evolution',
+    headers: { 'content-type': 'application/json' },
+    payload: JSON.stringify({ event: 'MESSAGES_UPSERT', data: { key: { id: 'qa-unauthorized' } } }),
+  });
+
+  assert.equal(response.statusCode, 401);
+  assert.deepEqual(JSON.parse(response.body), { error: 'Webhook não autorizado' });
+  await app.close();
+});

@@ -10,6 +10,7 @@ export type QaGoogleScenario = 'success' | 'conflict' | 'rate-limit' | 'timeout'
 
 let googleScenario: QaGoogleScenario = 'success';
 let providerOnlyChat: Record<string, any> | null = null;
+let qaWebhookConfig: Record<string, any> | null = null;
 
 export function currentQaGoogleScenario() {
   return googleScenario;
@@ -168,6 +169,20 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
   const method = (init?.method || 'GET').toUpperCase();
   let requestBody: any = {};
   try { requestBody = typeof init?.body === 'string' ? JSON.parse(init.body) : {}; } catch { requestBody = {}; }
+  if (path.includes('/webhook/find/')) {
+    return Promise.resolve(new Response(JSON.stringify(qaWebhookConfig), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+  }
+  if (path.includes('/webhook/set/') && method === 'POST') {
+    const webhook = requestBody?.webhook;
+    qaWebhookConfig = webhook && typeof webhook === 'object'
+      ? {
+        ...webhook,
+        webhookByEvents: webhook.byEvents,
+        webhookBase64: webhook.base64,
+      }
+      : null;
+    return Promise.resolve(new Response(JSON.stringify(qaWebhookConfig), { status: 201, headers: { 'Content-Type': 'application/json' } }));
+  }
   const participantNumber = String(requestBody?.number || '');
   const body = path.includes('/message/sendText/') || path.includes('/message/sendMedia/')
     ? { key: { id: `qa-evolution-${randomUUID()}` } }
