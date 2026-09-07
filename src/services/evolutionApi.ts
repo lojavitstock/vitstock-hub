@@ -417,7 +417,10 @@ export class EvolutionApiService {
    * Encerrar a sessão atual para permitir um novo pareamento por QR Code.
    */
   static async logoutInstance(instanceName: string) {
-    if (USE_MOCK) return { status: 'SUCCESS' };
+    if (USE_MOCK) {
+      this.publishStatus('disconnected');
+      return { status: 'SUCCESS' };
+    }
 
     const response = await apiFetch('/api/evolution/logout', {
       method: 'POST',
@@ -428,6 +431,7 @@ export class EvolutionApiService {
         throw new Error(body?.error || 'Não foi possível desconectar o WhatsApp');
       }
       this.statusCache.delete(instanceName);
+      this.publishStatus('disconnected');
       return body;
   }
 

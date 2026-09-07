@@ -242,7 +242,7 @@ The frontend maps Evolution instance state to three UI states:
 
 `EvolutionApiService.getInstanceStatus()` caches status briefly and emits a browser `vitstock:whatsapp-status` event. `AppLayout`, the Inbox hook and the message hook use this shared signal.
 
-The connection settings flow uses existing status, connect/QR and logout endpoints. Atendimento intentionally treats only `connected` as operational: while disconnected or connecting, it does not present the inbox/timeline as live and does not permit an outbound WhatsApp send. Existing browser state and drafts are not deleted merely because the connection is offline.
+The connection settings flow uses existing status, connect/QR and logout endpoints. Status is readable by authenticated users so Atendimento and the shared sidebar can reflect the provider state, while QR generation and logout are restricted to administrators. Non-administrators see the connection state without management controls. Atendimento intentionally treats only `connected` as operational: while disconnected or connecting, it does not present the inbox/timeline as live and does not permit an outbound WhatsApp send. Existing browser state and drafts are not deleted merely because the connection is offline.
 
 ## 9. Atendimento Architecture
 

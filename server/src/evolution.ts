@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
 import { config, isAllowedFrontendOrigin, isQaMode } from './config.js';
-import { requireUser } from './auth.js';
+import { requireAdmin, requireUser } from './auth.js';
 import { db } from './db.js';
 import { buildHasOlderMessagesQuery } from './hasOlderMessagesQuery.js';
 import { buildExistingConversationQuery } from './conversationQueries.js';
@@ -2981,14 +2981,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     );
   });
 
-  app.get('/api/evolution/connect', { preHandler: requireUser }, async (_request, reply) => {
+  app.get('/api/evolution/connect', { preHandler: requireAdmin }, async (_request, reply) => {
     return forwardEvolutionRequest(
       `/instance/connect/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
       reply,
     );
   });
 
-  app.post('/api/evolution/logout', { preHandler: requireUser }, async (_request, reply) => {
+  app.post('/api/evolution/logout', { preHandler: requireAdmin }, async (_request, reply) => {
     return forwardEvolutionRequest(
       `/instance/logout/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
       reply,

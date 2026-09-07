@@ -178,7 +178,8 @@ export const AppLayout: React.FC = () => {
           </NavLink>
           
           {/* Status WhatsApp (Evolution API em Tempo Real) */}
-          <div
+          <NavLink
+            to="/configuracoes?tab=connections"
             className="mb-2 flex h-11 items-center justify-center rounded-xl border border-[#3a474e] bg-[#20292f]"
             title={connectionStatus === 'connected' ? 'WhatsApp conectado' : connectionStatus === 'connecting' ? 'Reconectando WhatsApp' : 'WhatsApp desconectado'}
             aria-label={connectionStatus === 'connected' ? 'WhatsApp conectado' : connectionStatus === 'connecting' ? 'Reconectando WhatsApp' : 'WhatsApp desconectado'}
@@ -194,7 +195,7 @@ export const AppLayout: React.FC = () => {
             ) : (
               <WifiOff className="ml-2 h-4 w-4 text-red-400" aria-hidden="true" />
             )}
-          </div>
+          </NavLink>
 
           {/* Card Atendente */}
           <div className="flex flex-col items-center gap-2 rounded-xl p-2 transition-colors hover:bg-[#263138]">
