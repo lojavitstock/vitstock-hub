@@ -1112,6 +1112,7 @@ export class EvolutionApiService {
     const pending = this.mediaInFlight.get(cacheKey);
     if (pending) return pending;
 
+    let cacheTtlMs = 30_000;
     const request = (async () => {
       try {
         const res = await apiFetch('/api/evolution/media', {
@@ -1119,9 +1120,14 @@ export class EvolutionApiService {
           body: JSON.stringify({ messageKey })
         });
 
-        if (!res.ok) return null;
-        const data = await res.json();
-        if (data.base64) {
+        const data = await res.json().catch(() => null);
+        if (!res.ok) {
+          if (res.status === 404 || res.status === 410 || data?.temporary === false) {
+            cacheTtlMs = 10 * 60_000;
+          }
+          return null;
+        }
+        if (typeof data?.base64 === 'string' && data.base64) {
           return data.base64.startsWith('data:') ? data.base64 : `data:${data.mimetype || 'image/jpeg'};base64,${data.base64}`;
         }
         return null;
@@ -1133,7 +1139,7 @@ export class EvolutionApiService {
     this.mediaInFlight.set(cacheKey, request);
     try {
       const data = await request;
-      this.mediaCache.set(cacheKey, { data, expiresAt: Date.now() + (data ? 10 * 60_000 : 30_000) });
+      this.mediaCache.set(cacheKey, { data, expiresAt: Date.now() + (data ? 10 * 60_000 : cacheTtlMs) });
       return data;
     } finally {
       this.mediaInFlight.delete(cacheKey);

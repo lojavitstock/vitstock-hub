@@ -40,7 +40,16 @@ import { providerIdentityCandidates, resolveProviderMessageTarget } from '../ser
 import { resolveEvolutionRecipient } from '../server/src/evolutionRecipient';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
 import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
-import { providerMessageKeyFromRecord } from '../server/src/providerMessageKey';
+import {
+  providerMessageKeyFromRecord,
+  validateProviderMessageKey,
+} from '../server/src/providerMessageKey';
+import {
+  mediaFailureForInvalidProviderResponse,
+  mediaFailureForTransport,
+  mediaFailureForUpstreamStatus,
+  parseMediaProviderJson,
+} from '../server/src/mediaErrorContract';
 import { classifyProviderJid, filterConversationalProviderChats, isConversationalProviderJid } from '../server/src/providerJidPolicy';
 import {
   canonicalInboxIdentity,
@@ -1988,6 +1997,108 @@ test('provider key capture covers every reply-relevant provider message type', (
     assert.equal(key?.id, `provider-${index}`);
     assert.equal(key?.remoteJid, index === 1 ? 'opaque@lid' : '5521999999999@s.whatsapp.net');
   }
+});
+
+test('contrato de erro de mídia preserva semântica upstream sem expor o body', () => {
+  const cases = [
+    [400, 400, 'MEDIA_PROVIDER_REJECTED', 'invalid_key', true],
+    [404, 404, 'MEDIA_UNAVAILABLE', 'not_found', false],
+    [410, 410, 'MEDIA_UNAVAILABLE', 'expired', false],
+    [422, 422, 'MEDIA_PROVIDER_REJECTED', 'provider_rejected', true],
+    [429, 429, 'MEDIA_RATE_LIMITED', 'rate_limited', true],
+    [500, 502, 'MEDIA_UPSTREAM_ERROR', 'provider_error', true],
+  ] as const;
+
+  for (const [upstreamStatus, expectedStatus, error, reason, temporary] of cases) {
+    const result = mediaFailureForUpstreamStatus(upstreamStatus);
+    assert.equal(result.statusCode, expectedStatus);
+    assert.deepEqual(result.body, { error, reason, temporary });
+    assert.doesNotMatch(JSON.stringify(result.body), /provider-secret|base64|remoteJid/i);
+  }
+
+  assert.deepEqual(mediaFailureForTransport('timeout'), {
+    statusCode: 504,
+    body: { error: 'MEDIA_UPSTREAM_TIMEOUT', reason: 'timeout', temporary: true },
+  });
+  assert.deepEqual(mediaFailureForTransport('network'), {
+    statusCode: 502,
+    body: { error: 'MEDIA_UPSTREAM_UNAVAILABLE', reason: 'network', temporary: true },
+  });
+  assert.deepEqual(mediaFailureForInvalidProviderResponse(), {
+    statusCode: 502,
+    body: { error: 'MEDIA_UPSTREAM_INVALID_RESPONSE', reason: 'invalid_response', temporary: true },
+  });
+});
+
+test('contrato de mídia aceita JSON objeto e rejeita corpo upstream inválido', () => {
+  assert.deepEqual(parseMediaProviderJson('{"base64":"encoded","mimetype":"image/jpeg"}'), {
+    base64: 'encoded',
+    mimetype: 'image/jpeg',
+  });
+  assert.equal(parseMediaProviderJson(''), undefined);
+  assert.equal(parseMediaProviderJson('not-json'), undefined);
+  assert.equal(parseMediaProviderJson('[]'), undefined);
+  assert.equal(parseMediaProviderJson('"provider error"'), undefined);
+});
+
+test('validação de provider key preserva PN, LID, aliases e grupo sem exigir participant', () => {
+  const pn = validateProviderMessageKey({
+    id: 'media-pn',
+    remoteJid: '5521999999999@s.whatsapp.net',
+    fromMe: false,
+  });
+  assert.equal(pn.valid, true);
+  if (pn.valid) assert.equal(pn.key.remoteJid, '5521999999999@s.whatsapp.net');
+
+  const lid = validateProviderMessageKey({
+    id: 'media-lid',
+    remoteJid: 'opaque-lid@lid',
+    remoteJidAlt: '5521999999999@s.whatsapp.net',
+    participantAlt: '5521999999999@s.whatsapp.net',
+    addressingMode: 'lid',
+    senderPn: '5521999999999@s.whatsapp.net',
+    participantPn: '5521999999999@s.whatsapp.net',
+    fromMe: false,
+  });
+  assert.equal(lid.valid, true);
+  if (lid.valid) {
+    assert.equal(lid.key.remoteJid, 'opaque-lid@lid');
+    assert.equal(lid.key.remoteJidAlt, '5521999999999@s.whatsapp.net');
+    assert.equal(lid.key.participantPn, '5521999999999@s.whatsapp.net');
+  }
+
+  const group = validateProviderMessageKey({
+    id: 'media-group',
+    remoteJid: '120363012345678901@g.us',
+    fromMe: false,
+  });
+  assert.equal(group.valid, true);
+  const groupWithParticipant = validateProviderMessageKey({
+    id: 'media-group-participant',
+    remoteJid: '120363012345678901@g.us',
+    participant: 'participant@s.whatsapp.net',
+    fromMe: false,
+  });
+  assert.equal(groupWithParticipant.valid, true);
+  if (groupWithParticipant.valid) assert.equal(groupWithParticipant.key.participant, 'participant@s.whatsapp.net');
+});
+
+test('validação de provider key rejeita ausência estrutural sem converter LID em telefone', () => {
+  const cases = [
+    [{ remoteJid: '5521999999999@s.whatsapp.net' }, 'missing_id'],
+    [{ id: 'missing-remote' }, 'missing_remote_jid'],
+    [{ id: 'bad-type', remoteJid: '5521999999999@s.whatsapp.net', fromMe: 'false' }, 'invalid_field'],
+    [null, 'not_object'],
+  ] as const;
+  for (const [input, reason] of cases) {
+    const result = validateProviderMessageKey(input);
+    assert.equal(result.valid, false);
+    if (!result.valid) assert.equal(result.reason, reason);
+  }
+
+  const opaque = validateProviderMessageKey({ id: 'opaque', remoteJid: 'opaque-lid@lid' });
+  assert.equal(opaque.valid, true);
+  if (opaque.valid) assert.equal(opaque.key.remoteJid, 'opaque-lid@lid');
 });
 
 test('normaliza resposta inbound da Evolution quando contextInfo vem ao lado de message', () => {

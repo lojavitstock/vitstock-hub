@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
 import { config, isAllowedFrontendOrigin, isQaMode } from './config.js';
@@ -38,7 +38,20 @@ import {
   normalizeStoredReactions,
   providerReactionUpdate,
 } from './messageReactions.js';
-import { providerMessageKeyFromRecord, providerMessageKeyFromStoredMessage } from './providerMessageKey.js';
+import {
+  providerMessageKeyDiagnostics,
+  providerMessageKeyFromRecord,
+  providerMessageKeyFromStoredMessage,
+  validateProviderMessageKey,
+} from './providerMessageKey.js';
+import {
+  mediaFailureForInvalidProviderResponse,
+  mediaFailureForTransport,
+  mediaFailureForUpstreamStatus,
+  mediaKeyInvalid,
+  mediaRequestInvalid,
+  parseMediaProviderJson,
+} from './mediaErrorContract.js';
 import { hasQaProviderOnlyChat, qaEvolutionResponse } from './qa.js';
 import { loadConversationTags } from './conversationTags.js';
 import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.js';
@@ -966,6 +979,71 @@ async function forwardEvolutionRequest(path: string, reply: FastifyReply, init?:
     reply.request.log.warn({ err: error, path }, 'Evolution API não respondeu');
     return reply.code(502).send({ error: 'Evolution API indisponível no momento' });
   }
+}
+
+function isEvolutionTimeout(error: unknown) {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { name?: unknown; code?: unknown; message?: unknown };
+  return candidate.name === 'TimeoutError'
+    || candidate.code === 'ETIMEDOUT'
+    || /timed? ?out|timeout/i.test(String(candidate.message || ''));
+}
+
+async function forwardMediaRequest(
+  path: string,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  messageKey: Record<string, unknown>,
+) {
+  const key = providerMessageKeyDiagnostics(messageKey);
+  let response: Response;
+  try {
+    response = await evolutionRequest(path, { method: 'POST', body: JSON.stringify({ message: { key: messageKey }, convertToMp4: false }) });
+  } catch (error) {
+    const failure = mediaFailureForTransport(isEvolutionTimeout(error) ? 'timeout' : 'network');
+    request.log.warn({
+      media: key,
+      failure: failure.body.error,
+      reason: failure.body.reason,
+    }, 'Evolution media request failed before receiving a response');
+    return reply.code(failure.statusCode).send(failure.body);
+  }
+
+  let rawBody: string;
+  try {
+    rawBody = await response.text();
+  } catch (error) {
+    const failure = mediaFailureForTransport(isEvolutionTimeout(error) ? 'timeout' : 'network');
+    request.log.warn({
+      media: key,
+      failure: failure.body.error,
+      reason: failure.body.reason,
+    }, 'Evolution media response could not be read');
+    return reply.code(failure.statusCode).send(failure.body);
+  }
+  if (!response.ok) {
+    const failure = mediaFailureForUpstreamStatus(response.status);
+    request.log.warn({
+      media: key,
+      upstreamStatus: response.status,
+      failure: failure.body.error,
+      reason: failure.body.reason,
+    }, 'Evolution media request was rejected');
+    return reply.code(failure.statusCode).send(failure.body);
+  }
+
+  const body = parseMediaProviderJson(rawBody);
+  if (!body) {
+    const failure = mediaFailureForInvalidProviderResponse();
+    request.log.warn({
+      media: key,
+      upstreamStatus: response.status,
+      failure: failure.body.error,
+      reason: failure.body.reason,
+    }, 'Evolution media request returned an invalid response');
+    return reply.code(failure.statusCode).send(failure.body);
+  }
+  return body;
 }
 
 function assignmentJids(input: { remoteJid: string; phone?: string }) {
@@ -4458,11 +4536,24 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
 
   app.post('/api/evolution/media', { preHandler: requireUser }, async (request, reply) => {
     const parsed = mediaSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Mensagem de mídia inválida' });
-    return forwardEvolutionRequest(
+    if (!parsed.success) {
+      request.log.warn({ failure: 'MEDIA_REQUEST_INVALID', reason: 'invalid_request' }, 'Evolution media request was invalid');
+      return reply.code(mediaRequestInvalid().statusCode).send(mediaRequestInvalid().body);
+    }
+    const keyValidation = validateProviderMessageKey(parsed.data.messageKey);
+    if (!keyValidation.valid) {
+      request.log.warn({
+        media: keyValidation.diagnostics,
+        failure: 'MEDIA_KEY_INVALID',
+        reason: keyValidation.reason,
+      }, 'Evolution media request contained an invalid provider key');
+      return reply.code(mediaKeyInvalid().statusCode).send(mediaKeyInvalid().body);
+    }
+    return forwardMediaRequest(
       `/chat/getBase64FromMediaMessage/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+      request,
       reply,
-      { method: 'POST', body: JSON.stringify({ message: { key: parsed.data.messageKey }, convertToMp4: false }) },
+      keyValidation.key,
     );
   });
 
