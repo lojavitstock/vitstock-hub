@@ -67,6 +67,20 @@ type MonitorOptions = ReconcileOptions & {
   logger?: (level: 'info' | 'warn', details: Record<string, unknown>, message: string) => void;
 };
 
+const operationalWebhookFailureReasons: EvolutionWebhookReason[] = [
+  'provider_unavailable',
+  'unauthorized',
+  'invalid_response',
+  'repair_failed',
+];
+
+export function evolutionWebhookHealthLogMessage(result: Pick<EvolutionWebhookStatus, 'state' | 'reason'>) {
+  if (operationalWebhookFailureReasons.includes(result.reason)) return '[EVOLUTION_WEBHOOK] check_failed';
+  if (result.state === 'healthy') return '[EVOLUTION_WEBHOOK] healthy';
+  if (result.state === 'unknown') return '[EVOLUTION_WEBHOOK] check_inconclusive';
+  return '[EVOLUTION_WEBHOOK] unhealthy';
+}
+
 function normalizeUrl(value: string) {
   return value.trim().replace(/\/+$/, '');
 }
@@ -304,11 +318,13 @@ export function createEvolutionWebhookMonitor(options: MonitorOptions) {
     if (result.repaired) {
       options.logger?.('info', { reason: result.detectedReason || result.reason }, '[EVOLUTION_WEBHOOK] repaired');
     } else if (logKey !== lastLogKey) {
-      if (result.healthy) options.logger?.('info', { reason: result.reason }, '[EVOLUTION_WEBHOOK] healthy');
-      else if (result.reason === 'provider_unavailable' || result.reason === 'unauthorized' || result.reason === 'invalid_response' || result.reason === 'repair_failed') {
-        options.logger?.('warn', { reason: result.reason, providerStatus: result.providerStatus }, '[EVOLUTION_WEBHOOK] check_failed');
+      const message = evolutionWebhookHealthLogMessage(result);
+      if (message === '[EVOLUTION_WEBHOOK] healthy') {
+        options.logger?.('info', { reason: result.reason }, message);
+      } else if (message === '[EVOLUTION_WEBHOOK] check_failed') {
+        options.logger?.('warn', { reason: result.reason, providerStatus: result.providerStatus }, message);
       } else {
-        options.logger?.('warn', { reason: result.reason }, '[EVOLUTION_WEBHOOK] unhealthy');
+        options.logger?.('warn', { reason: result.reason }, message);
       }
     }
     lastLogKey = logKey;

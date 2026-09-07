@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   buildEvolutionWebhookContract,
   createEvolutionWebhookMonitor,
+  evolutionWebhookHealthLogMessage,
   evolutionWebhookSetPayload,
   matchesWebhookSecret,
   reconcileEvolutionWebhook,
@@ -28,6 +29,20 @@ function correctWebhook() {
     webhookBase64: false,
     headers: { 'x-webhook-secret': secret },
   };
+}
+
+function captureLogs() {
+  const logs: Array<{ level: 'info' | 'warn'; details: Record<string, unknown>; message: string }> = [];
+  return {
+    logs,
+    logger: (level: 'info' | 'warn', details: Record<string, unknown>, message: string) => {
+      logs.push({ level, details, message });
+    },
+  };
+}
+
+function messages(logs: Array<{ message: string }>) {
+  return logs.map((entry) => entry.message);
 }
 
 test('webhook correto é saudável e não gera POST', async () => {
@@ -183,4 +198,78 @@ test('secret correto continua autorizado pela mesma comparação usada na rota',
   assert.equal(matchesWebhookSecret(secret, secret), true);
   assert.equal(matchesWebhookSecret('wrong-secret', secret), false);
   assert.equal(matchesWebhookSecret(undefined, secret), false);
+});
+
+test('estado healthy gera somente o log healthy', async () => {
+  const captured = captureLogs();
+  const monitor = createEvolutionWebhookMonitor({
+    contract,
+    request: async () => jsonResponse(correctWebhook()),
+    logger: captured.logger,
+  });
+
+  const result = await monitor.ensure();
+
+  assert.equal(result.state, 'healthy');
+  assert.ok(messages(captured.logs).includes('[EVOLUTION_WEBHOOK] healthy'));
+  assert.equal(messages(captured.logs).includes('[EVOLUTION_WEBHOOK] unhealthy'), false);
+  assert.equal(messages(captured.logs).includes('[EVOLUTION_WEBHOOK] check_inconclusive'), false);
+});
+
+test('header unverifiable gera check_inconclusive com reason estruturado', async () => {
+  const captured = captureLogs();
+  const monitor = createEvolutionWebhookMonitor({
+    contract,
+    request: async () => jsonResponse({ ...correctWebhook(), headers: { 'x-webhook-secret': '********' } }),
+    logger: captured.logger,
+  });
+
+  const result = await monitor.ensure();
+  const log = captured.logs.find((entry) => entry.message === '[EVOLUTION_WEBHOOK] check_inconclusive');
+
+  assert.equal(result.state, 'unknown');
+  assert.equal(result.reason, 'header_unverifiable');
+  assert.ok(log);
+  assert.equal(log.details.reason, 'header_unverifiable');
+  assert.equal(messages(captured.logs).includes('[EVOLUTION_WEBHOOK] unhealthy'), false);
+});
+
+test('not_configured gera check_inconclusive sem unhealthy', async () => {
+  const captured = captureLogs();
+  const monitor = createEvolutionWebhookMonitor({
+    contract: undefined,
+    request: async () => {
+      throw new Error('request should not be called');
+    },
+    logger: captured.logger,
+  });
+
+  const result = await monitor.ensure();
+
+  assert.equal(result.state, 'unknown');
+  assert.equal(result.reason, 'not_configured');
+  assert.ok(messages(captured.logs).includes('[EVOLUTION_WEBHOOK] check_inconclusive'));
+  assert.equal(messages(captured.logs).includes('[EVOLUTION_WEBHOOK] unhealthy'), false);
+});
+
+test('estado unhealthy genérico mantém o log unhealthy', () => {
+  assert.equal(
+    evolutionWebhookHealthLogMessage({ state: 'unhealthy', reason: 'multiple_drift' }),
+    '[EVOLUTION_WEBHOOK] unhealthy',
+  );
+});
+
+test('falha operacional existente permanece como check_failed', async () => {
+  const captured = captureLogs();
+  const monitor = createEvolutionWebhookMonitor({
+    contract,
+    request: async () => jsonResponse({ error: 'unavailable' }, 500),
+    logger: captured.logger,
+  });
+
+  const result = await monitor.ensure();
+
+  assert.equal(result.reason, 'provider_unavailable');
+  assert.ok(messages(captured.logs).includes('[EVOLUTION_WEBHOOK] check_failed'));
+  assert.equal(messages(captured.logs).includes('[EVOLUTION_WEBHOOK] unhealthy'), false);
 });
