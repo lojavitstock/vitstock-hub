@@ -45,6 +45,7 @@ import {
   validateProviderMessageKey,
 } from '../server/src/providerMessageKey';
 import {
+  classifyMediaProviderRejection,
   mediaFailureForInvalidProviderResponse,
   mediaFailureForTransport,
   mediaFailureForUpstreamStatus,
@@ -2039,6 +2040,71 @@ test('contrato de mídia aceita JSON objeto e rejeita corpo upstream inválido',
   assert.equal(parseMediaProviderJson('not-json'), undefined);
   assert.equal(parseMediaProviderJson('[]'), undefined);
   assert.equal(parseMediaProviderJson('"provider error"'), undefined);
+});
+
+test('diagnóstico de rejeição de mídia classifica respostas 400 sem expor o body upstream', () => {
+  assert.deepEqual(classifyMediaProviderRejection(
+    JSON.stringify({ code: 'MESSAGE_NOT_FOUND', message: 'message provider-id-123 not found' }),
+    'application/json',
+  ), {
+    category: 'message_not_found',
+    providerErrorCode: 'MESSAGE_NOT_FOUND',
+    providerMessageSanitized: 'provider message not found',
+    responseFormat: 'json',
+  });
+
+  assert.equal(classifyMediaProviderRejection(
+    JSON.stringify({ error: 'media key is missing' }),
+    'application/json',
+  ).category, 'media_key_missing');
+  assert.equal(classifyMediaProviderRejection(
+    JSON.stringify({ error: 'decryption failed: bad mac' }),
+    'application/json',
+  ).category, 'decrypt_failed');
+  assert.equal(classifyMediaProviderRejection(
+    JSON.stringify({ error: 'unable to download media' }),
+    'application/json',
+  ).category, 'download_failed');
+  assert.equal(classifyMediaProviderRejection(
+    JSON.stringify({ error: 'media type is not supported' }),
+    'application/json',
+  ).category, 'unsupported_media');
+  assert.equal(classifyMediaProviderRejection(
+    JSON.stringify({ error: 'media URL expired' }),
+    'application/json',
+  ).category, 'expired');
+
+  assert.deepEqual(classifyMediaProviderRejection(
+    JSON.stringify({ error: 'bad request', messageId: 'opaque-message-id', remoteJid: '5521999999999@s.whatsapp.net' }),
+    'application/json',
+  ), {
+    category: 'provider_rejected_unknown',
+    providerMessageSanitized: 'provider rejection',
+    responseFormat: 'json',
+  });
+
+  assert.equal(classifyMediaProviderRejection('unable to download media for 5521999999999@s.whatsapp.net', 'text/plain').category, 'download_failed');
+  assert.equal(classifyMediaProviderRejection('not-json', 'application/json').responseFormat, 'invalid_json');
+  assert.equal(classifyMediaProviderRejection('').responseFormat, 'empty');
+});
+
+test('diagnóstico de rejeição de mídia não conserva identificadores ou segredos', () => {
+  const diagnostics = classifyMediaProviderRejection(JSON.stringify({
+    error: 'message provider-message-id not found for 5521999999999@s.whatsapp.net',
+    mediaKey: 'media-key-secret',
+    directPath: '/v/t62.7118-24/opaque-direct-path',
+    url: 'https://media.example.test/opaque-media-url',
+    apikey: 'evolution-api-key-secret',
+    'x-webhook-secret': 'webhook-secret-value',
+  }), 'application/json');
+  const serialized = JSON.stringify(diagnostics);
+  assert.equal(diagnostics.category, 'message_not_found');
+  assert.doesNotMatch(serialized, /provider-message-id|5521999999999|media-key-secret|opaque-direct-path|opaque-media-url|evolution-api-key-secret|webhook-secret-value/);
+  assert.deepEqual(diagnostics, {
+    category: 'message_not_found',
+    providerMessageSanitized: 'provider message not found',
+    responseFormat: 'json',
+  });
 });
 
 test('validação de provider key preserva PN, LID, aliases e grupo sem exigir participant', () => {

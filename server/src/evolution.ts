@@ -51,6 +51,7 @@ import {
   validateProviderMessageKey,
 } from './providerMessageKey.js';
 import {
+  classifyMediaProviderRejection,
   mediaFailureForInvalidProviderResponse,
   mediaFailureForTransport,
   mediaFailureForUpstreamStatus,
@@ -1022,12 +1023,26 @@ async function forwardMediaRequest(
   }
   if (!response.ok) {
     const failure = mediaFailureForUpstreamStatus(response.status);
-    request.log.warn({
-      media: key,
-      upstreamStatus: response.status,
-      failure: failure.body.error,
-      reason: failure.body.reason,
-    }, 'Evolution media request was rejected');
+    if (response.status === 400) {
+      const diagnostics = classifyMediaProviderRejection(rawBody, response.headers.get('content-type'));
+      request.log.warn({
+        media: key,
+        keySource: 'messageKey',
+        idSource: 'unknown',
+        ...key,
+        upstreamStatus: response.status,
+        failure: failure.body.error,
+        reason: failure.body.reason,
+        ...diagnostics,
+      }, '[EVOLUTION_MEDIA] provider_rejected');
+    } else {
+      request.log.warn({
+        media: key,
+        upstreamStatus: response.status,
+        failure: failure.body.error,
+        reason: failure.body.reason,
+      }, 'Evolution media request was rejected');
+    }
     return reply.code(failure.statusCode).send(failure.body);
   }
 
