@@ -126,6 +126,26 @@ const providerErrorClueKeys = new Set([
 
 const providerCodeKeys = new Set(['code', 'errorcode', 'type']);
 
+const collectDirectStringClues = (value: unknown, clues: string[]) => {
+  if (typeof value === 'string') {
+    clues.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.slice(0, 8).forEach((item) => {
+      if (typeof item === 'string') clues.push(item);
+    });
+  }
+};
+
+/** Read only the response.message field used by Evolution's error envelope. */
+const collectEvolutionResponseMessageClues = (value: unknown, clues: string[]) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const response = (value as Record<string, unknown>).response;
+  if (!response || typeof response !== 'object' || Array.isArray(response)) return;
+  collectDirectStringClues((response as Record<string, unknown>).message, clues);
+};
+
 const normalizeProviderCode = (value: unknown) => {
   if (typeof value !== 'string') return undefined;
   const normalized = value.trim().replace(/[\s-]+/g, '_').toUpperCase();
@@ -165,7 +185,7 @@ const categoryForProviderText = (value: string): MediaProviderRejectionCategory 
   if (/(?:decrypt|decryption|bad[\s_-]+mac|cipher|integrity)/i.test(text)) {
     return 'decrypt_failed';
   }
-  if (/(?:unsupported|not[\s_-]+supported|media[\s_-]*(?:type|format).*(?:invalid|not))/i.test(text)) {
+  if (/(?:unsupported|not[\s_-]+supported|message[\s_-]+is[\s_-]+not[\s_-]+of[\s_-]+the[\s_-]+media[\s_-]+type|media[\s_-]*(?:type|format).*(?:invalid|not))/i.test(text)) {
     return 'unsupported_media';
   }
   if (/(?:expired|expiration|expiry|stale)/i.test(text)) {
@@ -197,11 +217,13 @@ export const classifyMediaProviderRejection = (
   }
 
   const clues: string[] = [];
+  const responseMessageClues: string[] = [];
   const codes: string[] = [];
   let responseFormat: MediaProviderRejectionResponseFormat = 'text';
   try {
     const parsed: unknown = JSON.parse(trimmed);
     responseFormat = 'json';
+    collectEvolutionResponseMessageClues(parsed, responseMessageClues);
     collectProviderErrorClues(parsed, clues, codes);
   } catch {
     responseFormat = contentType?.toLowerCase().includes('json') ? 'invalid_json' : 'text';
@@ -212,7 +234,7 @@ export const classifyMediaProviderRejection = (
     || codes.find((code) => safeGenericProviderCodes.has(code));
   const category = providerErrorCode && categoryForProviderCode[providerErrorCode]
     ? categoryForProviderCode[providerErrorCode]
-    : categoryForProviderText(clues.join(' '));
+    : categoryForProviderText([...responseMessageClues, ...clues].join(' '));
   return {
     category,
     ...(providerErrorCode ? { providerErrorCode } : {}),

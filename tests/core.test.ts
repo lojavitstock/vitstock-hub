@@ -2088,6 +2088,79 @@ test('diagnóstico de rejeição de mídia classifica respostas 400 sem expor o 
   assert.equal(classifyMediaProviderRejection('').responseFormat, 'empty');
 });
 
+test('diagnóstico de mídia reconhece o envelope oficial da Evolution para mensagem ausente', () => {
+  const diagnostics = classifyMediaProviderRejection(JSON.stringify({
+    status: 400,
+    error: 'Bad Request',
+    response: { message: ['Message not found'] },
+  }), 'application/json');
+
+  assert.deepEqual(diagnostics, {
+    category: 'message_not_found',
+    providerMessageSanitized: 'provider message not found',
+    responseFormat: 'json',
+  });
+});
+
+test('diagnóstico de mídia reconhece response.message como string para tipo não suportado', () => {
+  const diagnostics = classifyMediaProviderRejection(JSON.stringify({
+    status: 400,
+    error: 'Bad Request',
+    response: { message: 'The message is not of the media type' },
+  }), 'application/json');
+
+  assert.deepEqual(diagnostics, {
+    category: 'unsupported_media',
+    providerMessageSanitized: 'provider unsupported media',
+    responseFormat: 'json',
+  });
+});
+
+test('diagnóstico de mídia mantém mensagem desconhecida nested em categoria fixa', () => {
+  const diagnostics = classifyMediaProviderRejection(JSON.stringify({
+    status: 400,
+    error: 'Bad Request',
+    response: { message: ['provider-message-id-123 cannot be processed'] },
+  }), 'application/json');
+
+  assert.deepEqual(diagnostics, {
+    category: 'provider_rejected_unknown',
+    providerMessageSanitized: 'provider rejection',
+    responseFormat: 'json',
+  });
+  assert.doesNotMatch(JSON.stringify(diagnostics), /provider-message-id-123|cannot be processed/);
+});
+
+test('diagnóstico de mídia prioriza response.message sobre erro raiz genérico', () => {
+  const diagnostics = classifyMediaProviderRejection(JSON.stringify({
+    status: 400,
+    error: 'Bad Request',
+    response: { message: ['Message not found'] },
+  }), 'application/json');
+
+  assert.equal(diagnostics.category, 'message_not_found');
+  assert.equal(diagnostics.providerMessageSanitized, 'provider message not found');
+});
+
+test('diagnóstico de mídia não expõe dados sensíveis no envelope nested', () => {
+  const diagnostics = classifyMediaProviderRejection(JSON.stringify({
+    status: 400,
+    error: 'Bad Request',
+    response: {
+      message: ['unrecognized provider failure for provider-message-id-123'],
+    },
+    mediaKey: 'media-key-secret',
+    directPath: '/v/t62.7118-24/opaque-direct-path',
+    url: 'https://media.example.test/opaque-media-url',
+    apikey: 'evolution-api-key-secret',
+    'x-webhook-secret': 'webhook-secret-value',
+  }), 'application/json');
+
+  const serialized = JSON.stringify(diagnostics);
+  assert.equal(diagnostics.category, 'provider_rejected_unknown');
+  assert.doesNotMatch(serialized, /provider-message-id-123|media-key-secret|opaque-direct-path|opaque-media-url|evolution-api-key-secret|webhook-secret-value/);
+});
+
 test('diagnóstico de rejeição de mídia não conserva identificadores ou segredos', () => {
   const diagnostics = classifyMediaProviderRejection(JSON.stringify({
     error: 'message provider-message-id not found for 5521999999999@s.whatsapp.net',
