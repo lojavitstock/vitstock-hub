@@ -29,11 +29,35 @@ export type MediaProviderRejectionCategory =
 
 export type MediaProviderRejectionResponseFormat = 'json' | 'text' | 'empty' | 'invalid_json';
 
+export type MediaDownloadStatusClass =
+  | 'not_found_404'
+  | 'gone_410'
+  | 'forbidden_403'
+  | 'upstream_5xx'
+  | 'network_error'
+  | 'decrypt_error'
+  | 'missing_direct_path'
+  | 'missing_media_key'
+  | 'unsupported_media'
+  | 'unknown';
+
+export type MediaMessageAgeBucket = 'lt_1h' | 'lt_24h' | 'lt_7d' | 'lt_30d' | 'gte_30d' | 'unknown';
+
 export type MediaProviderRejectionDiagnostics = {
   category: MediaProviderRejectionCategory;
   providerErrorCode?: string;
   providerMessageSanitized: string;
   responseFormat: MediaProviderRejectionResponseFormat;
+  downloadStatusClass: MediaDownloadStatusClass;
+  hasMediaKey?: boolean;
+  hasDirectPath?: boolean;
+  hasValidMmgUrl?: boolean;
+  hasMediaMessage?: boolean;
+  hasFullMessage?: boolean;
+  reuploadAttempted?: boolean;
+  reuploadSucceeded?: boolean;
+  reuploadFailed?: boolean;
+  messageAgeBucket?: MediaMessageAgeBucket;
 };
 
 const failure = (
@@ -126,6 +150,89 @@ const providerErrorClueKeys = new Set([
 
 const providerCodeKeys = new Set(['code', 'errorcode', 'type']);
 
+const normalizeProviderStatus = (value: unknown) => {
+  const status = typeof value === 'number' ? value : Number(value);
+  return Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined;
+};
+
+const downloadStatusClassForStatus = (status: number | undefined): MediaDownloadStatusClass | undefined => {
+  if (status === 404) return 'not_found_404';
+  if (status === 410) return 'gone_410';
+  if (status === 403) return 'forbidden_403';
+  if (status !== undefined && status >= 500 && status < 600) return 'upstream_5xx';
+  return undefined;
+};
+
+/**
+ * Read only provider error paths. The root `status` is the Evolution HTTP
+ * envelope (normally 400) and is intentionally ignored; nested `status`,
+ * `statusCode`, and Boom `output.statusCode` values are eligible evidence.
+ */
+const collectProviderStatuses = (value: unknown, statuses: number[], depth = 0) => {
+  if (depth > 4 || !value || typeof value !== 'object' || Array.isArray(value)) return;
+  Object.entries(value as Record<string, unknown>).forEach(([key, item]) => {
+    const normalizedKey = key.toLowerCase();
+    if (normalizedKey === 'statuscode' || (normalizedKey === 'status' && depth > 0)) {
+      const status = normalizeProviderStatus(item);
+      if (status !== undefined) statuses.push(status);
+    }
+    if (normalizedKey === 'response' || normalizedKey === 'error' || normalizedKey === 'output') {
+      collectProviderStatuses(item, statuses, depth + 1);
+    }
+  });
+};
+
+const optionalBooleanKeys = new Set([
+  'hasMediaKey',
+  'hasDirectPath',
+  'hasValidMmgUrl',
+  'hasMediaMessage',
+  'hasFullMessage',
+  'reuploadAttempted',
+  'reuploadSucceeded',
+  'reuploadFailed',
+]);
+
+const validMessageAgeBuckets = new Set<MediaMessageAgeBucket>([
+  'lt_1h',
+  'lt_24h',
+  'lt_7d',
+  'lt_30d',
+  'gte_30d',
+  'unknown',
+]);
+
+const collectOptionalDiagnostics = (value: unknown) => {
+  const result: Partial<Pick<
+    MediaProviderRejectionDiagnostics,
+    | 'hasMediaKey'
+    | 'hasDirectPath'
+    | 'hasValidMmgUrl'
+    | 'hasMediaMessage'
+    | 'hasFullMessage'
+    | 'reuploadAttempted'
+    | 'reuploadSucceeded'
+    | 'reuploadFailed'
+    | 'messageAgeBucket'
+  >> = {};
+
+  const visit = (candidate: unknown, depth = 0) => {
+    if (depth > 4 || !candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return;
+    Object.entries(candidate as Record<string, unknown>).forEach(([key, item]) => {
+      if (optionalBooleanKeys.has(key) && typeof item === 'boolean' && !(key in result)) {
+        (result as Record<string, unknown>)[key] = item;
+      }
+      if (key === 'messageAgeBucket' && typeof item === 'string' && validMessageAgeBuckets.has(item as MediaMessageAgeBucket)) {
+        result.messageAgeBucket ||= item as MediaMessageAgeBucket;
+      }
+      if (key === 'response' || key === 'error' || key === 'output') visit(item, depth + 1);
+    });
+  };
+
+  visit(value);
+  return result;
+};
+
 const collectDirectStringClues = (value: unknown, clues: string[]) => {
   if (typeof value === 'string') {
     clues.push(value);
@@ -179,7 +286,7 @@ const categoryForProviderText = (value: string): MediaProviderRejectionCategory 
   if (/message.*(?:not[\s_-]+found|does not exist|missing|undefined)|not[\s_-]+found.*message/i.test(text)) {
     return 'message_not_found';
   }
-  if (/(?:media[\s_-]*key).*(?:missing|absent|undefined|null|invalid|not[\s_-]+provided|not[\s_-]+found)|(?:missing|absent|undefined|null)[^a-z]+media[\s_-]*key/i.test(text)) {
+  if (/(?:media[\s_-]*key).*(?:missing|absent|undefined|null|empty|invalid|not[\s_-]+provided|not[\s_-]+found)|(?:missing|absent|undefined|null|empty)[^a-z]+media[\s_-]*key/i.test(text)) {
     return 'media_key_missing';
   }
   if (/(?:decrypt|decryption|bad[\s_-]+mac|cipher|integrity)/i.test(text)) {
@@ -197,6 +304,24 @@ const categoryForProviderText = (value: string): MediaProviderRejectionCategory 
   return 'provider_rejected_unknown';
 };
 
+const downloadStatusClassForText = (value: string): MediaDownloadStatusClass | undefined => {
+  const text = value.toLowerCase();
+  if (/(?:decrypt|decryption|bad[\s_-]+mac|cipher|integrity|decipher)/i.test(text)) return 'decrypt_error';
+  if (/(?:media[\s_-]*key).*(?:missing|absent|undefined|null|empty|invalid|not[\s_-]+provided|not[\s_-]+found)|(?:missing|absent|undefined|null|empty)[^a-z]+media[\s_-]*key|cannot .*?(?:derive|get).*?(?:media[\s_-]*key)|empty media[\s_-]*key/i.test(text)) {
+    return 'missing_media_key';
+  }
+  if (/(?:direct[\s_-]*path).*(?:missing|absent|undefined|null|empty|not[\s_-]+provided|not[\s_-]+found|not present)|(?:missing|absent|undefined|null|empty)[^a-z]+direct[\s_-]*path|no (?:valid )?(?:media )?(?:url|direct[\s_-]*path)|(?:media[\s_-]*url).*(?:missing|absent|undefined|null|empty)/i.test(text)) {
+    return 'missing_direct_path';
+  }
+  if (/(?:unsupported|not[\s_-]+supported|message[\s_-]+is[\s_-]+not[\s_-]+of[\s_-]+the[\s_-]+media[\s_-]+type|media[\s_-]*(?:type|format).*(?:invalid|not))/i.test(text)) {
+    return 'unsupported_media';
+  }
+  if (/(?:network|connection|socket|timeout|timed[\s_-]+out|econn(?:reset|refused|aborted)|enotfound)/i.test(text)) {
+    return 'network_error';
+  }
+  return undefined;
+};
+
 /**
  * Classifies an upstream rejection without returning any provider text. The
  * returned message is a fixed safe label; identifiers and sensitive fields in
@@ -205,6 +330,7 @@ const categoryForProviderText = (value: string): MediaProviderRejectionCategory 
 export const classifyMediaProviderRejection = (
   rawBody: string,
   contentType?: string | null,
+  upstreamStatus?: number,
 ): MediaProviderRejectionDiagnostics => {
   const raw = String(rawBody || '');
   const trimmed = raw.trim();
@@ -213,15 +339,17 @@ export const classifyMediaProviderRejection = (
       category: 'provider_rejected_unknown',
       providerMessageSanitized: safeMessageByCategory.provider_rejected_unknown,
       responseFormat: 'empty',
+      downloadStatusClass: downloadStatusClassForStatus(upstreamStatus) || 'unknown',
     };
   }
 
   const clues: string[] = [];
   const responseMessageClues: string[] = [];
   const codes: string[] = [];
+  let parsed: unknown;
   let responseFormat: MediaProviderRejectionResponseFormat = 'text';
   try {
-    const parsed: unknown = JSON.parse(trimmed);
+    parsed = JSON.parse(trimmed);
     responseFormat = 'json';
     collectEvolutionResponseMessageClues(parsed, responseMessageClues);
     collectProviderErrorClues(parsed, clues, codes);
@@ -235,11 +363,22 @@ export const classifyMediaProviderRejection = (
   const category = providerErrorCode && categoryForProviderCode[providerErrorCode]
     ? categoryForProviderCode[providerErrorCode]
     : categoryForProviderText([...responseMessageClues, ...clues].join(' '));
+  const providerStatuses: number[] = [];
+  collectProviderStatuses(parsed, providerStatuses);
+  const statusClass = providerStatuses
+    .map((status) => downloadStatusClassForStatus(status))
+    .find((candidate): candidate is MediaDownloadStatusClass => Boolean(candidate));
+  const downloadStatusClass = statusClass
+    || downloadStatusClassForStatus(upstreamStatus)
+    || downloadStatusClassForText([...responseMessageClues, ...clues].join(' '))
+    || 'unknown';
   return {
     category,
     ...(providerErrorCode ? { providerErrorCode } : {}),
     providerMessageSanitized: safeMessageByCategory[category],
     responseFormat,
+    downloadStatusClass,
+    ...collectOptionalDiagnostics(parsed),
   };
 };
 

@@ -2051,6 +2051,7 @@ test('diagnóstico de rejeição de mídia classifica respostas 400 sem expor o 
     providerErrorCode: 'MESSAGE_NOT_FOUND',
     providerMessageSanitized: 'provider message not found',
     responseFormat: 'json',
+    downloadStatusClass: 'unknown',
   });
 
   assert.equal(classifyMediaProviderRejection(
@@ -2081,9 +2082,11 @@ test('diagnóstico de rejeição de mídia classifica respostas 400 sem expor o 
     category: 'provider_rejected_unknown',
     providerMessageSanitized: 'provider rejection',
     responseFormat: 'json',
+    downloadStatusClass: 'unknown',
   });
 
   assert.equal(classifyMediaProviderRejection('unable to download media for 5521999999999@s.whatsapp.net', 'text/plain').category, 'download_failed');
+  assert.equal(classifyMediaProviderRejection('unable to download media for 5521999999999@s.whatsapp.net', 'text/plain').downloadStatusClass, 'unknown');
   assert.equal(classifyMediaProviderRejection('not-json', 'application/json').responseFormat, 'invalid_json');
   assert.equal(classifyMediaProviderRejection('').responseFormat, 'empty');
 });
@@ -2099,6 +2102,7 @@ test('diagnóstico de mídia reconhece o envelope oficial da Evolution para mens
     category: 'message_not_found',
     providerMessageSanitized: 'provider message not found',
     responseFormat: 'json',
+    downloadStatusClass: 'unknown',
   });
 });
 
@@ -2113,6 +2117,7 @@ test('diagnóstico de mídia reconhece response.message como string para tipo n�
     category: 'unsupported_media',
     providerMessageSanitized: 'provider unsupported media',
     responseFormat: 'json',
+    downloadStatusClass: 'unsupported_media',
   });
 });
 
@@ -2127,6 +2132,7 @@ test('diagnóstico de mídia mantém mensagem desconhecida nested em categoria f
     category: 'provider_rejected_unknown',
     providerMessageSanitized: 'provider rejection',
     responseFormat: 'json',
+    downloadStatusClass: 'unknown',
   });
   assert.doesNotMatch(JSON.stringify(diagnostics), /provider-message-id-123|cannot be processed/);
 });
@@ -2177,7 +2183,72 @@ test('diagnóstico de rejeição de mídia não conserva identificadores ou segr
     category: 'message_not_found',
     providerMessageSanitized: 'provider message not found',
     responseFormat: 'json',
+    downloadStatusClass: 'unknown',
   });
+});
+
+test('diagnóstico de mídia distingue status internos do provider e falhas de download', () => {
+  const cases = [
+    [{ response: { output: { statusCode: 404 }, message: 'media not found' } }, 'not_found_404'],
+    [{ response: { status: 410, message: 'media expired' } }, 'gone_410'],
+    [{ error: { status: 403 }, message: 'forbidden media' }, 'forbidden_403'],
+    [{ error: { output: { statusCode: 503 } }, message: 'provider unavailable' }, 'upstream_5xx'],
+    [{ response: { message: 'decryption failed: bad mac' } }, 'decrypt_error'],
+    [{ response: { message: 'Cannot derive from empty media key' } }, 'missing_media_key'],
+    [{ response: { message: 'No valid media URL or directPath present' } }, 'missing_direct_path'],
+    [{ response: { message: 'media type is not supported' } }, 'unsupported_media'],
+    [{ response: { message: 'provider rejected the request' } }, 'unknown'],
+  ] as const;
+
+  for (const [body, expected] of cases) {
+    assert.equal(classifyMediaProviderRejection(JSON.stringify(body), 'application/json', 400).downloadStatusClass, expected);
+  }
+  assert.equal(classifyMediaProviderRejection('', 'application/json', 404).downloadStatusClass, 'not_found_404');
+  assert.equal(classifyMediaProviderRejection('{"error":"network connection timeout"}', 'application/json').downloadStatusClass, 'network_error');
+  assert.equal(classifyMediaProviderRejection('{"status":400,"message":"provider rejected"}', 'application/json').downloadStatusClass, 'unknown');
+});
+
+test('diagnóstico de mídia preserva apenas flags sanitizados quando o provider os fornece', () => {
+  const diagnostics = classifyMediaProviderRejection(JSON.stringify({
+    status: 400,
+    response: {
+      message: 'provider failure',
+      hasMediaKey: true,
+      hasDirectPath: false,
+      hasValidMmgUrl: false,
+      hasMediaMessage: true,
+      hasFullMessage: false,
+      reuploadAttempted: true,
+      reuploadSucceeded: false,
+      reuploadFailed: true,
+      messageAgeBucket: 'lt_24h',
+    },
+    mediaKey: 'media-key-secret',
+    directPath: '/opaque-direct-path',
+    url: 'https://media.example.test/opaque-url',
+    messageId: 'provider-message-id',
+    remoteJid: '5521999999999@s.whatsapp.net',
+    apikey: 'evolution-api-key-secret',
+    'x-webhook-secret': 'webhook-secret-value',
+  }), 'application/json');
+
+  assert.deepEqual(diagnostics, {
+    category: 'provider_rejected_unknown',
+    providerMessageSanitized: 'provider rejection',
+    responseFormat: 'json',
+    downloadStatusClass: 'unknown',
+    hasMediaKey: true,
+    hasDirectPath: false,
+    hasValidMmgUrl: false,
+    hasMediaMessage: true,
+    hasFullMessage: false,
+    reuploadAttempted: true,
+    reuploadSucceeded: false,
+    reuploadFailed: true,
+    messageAgeBucket: 'lt_24h',
+  });
+  const serialized = JSON.stringify(diagnostics);
+  assert.doesNotMatch(serialized, /media-key-secret|opaque-direct-path|opaque-url|provider-message-id|5521999999999|evolution-api-key-secret|webhook-secret-value/);
 });
 
 test('validação de provider key preserva PN, LID, aliases e grupo sem exigir participant', () => {

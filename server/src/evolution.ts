@@ -1003,9 +1003,11 @@ async function forwardMediaRequest(
     const failure = mediaFailureForTransport(isEvolutionTimeout(error) ? 'timeout' : 'network');
     request.log.warn({
       media: key,
+      downloadStatusClass: 'network_error',
+      failureStage: 'request',
       failure: failure.body.error,
       reason: failure.body.reason,
-    }, 'Evolution media request failed before receiving a response');
+    }, '[EVOLUTION_MEDIA] provider_rejected');
     return reply.code(failure.statusCode).send(failure.body);
   }
 
@@ -1016,33 +1018,27 @@ async function forwardMediaRequest(
     const failure = mediaFailureForTransport(isEvolutionTimeout(error) ? 'timeout' : 'network');
     request.log.warn({
       media: key,
+      downloadStatusClass: 'network_error',
+      failureStage: 'response_body',
       failure: failure.body.error,
       reason: failure.body.reason,
-    }, 'Evolution media response could not be read');
+    }, '[EVOLUTION_MEDIA] provider_rejected');
     return reply.code(failure.statusCode).send(failure.body);
   }
   if (!response.ok) {
     const failure = mediaFailureForUpstreamStatus(response.status);
-    if (response.status === 400) {
-      const diagnostics = classifyMediaProviderRejection(rawBody, response.headers.get('content-type'));
-      request.log.warn({
-        media: key,
-        keySource: 'messageKey',
-        idSource: 'unknown',
-        ...key,
-        upstreamStatus: response.status,
-        failure: failure.body.error,
-        reason: failure.body.reason,
-        ...diagnostics,
-      }, '[EVOLUTION_MEDIA] provider_rejected');
-    } else {
-      request.log.warn({
-        media: key,
-        upstreamStatus: response.status,
-        failure: failure.body.error,
-        reason: failure.body.reason,
-      }, 'Evolution media request was rejected');
-    }
+    const diagnostics = classifyMediaProviderRejection(rawBody, response.headers.get('content-type'), response.status);
+    request.log.warn({
+      media: key,
+      keySource: 'messageKey',
+      idSource: 'unknown',
+      ...key,
+      upstreamStatus: response.status,
+      failureStage: 'provider_response',
+      failure: failure.body.error,
+      reason: failure.body.reason,
+      ...diagnostics,
+    }, '[EVOLUTION_MEDIA] provider_rejected');
     return reply.code(failure.statusCode).send(failure.body);
   }
 
@@ -1052,9 +1048,11 @@ async function forwardMediaRequest(
     request.log.warn({
       media: key,
       upstreamStatus: response.status,
+      downloadStatusClass: 'unknown',
+      failureStage: 'provider_response',
       failure: failure.body.error,
       reason: failure.body.reason,
-    }, 'Evolution media request returned an invalid response');
+    }, '[EVOLUTION_MEDIA] provider_rejected');
     return reply.code(failure.statusCode).send(failure.body);
   }
   return body;
