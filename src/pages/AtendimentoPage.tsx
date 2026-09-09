@@ -63,6 +63,7 @@ import {
   type CommonReactionEmoji,
 } from '../utils/messageReactionActions';
 import { canDeleteMessageForEveryone, canEditMessage } from '../utils/messageActions';
+import { applyOutboundSendConfirmation } from '../utils/outboundMessageConfirmation';
 
 export const AtendimentoPage: React.FC = () => {
   const instanceName = 'vitstock_atendimento';
@@ -1156,13 +1157,9 @@ export const AtendimentoPage: React.FC = () => {
       const result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, newMsgText, activeConv.id, newMsg.id, quotedMessage, replyTraceId);
       traceOutbound?.('http.completed', { ok: true, evolutionMessageId: result?.message?.evolutionMessageId || result?.message?.id || null });
       if (activeConversationIdRef.current === activeConv.id) {
-        const providerMessageId = result?.message?.evolutionMessageId || result?.message?.id;
-        setMessages((previous) => previous.map((message) => message.id === newMsg.id ? {
-          ...message,
-          id: providerMessageId || message.id,
-          status: result?.message?.status || result?.status || 'sent',
-          ...(providerMessageId ? { rawKey: { id: providerMessageId, remoteJid: activeConv.id, fromMe: true } } : {}),
-        } : message));
+        setMessages((previous) => previous.map((message) => message.id === newMsg.id
+          ? applyOutboundSendConfirmation(message, result, activeConv.id)
+          : message));
         traceOutbound?.('optimistic.acknowledged', { status: result?.message?.status || result?.status || 'sent' });
       }
       const dailyResponder = result?.dailyResponder;
@@ -1361,13 +1358,9 @@ export const AtendimentoPage: React.FC = () => {
           succeeded += 1;
           traceOutbound('http.completed', { ok: true, evolutionMessageId: result?.message?.evolutionMessageId || result?.message?.id || null });
           if (activeConversationIdRef.current === conversation.id) {
-            const providerMessageId = result?.message?.evolutionMessageId || result?.message?.id;
-            setMessages((previous) => previous.map((message) => message.id === localMessage.id ? {
-              ...message,
-              id: providerMessageId || message.id,
-              status: result?.message?.status || result?.status || 'sent',
-              ...(providerMessageId ? { rawKey: { id: providerMessageId, remoteJid: conversation.id, fromMe: true } } : {}),
-            } : message));
+            setMessages((previous) => previous.map((message) => message.id === localMessage.id
+              ? applyOutboundSendConfirmation(message, result, conversation.id)
+              : message));
             traceOutbound('optimistic.acknowledged', { status: result?.message?.status || result?.status || 'sent' });
           }
           const dailyResponder = result?.dailyResponder;
@@ -1529,16 +1522,14 @@ export const AtendimentoPage: React.FC = () => {
         result = await EvolutionApiService.sendTextMessage(instanceName, activeConv.contact.phone, retryText, activeConv.id, clientMessageId, message.metadata?.quotedMessage, replyTraceId);
       }
       if (activeConversationIdRef.current === conversationId) {
-        const providerMessageId = result?.message?.evolutionMessageId || result?.message?.id;
-        setMessages((previous) => previous.map((item) => item.id === message.id ? {
-          ...item,
-          id: providerMessageId || item.id,
-          status: result?.message?.status || result?.status || 'sent',
-          ...(providerMessageId ? { rawKey: { id: providerMessageId, remoteJid: activeConv.id, fromMe: true } } : {}),
-          metadata: item.metadata?.sentByHub === true
-            ? { ...item.metadata, clientMessageId: item.metadata.clientMessageId || clientMessageId }
-            : item.metadata,
-        } : item));
+        setMessages((previous) => previous.map((item) => item.id === message.id
+          ? applyOutboundSendConfirmation({
+              ...item,
+              metadata: item.metadata?.sentByHub === true
+                ? { ...item.metadata, clientMessageId: item.metadata.clientMessageId || clientMessageId }
+                : item.metadata,
+            }, result, activeConv.id)
+          : item));
       }
       const dailyResponder = result?.dailyResponder;
       if (dailyResponder?.id && dailyResponder?.name) {
@@ -1634,7 +1625,7 @@ export const AtendimentoPage: React.FC = () => {
     setConversations(prev => [newConv, ...prev]);
     captureScrollState(activeConvId);
     setActiveConvId(jid);
-    setMessages([{
+    const optimisticNewChatMessage: Message = {
       id: result?.message?.evolutionMessageId || result?.message?.id || clientMessageId,
       conversationId: jid,
       sender: 'attendant',
@@ -1649,7 +1640,8 @@ export const AtendimentoPage: React.FC = () => {
         sentByUserName: attendantName,
         clientMessageId,
       },
-    }]);
+    };
+    setMessages([applyOutboundSendConfirmation(optimisticNewChatMessage, result, jid)]);
     setShowNewChatModal(false);
     setNewChatNumber('');
     setNewChatName('');

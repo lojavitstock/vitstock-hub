@@ -11,7 +11,9 @@ import {
 } from '../server/src/messageMutations';
 import type { Conversation, Message } from '../src/types';
 import { canDeleteMessageForEveryone, canEditMessage, messageMenuActionsFor } from '../src/utils/messageActions';
+import { applyOutboundSendConfirmation } from '../src/utils/outboundMessageConfirmation';
 import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
+import { normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
 
 const key = (remoteJid = '5511999999999@s.whatsapp.net') => ({
   id: 'BAE5A1',
@@ -140,6 +142,7 @@ test('message menu exposes edit only for textual Hub PN messages and delete for 
   assert.equal(canEditMessage(direct), true);
   assert.equal(canDeleteMessageForEveryone(direct), true);
   assert.ok(messageMenuActionsFor(direct).includes('edit'));
+  assert.ok(messageMenuActionsFor(direct).includes('delete'));
 
   const group = message('group', 'texto', {
     rawKey: key('120363000000@g.us'),
@@ -147,6 +150,94 @@ test('message menu exposes edit only for textual Hub PN messages and delete for 
   });
   assert.equal(canEditMessage(group), false);
   assert.equal(canDeleteMessageForEveryone(group), true);
+  assert.equal(messageMenuActionsFor(group).includes('edit'), false);
+  assert.equal(messageMenuActionsFor(group).includes('delete'), true);
+});
+
+test('confirmação do envio mantém a chave explícita para as ações do menu', () => {
+  const optimistic = message('client-1', 'texto', {
+    metadata: { sentByHub: true, clientMessageId: 'client-1' },
+    rawKey: undefined,
+    status: 'pending',
+  });
+  const confirmed = applyOutboundSendConfirmation(optimistic, {
+    message: { evolutionMessageId: 'provider-1', status: 'sent', providerKey: key() },
+  });
+
+  assert.equal(confirmed.id, 'provider-1');
+  assert.deepEqual(confirmed.metadata?.providerKey, key());
+  assert.equal(canEditMessage(confirmed), true);
+  assert.equal(canDeleteMessageForEveryone(confirmed), true);
+});
+
+test('SSE mantém ambas as ações quando a mensagem chega com providerKey completo', () => {
+  const optimistic = message('client-sse', 'texto', {
+    metadata: { sentByHub: true, clientMessageId: 'client-sse' },
+    rawKey: undefined,
+    status: 'pending',
+  });
+  const incoming = message('provider-sse', 'texto', {
+    metadata: { sentByHub: true, clientMessageId: 'client-sse', providerKey: key() },
+    rawKey: key(),
+  });
+  const reconciled = reconcileRealtimeMessages([optimistic], optimistic.conversationId, {
+    type: 'message.upsert',
+    remoteJid: optimistic.conversationId,
+    message: incoming,
+  });
+
+  assert.equal(reconciled?.length, 1);
+  assert.equal(canEditMessage(reconciled![0]), true);
+  assert.equal(canDeleteMessageForEveryone(reconciled![0]), true);
+});
+
+test('histórico normalizado preserva as duas ações para outbound PN', () => {
+  const reloaded = normalizeEvolutionMessage({
+    key: key(),
+    metadataScope: 'persisted_message',
+    metadata: { sentByHub: true, providerKey: key(), sentByUserId: 'user-1', sentByUserName: 'Leo' },
+    message: { conversation: '*Leo:*\ntexto' },
+    messageTimestamp: 1_700_000_000,
+  }, 0, key().remoteJid!, 'Leo');
+
+  assert.equal(canEditMessage(reloaded), true);
+  assert.equal(canDeleteMessageForEveryone(reloaded), true);
+});
+
+test('inbound, envio externo, apagada e chave parcial não recebem ações destrutivas', () => {
+  const inbound = message('inbound', 'texto', {
+    sender: 'contact',
+    metadata: { providerKey: { ...key(), fromMe: false }, sentByHub: true },
+  });
+  const external = message('external', 'texto', { metadata: { providerKey: key(), sentByHub: false } });
+  const deleted = message('deleted', 'texto', { metadata: { providerKey: key(), sentByHub: true, deletedForEveryone: true } });
+  const partial = message('partial', 'texto', { metadata: { sentByHub: true, providerKey: { id: 'BAE5A1', fromMe: true } } });
+
+  for (const candidate of [inbound, external, deleted, partial]) {
+    assert.equal(canEditMessage(candidate), false);
+    assert.equal(canDeleteMessageForEveryone(candidate), false);
+    assert.equal(messageMenuActionsFor(candidate).includes('edit'), false);
+    assert.equal(messageMenuActionsFor(candidate).includes('delete'), false);
+  }
+
+  const partialResponse = applyOutboundSendConfirmation(
+    message('partial-response', 'texto', { metadata: { sentByHub: true }, status: 'pending' }),
+    { message: { evolutionMessageId: 'BAE5A1', providerKey: { id: 'BAE5A1' } } },
+  );
+  assert.equal(partialResponse.metadata?.providerKey, undefined);
+  assert.equal(canEditMessage(partialResponse), false);
+  assert.equal(canDeleteMessageForEveryone(partialResponse), false);
+});
+
+test('LID bloqueia edição, mas exclusão usa a chave LID exata', () => {
+  const lid = message('lid', 'texto', {
+    metadata: { sentByHub: true, providerKey: key('100000000000001@lid') },
+    rawKey: key('100000000000001@lid'),
+  });
+  assert.equal(canEditMessage(lid), false);
+  assert.equal(canDeleteMessageForEveryone(lid), true);
+  assert.equal(messageMenuActionsFor(lid).includes('edit'), false);
+  assert.equal(messageMenuActionsFor(lid).includes('delete'), true);
 });
 
 test('message.updated replaces the same timeline item and never appends an unloaded target', () => {
