@@ -184,9 +184,13 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
     return Promise.resolve(new Response(JSON.stringify(qaWebhookConfig), { status: 201, headers: { 'Content-Type': 'application/json' } }));
   }
   const participantNumber = String(requestBody?.number || '');
+  const providerRemoteJid = participantNumber.includes('@')
+    ? participantNumber
+    : `${participantNumber.replace(/\D/g, '')}@s.whatsapp.net`;
   const body = path.includes('/message/sendText/') || path.includes('/message/sendMedia/')
-    ? { key: { id: `qa-evolution-${randomUUID()}` } }
+    ? { key: { id: `qa-evolution-${randomUUID()}`, remoteJid: providerRemoteJid, fromMe: true } }
       : path.includes('/message/sendReaction/') ? { status: 'ok' }
+        : path.includes('/chat/updateMessage/') || path.includes('/chat/deleteMessageForEveryone/') ? { status: 'ok' }
         : path.includes('/connectionState/') ? { instance: { state: 'open' } }
             : path.includes('/group/fetchAllGroups/') ? qaGroupMetadataRecords()
             : path.includes('/group/participants/') ? [

@@ -62,6 +62,7 @@ import {
   withOptimisticHubReaction,
   type CommonReactionEmoji,
 } from '../utils/messageReactionActions';
+import { canDeleteMessageForEveryone, canEditMessage } from '../utils/messageActions';
 
 export const AtendimentoPage: React.FC = () => {
   const instanceName = 'vitstock_atendimento';
@@ -97,6 +98,9 @@ export const AtendimentoPage: React.FC = () => {
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
   const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
+  const [editingMessage, setEditingMessage] = useState<Message | null>(null);
+  const [deletingMessage, setDeletingMessage] = useState<Message | null>(null);
+  const [messageActionBusyId, setMessageActionBusyId] = useState<string | null>(null);
   // Estado para Nova Conversa por Telefone
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [newChatNumber, setNewChatNumber] = useState('');
@@ -186,6 +190,8 @@ export const AtendimentoPage: React.FC = () => {
     }
     activeConversationIdRef.current = activeConvId;
     setReplyTo(null);
+    setEditingMessage(null);
+    setDeletingMessage(null);
     setQuickReplyOpen(false);
     setShowConversationTagMenu(false);
     clearAttachmentDrafts();
@@ -746,6 +752,81 @@ export const AtendimentoPage: React.FC = () => {
     scheduleComposerFocus(() => composerRef.current?.focus());
   }, []);
 
+  const applyMessageMutationToConversation = useCallback((message: Message) => {
+    setConversations((previous) => previous.map((conversation) => {
+      const messageIds = new Set([message.id, message.rawKey?.id].filter((value): value is string => typeof value === 'string'));
+      if (!conversation.lastMessageKey?.id || !messageIds.has(conversation.lastMessageKey.id)) return conversation;
+      const content = message.metadata?.deletedForEveryone === true ? 'Mensagem apagada' : message.content;
+      return {
+        ...conversation,
+        lastMessage: conversation.isGroup
+          ? `${message.senderName || 'Atendente'}: ${content}`
+          : content,
+        lastMessageKey: message.rawKey || conversation.lastMessageKey,
+        lastMessageAt: conversation.lastMessageAt,
+        lastMessageTimestamp: conversation.lastMessageTimestamp,
+      };
+    }));
+  }, [setConversations]);
+
+  const handleEditMessage = useCallback((message: Message) => {
+    if (!canEditMessage(message)) return;
+    clearAttachmentDrafts();
+    setReplyTo(null);
+    setIsInternalNote(false);
+    setQuickReplyOpen(false);
+    setAssignmentFeedback('');
+    setEditingMessage(message);
+    composerRef.current?.setText(message.content);
+    scheduleComposerFocus(() => composerRef.current?.focus());
+  }, [clearAttachmentDrafts, setAssignmentFeedback]);
+
+  const handleDeleteMessage = useCallback((message: Message) => {
+    if (!canDeleteMessageForEveryone(message)) return;
+    setDeletingMessage(message);
+  }, []);
+
+  const cancelEditingMessage = useCallback(() => {
+    setEditingMessage(null);
+    composerRef.current?.clear();
+  }, []);
+
+  const confirmDeleteMessage = useCallback(async () => {
+    const target = deletingMessage;
+    if (!target || messageActionBusyId) return;
+    setMessageActionBusyId(target.id);
+    setAssignmentFeedback('');
+    try {
+      const result = isMock
+        ? {
+            message: {
+              ...target,
+              content: 'Mensagem apagada',
+              metadata: { ...(target.metadata || {}), deletedAt: new Date().toISOString(), deletedForEveryone: true, deletedByUserId: user?.id },
+            },
+            reason: 'deleted',
+          }
+        : await EvolutionApiService.deleteMessageForEveryone(target.id);
+      const updatedMessage = result.message?.id
+        ? result.message
+        : {
+            ...target,
+            content: 'Mensagem apagada',
+            metadata: { ...(target.metadata || {}), deletedAt: new Date().toISOString(), deletedForEveryone: true, deletedByUserId: user?.id },
+          };
+      if (activeConversationIdRef.current === target.conversationId) {
+        setMessages((previous) => previous.map((message) => message.id === target.id ? updatedMessage : message));
+      }
+      applyMessageMutationToConversation(updatedMessage);
+      setDeletingMessage(null);
+      setAssignmentFeedback('Mensagem apagada para todos.');
+    } catch (error) {
+      setAssignmentFeedback(outboundErrorMessage(error, 'Não foi possível apagar a mensagem.'));
+    } finally {
+      setMessageActionBusyId(null);
+    }
+  }, [applyMessageMutationToConversation, deletingMessage, isMock, messageActionBusyId, setAssignmentFeedback, setMessages, user?.id]);
+
   const handleReactMessage = useCallback(async (message: Message, emoji: CommonReactionEmoji) => {
     if (!activeConv || !canReactToMessage(message)) {
       setAssignmentFeedback('Aguarde a confirmação da mensagem antes de reagir.');
@@ -918,6 +999,55 @@ export const AtendimentoPage: React.FC = () => {
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (editingMessage) {
+      const target = editingMessage;
+      const newText = composerTextRef.current.trim();
+      if (!newText) {
+        setAssignmentFeedback('A nova mensagem precisa conter texto.');
+        return;
+      }
+      if (activeChatLocked) {
+        setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
+        return;
+      }
+      if (!isMock && whatsappStatus !== 'connected') {
+        setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de editar mensagens.');
+        return;
+      }
+      if (messageActionBusyId) return;
+      setMessageActionBusyId(target.id);
+      setAssignmentFeedback('');
+      try {
+        const result: { message?: Message } = isMock
+          ? {
+              message: {
+                ...target,
+                content: newText,
+                metadata: { ...(target.metadata || {}), editedAt: new Date().toISOString(), editedByUserId: user?.id },
+              },
+            }
+          : await EvolutionApiService.editMessage(target.id, newText);
+        const updatedMessage = result.message?.id
+          ? result.message
+          : {
+              ...target,
+              content: newText,
+              metadata: { ...(target.metadata || {}), editedAt: new Date().toISOString(), editedByUserId: user?.id },
+            };
+        if (activeConversationIdRef.current === target.conversationId) {
+          setMessages((previous) => previous.map((message) => message.id === target.id ? updatedMessage : message));
+        }
+        applyMessageMutationToConversation(updatedMessage);
+        setEditingMessage(null);
+        composerRef.current?.clear();
+        setAssignmentFeedback('Mensagem editada.');
+      } catch (error) {
+        setAssignmentFeedback(outboundErrorMessage(error, 'Não foi possível editar a mensagem.'));
+      } finally {
+        setMessageActionBusyId(null);
+      }
+      return;
+    }
     const pendingAttachments = attachmentDraftsRef.current;
     if ((!composerTextRef.current.trim() && pendingAttachments.length === 0) || !activeConv) return;
     if (pendingAttachments.length > 0) {
@@ -1858,6 +1988,9 @@ export const AtendimentoPage: React.FC = () => {
               onRetryMessage={handleRetryMessage}
               onReplyMessage={handleReplyMessage}
               onReactMessage={handleReactMessage}
+              onEditMessage={handleEditMessage}
+              onDeleteMessage={handleDeleteMessage}
+              messageActionBusyId={messageActionBusyId}
             />
 
             <MessageComposer
@@ -1893,7 +2026,21 @@ export const AtendimentoPage: React.FC = () => {
               activeConversationId={activeConvId}
               replyTo={replyTo}
               onCancelReply={() => setReplyTo(null)}
+              editingMessage={editingMessage}
+              onCancelEditing={cancelEditingMessage}
             />
+            {deletingMessage && (
+              <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 px-4" role="dialog" aria-modal="true" aria-labelledby="delete-message-title">
+                <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#20292f] p-5 shadow-2xl">
+                  <h2 id="delete-message-title" className="text-base font-extrabold text-slate-100">Apagar mensagem para todos?</h2>
+                  <p className="mt-2 text-sm text-slate-400">Esta mensagem será substituída por “Mensagem apagada” para todos os operadores.</p>
+                  <div className="mt-5 flex justify-end gap-2">
+                    <button type="button" disabled={messageActionBusyId === deletingMessage.id} onClick={() => setDeletingMessage(null)} className="rounded-lg px-3 py-2 text-sm font-bold text-slate-300 transition-colors hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50">Cancelar</button>
+                    <button type="button" disabled={messageActionBusyId === deletingMessage.id} onClick={() => void confirmDeleteMessage()} className="rounded-lg bg-red-500 px-3 py-2 text-sm font-extrabold text-white transition-colors hover:bg-red-400 disabled:cursor-wait disabled:opacity-50">{messageActionBusyId === deletingMessage.id ? 'Apagando...' : 'Apagar para todos'}</button>
+                  </div>
+                </div>
+              </div>
+            )}
           </>
         ) : !whatsappConnected ? (
           <div className="flex flex-1 flex-col items-center justify-center px-8 text-center text-zinc-500">

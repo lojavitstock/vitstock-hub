@@ -88,6 +88,11 @@ export interface Message {
     sentByUserName?: string;
     sentOutsideHub?: boolean;
     clientMessageId?: string;
+    editedAt?: string;
+    editedByUserId?: string;
+    deletedAt?: string;
+    deletedForEveryone?: boolean;
+    deletedByUserId?: string;
     /** Explicit Evolution/Baileys identity retained for media replies after reload. */
     providerKey?: {
       id: string;

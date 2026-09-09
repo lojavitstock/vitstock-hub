@@ -197,7 +197,7 @@ export const useConversationInbox = ({
       // Statuses only affect the active timeline. The inbox has no message
       // delivery state to render, so refetching the complete list is wasted.
       if (event.type === 'message.status') return;
-      if (event.type !== 'message.upsert' && event.type !== 'conversation.updated') return;
+      if (event.type !== 'message.upsert' && event.type !== 'message.updated' && event.type !== 'conversation.updated') return;
 
       const previousConversations = conversationsRef.current;
       const reconciledConversations = reconcileRealtimeConversation(previousConversations, event);

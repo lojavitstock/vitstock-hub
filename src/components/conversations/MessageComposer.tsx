@@ -1,5 +1,5 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { FileText, Paperclip, Plus, Reply, Send, Smile, X, Zap } from 'lucide-react';
+import { FileText, Paperclip, Pencil, Plus, Reply, Send, Smile, X, Zap } from 'lucide-react';
 import { Message, QuickReply } from '../../types';
 import { quotedMediaLabel, toQuotedMessage } from '../../utils/quotedMessage';
 import { insertComposerText } from '../../utils/composerSubmission';
@@ -34,6 +34,8 @@ type MessageComposerProps = {
   activeConversationId?: string | null;
   replyTo?: Message | null;
   onCancelReply?: () => void;
+  editingMessage?: Message | null;
+  onCancelEditing?: () => void;
 };
 
 export type MessageComposerHandle = {
@@ -104,6 +106,8 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   activeConversationId,
   replyTo,
   onCancelReply,
+  editingMessage,
+  onCancelEditing,
   } = props;
   const replyPreview = replyTo ? toQuotedMessage(replyTo) : undefined;
   const [emojiOpen, setEmojiOpen] = useState(false);
@@ -117,11 +121,11 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   const [quickReplyCursor, setQuickReplyCursor] = useState(0);
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
-  const hasAttachment = attachmentDrafts.length > 0 && !isInternalNote;
+  const hasAttachment = attachmentDrafts.length > 0 && !isInternalNote && !editingMessage;
 
   const slashToken = useMemo(
-    () => !isInternalNote ? findQuickReplyToken(inputText, quickReplyCursor) : null,
-    [inputText, quickReplyCursor, isInternalNote],
+    () => !isInternalNote && !editingMessage ? findQuickReplyToken(inputText, quickReplyCursor) : null,
+    [editingMessage, inputText, quickReplyCursor, isInternalNote],
   );
   const slashReplies = useMemo(
     () => slashToken ? filterQuickReplies(quickReplies, slashToken.value.slice(1)) : [],
@@ -267,6 +271,11 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
       if (quickReplyOpen) onToggleQuickReply();
       return;
     }
+    if (event.key === 'Escape' && editingMessage) {
+      event.preventDefault();
+      onCancelEditing?.();
+      return;
+    }
     if (event.key === 'Enter' && !event.ctrlKey && !event.shiftKey && slashOpen && token && slashReplies.length > 0 && !event.nativeEvent.isComposing) {
       event.preventDefault();
       const reply = slashReplies[slashIndex] || slashReplies[0];
@@ -311,6 +320,18 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
           </button>
         </div>
       )}
+      {editingMessage && (
+        <div className="mb-3 flex items-start gap-2 rounded-lg border-l-2 border-amber-300 bg-amber-300/10 px-3 py-2 text-left shadow-sm">
+          <Pencil className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-bold text-amber-200">Editando mensagem</p>
+            <p className="truncate text-xs text-slate-300">{editingMessage.content}</p>
+          </div>
+          <button type="button" onClick={onCancelEditing} className="rounded p-1 text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100" title="Cancelar edição" aria-label="Cancelar edição">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
       {activeChatLocked && (
         <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-violet-300/20 bg-violet-300/10 px-3 py-2 text-xs font-semibold text-violet-200">
           <span>Atendimento em andamento por {leaseOwnerName || 'outro atendente'}.</span>
@@ -322,10 +343,10 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
         </div>
       )}
       <div className="mb-2 flex items-center gap-2">
-        <button type="button" onClick={() => onToggleInternalNote(false)} className={`rounded-md px-3 py-1.5 text-sm font-bold transition-all ${!isInternalNote ? 'bg-amber-400 text-zinc-950 shadow-sm' : 'text-zinc-400 hover:text-zinc-200'}`}>
+        <button type="button" disabled={Boolean(editingMessage)} onClick={() => onToggleInternalNote(false)} className={`rounded-md px-3 py-1.5 text-sm font-bold transition-all ${!isInternalNote ? 'bg-amber-400 text-zinc-950 shadow-sm' : 'text-zinc-400 hover:text-zinc-200'} disabled:cursor-not-allowed disabled:opacity-50`}>
           💬 Responder
         </button>
-        <button type="button" onClick={() => onToggleInternalNote(true)} className={`flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-bold transition-all ${isInternalNote ? 'border border-amber-400/40 bg-amber-400/20 text-amber-400' : 'text-zinc-400 hover:text-zinc-200'}`}>
+        <button type="button" disabled={Boolean(editingMessage)} onClick={() => onToggleInternalNote(true)} className={`flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-bold transition-all ${isInternalNote ? 'border border-amber-400/40 bg-amber-400/20 text-amber-400' : 'text-zinc-400 hover:text-zinc-200'} disabled:cursor-not-allowed disabled:opacity-50`}>
           🔒 Nota Interna
         </button>
       </div>
@@ -416,21 +437,21 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
             </div>
           </div>
         )}
-        {!isInternalNote && (
+        {!isInternalNote && !editingMessage && (
           <button ref={emojiButtonRef} type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => { if (quickReplyOpen) onToggleQuickReply(); setEmojiOpen((open) => !open); }} aria-label="Inserir emoji" title="Inserir emoji" className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300">
             <Smile className="h-4 w-4" />
           </button>
         )}
         <input ref={attachmentInputRef} type="file" multiple accept="image/*,video/*,application/pdf,.doc,.docx" className="hidden" onChange={onAttachmentChange} />
-        <button type="button" onClick={() => attachmentInputRef.current?.click()} disabled={activeChatLocked || isInternalNote || sendingMedia || !whatsappConnected} aria-label="Anexar arquivo" title="Anexar arquivo" className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40">
+        <button type="button" onClick={() => attachmentInputRef.current?.click()} disabled={activeChatLocked || isInternalNote || sendingMedia || !whatsappConnected || Boolean(editingMessage)} aria-label="Anexar arquivo" title="Anexar arquivo" className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40">
           <Paperclip className="h-4 w-4" />
         </button>
-        {!isInternalNote && <button ref={quickReplyButtonRef} type="button" disabled={activeChatLocked || sendingMedia} onMouseDown={(event) => event.preventDefault()} onClick={() => { setEmojiOpen(false); setQuickReplySearch(''); setSlashOpen(false); onToggleQuickReply(); }} aria-label="Mensagens rápidas" title="Mensagens rápidas" className={`shrink-0 rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40 ${quickReplyOpen ? 'text-amber-300' : ''}`}>
+        {!isInternalNote && !editingMessage && <button ref={quickReplyButtonRef} type="button" disabled={activeChatLocked || sendingMedia} onMouseDown={(event) => event.preventDefault()} onClick={() => { setEmojiOpen(false); setQuickReplySearch(''); setSlashOpen(false); onToggleQuickReply(); }} aria-label="Mensagens rápidas" title="Mensagens rápidas" className={`shrink-0 rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40 ${quickReplyOpen ? 'text-amber-300' : ''}`}>
           <Zap className="h-4 w-4" />
         </button>}
-        <textarea ref={textareaRef} rows={1} value={inputText} onChange={(event) => { setInputText(event.target.value); setQuickReplyCursor(event.target.selectionStart); onTextChange?.(event.target.value); }} onSelect={(event) => setQuickReplyCursor(event.currentTarget.selectionStart)} onKeyDown={handleKeyDown} onPaste={onInputPaste} disabled={activeChatLocked || sendingMedia} placeholder={isInternalNote ? 'Digite uma nota interna para a equipe...' : 'Digite sua mensagem para o WhatsApp...'} title={!isInternalNote ? 'Cole uma imagem com Ctrl+V para enviar' : undefined} className={`max-h-32 min-h-12 flex-1 resize-y rounded-2xl border bg-[#2a343a] px-4 py-3 text-base leading-6 text-slate-100 placeholder-slate-400 transition-colors focus:outline-none ${isInternalNote ? 'border-amber-400/50 bg-amber-400/5 focus:border-amber-400' : 'border-transparent focus:border-amber-400/70'}`} />
-        <button type="submit" disabled={activeChatLocked || sendingMedia || (!isInternalNote && !whatsappConnected) || (!inputText.trim() && !hasAttachment)} aria-label="Enviar mensagem" title="Enviar mensagem" className={`flex items-center justify-center rounded-full p-3 font-bold transition-all ${isInternalNote ? 'bg-amber-500 text-zinc-950 hover:bg-amber-400' : 'bg-amber-400 text-zinc-950 shadow-[0_0_12px_rgba(238,187,44,0.3)] hover:bg-amber-300'} disabled:cursor-not-allowed disabled:opacity-40`}>
-          <Send className="h-4 w-4" />
+        <textarea ref={textareaRef} rows={1} value={inputText} onChange={(event) => { setInputText(event.target.value); setQuickReplyCursor(event.target.selectionStart); onTextChange?.(event.target.value); }} onSelect={(event) => setQuickReplyCursor(event.currentTarget.selectionStart)} onKeyDown={handleKeyDown} onPaste={onInputPaste} disabled={activeChatLocked || sendingMedia} placeholder={editingMessage ? 'Edite sua mensagem...' : isInternalNote ? 'Digite uma nota interna para a equipe...' : 'Digite sua mensagem para o WhatsApp...'} title={!isInternalNote && !editingMessage ? 'Cole uma imagem com Ctrl+V para enviar' : undefined} className={`max-h-32 min-h-12 flex-1 resize-y rounded-2xl border bg-[#2a343a] px-4 py-3 text-base leading-6 text-slate-100 placeholder-slate-400 transition-colors focus:outline-none ${isInternalNote ? 'border-amber-400/50 bg-amber-400/5 focus:border-amber-400' : 'border-transparent focus:border-amber-400/70'}`} />
+        <button type="submit" disabled={activeChatLocked || sendingMedia || (!isInternalNote && !whatsappConnected) || (!inputText.trim() && !hasAttachment)} aria-label={editingMessage ? 'Salvar edição' : 'Enviar mensagem'} title={editingMessage ? 'Salvar edição' : 'Enviar mensagem'} className={`flex items-center justify-center rounded-full p-3 font-bold transition-all ${isInternalNote ? 'bg-amber-500 text-zinc-950 hover:bg-amber-400' : 'bg-amber-400 text-zinc-950 shadow-[0_0_12px_rgba(238,187,44,0.3)] hover:bg-amber-300'} disabled:cursor-not-allowed disabled:opacity-40`}>
+          {editingMessage ? <Pencil className="h-4 w-4" /> : <Send className="h-4 w-4" />}
         </button>
       </div>
     </form>

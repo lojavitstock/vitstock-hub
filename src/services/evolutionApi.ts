@@ -934,6 +934,32 @@ export class EvolutionApiService {
     }
   }
 
+  static async editMessage(messageId: string, text: string): Promise<{ message: Message; reason?: string }> {
+    if (USE_MOCK) {
+      return { message: {} as Message, reason: 'edited' };
+    }
+    const response = await apiFetch(`/api/evolution/messages/${encodeURIComponent(messageId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ text }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw errorFromResponse(response, body, 'Não foi possível editar a mensagem');
+    return body as { message: Message; reason?: string };
+  }
+
+  static async deleteMessageForEveryone(messageId: string): Promise<{ message: Message; reason?: string }> {
+    if (USE_MOCK) {
+      return { message: {} as Message, reason: 'deleted' };
+    }
+    const response = await apiFetch(`/api/evolution/messages/${encodeURIComponent(messageId)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({}),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw errorFromResponse(response, body, 'Não foi possível apagar a mensagem');
+    return body as { message: Message; reason?: string };
+  }
+
   static async sendMessageReaction(input: {
     number: string;
     remoteJid: string;

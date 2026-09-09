@@ -15,6 +15,7 @@ import {
   MapPin,
   Megaphone,
   Pause,
+  Pencil,
   PhoneCall,
   PhoneIncoming,
   PhoneMissed,
@@ -23,6 +24,7 @@ import {
   RefreshCw,
   Reply,
   SmilePlus,
+  Trash2,
   UserRound,
 } from 'lucide-react';
 import { Conversation, Message } from '../../types';
@@ -33,7 +35,7 @@ import { formatMessageDay, formatMessageTimestamp, formatOperatorLabel } from '.
 import { quotedMediaLabel, quotedMessageExcerpt } from '../../utils/quotedMessage';
 import { getDocumentPresentation } from '../../utils/documentMedia';
 import { mediaViewerItemFrom, type MediaViewerItem } from '../../utils/mediaViewer';
-import { canDownloadMessageMedia, messageCopyText } from '../../utils/messageActions';
+import { canDeleteMessageForEveryone, canDownloadMessageMedia, canEditMessage, messageCopyText } from '../../utils/messageActions';
 import { COMMON_REACTION_EMOJIS, canReactToMessage, type CommonReactionEmoji } from '../../utils/messageReactionActions';
 import { positionMessageActionMenu, positionReactionPalette, type PopoverPosition } from '../../utils/messagePopoverPosition';
 import { providerDisplayName, providerFallbackDisplayName } from '../../utils/whatsappIdentity';
@@ -55,6 +57,9 @@ type MessageTimelineProps = {
   onRetryMessage: (message: Message) => void;
   onReplyMessage: (message: Message) => void;
   onReactMessage: (message: Message, emoji: CommonReactionEmoji) => void;
+  onEditMessage: (message: Message) => void;
+  onDeleteMessage: (message: Message) => void;
+  messageActionBusyId?: string | null;
   onLayoutChange?: (reason: string, messageId?: string) => void;
 };
 
@@ -140,12 +145,15 @@ const MessageActionMenu: React.FC<{
   onReact: (emoji: CommonReactionEmoji) => void;
   onCopy: () => void;
   onDownload?: () => void;
-}> = ({ message, isOpen, align, triggerRef, onClose, onReply, onReact, onCopy, onDownload }) => {
+  onEdit?: () => void;
+  onDelete?: () => void;
+  actionBusy?: boolean;
+}> = ({ message, isOpen, align, triggerRef, onClose, onReply, onReact, onCopy, onDownload, onEdit, onDelete, actionBusy = false }) => {
   const menuRef = React.useRef<HTMLDivElement>(null);
   const paletteRef = React.useRef<HTMLDivElement>(null);
   const reactionTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [reactionPaletteOpen, setReactionPaletteOpen] = useState(false);
-  const fallbackMenuSize = { width: 176, height: 172 };
+  const fallbackMenuSize = { width: 208, height: 250 };
   const fallbackPaletteSize = { width: 260, height: 48 };
   const initialMenuPosition = (): PopoverPosition => {
     if (typeof window === 'undefined') return { top: 8, left: 8 };
@@ -246,6 +254,8 @@ const MessageActionMenu: React.FC<{
         </div>
       )}
       {messageCopyText(message) && <button type="button" role="menuitem" onClick={onCopy} className={itemClass}><Copy className="h-3.5 w-3.5 text-slate-300" /> Copiar</button>}
+      {onEdit && <button type="button" role="menuitem" disabled={actionBusy} onClick={onEdit} className={`${itemClass} disabled:cursor-wait disabled:opacity-50`}><Pencil className="h-3.5 w-3.5 text-amber-300" /> Editar</button>}
+      {onDelete && <button type="button" role="menuitem" disabled={actionBusy} onClick={onDelete} className={`${itemClass} text-red-200 disabled:cursor-wait disabled:opacity-50`}><Trash2 className="h-3.5 w-3.5 text-red-300" /> Apagar para todos</button>}
       {onDownload && canDownloadMessageMedia(message) && <button type="button" role="menuitem" onClick={onDownload} className={itemClass}><Download className="h-3.5 w-3.5 text-amber-300" /> Baixar</button>}
     </div>
     </>,
@@ -549,7 +559,7 @@ const MediaMessageContent: React.FC<{
   return null;
 };
 
-export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, isNearBottom = true, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage, onReplyMessage, onReactMessage, onLayoutChange }) => {
+export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, isNearBottom = true, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage, onReplyMessage, onReactMessage, onEditMessage, onDeleteMessage, messageActionBusyId, onLayoutChange }) => {
   const shouldShowIndicator = !isNearBottom && Boolean(onJumpToLatest);
   const participantIdentityMap = React.useMemo(() => {
     const map = new Map<string, { name?: string; avatar?: string }>();
@@ -734,17 +744,25 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
                 onReact={(emoji) => onReactMessage(message, emoji)}
                 onCopy={() => void copyMessage(message)}
                 onDownload={canDownloadMessageMedia(message) ? () => void downloadMessage(message) : undefined}
+                onEdit={canEditMessage(message) ? () => { setOpenMenuMessageId(null); onEditMessage(message); } : undefined}
+                onDelete={canDeleteMessageForEveryone(message) ? () => { setOpenMenuMessageId(null); onDeleteMessage(message); } : undefined}
+                actionBusy={messageActionBusyId === message.id}
               />}
               {isMe && <p className="mb-1 text-xs font-bold text-amber-200/75">{message.metadata?.sentOutsideHub ? 'Enviado fora do Vitstock Hub' : formatOperatorLabel(message.senderName)}</p>}
               <QuotedMessageBlock message={message} onOpenOriginal={openQuotedMessage} onLayoutChange={onLayoutChange} />
-              <MediaMessageContent message={message} instanceName={instanceName} onOpenViewer={openMediaViewer} onLayoutChange={onLayoutChange} />
-              <SpecialMessageContent message={message} contactPhone={activeConversation.isGroup ? undefined : activeConversation.contact.phone} />
-              <InteractiveMessageContent message={message} />
-              {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap"><WhatsAppFormattedText text={message.content} /></p>}
+              {message.metadata?.deletedForEveryone === true ? (
+                <p className="italic text-slate-400">Mensagem apagada</p>
+              ) : <>
+                <MediaMessageContent message={message} instanceName={instanceName} onOpenViewer={openMediaViewer} onLayoutChange={onLayoutChange} />
+                <SpecialMessageContent message={message} contactPhone={activeConversation.isGroup ? undefined : activeConversation.contact.phone} />
+                <InteractiveMessageContent message={message} />
+                {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap"><WhatsAppFormattedText text={message.content} /></p>}
+              </>}
               {message.metadata?.reactions?.length ? <ReactionBadges reactions={message.metadata.reactions} align={isMe ? 'right' : 'left'} /> : null}
             </div>
             <div className={`mt-4 flex items-center gap-1 text-xs text-zinc-500 ${isMe ? 'justify-end' : ''}`}>
               <span>{formatMessageTimestamp(message.timestampMs, message.timestamp)}</span>
+              {message.metadata?.editedAt && <span className="italic">editada</span>}
               {isMe && message.status === 'failed' && <span className="font-bold text-red-300">Falha no envio</span>}
               {isMe && message.status === 'pending' && <RefreshCw className="h-3.5 w-3.5 animate-spin text-amber-300" aria-label="Enviando" />}
               {isMe && message.status !== 'failed' && message.status !== 'pending' && <CheckCheck className={`h-3.5 w-3.5 ${message.status === 'read' ? 'text-emerald-400' : message.status === 'delivered' ? 'text-amber-400' : 'text-slate-400'}`} />}

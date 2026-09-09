@@ -553,7 +553,7 @@ export const useConversationMessages = ({
         }
         return;
       }
-      if (event.type !== 'message.upsert' && event.type !== 'message.status') return;
+      if (event.type !== 'message.upsert' && event.type !== 'message.updated' && event.type !== 'message.status') return;
       traceScroll(`realtime.${event.type}.received`, activeConversationId, { eventConversationId: event.message?.conversationId || event.remoteJid || null });
       traceOutboundRealtimeAck({
         conversationId: event.message?.conversationId || String(event.remoteJid || ''),
@@ -645,7 +645,7 @@ export const useConversationMessages = ({
             && stickToBottomRef.current
           ) scrollToBottom('realtime.message.bottom');
         });
-      } else {
+      } else if (event.type === 'message.status') {
         window.requestAnimationFrame(() => {
           if (
             scrollGenerationRef.current === scrollGeneration

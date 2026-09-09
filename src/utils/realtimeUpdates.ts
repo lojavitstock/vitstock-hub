@@ -288,6 +288,32 @@ const updateConversationFromStatus = (
   return changed ? next : conversation;
 };
 
+const updateConversationFromMessageUpdate = (
+  conversation: Conversation,
+  event: RealtimeEventPayload,
+): Conversation | null => {
+  const message = event.message;
+  if (!message?.id || !eventMatchesConversation(conversation, event)) return null;
+  const messageIds = new Set([message.id, message.rawKey?.id, event.messageId].filter((value): value is string => typeof value === 'string'));
+  const isLastMessage = Boolean(conversation.lastMessageKey?.id && messageIds.has(conversation.lastMessageKey.id));
+  if (!isLastMessage) return conversation;
+
+  const isIncoming = message.sender === 'contact';
+  const messagePreview = comparableMessagePreview(message);
+  const nextPreview = conversation.isGroup
+    ? `${isIncoming ? (message.senderName || 'Participante') : (message.senderName || 'Atendente')}: ${messagePreview || mediaPreview(message.mediaType) || conversation.lastMessage}`
+    : messagePreview || mediaPreview(message.mediaType) || conversation.lastMessage;
+  const nextKey = messageKeyForConversation(message, event, conversation);
+  if (conversation.lastMessage === nextPreview && conversation.lastMessageKey?.id === nextKey.id) return conversation;
+  return {
+    ...conversation,
+    lastMessage: nextPreview,
+    lastMessageKey: nextKey,
+    // A semantic mutation is not a new activity: retain timestamp, unread,
+    // needsResponse and array position exactly as they were.
+  };
+};
+
 /**
  * Applies only fields that the current conversation.updated payload actually
  * carries. Returning null means the event is insufficient and must use the
@@ -297,7 +323,7 @@ export const reconcileRealtimeConversation = (
   previous: Conversation[],
   event: RealtimeEventPayload,
 ): Conversation[] | null => {
-  if (event.type !== 'conversation.updated' && event.type !== 'message.upsert') return null;
+  if (event.type !== 'conversation.updated' && event.type !== 'message.upsert' && event.type !== 'message.updated') return null;
   // A reaction updates metadata on an existing message. It is never a new
   // conversation activity and must not move the chat or alter unread state.
   if (event.type === 'message.upsert' && event.reaction === true) return previous;
@@ -308,7 +334,9 @@ export const reconcileRealtimeConversation = (
   const current = previous[index];
   const updated = event.type === 'message.upsert'
     ? updateConversationFromMessage(current, event)
-    : updateConversationFromStatus(current, event);
+    : event.type === 'message.updated'
+      ? updateConversationFromMessageUpdate(current, event)
+      : updateConversationFromStatus(current, event);
   if (!updated) return null;
   if (updated === current) return previous;
 
@@ -348,6 +376,15 @@ export const reconcileRealtimeMessages = (
     if (!message?.id || (message.conversationId && message.conversationId !== activeConversationId)) return null;
     // mergeConversationMessages correlates a provider ID that arrives before
     // the POST response with the matching optimistic outbound message.
+    return mergeConversationMessages(current, [message]);
+  }
+
+  if (event.type === 'message.updated') {
+    const message = event.message;
+    if (!message?.id || (message.conversationId && message.conversationId !== activeConversationId)) return null;
+    // Semantic updates replace an existing item only. They must never append
+    // a second copy when the target is outside the loaded timeline window.
+    if (!current.some((item) => item.id === message.id)) return current;
     return mergeConversationMessages(current, [message]);
   }
 

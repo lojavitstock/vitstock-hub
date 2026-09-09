@@ -67,6 +67,15 @@ import { buildReplyFailureTrace } from './replyFailureTrace.js';
 import { resolveConversationForOperation, resolveConversationWithClient } from './conversationResolver.js';
 import { filterConversationalProviderChats, isConversationalProviderJid } from './providerJidPolicy.js';
 import {
+  deletedMessageMetadata,
+  editedMessageMetadata,
+  evolutionDeleteMessagePayload,
+  evolutionEditMessagePayload,
+  isProviderTimeout,
+  MessageMutationError,
+  MESSAGE_MUTATION_ERROR_CODES,
+} from './messageMutations.js';
+import {
   OPAQUE_LID_STAGING_CLEANUP_INTERVAL_MS,
   OPAQUE_LID_STAGING_TTL_MS,
   createOpaqueLidStagingEnvelope,
@@ -140,6 +149,7 @@ const sendReactionSchema = z.object({
   messageId: z.string().trim().min(1).max(256),
   emoji: z.union([z.enum(['👍', '❤️', '😂', '😮', '😢', '🙏']), z.null()]),
 });
+const editMessageSchema = z.object({ text: z.string().trim().min(1).max(4096) });
 const mediaSchema = z.object({ messageKey: z.record(z.string(), z.unknown()) });
 const phoneSchema = z.object({ number: z.string().regex(/^\d{8,20}$/) });
 const noteSchema = z.object({
@@ -2050,6 +2060,15 @@ function localMessageToProviderRecord(row: any) {
   };
 }
 
+function providerKeyForOutboundResponse(body: any, messageId: string | undefined) {
+  if (!messageId) return undefined;
+  const candidates = [body?.message, body?.data?.message, body?.data, body].filter(Boolean);
+  const providerKey = candidates
+    .map((candidate) => providerMessageKeyFromRecord(candidate, messageId))
+    .find((candidate) => candidate?.id && candidate.remoteJid && candidate.fromMe === true);
+  return providerKey ? { ...providerKey, id: messageId } : undefined;
+}
+
 function storedMessageToRealtimeMessage(row: any) {
   const timestampMs = new Date(row.sent_at).getTime();
   const id = row.evolution_message_id || row.id;
@@ -2081,6 +2100,91 @@ function storedMessageToRealtimeMessage(row: any) {
     status: row.status,
     isInternalNote: false,
   };
+}
+
+type MessageMutationDbRow = {
+  id: string;
+  company_id: string;
+  conversation_id: string;
+  evolution_message_id: string | null;
+  sender: 'contact' | 'attendant' | 'system';
+  sender_name: string | null;
+  content: string;
+  media_url: string | null;
+  media_type: string | null;
+  metadata: Record<string, any> | null;
+  status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
+  sent_at: string;
+  evolution_remote_jid: string;
+  contact_phone: string;
+  is_group: boolean;
+};
+
+const messageMutationTargetQuery = `
+  SELECT m.id, m.company_id, m.conversation_id, m.evolution_message_id, m.sender, m.sender_name,
+         m.content, m.media_url, m.media_type, m.metadata, m.status, m.sent_at,
+         c.evolution_remote_jid, c.is_group,
+         regexp_replace(contact.phone, '\\D', '', 'g') AS contact_phone
+  FROM messages m
+  INNER JOIN conversations c ON c.id = m.conversation_id
+  INNER JOIN contacts contact ON contact.id = c.contact_id
+  WHERE m.company_id = $1::uuid
+    AND (m.evolution_message_id = $2::text OR m.id::text = $2::text)
+    AND m.is_internal_note = false
+  LIMIT 1`;
+
+async function findMessageMutationTarget(companyId: string, messageId: string) {
+  const result = await db.query<MessageMutationDbRow>(messageMutationTargetQuery, [companyId, messageId]);
+  return result.rows[0];
+}
+
+async function persistMessageMutation(input: {
+  target: MessageMutationDbRow;
+  operation: 'edit' | 'delete';
+  userId: string;
+  text?: string;
+}) {
+  const changedAt = new Date().toISOString();
+  const metadata = input.operation === 'edit'
+    ? editedMessageMetadata(input.target.metadata, input.userId, changedAt)
+    : deletedMessageMetadata(input.target.metadata, input.userId, changedAt);
+  const content = input.operation === 'edit' ? input.text!.trim() : 'Mensagem apagada';
+  const updated = await db.query(
+    `UPDATE messages
+     SET content = $1::text,
+         metadata = $2::jsonb
+     WHERE id = $3::uuid
+       AND company_id = $4::uuid
+     RETURNING id`,
+    [content, JSON.stringify(metadata), input.target.id, input.target.company_id],
+  );
+  if (!updated.rowCount) throw new Error('message_mutation_persist_failed');
+
+  // Keep the inbox preview in place only when this message is still the last
+  // visible activity. The timestamp and ordering are intentionally untouched.
+  const preview = input.target.is_group
+    ? `${input.target.sender_name || 'Atendente'}: ${content}`
+    : content;
+  await db.query(
+    `UPDATE conversations c
+     SET last_message = $1::text,
+         updated_at = now()
+     WHERE c.id = $2::uuid
+       AND NOT EXISTS (
+         SELECT 1
+         FROM messages newer
+         WHERE newer.conversation_id = c.id
+           AND (
+             newer.sent_at > $3::timestamptz
+             OR (newer.sent_at = $3::timestamptz AND newer.id <> $4::uuid)
+           )
+       )`,
+    [preview, input.target.conversation_id, input.target.sent_at, input.target.id],
+  );
+
+  const persisted = await findMessageMutationTarget(input.target.company_id, input.target.id);
+  if (!persisted) throw new Error('message_mutation_reload_failed');
+  return persisted;
 }
 
 type ProviderPersistenceResult = {
@@ -2761,6 +2865,81 @@ function extractWebhookMessageStatus(body: any) {
   return typeof messageId === 'string' && status ? { messageId, status } : undefined;
 }
 
+const providerMutationEvents = new Set([
+  'messages.edit',
+  'messages.edited',
+  'messages.delete',
+  'messages.update',
+  'messages.updated',
+  'message.update',
+  'send.message.update',
+  'message.edited',
+  'message.deleted',
+]);
+
+const providerMutationKeyCandidates = (body: any) => {
+  const data = body?.data || body?.payload || body;
+  const values = [
+    ...(Array.isArray(data?.keys) ? data.keys : []),
+    data?.key,
+    data?.message?.key,
+    data?.editedMessage?.key,
+    data?.message?.editedMessage?.key,
+    data?.protocolMessage?.key,
+    data,
+  ];
+  const keys = values
+    .map((value) => value?.key && typeof value.key === 'object' ? value.key : value)
+    .filter((value) => value && typeof value === 'object' && typeof value.id === 'string' && value.id.trim());
+  return [...new Map(keys.map((key) => [key.id.trim(), key])).values()];
+};
+
+const providerMutationText = (body: any) => {
+  const data = body?.data || body?.payload || body;
+  const candidates = [
+    data?.message?.editedMessage?.message,
+    data?.editedMessage?.message,
+    data?.protocolMessage?.editedMessage?.message,
+    data?.message?.protocolMessage?.editedMessage?.message,
+    data?.message,
+    data?.editedMessage,
+  ];
+  for (const message of candidates) {
+    const text = firstProviderText(
+      message?.conversation,
+      message?.extendedTextMessage?.text,
+      message?.imageMessage?.caption,
+      message?.videoMessage?.caption,
+      message?.documentMessage?.caption,
+    );
+    if (text) return text;
+  }
+  return undefined;
+};
+
+async function persistProviderMessageMutation(
+  companyId: string,
+  body: any,
+  reason: 'edited' | 'deleted',
+) {
+  const content = reason === 'edited' ? providerMutationText(body) : undefined;
+  if (reason === 'edited' && !content) return undefined;
+
+  for (const key of providerMutationKeyCandidates(body)) {
+    const target = await findMessageMutationTarget(companyId, key.id.trim());
+    if (!target) continue;
+    if (reason === 'deleted' && target.metadata?.deletedForEveryone === true) return undefined;
+    const persisted = await persistMessageMutation({
+      target,
+      operation: reason === 'edited' ? 'edit' : 'delete',
+      userId: 'evolution-webhook',
+      ...(content ? { text: content } : {}),
+    });
+    return { message: storedMessageToRealtimeMessage(persisted), remoteJid: persisted.evolution_remote_jid };
+  }
+  return undefined;
+}
+
 async function recordDailyResponder(companyId: string, number: string, user: { id: string; name: string }) {
   if (isWhatsAppGroupJid(number)) return undefined;
   const remoteJid = canonicalPhoneJid(number);
@@ -2992,15 +3171,19 @@ async function ensureOutboundMessage(input: {
   }
 }
 
-async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed', evolutionMessageId?: string) {
+async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed', evolutionMessageId?: string, providerKey?: Record<string, unknown>) {
   try {
     await db.query(
       `UPDATE messages
        SET status = $2,
            evolution_message_id = COALESCE($3, evolution_message_id),
+           metadata = CASE
+             WHEN $4::jsonb IS NULL THEN metadata
+             ELSE COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('providerKey', $4::jsonb)
+           END,
            sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END
        WHERE id = $1`,
-      [messageId, status, evolutionMessageId || null],
+      [messageId, status, evolutionMessageId || null, providerKey ? JSON.stringify(providerKey) : null],
     );
   } catch (error: any) {
     // Se o webhook vinculou o ID alguns milissegundos antes, a restrição
@@ -3033,7 +3216,10 @@ async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed
              ELSE $4
            END
        WHERE id = $1`,
-      [providerMessage.rows[0].id, pending.sender_name, JSON.stringify(pending.metadata || {}), status],
+      [providerMessage.rows[0].id, pending.sender_name, JSON.stringify({
+        ...(pending.metadata || {}),
+        ...(providerKey ? { providerKey } : {}),
+      }), status],
     );
     await db.query(
       `DELETE FROM messages
@@ -4060,6 +4246,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
     const evolutionMessageId = evolutionMessageReference?.messageId;
+    const outboundProviderKey = providerKeyForOutboundResponse(dispatch.body, evolutionMessageId);
     traceOutbound(request, 'evolution.response', {
       clientMessageId,
       replyTraceId,
@@ -4070,7 +4257,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       elapsedMs: Date.now() - outboundStartedAt,
       evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
     });
-    await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
+    await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined, outboundProviderKey);
     traceOutbound(request, 'persistence.confirmed', {
       clientMessageId,
       replyTraceId,
@@ -4101,8 +4288,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
           ...(normalizedQuote
             ? { quotedMessage: normalizedQuote }
             : {}),
+          ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
         },
-        rawKey: { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
+        rawKey: outboundProviderKey || { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
         timestampMs: realtimeTimestampMs,
         timestamp: new Date(realtimeTimestampMs).toISOString(),
         status: 'sent',
@@ -4128,7 +4316,13 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       dailyResponder,
       lease: leaseAcquisition.lease,
       remoteJid: canonicalRemoteJid,
-      message: { id: localMessage.messageId, evolutionMessageId, status: 'sent', senderName: request.user!.name },
+      message: {
+        id: localMessage.messageId,
+        evolutionMessageId,
+        status: 'sent',
+        senderName: request.user!.name,
+        ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+      },
     };
   });
 
@@ -4397,6 +4591,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
     const evolutionMessageId = evolutionMessageReference?.messageId;
+    const outboundProviderKey = providerKeyForOutboundResponse(dispatch.body, evolutionMessageId);
     traceOutbound(request, 'evolution.response', {
       clientMessageId,
       replyTraceId,
@@ -4407,7 +4602,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       elapsedMs: Date.now() - outboundStartedAt,
       evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
     });
-    await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
+    await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined, outboundProviderKey);
     traceOutbound(request, 'persistence.confirmed', {
       clientMessageId,
       replyTraceId,
@@ -4442,8 +4637,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
           ...(normalizedQuote
             ? { quotedMessage: normalizedQuote }
             : {}),
+          ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
         },
-        rawKey: { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
+        rawKey: outboundProviderKey || { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
         timestampMs: realtimeTimestampMs,
         timestamp: new Date(realtimeTimestampMs).toISOString(),
         status: 'sent',
@@ -4468,8 +4664,152 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       dailyResponder,
       lease: leaseAcquisition.lease,
       remoteJid: canonicalRemoteJid,
-      message: { id: localMessage.messageId, evolutionMessageId, status: 'sent', senderName: request.user!.name },
+      message: {
+        id: localMessage.messageId,
+        evolutionMessageId,
+        status: 'sent',
+        senderName: request.user!.name,
+        ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+      },
     };
+  });
+
+  app.patch('/api/evolution/messages/:messageId', { preHandler: requireUser }, async (request, reply) => {
+    const parsed = editMessageSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Texto de edição inválido', code: MESSAGE_MUTATION_ERROR_CODES.unsupportedType });
+    const messageId = String((request.params as { messageId?: string })?.messageId || '').trim();
+    if (!messageId) return reply.code(404).send({ error: 'Mensagem não encontrada', code: MESSAGE_MUTATION_ERROR_CODES.notFound });
+
+    const target = await findMessageMutationTarget(request.user!.companyId, messageId);
+    if (!target) return reply.code(404).send({ error: 'Mensagem não encontrada', code: MESSAGE_MUTATION_ERROR_CODES.notFound });
+
+    let payload: ReturnType<typeof evolutionEditMessagePayload>;
+    try {
+      payload = evolutionEditMessagePayload(target, parsed.data.text);
+    } catch (error) {
+      if (error instanceof MessageMutationError) return reply.code(error.statusCode).send({ error: error.message, code: error.code });
+      throw error;
+    }
+
+    const leaseNumber = target.is_group ? target.evolution_remote_jid : target.contact_phone || target.evolution_remote_jid;
+    const leaseAcquisition = await acquireOutboundLease({
+      companyId: request.user!.companyId,
+      user: request.user!,
+      number: leaseNumber,
+      remoteJid: target.evolution_remote_jid,
+    });
+    if (!leaseAcquisition.acquired) {
+      return reply.code(409).send({
+        error: `Atendimento em andamento por ${leaseAcquisition.lease.ownerName}`,
+        code: 'conversation_lease_active',
+        lease: leaseAcquisition.lease,
+      });
+    }
+    publishRealtimeEvent(request.user!.companyId, 'conversation.updated', leaseRealtimePayload({
+      remoteJid: target.evolution_remote_jid,
+      phone: leaseNumber,
+      lease: leaseAcquisition.lease,
+    }));
+
+    let response: Response;
+    try {
+      response = await evolutionRequest(
+        `/chat/updateMessage/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+        { method: 'POST', body: JSON.stringify(payload) },
+      );
+    } catch (error) {
+      request.log.warn({ err: error, messageId }, 'Falha ao editar mensagem na Evolution API');
+      const timeout = isProviderTimeout(error);
+      return reply.code(timeout ? 504 : 502).send({
+        error: timeout ? 'A Evolution API excedeu o tempo limite' : 'A Evolution API recusou a edição',
+        code: timeout ? MESSAGE_MUTATION_ERROR_CODES.providerTimeout : MESSAGE_MUTATION_ERROR_CODES.editRejected,
+      });
+    }
+    if (!response.ok) {
+      request.log.warn({ messageId, providerStatus: response.status }, 'Evolution API recusou a edição de mensagem');
+      return reply.code(502).send({ error: 'A Evolution API recusou a edição', code: MESSAGE_MUTATION_ERROR_CODES.editRejected });
+    }
+
+    const persisted = await persistMessageMutation({ target, operation: 'edit', userId: request.user!.id, text: parsed.data.text });
+    const message = storedMessageToRealtimeMessage(persisted);
+    publishRealtimeEvent(request.user!.companyId, 'message.updated', {
+      remoteJid: persisted.evolution_remote_jid,
+      phone: leaseNumber,
+      messageId: message.id,
+      timestampMs: message.timestampMs,
+      fromMe: true,
+      reason: 'edited',
+      message,
+    });
+    return { message, reason: 'edited' };
+  });
+
+  app.delete('/api/evolution/messages/:messageId', { preHandler: requireUser }, async (request, reply) => {
+    const messageId = String((request.params as { messageId?: string })?.messageId || '').trim();
+    if (!messageId) return reply.code(404).send({ error: 'Mensagem não encontrada', code: MESSAGE_MUTATION_ERROR_CODES.notFound });
+
+    const target = await findMessageMutationTarget(request.user!.companyId, messageId);
+    if (!target) return reply.code(404).send({ error: 'Mensagem não encontrada', code: MESSAGE_MUTATION_ERROR_CODES.notFound });
+
+    let payload: ReturnType<typeof evolutionDeleteMessagePayload>;
+    try {
+      payload = evolutionDeleteMessagePayload(target);
+    } catch (error) {
+      if (error instanceof MessageMutationError) return reply.code(error.statusCode).send({ error: error.message, code: error.code });
+      throw error;
+    }
+
+    const leaseNumber = target.is_group ? target.evolution_remote_jid : target.contact_phone || target.evolution_remote_jid;
+    const leaseAcquisition = await acquireOutboundLease({
+      companyId: request.user!.companyId,
+      user: request.user!,
+      number: leaseNumber,
+      remoteJid: target.evolution_remote_jid,
+    });
+    if (!leaseAcquisition.acquired) {
+      return reply.code(409).send({
+        error: `Atendimento em andamento por ${leaseAcquisition.lease.ownerName}`,
+        code: 'conversation_lease_active',
+        lease: leaseAcquisition.lease,
+      });
+    }
+    publishRealtimeEvent(request.user!.companyId, 'conversation.updated', leaseRealtimePayload({
+      remoteJid: target.evolution_remote_jid,
+      phone: leaseNumber,
+      lease: leaseAcquisition.lease,
+    }));
+
+    let response: Response;
+    try {
+      response = await evolutionRequest(
+        `/chat/deleteMessageForEveryone/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+        { method: 'DELETE', body: JSON.stringify(payload) },
+      );
+    } catch (error) {
+      request.log.warn({ err: error, messageId }, 'Falha ao apagar mensagem na Evolution API');
+      const timeout = isProviderTimeout(error);
+      return reply.code(timeout ? 504 : 502).send({
+        error: timeout ? 'A Evolution API excedeu o tempo limite' : 'A Evolution API recusou a exclusão',
+        code: timeout ? MESSAGE_MUTATION_ERROR_CODES.providerTimeout : MESSAGE_MUTATION_ERROR_CODES.deleteRejected,
+      });
+    }
+    if (!response.ok) {
+      request.log.warn({ messageId, providerStatus: response.status }, 'Evolution API recusou a exclusão de mensagem');
+      return reply.code(502).send({ error: 'A Evolution API recusou a exclusão', code: MESSAGE_MUTATION_ERROR_CODES.deleteRejected });
+    }
+
+    const persisted = await persistMessageMutation({ target, operation: 'delete', userId: request.user!.id });
+    const message = storedMessageToRealtimeMessage(persisted);
+    publishRealtimeEvent(request.user!.companyId, 'message.updated', {
+      remoteJid: persisted.evolution_remote_jid,
+      phone: leaseNumber,
+      messageId: message.id,
+      timestampMs: message.timestampMs,
+      fromMe: true,
+      reason: 'deleted',
+      message,
+    });
+    return { message, reason: 'deleted' };
   });
 
   app.post('/api/evolution/messages/reaction', { preHandler: requireUser }, async (request, reply) => {
@@ -4648,9 +4988,32 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const event = String(body?.event || body?.type || 'unknown');
     const normalizedEvent = event.toLowerCase().replace(/_/g, '.');
     const isMessageEvent = normalizedEvent === 'messages.upsert' || normalizedEvent === 'messages.set';
+    const isProviderMutationEvent = providerMutationEvents.has(normalizedEvent);
     let persistedMessages = 0;
     const company = await db.query<{ id: string }>('SELECT id FROM companies ORDER BY created_at LIMIT 1');
     const companyId = company.rows[0]?.id;
+
+    if (companyId && isProviderMutationEvent) {
+      try {
+        const mutation = await persistProviderMessageMutation(
+          companyId,
+          body,
+          normalizedEvent.includes('delete') ? 'deleted' : 'edited',
+        );
+        if (mutation) {
+          publishRealtimeEvent(companyId, 'message.updated', {
+            remoteJid: mutation.remoteJid,
+            messageId: mutation.message.id,
+            timestampMs: mutation.message.timestampMs,
+            fromMe: mutation.message.sender === 'attendant',
+            reason: normalizedEvent.includes('delete') ? 'deleted' : 'edited',
+            message: mutation.message,
+          });
+        }
+      } catch (error) {
+        request.log.warn({ err: error, event }, 'Falha ao reconciliar edição/exclusão recebida da Evolution');
+      }
+    }
 
     if (isMessageEvent) {
       const data = body?.data || body?.payload || body;
