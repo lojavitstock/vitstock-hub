@@ -8,6 +8,7 @@ import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 import type { RealtimeEventPayload } from '../utils/realtimeUpdates';
 import { REALTIME_RECONNECTED_EVENT } from '../utils/realtimeConfig';
 import type { QuotedMessage } from '../utils/quotedMessage';
+import { traceAvatarSelection } from '../utils/avatarDiagnostics';
 
 const unwrapEvolutionMessage = (message: any) => {
   let current = message || {};
@@ -454,7 +455,7 @@ export class EvolutionApiService {
       const contactsData = payload.contacts;
       const chatsData = payload.chats;
       const storedContactsData = payload.storedContacts;
-      const storedContactsMap = new Map<string, { name: string; source: string }>();
+      const storedContactsMap = new Map<string, { name: string; source: string; avatarPresent?: boolean; googleAvatarPresent?: boolean }>();
       const whatsappNamesMap = new Map<string, { name: string; avatar?: string }>();
       const whatsappIdentitiesMap = new Map<string, { phone?: string; name?: string; avatar?: string }>();
       const groupMetadataMap = new Map<string, { subject?: string; picture?: string }>();
@@ -554,7 +555,12 @@ export class EvolutionApiService {
           if (!contact?.name || !contact?.phone) return;
           phoneVariants(contact.phone).forEach((phone) => {
             if (!storedContactsMap.has(phone)) {
-              storedContactsMap.set(phone, { name: contact.name, source: contact.source });
+              storedContactsMap.set(phone, {
+                name: contact.name,
+                source: contact.source,
+                ...(typeof contact.avatarPresent === 'boolean' ? { avatarPresent: contact.avatarPresent } : {}),
+                ...(typeof contact.googleAvatarPresent === 'boolean' ? { googleAvatarPresent: contact.googleAvatarPresent } : {}),
+              });
             }
           });
         });
@@ -746,6 +752,33 @@ export class EvolutionApiService {
           assignedAttendant: assignment ? { id: assignment.id, name: assignment.name } : undefined,
           lease,
         };
+
+        const snapshotAvatar = item.profilePicUrl || item.profilePictureUrl || item.profilePicture || '';
+        const selectedAvatar = conversationObj.contact.avatar;
+        const selectedSource = isGroup
+          ? 'group' as const
+          : savedContact?.avatar
+            ? 'whatsapp' as const
+            : identity?.avatar
+              ? 'stored' as const
+              : whatsappContact?.avatar
+                ? 'whatsapp' as const
+                : snapshotAvatar
+                  ? 'snapshot' as const
+                  : 'none' as const;
+        traceAvatarSelection({
+          entityId: rawRemoteJid,
+          remoteJid: rawRemoteJid,
+          isGroup,
+          whatsappAvatar: savedContact?.avatar || whatsappContact?.avatar,
+          googleAvatar: storedContact?.googleAvatarPresent ? 'present' : undefined,
+          storedAvatar: savedContact?.avatar || identity?.avatar || (storedContact?.avatarPresent ? 'present' : undefined),
+          snapshotAvatar,
+          selectedSource,
+          selectedAvatar,
+          explicitAliasPresent: Boolean(item.remoteJidAlt || item.lastMessage?.key?.remoteJidAlt),
+          path: 'evolutionApi.fetchRealChats',
+        });
 
         // Se o mapa já tiver este número, atualiza apenas se a mensagem for mais recente ou se o nome for melhor que a entrada existente
         if (conversationsMap.has(conversationKey)) {

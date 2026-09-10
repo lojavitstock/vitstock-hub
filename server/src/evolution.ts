@@ -83,6 +83,7 @@ import {
   shouldStageOpaqueLidMessage,
   type OpaqueLidStagingEnvelope,
 } from './opaqueLidStaging.js';
+import { traceAvatarSelection } from './avatarDiagnostics.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -543,6 +544,25 @@ function mergePersistedParticipantIdentities(
     const byPhone = seed.participantPhone ? persisted.byPhone.get(seed.participantPhone) : undefined;
     const google = [byPhone, byJid].find((identity) => identity?.googleContact && identity.displayName);
     const known = google || byJid || byPhone;
+    const selectedPicture = seed.pictureUrl || known?.pictureUrl;
+    const selectedSource = seed.pictureUrl
+      ? 'whatsapp' as const
+      : google?.pictureUrl
+        ? 'google' as const
+        : known?.pictureUrl
+          ? 'stored' as const
+          : 'none' as const;
+    traceAvatarSelection({
+      entityId: seed.participantJid,
+      participantJid: seed.participantJid,
+      whatsappAvatar: seed.pictureUrl,
+      googleAvatar: google?.pictureUrl,
+      storedAvatar: known?.pictureUrl,
+      selectedSource,
+      selectedAvatar: selectedPicture,
+      explicitAliasPresent: Boolean(seed.aliases?.length),
+      path: 'evolution.participantIdentity',
+    });
     merged.set(key, {
       ...(known || { participantJid: seed.participantJid }),
       ...seed,
@@ -716,6 +736,16 @@ async function refreshGroupMetadata(companyId: string) {
           metadata: group,
           expiresAt: now + GROUP_METADATA_TTL_MS,
           staleUntil: now + GROUP_METADATA_STALE_MS,
+        });
+        traceAvatarSelection({
+          entityId: group.groupJid,
+          remoteJid: group.groupJid,
+          isGroup: true,
+          snapshotAvatar: group.picture,
+          selectedSource: group.picture ? 'group' : 'none',
+          selectedAvatar: group.picture,
+          explicitAliasPresent: true,
+          path: 'evolution.groupMetadata',
         });
       });
       void persistGroupMetadata(companyId, groups);
@@ -3443,7 +3473,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         _request.log.warn({ err: error }, 'Tabela de nomes do WhatsApp ainda não está disponível');
       }
     }
-    let storedContacts: { rows: Array<{ name: string; phone: string; source: string }> };
+    let storedContacts: { rows: Array<{ name: string; phone: string; source: string; avatar_url: string | null }> };
     let assignments: { rows: Array<{ evolution_remote_jid: string; user_id: string; user_name: string }> };
     let leases: { rows: Array<{ evolution_remote_jid: string; phone: string; owner_user_id: string; owner_name: string; expires_at: string }> };
     let statuses: { rows: Array<{ evolution_remote_jid: string; status: 'open' | 'pending' | 'resolved'; updated_at: string }> };
@@ -3453,8 +3483,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       name: string;
       phone: string;
       source: string;
+      avatar_url: string | null;
       }>(
-      `SELECT name, phone, source
+      `SELECT name, phone, source, avatar_url
        FROM contacts
        WHERE company_id = $1
        ORDER BY CASE source WHEN 'google' THEN 0 WHEN 'hub' THEN 1 ELSE 2 END`,
@@ -3544,6 +3575,19 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     } catch (error) {
       _request.log.warn({ err: error }, 'Identidades WhatsApp ainda não estão disponíveis');
     }
+    if (process.env.AVATAR_DEBUG === 'true') {
+      storedContacts.rows.forEach((contact) => {
+        traceAvatarSelection({
+          entityId: contact.phone,
+          whatsappAvatar: contact.source === 'whatsapp' ? contact.avatar_url : undefined,
+          googleAvatar: contact.source === 'google' ? contact.avatar_url : undefined,
+          storedAvatar: contact.avatar_url,
+          selectedSource: contact.source === 'google' ? 'google' : contact.avatar_url ? 'stored' : 'none',
+          selectedAvatar: contact.avatar_url,
+          path: 'evolution.storedContact',
+        });
+      });
+    }
     let dailyResponders: { rows: Array<{ evolution_remote_jid: string; user_id: string; user_name: string; response_date: string }> } = { rows: [] };
     try {
       dailyResponders = await db.query(
@@ -3559,7 +3603,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     return {
       chats: chatsData,
       contacts: contactsData,
-      storedContacts: storedContacts.rows,
+      storedContacts: process.env.AVATAR_DEBUG === 'true'
+        ? storedContacts.rows.map(({ name, phone, source, avatar_url }) => ({ name, phone, source, avatarPresent: Boolean(avatar_url), googleAvatarPresent: source === 'google' && Boolean(avatar_url) }))
+        : storedContacts.rows.map(({ name, phone, source }) => ({ name, phone, source })),
       whatsappNames: whatsappNames.rows,
       whatsappIdentities: whatsappIdentities.rows,
       groupMetadata: snapshot.groups,

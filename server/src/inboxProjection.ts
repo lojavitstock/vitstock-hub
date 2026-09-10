@@ -3,6 +3,7 @@ import { isWhatsAppGroup, isWhatsAppLid, providerPhoneDigits } from './whatsappI
 import { isNonRenderableProviderMessage } from './providerMessagePolicy.js';
 import { isProviderReactionEvent } from './messageReactions.js';
 import { filterConversationalProviderChats } from './providerJidPolicy.js';
+import { traceAvatarSelection } from './avatarDiagnostics.js';
 
 type InboxChat = Record<string, any>;
 
@@ -157,9 +158,34 @@ const mergeContactData = (
   const name = contacts.map((contact: any) => usableName(contact.name)).find(Boolean)
     || stringValue(base.name)
     || items.map(({ chat }) => usableName(chat.name) || usableName(chat.pushName)).find(Boolean);
-  const avatar = contacts.map((contact: any) => stringValue(contact.avatar)).find(Boolean)
+  const storedContact = contacts.find((contact: any) => stringValue(contact.avatar));
+  const snapshotAvatar = items.map(({ chat }) => stringValue(chat.profilePicUrl || chat.profilePictureUrl)).find(Boolean);
+  const avatar = stringValue(storedContact?.avatar)
     || stringValue(base.avatar)
-    || items.map(({ chat }) => stringValue(chat.profilePicUrl || chat.profilePictureUrl)).find(Boolean);
+    || snapshotAvatar;
+  const selectedSource = identity.canonicalPhone && storedContact?.source === 'google'
+    ? 'google' as const
+    : storedContact?.avatar || base.avatar
+      ? 'stored' as const
+      : snapshotAvatar
+        ? 'snapshot' as const
+        : 'none' as const;
+  traceAvatarSelection({
+    entityId: identity.key,
+    remoteJid: identity.remoteJid,
+    isGroup: isWhatsAppGroup(identity.remoteJid),
+    whatsappAvatar: items.map(({ chat }) => chat.whatsappAvatar || chat.profilePicUrl || chat.profilePictureUrl).find(Boolean),
+    googleAvatar: contacts
+      .filter((contact: any) => contact?.source === 'google')
+      .map((contact: any) => contact.avatar)
+      .find(Boolean),
+    storedAvatar: contacts.map((contact: any) => contact?.avatar).find(Boolean) || base.avatar,
+    snapshotAvatar,
+    selectedSource,
+    selectedAvatar: avatar,
+    explicitAliasPresent: identity.explicit,
+    path: 'inboxProjection.mergeContactData',
+  });
   const result = {
     ...base,
     ...(name ? { name } : {}),
@@ -230,7 +256,43 @@ const mergeBucket = (items: Array<{ chat: InboxChat; index: number }>, identity:
     merged.name = name;
     if (!merged.pushName || !usableName(merged.pushName)) merged.pushName = name;
   }
+  const snapshotAvatar = items.map(({ chat }) => stringValue(chat.profilePicUrl || chat.profilePictureUrl)).find(Boolean);
+  const storedAvatar = items.map(({ chat }) => stringValue(chat.contact?.avatar)).find(Boolean);
+  const googleAvatar = items
+    .map(({ chat }) => chat.contact?.source === 'google' ? chat.contact?.avatar : undefined)
+    .find(Boolean);
+  const whatsappAvatar = items
+    .map(({ chat }) => chat.whatsappAvatar || chat.profilePicUrl || chat.profilePictureUrl)
+    .find(Boolean);
   const avatar = items.map(({ chat }) => stringValue(chat.profilePicUrl || chat.profilePictureUrl || chat.contact?.avatar)).find(Boolean);
+  const selectedAvatarEntry = items.map(({ chat }) => {
+    const snapshot = stringValue(chat.profilePicUrl || chat.profilePictureUrl);
+    const contactAvatar = stringValue(chat.contact?.avatar);
+    return {
+      value: snapshot || contactAvatar,
+      source: snapshot
+        ? (isWhatsAppGroup(primary.remoteJid || primary.id) ? 'group' as const : 'snapshot' as const)
+        : contactAvatar && chat.contact?.source === 'google'
+          ? 'google' as const
+          : contactAvatar
+            ? 'stored' as const
+            : 'none' as const,
+    };
+  }).find(({ value }) => Boolean(value));
+  const selectedSource = selectedAvatarEntry?.source || 'none';
+  traceAvatarSelection({
+    entityId: identity.key,
+    remoteJid: identity.remoteJid,
+    isGroup: isWhatsAppGroup(primary.remoteJid || primary.id),
+    whatsappAvatar,
+    googleAvatar,
+    storedAvatar,
+    snapshotAvatar,
+    selectedSource,
+    selectedAvatar: avatar,
+    explicitAliasPresent: identity.explicit,
+    path: 'inboxProjection.mergeBucket',
+  });
   if (avatar) merged.profilePicUrl = avatar;
   if (identity.canonicalPhone) merged.phone = `+${identity.canonicalPhone}`;
   const mergedContact = mergeContactData(items, primary, identity);

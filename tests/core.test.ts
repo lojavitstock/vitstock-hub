@@ -40,6 +40,7 @@ import { providerIdentityCandidates, resolveProviderMessageTarget } from '../ser
 import { resolveEvolutionRecipient } from '../server/src/evolutionRecipient';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
 import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
+import { resetAvatarDebugDedupe as resetServerAvatarDebugDedupe, traceAvatarSelection as traceServerAvatarSelection } from '../server/src/avatarDiagnostics';
 import {
   providerMessageKeyFromRecord,
   validateProviderMessageKey,
@@ -64,6 +65,7 @@ import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaVi
 import { canDownloadMessageMedia, messageCopyText, messageMenuActionsFor } from '../src/utils/messageActions';
 import { parseWhatsAppFormatting, stripWhatsAppFormatting } from '../src/utils/whatsappFormatting';
 import { collectBrokenImages, installBrowserDiagnostics } from './e2e/support/diagnostics';
+import { resetAvatarDebugDedupe as resetFrontendAvatarDebugDedupe, traceAvatarImageError } from '../src/utils/avatarDiagnostics';
 import {
   canReactToMessage,
   nextHubReactionEmoji,
@@ -3316,6 +3318,65 @@ test('diagnóstico propaga erros inesperados do collector', async () => {
   } as any;
 
   await assert.rejects(() => collectBrokenImages(page, diagnostics as any), /collector failure/);
+});
+
+test('avatar debug do backend registra somente presença, origem e entidade sanitizada', () => {
+  const output: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { output.push(args.join(' ')); };
+  try {
+    resetServerAvatarDebugDedupe();
+    const input = {
+      entityId: '5521999999999@s.whatsapp.net',
+      remoteJid: '5521999999999@s.whatsapp.net',
+      whatsappAvatar: 'https://pps.whatsapp.net/avatar/full-path?token=secret',
+      googleAvatar: 'https://contacts.google.test/photo/full-path',
+      storedAvatar: 'https://stored.test/photo/full-path',
+      snapshotAvatar: '',
+      selectedSource: 'whatsapp' as const,
+      selectedAvatar: 'https://pps.whatsapp.net/avatar/full-path?token=secret',
+      explicitAliasPresent: true,
+      path: 'inboxProjection.mergeBucket',
+    };
+    assert.equal(traceServerAvatarSelection(input, { enabled: true }), true);
+    assert.equal(traceServerAvatarSelection(input, { enabled: true }), false);
+  } finally {
+    console.info = originalInfo;
+    resetServerAvatarDebugDedupe();
+  }
+  assert.equal(output.length, 1);
+  assert.equal(output[0]?.startsWith('[AVATAR_DEBUG] '), true);
+  assert.equal(output[0]?.includes('5521999999999'), false);
+  assert.equal(output[0]?.includes('https://pps.whatsapp.net/avatar/full-path'), false);
+  assert.equal(output[0]?.includes('token=secret'), false);
+  assert.match(output[0] || '', /"whatsappAvatarPresent":true/);
+  assert.match(output[0] || '', /"googleAvatarPresent":true/);
+  assert.match(output[0] || '', /"selectedSource":"whatsapp"/);
+});
+
+test('avatar debug do frontend registra erro sem URL completa e deduplica renders', () => {
+  const output: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { output.push(args.join(' ')); };
+  try {
+    resetFrontendAvatarDebugDedupe();
+    const input = {
+      entityId: '164794086760597@lid',
+      avatar: 'https://pps.whatsapp.net/v/t61.24694-24/12345.jpg?ccb=1&token=secret',
+      sourceCategory: 'whatsapp' as const,
+    };
+    assert.equal(traceAvatarImageError(input, { enabled: true }), true);
+    assert.equal(traceAvatarImageError(input, { enabled: true }), false);
+  } finally {
+    console.info = originalInfo;
+    resetFrontendAvatarDebugDedupe();
+  }
+  assert.equal(output.length, 1);
+  assert.equal(output[0]?.includes('164794086760597'), false);
+  assert.equal(output[0]?.includes('/v/t61.24694-24/12345.jpg'), false);
+  assert.equal(output[0]?.includes('token=secret'), false);
+  assert.match(output[0] || '', /"event":"image_error"/);
+  assert.match(output[0] || '', /"hostname":"pps.whatsapp.net"/);
 });
 
 test('diagnósticos de console.error e pageerror continuam sendo capturados', () => {
