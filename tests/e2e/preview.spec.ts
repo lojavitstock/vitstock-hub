@@ -5,7 +5,7 @@ const expectedApi = process.env.PLAYWRIGHT_EXPECTED_API_URL || 'https://vitstock
 const productionHosts = new Set(['vitstock-hub.vercel.app', 'vitstock-hub-api-production.up.railway.app']);
 const email = process.env.E2E_EMAIL?.trim();
 const password = process.env.E2E_PASSWORD;
-const previewHost = new URL(process.env.PLAYWRIGHT_BASE_URL || 'https://vitstock-hub-git-preview-vitstocks-projects.vercel.app').hostname;
+const previewHost = new URL(process.env.PLAYWRIGHT_BASE_URL || 'https://hub-preview.vitstock.com.br').hostname;
 const bypassSecret = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
 
 test('Preview smoke usa o frontend e o backend Preview sem escrita funcional', async ({ page }, testInfo) => {
@@ -75,7 +75,7 @@ test('Preview smoke usa o frontend e o backend Preview sem escrita funcional', a
 test('Conexão WhatsApp Preview expõe estado real e QR sem acessar Production', async ({ page }, testInfo) => {
   const diagnostics = installBrowserDiagnostics(page);
   const evolutionResponses: Array<{ path: string; status: number }> = [];
-  const previewHost = new URL(process.env.PLAYWRIGHT_BASE_URL || 'https://vitstock-hub-git-preview-vitstocks-projects.vercel.app').hostname;
+  const previewHost = new URL(process.env.PLAYWRIGHT_BASE_URL || 'https://hub-preview.vitstock.com.br').hostname;
   const productionHosts = new Set(['vitstock-hub.vercel.app', 'vitstock-hub-api-production.up.railway.app']);
 
   page.on('response', (response) => {
