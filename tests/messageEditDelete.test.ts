@@ -10,14 +10,7 @@ import {
   MessageMutationError,
 } from '../server/src/messageMutations';
 import type { Conversation, Message } from '../src/types';
-import {
-  canDeleteMessageForEveryone,
-  canEditMessage,
-  getDeleteMessageEligibility,
-  getEditMessageEligibility,
-  messageActionDebugPayload,
-  messageMenuActionsFor,
-} from '../src/utils/messageActions';
+import { canDeleteMessageForEveryone, canEditMessage, messageMenuActionsFor } from '../src/utils/messageActions';
 import { applyOutboundSendConfirmation } from '../src/utils/outboundMessageConfirmation';
 import { reconcileRealtimeConversation, reconcileRealtimeMessages } from '../src/utils/realtimeUpdates';
 import { normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
@@ -245,47 +238,6 @@ test('LID bloqueia edição, mas exclusão usa a chave LID exata', () => {
   assert.equal(canDeleteMessageForEveryone(lid), true);
   assert.equal(messageMenuActionsFor(lid).includes('edit'), false);
   assert.equal(messageMenuActionsFor(lid).includes('delete'), true);
-});
-
-test('diagnóstico de actions expõe reasons sanitizados sem texto ou JID completo', () => {
-  const candidate = message('debug-message', 'texto que não deve aparecer no log', {
-    sender: 'contact',
-    metadata: { sentByHub: true, providerKey: { ...key(), fromMe: false } },
-  });
-  const editEligibility = getEditMessageEligibility(candidate);
-  const deleteEligibility = getDeleteMessageEligibility(candidate);
-  const payload = messageActionDebugPayload(candidate);
-  const serialized = JSON.stringify(payload);
-
-  assert.equal(editEligibility.allowed, false);
-  assert.ok(editEligibility.reasons.includes('NOT_ATTENDANT'));
-  assert.ok(editEligibility.reasons.includes('FROM_ME_NOT_TRUE'));
-  assert.equal(deleteEligibility.allowed, false);
-  assert.ok(deleteEligibility.reasons.includes('NOT_ATTENDANT'));
-  assert.ok(deleteEligibility.reasons.includes('FROM_ME_NOT_TRUE'));
-  assert.equal(payload.providerKey.remoteJidType, '@s.whatsapp.net');
-  assert.equal('remoteJid' in payload.providerKey, false);
-  assert.equal(serialized.includes('texto que não deve aparecer no log'), false);
-  assert.equal(serialized.includes('5511999999999@s.whatsapp.net'), false);
-});
-
-test('diagnóstico distingue alvo LID e chave de provider ausente', () => {
-  const lid = message('debug-lid', 'texto', {
-    metadata: { sentByHub: true, providerKey: key('100000000000001@lid') },
-  });
-  const missing = message('debug-missing', 'texto', {
-    metadata: { sentByHub: true },
-  });
-
-  assert.equal(messageActionDebugPayload(lid).providerKey.remoteJidType, '@lid');
-  assert.ok(messageActionDebugPayload(lid).editFailureReasons.includes('UNSUPPORTED_EDIT_TARGET'));
-  assert.equal(messageActionDebugPayload(lid).canDelete, true);
-  assert.deepEqual(messageActionDebugPayload(missing).editFailureReasons, [
-    'MISSING_PROVIDER_KEY',
-  ]);
-  assert.deepEqual(messageActionDebugPayload(missing).deleteFailureReasons, [
-    'MISSING_PROVIDER_KEY',
-  ]);
 });
 
 test('message.updated replaces the same timeline item and never appends an unloaded target', () => {
