@@ -3816,6 +3816,72 @@ test('merge do inbox usa a projeção local como desempate em timestamp igual', 
   assert.equal(inboxActivityTimestamp(merged), 1_800_000_000_000);
 });
 
+test('merge do inbox preserva aliases locais quando o provider só retorna o LID', () => {
+  const provider = inboxProjectionChat('opaque-contact@lid', {
+    lastMessage: {
+      key: { id: 'provider-copy', remoteJid: 'opaque-contact@lid', fromMe: false },
+      message: { conversation: 'Provider' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+  const local = inboxProjectionChat('opaque-contact@lid', {
+    phone: '+5521999999999',
+    remoteJidAliases: ['opaque-contact@lid', '5521999999999@s.whatsapp.net'],
+    lastMessage: {
+      key: { id: 'local-copy', remoteJid: 'opaque-contact@lid', fromMe: false },
+      message: { conversation: 'Local' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+  const merged = mergeInboxActivity(provider, local);
+  assert.deepEqual(merged.remoteJidAliases, ['opaque-contact@lid', '5521999999999@s.whatsapp.net']);
+  assert.equal(merged.phone, '+5521999999999');
+  const projected = projectCanonicalInboxChats([
+    merged,
+    inboxProjectionChat('5521999999999@s.whatsapp.net'),
+  ]);
+  assert.equal(projected.length, 1);
+});
+
+test('projeção compartilha alias explícito quando apenas a entrada local conhece o LID', () => {
+  const projected = projectCanonicalInboxChats([
+    inboxProjectionChat('opaque-provider@lid', {
+      lastMessage: { key: { id: 'provider-message', remoteJid: 'opaque-provider@lid' }, message: { conversation: 'Provider' }, messageTimestamp: 1_800_000_010 },
+    }),
+    inboxProjectionChat('5521999999999@s.whatsapp.net', {
+      remoteJidAliases: ['5521999999999@s.whatsapp.net', 'opaque-provider@lid'],
+      lastMessage: { key: { id: 'local-message', remoteJid: '5521999999999@s.whatsapp.net' }, message: { conversation: 'Local' }, messageTimestamp: 1_800_000_000 },
+    }),
+  ]);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0]?.lastMessage?.key?.id, 'provider-message');
+});
+
+test('snapshot administrativo com a mesma última mensagem preserva posição e atividade', () => {
+  const first = conversation('first', { lastMessageAt: 2_000, lastMessage: 'Primeira' });
+  const second = conversation('second', { lastMessageAt: 1_000, lastMessage: 'Segunda' });
+  const current = [first, second];
+  const snapshot = [
+    { ...cloneConversation(second), updatedAt: '2026-09-10T12:00:00.000Z' },
+    { ...cloneConversation(first), lastMessageAt: 9_000, updatedAt: '2026-09-10T12:01:00.000Z' },
+  ];
+  const reconciled = reconcileConversationsMonotonic(current, snapshot);
+  assert.deepEqual(reconciled.map((conversation) => conversation.id), ['first', 'second']);
+  assert.equal(reconciled[0]?.lastMessageAt, 2_000);
+});
+
+test('mensagem nova continua podendo reordenar a conversa para o topo', () => {
+  const first = conversation('first', { lastMessageAt: 2_000, lastMessage: 'Primeira' });
+  const second = conversation('second', { lastMessageAt: 1_000, lastMessage: 'Segunda' });
+  const snapshot = [
+    { ...cloneConversation(second), lastMessage: 'Nova segunda', lastMessageAt: 3_000, lastMessageKey: { ...second.lastMessageKey!, id: 'message-second-new' } },
+    cloneConversation(first),
+  ];
+  const reconciled = reconcileConversationsMonotonic([first, second], snapshot);
+  assert.deepEqual(reconciled.map((conversation) => conversation.id), ['second', 'first']);
+  assert.equal(reconciled[0]?.lastMessage, 'Nova segunda');
+});
+
 test('reação mais nova não substitui atividade renderizável do inbox', () => {
   const providerReaction = inboxProjectionChat('120363000000@g.us', {
     lastMessage: {

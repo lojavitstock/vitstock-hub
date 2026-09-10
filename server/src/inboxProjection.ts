@@ -54,6 +54,52 @@ export function canonicalInboxIdentity(chat: InboxChat): CanonicalInboxIdentity 
   return { key: `jid:${lowerRemoteJid}`, remoteJid, canonicalPhone: '', explicit: false };
 }
 
+const explicitIdentityAliases = (chat: InboxChat) => [
+  remoteJidOf(chat),
+  chat.remoteJidAlt,
+  ...(Array.isArray(chat.remoteJidAliases) ? chat.remoteJidAliases : []),
+].map(stringValue).filter(Boolean).map((value) => value.toLowerCase());
+
+/**
+ * An opaque provider row may omit its aliases while another row in the same
+ * snapshot (usually the persisted local projection) still carries the
+ * explicit LID↔PN evidence. Index only unambiguous aliases so a missing or
+ * conflicting mapping remains fail-closed.
+ */
+const buildExplicitAliasIndex = (chats: InboxChat[]) => {
+  const index = new Map<string, Set<string>>();
+  chats.forEach((chat) => {
+    const identity = canonicalInboxIdentity(chat);
+    if (!identity.explicit || !identity.key.startsWith('phone:')) return;
+    explicitIdentityAliases(chat).forEach((alias) => {
+      const keys = index.get(alias) || new Set<string>();
+      keys.add(identity.key);
+      index.set(alias, keys);
+    });
+  });
+  return index;
+};
+
+const projectedInboxIdentity = (
+  chat: InboxChat,
+  aliasIndex: Map<string, Set<string>>,
+): CanonicalInboxIdentity => {
+  const identity = canonicalInboxIdentity(chat);
+  if (identity.explicit) return identity;
+  const matches = new Set<string>();
+  explicitIdentityAliases(chat).forEach((alias) => {
+    (aliasIndex.get(alias) || []).forEach((key) => matches.add(key));
+  });
+  if (matches.size !== 1) return identity;
+  const key = [...matches][0]!;
+  return {
+    ...identity,
+    key,
+    canonicalPhone: key.slice('phone:'.length),
+    explicit: true,
+  };
+};
+
 const numericTimestampMs = (value: unknown) => {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) {
@@ -93,6 +139,24 @@ export function inboxActivityTimestamp(chat: InboxChat) {
   return hasRenderableActivity(chat) ? activityTimestamp(chat) : 0;
 }
 
+const messageIdOf = (chat: InboxChat) => {
+  const value = chat?.lastMessage?.key?.id || chat?.lastMessage?.id;
+  return typeof value === 'string' ? value.trim() : '';
+};
+
+const mergeExplicitIdentity = (providerChat: InboxChat, localChat: InboxChat) => {
+  const aliases = Array.from(new Set([
+    ...(Array.isArray(providerChat.remoteJidAliases) ? providerChat.remoteJidAliases : []),
+    ...(Array.isArray(localChat.remoteJidAliases) ? localChat.remoteJidAliases : []),
+  ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0)));
+  return {
+    ...providerChat,
+    ...(providerChat.remoteJidAlt || !localChat.remoteJidAlt ? {} : { remoteJidAlt: localChat.remoteJidAlt }),
+    ...(aliases.length ? { remoteJidAliases: aliases } : {}),
+    ...(providerChat.phone || !localChat.phone ? {} : { phone: localChat.phone }),
+  };
+};
+
 /**
  * Combines a provider chat with its persisted local projection without
  * allowing an older provider snapshot to hide a newer renderable message.
@@ -102,16 +166,31 @@ export function inboxActivityTimestamp(chat: InboxChat) {
 export function mergeInboxActivity(providerChat: InboxChat, localChat?: InboxChat) {
   const providerTimestamp = inboxActivityTimestamp(providerChat);
   const localTimestamp = localChat ? inboxActivityTimestamp(localChat) : 0;
+  const providerWithIdentity = localChat ? mergeExplicitIdentity(providerChat, localChat) : providerChat;
+  const sameMessage = Boolean(localChat && messageIdOf(providerChat) && messageIdOf(providerChat) === messageIdOf(localChat));
+
+  // A provider snapshot may refresh `updatedAt` after a read/status action
+  // while still carrying the same last message. Keep the persisted activity
+  // timestamp and identity instead of turning that administrative update into
+  // a new inbox activity or dropping explicit PN aliases.
+  if (localChat && sameMessage && localTimestamp > 0) {
+    return {
+      ...providerWithIdentity,
+      lastMessage: localChat.lastMessage,
+      ...(localChat.updatedAt ? { updatedAt: localChat.updatedAt } : {}),
+      ...(localChat.lastMessageAt ? { lastMessageAt: localChat.lastMessageAt } : {}),
+    };
+  }
 
   if (!localChat || (!localTimestamp && providerTimestamp > 0) || providerTimestamp > localTimestamp) {
     return providerTimestamp > 0
-      ? providerChat
-      : { ...providerChat, lastMessage: undefined };
+      ? providerWithIdentity
+      : { ...providerWithIdentity, lastMessage: undefined };
   }
 
   if (localTimestamp > 0 || providerTimestamp === 0) {
     return {
-      ...providerChat,
+      ...providerWithIdentity,
       lastMessage: localChat.lastMessage,
       ...(localChat.updatedAt ? { updatedAt: localChat.updatedAt } : {}),
       ...(localChat.lastMessageAt ? { lastMessageAt: localChat.lastMessageAt } : {}),
@@ -321,9 +400,13 @@ const mergeBucket = (items: Array<{ chat: InboxChat; index: number }>, identity:
  * bucket, where k is the number of aliases for that identity.
  */
 export function projectCanonicalInboxChats(chats: InboxChat[]) {
+  const conversationalChats = filterConversationalProviderChats(chats);
+  const aliasIndex = buildExplicitAliasIndex(conversationalChats);
+  const identityByChat = new Map<InboxChat, CanonicalInboxIdentity>();
   const buckets = new Map<string, Array<{ chat: InboxChat; index: number }>>();
-  filterConversationalProviderChats(chats).forEach((chat, index) => {
-    const identity = canonicalInboxIdentity(chat);
+  conversationalChats.forEach((chat, index) => {
+    const identity = projectedInboxIdentity(chat, aliasIndex);
+    identityByChat.set(chat, identity);
     const bucket = buckets.get(identity.key) || [];
     bucket.push({ chat, index });
     buckets.set(identity.key, bucket);
@@ -332,7 +415,7 @@ export function projectCanonicalInboxChats(chats: InboxChat[]) {
   return Array.from(buckets.entries())
     .map(([key, items]) => {
       const firstItem = items[0]!;
-      const identity = canonicalInboxIdentity(firstItem.chat);
+      const identity = identityByChat.get(firstItem.chat) || canonicalInboxIdentity(firstItem.chat);
       return { chat: mergeBucket(items, identity), index: Math.min(...items.map((item) => item.index)), key };
     })
     .sort((left, right) => inboxActivityTimestamp(right.chat) - inboxActivityTimestamp(left.chat) || left.index - right.index)

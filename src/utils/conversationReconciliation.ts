@@ -193,6 +193,32 @@ const sameConversationActivity = (previous: Conversation, next: Conversation) =>
     : previous.lastMessage === next.lastMessage)
 );
 
+const hasExplicitActivityChange = (previous: Conversation, next: Conversation) => {
+  const previousMessageId = previous.lastMessageKey?.id;
+  const nextMessageId = next.lastMessageKey?.id;
+  if (previousMessageId && nextMessageId) {
+    if (previousMessageId !== nextMessageId) return true;
+    // A changed preview with the same provider id is an explicit message
+    // update (for example an edited message), not a read/status transition.
+    return previous.lastMessage !== next.lastMessage
+      || previous.lastMessageFromMe !== next.lastMessageFromMe;
+  }
+  return activityTimestamp(previous) !== activityTimestamp(next);
+};
+
+const preserveStableActivityForSameMessage = (previous: Conversation, next: Conversation) => {
+  const previousMessageId = previous.lastMessageKey?.id;
+  const nextMessageId = next.lastMessageKey?.id;
+  if (!previousMessageId || previousMessageId !== nextMessageId) return next;
+  if (previous.lastMessage !== next.lastMessage || previous.lastMessageFromMe !== next.lastMessageFromMe) return next;
+  if (!previous.lastMessageAt || !next.lastMessageAt || next.lastMessageAt <= previous.lastMessageAt) return next;
+  return {
+    ...next,
+    lastMessageTimestamp: previous.lastMessageTimestamp,
+    lastMessageAt: previous.lastMessageAt,
+  };
+};
+
 /**
  * Reconciles an inbox snapshot without allowing an older activity snapshot to
  * replace a newer local/SSE activity. Phone matching covers @lid and
@@ -214,6 +240,7 @@ export const reconcileConversationsMonotonic = (
   });
 
   const locallyNewerIds = new Set<string>();
+  const legitimateActivityIds = new Set<string>();
   const protectedSnapshot = next.map((conversation) => {
     const phone = conversation.contact.phone.replace(/\D/g, '');
     const previousConversation = previousById.get(conversation.id)
@@ -227,7 +254,9 @@ export const reconcileConversationsMonotonic = (
       groupName: withLease.groupName || previousConversation.groupName,
       groupAvatar: withLease.groupAvatar || previousConversation.groupAvatar,
     };
-    const protectedActivity = preserveNewerActivity(previousConversation, withIdentity);
+    if (hasExplicitActivityChange(previousConversation, withIdentity)) legitimateActivityIds.add(conversation.id);
+    const stableActivity = preserveStableActivityForSameMessage(previousConversation, withIdentity);
+    const protectedActivity = preserveNewerActivity(previousConversation, stableActivity);
     if (protectedActivity.preserved) locallyNewerIds.add(conversation.id);
     const nextConversation = protectedActivity.conversation;
     // Reading is a local state transition that can arrive before the next
@@ -243,7 +272,29 @@ export const reconcileConversationsMonotonic = (
     return nextConversation;
   });
 
-  if (locallyNewerIds.size === 0) return reconcileConversations(previous, protectedSnapshot);
+  if (legitimateActivityIds.size === 0 && locallyNewerIds.size === 0) {
+    const previousPosition = new Map<string, number>();
+    previous.forEach((conversation, index) => {
+      previousPosition.set(conversation.id, index);
+      const phone = conversation.contact.phone.replace(/\D/g, '');
+      phoneVariants(phone).forEach((variant) => {
+        if (variant) previousPosition.set(`phone:${variant}`, index);
+      });
+    });
+    const stableOrder = protectedSnapshot
+      .map((conversation, index) => ({ conversation, index }))
+      .sort((left, right) => {
+        const leftPosition = previousPosition.get(left.conversation.id)
+          ?? previousPosition.get(`phone:${left.conversation.contact.phone.replace(/\D/g, '')}`)
+          ?? Number.MAX_SAFE_INTEGER;
+        const rightPosition = previousPosition.get(right.conversation.id)
+          ?? previousPosition.get(`phone:${right.conversation.contact.phone.replace(/\D/g, '')}`)
+          ?? Number.MAX_SAFE_INTEGER;
+        return leftPosition - rightPosition || left.index - right.index;
+      })
+      .map(({ conversation }) => conversation);
+    return reconcileConversations(previous, stableOrder);
+  }
 
   const orderedSnapshot = protectedSnapshot
     .map((conversation, index) => ({ conversation, index }))
