@@ -35,7 +35,13 @@ import { formatMessageDay, formatMessageTimestamp, formatOperatorLabel } from '.
 import { quotedMediaLabel, quotedMessageExcerpt } from '../../utils/quotedMessage';
 import { getDocumentPresentation } from '../../utils/documentMedia';
 import { mediaViewerItemFrom, type MediaViewerItem } from '../../utils/mediaViewer';
-import { canDeleteMessageForEveryone, canDownloadMessageMedia, canEditMessage, messageCopyText } from '../../utils/messageActions';
+import {
+  canDeleteMessageForEveryone,
+  canDownloadMessageMedia,
+  canEditMessage,
+  messageActionDebugPayload,
+  messageCopyText,
+} from '../../utils/messageActions';
 import { COMMON_REACTION_EMOJIS, canReactToMessage, type CommonReactionEmoji } from '../../utils/messageReactionActions';
 import { positionMessageActionMenu, positionReactionPalette, type PopoverPosition } from '../../utils/messagePopoverPosition';
 import { providerDisplayName, providerFallbackDisplayName } from '../../utils/whatsappIdentity';
@@ -589,11 +595,31 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
   const viewerTriggerRef = React.useRef<HTMLElement | null>(null);
   const menuTriggerRef = React.useRef<HTMLButtonElement>(null);
   const actionErrorTimeoutRef = React.useRef<number | undefined>();
+  const actionDebugMessage = React.useMemo(
+    () => (openMenuMessageId ? messages.find((message) => message.id === openMenuMessageId) : undefined),
+    [messages, openMenuMessageId],
+  );
+  const actionDebugPayload = React.useMemo(
+    () => (actionDebugMessage ? messageActionDebugPayload(actionDebugMessage) : undefined),
+    [actionDebugMessage],
+  );
+  const actionDebugSignature = actionDebugPayload ? JSON.stringify(actionDebugPayload) : '';
+  const actionDebugSignatureRef = React.useRef('');
 
   useEffect(() => () => {
     if (highlightTimeoutRef.current) window.clearTimeout(highlightTimeoutRef.current);
     if (actionErrorTimeoutRef.current) window.clearTimeout(actionErrorTimeoutRef.current);
   }, []);
+
+  useEffect(() => {
+    if (!actionDebugPayload) {
+      actionDebugSignatureRef.current = '';
+      return;
+    }
+    if (actionDebugSignatureRef.current === actionDebugSignature) return;
+    actionDebugSignatureRef.current = actionDebugSignature;
+    console.warn('[MESSAGE_ACTION_DEBUG]', actionDebugPayload);
+  }, [actionDebugPayload, actionDebugSignature]);
 
   const openQuotedMessage = (messageId: string) => {
     const container = containerRef.current;
