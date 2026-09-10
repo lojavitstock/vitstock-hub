@@ -40,7 +40,12 @@ import { providerIdentityCandidates, resolveProviderMessageTarget } from '../ser
 import { resolveEvolutionRecipient } from '../server/src/evolutionRecipient';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
 import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
-import { resetAvatarDebugDedupe as resetServerAvatarDebugDedupe, traceAvatarSelection as traceServerAvatarSelection } from '../server/src/avatarDiagnostics';
+import {
+  resetAvatarDebugDedupe as resetServerAvatarDebugDedupe,
+  traceAvatarProfileFetch,
+  traceAvatarSelection as traceServerAvatarSelection,
+  traceAvatarTargetSelection,
+} from '../server/src/avatarDiagnostics';
 import {
   providerMessageKeyFromRecord,
   validateProviderMessageKey,
@@ -107,6 +112,8 @@ import { normalizeConversationTags } from '../src/utils/conversationTags';
 import { formatConversationTimestamp, formatOperatorLabel } from '../src/components/conversations/conversationFormatters';
 import { outboundErrorMessage } from '../src/utils/outboundError';
 import { classifyAttachmentFile, MAX_ATTACHMENTS_PER_MESSAGE, MAX_TOTAL_ATTACHMENT_BYTES, selectAttachmentFiles } from '../src/utils/composerAttachment';
+import { resetInboxOrderDebugDedupe, traceInboxOrderProjection } from '../server/src/inboxOrderDiagnostics';
+import { traceInboxOrderChanges as traceFrontendInboxOrderChanges, traceInboxOrderEvent as traceFrontendInboxOrderEvent } from '../src/utils/inboxOrderDiagnostics';
 import type { Conversation, Message } from '../src/types';
 
 test('classifies provider JIDs and filters non-conversational entities fail-closed', () => {
@@ -3377,6 +3384,123 @@ test('avatar debug do frontend registra erro sem URL completa e deduplica render
   assert.equal(output[0]?.includes('token=secret'), false);
   assert.match(output[0] || '', /"event":"image_error"/);
   assert.match(output[0] || '', /"hostname":"pps.whatsapp.net"/);
+});
+
+test('avatar target trace registra somente presença/proveniência sanitizada', () => {
+  const output: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { output.push(args.join(' ')); };
+  try {
+    resetServerAvatarDebugDedupe();
+    assert.equal(traceAvatarTargetSelection({
+      entityId: '164794086760597@lid',
+      remoteJid: '164794086760597@lid',
+      remoteJidAltPresent: true,
+      senderPnPresent: false,
+      participantPnPresent: false,
+      providerPhonePresent: true,
+      snapshotProfilePicPresent: false,
+      snapshotProfilePicturePresent: true,
+      whatsappIdentityPresent: true,
+      whatsappIdentityAvatarPresent: false,
+      whatsappStoredNamePresent: true,
+      whatsappStoredAvatarPresent: false,
+      contactRecordPresent: true,
+      contactAvatarPresent: false,
+      googleLinkPresent: true,
+      selectedSource: 'none',
+      selectedAvatar: '',
+    }, { enabled: true }), true);
+    assert.equal(traceAvatarTargetSelection({
+      entityId: '164794086760597@lid',
+      remoteJid: '164794086760597@lid',
+      selectedSource: 'none',
+    }, { enabled: true }), true);
+  } finally {
+    console.info = originalInfo;
+    resetServerAvatarDebugDedupe();
+  }
+  assert.equal(output.length, 2);
+  assert.match(output[0] || '', /^\[AVATAR_TARGET_TRACE\] /);
+  assert.equal(output[0]?.includes('164794086760597'), false);
+  assert.match(output[0] || '', /"jidType":"LID"/);
+  assert.match(output[0] || '', /"googleLinkPresent":true/);
+  assert.match(output[0] || '', /"selectedAvatarPresent":false/);
+});
+
+test('avatar profile fetch trace classifica respostas sem expor a URL', () => {
+  const output: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { output.push(args.join(' ')); };
+  try {
+    resetServerAvatarDebugDedupe();
+    assert.equal(traceAvatarProfileFetch({
+      entityId: '5521999999999@s.whatsapp.net',
+      remoteJid: '5521999999999@s.whatsapp.net',
+      identityBasis: 'PN',
+      result: 'success',
+      avatarReturned: true,
+    }, { enabled: true }), true);
+    assert.equal(traceAvatarProfileFetch({
+      entityId: 'opaque@lid',
+      participantJid: 'opaque@lid',
+      identityBasis: 'OTHER',
+      result: 'provider_4xx',
+      avatarReturned: false,
+    }, { enabled: true }), true);
+  } finally {
+    console.info = originalInfo;
+    resetServerAvatarDebugDedupe();
+  }
+  assert.equal(output.length, 2);
+  assert.match(output[0] || '', /^\[AVATAR_PROFILE_FETCH\] /);
+  assert.equal(output[0]?.includes('5521999999999'), false);
+  assert.match(output[0] || '', /"identityBasis":"PN"/);
+  assert.match(output[0] || '', /"result":"success"/);
+  assert.match(output[1] || '', /"result":"provider_4xx"/);
+});
+
+test('inbox order trace só registra mudanças reais de índice', () => {
+  const output: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { output.push(args.join(' ')); };
+  try {
+    resetInboxOrderDebugDedupe();
+    const first = conversation('first', { lastMessageAt: 100, updatedAt: '2026-09-10T10:00:00.000Z' });
+    const second = conversation('second', { lastMessageAt: 200, updatedAt: '2026-09-10T10:01:00.000Z' });
+    assert.equal(traceFrontendInboxOrderChanges([first, second], [first, second], { enabled: true, trigger: 'polling' }), 0);
+    assert.equal(traceFrontendInboxOrderChanges([first, second], [second, first], { enabled: true, trigger: 'polling', activeConversationId: 'second' }), 2);
+    assert.equal(traceFrontendInboxOrderChanges([first, second], [second, first], { enabled: true, trigger: 'polling', activeConversationId: 'second' }), 2);
+    assert.equal(traceFrontendInboxOrderEvent({ event: 'mark_read_success', conversation: second, index: 0, enabled: true }), true);
+  } finally {
+    console.info = originalInfo;
+  }
+  assert.equal(output.length, 5);
+  assert.match(output[0] || '', /^\[INBOX_ORDER_TRACE\] /);
+  assert.equal(output[0]?.includes('conversation-second'), false);
+  assert.match(output[0] || '', /"fromIndex":0/);
+  assert.match(output[0] || '', /"toIndex":1/);
+  assert.match(output[2] || '', /"event":"reorder"/);
+  assert.match(output[4] || '', /"event":"mark_read_success"/);
+});
+
+test('backend inbox order trace sinaliza fallback por updatedAt e não expõe identidade', () => {
+  const output: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { output.push(args.join(' ')); };
+  try {
+    resetInboxOrderDebugDedupe();
+    const previous = [{ id: 'a@s.whatsapp.net', lastMessage: { message: {} }, updatedAt: '2026-09-10T10:00:00.000Z' }];
+    const next = [{ id: 'a@s.whatsapp.net', lastMessage: { message: {} }, updatedAt: '2026-09-10T10:01:00.000Z' }];
+    assert.equal(traceInboxOrderProjection(previous, next, { enabled: true, trigger: 'unknown' }), 1);
+  } finally {
+    console.info = originalInfo;
+    resetInboxOrderDebugDedupe();
+  }
+  assert.equal(output.length, 1);
+  assert.match(output[0] || '', /^\[INBOX_ORDER_TRACE\] /);
+  assert.equal(output[0]?.includes('a@s.whatsapp.net'), false);
+  assert.match(output[0] || '', /"orderingTimestampChosenFrom":"updatedAt"/);
 });
 
 test('diagnósticos de console.error e pageerror continuam sendo capturados', () => {

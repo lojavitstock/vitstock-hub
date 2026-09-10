@@ -170,6 +170,8 @@ export interface Message {
 
 export interface Conversation {
   id: string;
+  /** Provider snapshot timestamp kept only for diagnostics/reconciliation. */
+  updatedAt?: string;
   isGroup?: boolean;
   groupName?: string;
   groupAvatar?: string;

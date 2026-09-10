@@ -83,7 +83,8 @@ import {
   shouldStageOpaqueLidMessage,
   type OpaqueLidStagingEnvelope,
 } from './opaqueLidStaging.js';
-import { traceAvatarSelection } from './avatarDiagnostics.js';
+import { traceAvatarProfileFetch, traceAvatarSelection, type AvatarProfileFetchResult } from './avatarDiagnostics.js';
+import { traceInboxOrderProjection } from './inboxOrderDiagnostics.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -190,6 +191,14 @@ async function evolutionRequest(path: string, init?: RequestInit, timeoutMs = 15
     signal: AbortSignal.timeout(timeoutMs),
   });
 }
+
+const avatarProfileFetchErrorResult = (error: unknown): AvatarProfileFetchResult => {
+  const name = error instanceof Error ? error.name : '';
+  const message = error instanceof Error ? error.message : String(error || '');
+  return name === 'AbortError' || name === 'TimeoutError' || /timeout|timed out|aborted/i.test(message)
+    ? 'timeout'
+    : 'error';
+};
 
 type EvolutionChatsSnapshot = { chats: any[]; contacts: any[]; groups: GroupMetadata[]; expiresAt: number; staleUntil: number };
 const evolutionChatsCache = new Map<string, EvolutionChatsSnapshot>();
@@ -364,20 +373,50 @@ async function refreshParticipantIdentity(key: string, seed: ParticipantIdentity
     let pictureUrl = seed.pictureUrl || baseIdentity?.pictureUrl;
     try {
       if (!pictureUrl) {
-        const response = await evolutionRequest(
-          `/chat/fetchProfilePictureUrl/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
-          { method: 'POST', body: JSON.stringify({ number: seed.participantPhone ? providerPhoneJid({ remoteJid: seed.participantPhone }) : seed.participantJid }) },
-          10_000,
-        );
-        if (response.ok) {
-          const body: any = await response.json().catch(() => ({}));
-          pictureUrl = body?.profilePictureUrl
-            || body?.profilePicUrl
-            || body?.pictureUrl
-            || body?.data?.profilePictureUrl
-            || body?.data?.profilePicUrl
-            || body?.data?.pictureUrl
-            || pictureUrl;
+        const identityBasis = seed.participantPhone
+          ? 'PN' as const
+          : seed.aliases?.some((alias) => alias.startsWith('phone:') || alias.includes('@s.whatsapp.net'))
+            ? 'explicitAlias' as const
+            : 'OTHER' as const;
+        try {
+          const response = await evolutionRequest(
+            `/chat/fetchProfilePictureUrl/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+            { method: 'POST', body: JSON.stringify({ number: seed.participantPhone ? providerPhoneJid({ remoteJid: seed.participantPhone }) : seed.participantJid }) },
+            10_000,
+          );
+          if (!response.ok) {
+            traceAvatarProfileFetch({
+              entityId: seed.participantJid,
+              participantJid: seed.participantJid,
+              identityBasis,
+              result: response.status >= 500 ? 'provider_5xx' : 'provider_4xx',
+              avatarReturned: false,
+            });
+          } else {
+            const body: any = await response.json().catch(() => ({}));
+            pictureUrl = body?.profilePictureUrl
+              || body?.profilePicUrl
+              || body?.pictureUrl
+              || body?.data?.profilePictureUrl
+              || body?.data?.profilePicUrl
+              || body?.data?.pictureUrl
+              || pictureUrl;
+            traceAvatarProfileFetch({
+              entityId: seed.participantJid,
+              participantJid: seed.participantJid,
+              identityBasis,
+              result: pictureUrl ? 'success' : 'empty',
+              avatarReturned: Boolean(pictureUrl),
+            });
+          }
+        } catch (error) {
+          traceAvatarProfileFetch({
+            entityId: seed.participantJid,
+            participantJid: seed.participantJid,
+            identityBasis,
+            result: avatarProfileFetchErrorResult(error),
+            avatarReturned: false,
+          });
         }
       }
     } catch {
@@ -710,7 +749,17 @@ async function refreshGroupMetadata(companyId: string) {
             { method: 'POST', body: JSON.stringify({ number: group.groupJid }) },
             10_000,
           );
-          if (!profile.ok) return group;
+          if (!profile.ok) {
+            traceAvatarProfileFetch({
+              entityId: group.groupJid,
+              remoteJid: group.groupJid,
+              isGroup: true,
+              identityBasis: 'GROUP',
+              result: profile.status >= 500 ? 'provider_5xx' : 'provider_4xx',
+              avatarReturned: false,
+            });
+            return group;
+          }
           const body: any = await profile.json().catch(() => ({}));
           const picture = body?.profilePictureUrl
             || body?.profilePicUrl
@@ -718,10 +767,26 @@ async function refreshGroupMetadata(companyId: string) {
             || body?.data?.profilePictureUrl
             || body?.data?.profilePicUrl
             || body?.data?.pictureUrl;
+          traceAvatarProfileFetch({
+            entityId: group.groupJid,
+            remoteJid: group.groupJid,
+            isGroup: true,
+            identityBasis: 'GROUP',
+            result: picture ? 'success' : 'empty',
+            avatarReturned: Boolean(picture),
+          });
           return typeof picture === 'string' && picture.trim()
             ? { ...group, picture: picture.trim() }
             : group;
-        } catch {
+        } catch (error) {
+          traceAvatarProfileFetch({
+            entityId: group.groupJid,
+            remoteJid: group.groupJid,
+            isGroup: true,
+            identityBasis: 'GROUP',
+            result: avatarProfileFetchErrorResult(error),
+            avatarReturned: false,
+          });
           return group;
         }
       }));
@@ -3339,12 +3404,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.get('/api/evolution/chats', { preHandler: requireUser }, async (_request, reply) => {
     let snapshot: { chats: any[]; contacts: any[]; groups: GroupMetadata[] };
     let usingLocalInboxFallback = false;
+    let localChatsForTrace: any[] = [];
     try {
       snapshot = await fetchEvolutionChatsSnapshot(_request.user!.companyId);
     } catch (error) {
       _request.log.warn({ err: error }, 'Evolution nÃ£o respondeu a consulta de conversas');
       try {
-        snapshot = { chats: await fetchLocalInboxChats(_request.user!.companyId), contacts: [], groups: [] };
+        localChatsForTrace = await fetchLocalInboxChats(_request.user!.companyId);
+        snapshot = { chats: localChatsForTrace, contacts: [], groups: [] };
         usingLocalInboxFallback = true;
       } catch (localError) {
         _request.log.error({ err: localError }, 'NÃ£o foi possÃ­vel recuperar o inbox persistido');
@@ -3354,6 +3421,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     if (snapshot.chats.length === 0) {
       try {
         const localChats = await fetchLocalInboxChats(_request.user!.companyId);
+        localChatsForTrace = localChats;
         if (localChats.length > 0) {
           snapshot = { chats: localChats, contacts: snapshot.contacts, groups: snapshot.groups };
           usingLocalInboxFallback = true;
@@ -3434,7 +3502,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     // The provider and the persisted inbox may expose both a LID and its PN
     // alias. Collapse only identities with explicit phone evidence before the
     // snapshot reaches the frontend; opaque LIDs remain independent rows.
+    const chatsBeforeCanonicalProjection = chatsData;
     chatsData = projectCanonicalInboxChats(chatsData);
+    traceInboxOrderProjection(chatsBeforeCanonicalProjection, chatsData, {
+      localChats: localChatsForTrace,
+      trigger: 'unknown',
+    });
     const providerNames = new Map<string, { phone: string; name: string; avatar_url: string | null }>();
     const rememberProviderContact = (value: any) => {
       const entityJid = String(value?.remoteJid || value?.id || value?.key?.remoteJid || '').trim();
@@ -3473,7 +3546,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         _request.log.warn({ err: error }, 'Tabela de nomes do WhatsApp ainda não está disponível');
       }
     }
-    let storedContacts: { rows: Array<{ name: string; phone: string; source: string; avatar_url: string | null }> };
+    let storedContacts: { rows: Array<{ name: string; phone: string; source: string; avatar_url: string | null; google_link_present: boolean }> };
     let assignments: { rows: Array<{ evolution_remote_jid: string; user_id: string; user_name: string }> };
     let leases: { rows: Array<{ evolution_remote_jid: string; phone: string; owner_user_id: string; owner_name: string; expires_at: string }> };
     let statuses: { rows: Array<{ evolution_remote_jid: string; status: 'open' | 'pending' | 'resolved'; updated_at: string }> };
@@ -3484,8 +3557,10 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       phone: string;
       source: string;
       avatar_url: string | null;
+      google_link_present: boolean;
       }>(
-      `SELECT name, phone, source, avatar_url
+      `SELECT name, phone, source, avatar_url,
+              (source = 'google' OR google_resource_name IS NOT NULL) AS google_link_present
        FROM contacts
        WHERE company_id = $1
        ORDER BY CASE source WHEN 'google' THEN 0 WHEN 'hub' THEN 1 ELSE 2 END`,
@@ -3575,19 +3650,6 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     } catch (error) {
       _request.log.warn({ err: error }, 'Identidades WhatsApp ainda não estão disponíveis');
     }
-    if (process.env.AVATAR_DEBUG === 'true') {
-      storedContacts.rows.forEach((contact) => {
-        traceAvatarSelection({
-          entityId: contact.phone,
-          whatsappAvatar: contact.source === 'whatsapp' ? contact.avatar_url : undefined,
-          googleAvatar: contact.source === 'google' ? contact.avatar_url : undefined,
-          storedAvatar: contact.avatar_url,
-          selectedSource: contact.source === 'google' ? 'google' : contact.avatar_url ? 'stored' : 'none',
-          selectedAvatar: contact.avatar_url,
-          path: 'evolution.storedContact',
-        });
-      });
-    }
     let dailyResponders: { rows: Array<{ evolution_remote_jid: string; user_id: string; user_name: string; response_date: string }> } = { rows: [] };
     try {
       dailyResponders = await db.query(
@@ -3604,7 +3666,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       chats: chatsData,
       contacts: contactsData,
       storedContacts: process.env.AVATAR_DEBUG === 'true'
-        ? storedContacts.rows.map(({ name, phone, source, avatar_url }) => ({ name, phone, source, avatarPresent: Boolean(avatar_url), googleAvatarPresent: source === 'google' && Boolean(avatar_url) }))
+        ? storedContacts.rows.map(({ name, phone, source, avatar_url, google_link_present }) => ({ name, phone, source, avatarPresent: Boolean(avatar_url), googleLinkPresent: Boolean(google_link_present), googleAvatarPresent: Boolean(google_link_present && avatar_url) }))
         : storedContacts.rows.map(({ name, phone, source }) => ({ name, phone, source })),
       whatsappNames: whatsappNames.rows,
       whatsappIdentities: whatsappIdentities.rows,

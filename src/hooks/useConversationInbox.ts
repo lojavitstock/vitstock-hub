@@ -11,6 +11,7 @@ import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../util
 import { createMessageNotificationDeduper } from '../utils/messageNotification';
 import { playNotificationSound } from '../utils/notificationSound';
 import { conversationNeedsResponse } from '../utils/conversationState';
+import { traceInboxOrderChanges, traceInboxOrderEvent, type InboxOrderTraceTrigger } from '../utils/inboxOrderDiagnostics';
 
 export { conversationNeedsResponse } from '../utils/conversationState';
 
@@ -84,7 +85,7 @@ export const useConversationInbox = ({
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
 
-  const loadChats = useCallback((showLoading = true) => {
+  const loadChats = useCallback((showLoading = true, trigger: InboxOrderTraceTrigger = showLoading ? 'initial_load' : 'unknown') => {
     if (!isMock && connectionStatus !== 'connected') return Promise.resolve();
     return inboxRequestsRef.current.run('inbox', async () => {
     // A Evolution pode levar vários segundos para responder. Não iniciamos
@@ -136,6 +137,11 @@ export const useConversationInbox = ({
       });
 
       const reconciledConversations = reconcileConversationsMonotonic(previousConversations, mergedChats);
+      traceInboxOrderChanges(previousConversations, reconciledConversations, {
+        snapshot: mergedChats,
+        activeConversationId: activeConversationIdRef.current,
+        trigger,
+      });
       if (reconciledConversations !== previousConversations) {
         conversationsRef.current = reconciledConversations;
         setConversations(reconciledConversations);
@@ -178,7 +184,7 @@ export const useConversationInbox = ({
 
   useEffect(() => {
     if (!isMock && connectionStatus !== 'connected') return undefined;
-    void loadChats();
+    void loadChats(true, 'initial_load');
     if (isMock) return undefined;
 
     const unsubscribe = EvolutionApiService.subscribeToRealtimeEvents((event) => {
@@ -190,7 +196,7 @@ export const useConversationInbox = ({
       if (event.type === REALTIME_RECONNECTED_EVENT) {
         if (document.visibilityState === 'visible') {
           void EvolutionApiService.getInstanceStatus(instanceName);
-          void loadChats(false);
+          void loadChats(false, 'realtime_reconnect');
         }
         return;
       }
@@ -202,6 +208,12 @@ export const useConversationInbox = ({
       const previousConversations = conversationsRef.current;
       const reconciledConversations = reconcileRealtimeConversation(previousConversations, event);
       if (reconciledConversations) {
+        traceInboxOrderChanges(previousConversations, reconciledConversations, {
+          activeConversationId: activeConversationIdRef.current,
+          trigger: event.type === 'message.upsert'
+            ? 'message_upsert'
+            : event.type === 'conversation.updated' ? 'conversation_updated' : 'unknown',
+        });
         if (reconciledConversations !== previousConversations) {
           conversationsRef.current = reconciledConversations;
           setConversations(reconciledConversations);
@@ -211,7 +223,7 @@ export const useConversationInbox = ({
 
       // Events without enough fields (or for a conversation not currently in
       // the list) retain the existing polling/refetch safety net.
-      void loadChats(false);
+      void loadChats(false, 'unknown');
     });
     const handleWhatsAppStatus = (event: Event) => {
       const status = (event as CustomEvent<'connected' | 'connecting' | 'disconnected'>).detail;
@@ -219,15 +231,15 @@ export const useConversationInbox = ({
       const previousStatus = whatsappStatusRef.current;
       whatsappStatusRef.current = status;
       if (status === 'connected' && previousStatus !== 'connected' && document.visibilityState === 'visible') {
-        void loadChats(false);
+        void loadChats(false, 'realtime_reconnect');
       }
     };
     window.addEventListener('vitstock:whatsapp-status', handleWhatsAppStatus);
     const interval = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void loadChats(false);
+      if (document.visibilityState === 'visible') void loadChats(false, 'polling');
     }, REALTIME_SAFETY_INTERVAL_MS);
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') void loadChats(false);
+      if (document.visibilityState === 'visible') void loadChats(false, 'polling');
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
@@ -260,6 +272,13 @@ export const useConversationInbox = ({
   const needsAttention = useCallback((conversation: Conversation) => conversationNeedsAttention(conversation, now), [now]);
 
   const markConversationAsRead = useCallback(async (conversation: Conversation) => {
+    const index = conversationsRef.current.findIndex((item) => item.id === conversation.id);
+    traceInboxOrderEvent({
+      event: 'mark_read_start',
+      conversation,
+      index,
+      activeConversationId: activeConversationIdRef.current,
+    });
     setConversations((previous) => {
       const next = previous.map((item) => item.id === conversation.id
         ? { ...item, unreadCount: 0 }
@@ -272,7 +291,19 @@ export const useConversationInbox = ({
     readOverridesRef.current.set(conversation.id, conversation.lastMessageAt);
     try {
       await EvolutionApiService.markChatAsRead(conversation.id, conversation.lastMessageAt, conversation.lastMessageKey);
+      traceInboxOrderEvent({
+        event: 'mark_read_success',
+        conversation,
+        index,
+        activeConversationId: activeConversationIdRef.current,
+      });
     } catch (error) {
+      traceInboxOrderEvent({
+        event: 'mark_read_failure',
+        conversation,
+        index,
+        activeConversationId: activeConversationIdRef.current,
+      });
       console.warn('[Atendimento] Não foi possível persistir a leitura:', error);
     }
   }, []);
@@ -309,7 +340,7 @@ export const useConversationInbox = ({
       setAssignmentFeedback('Atendimento capturado.');
     } catch (error) {
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível capturar o atendimento');
-      await loadChats(false);
+      await loadChats(false, 'manual_refresh');
     } finally {
       setCapturingChat(false);
     }
@@ -352,7 +383,7 @@ export const useConversationInbox = ({
       setAssignmentFeedback('Conversa puxada para voc\u00ea.');
     } catch (error) {
       setAssignmentFeedback(error instanceof Error ? error.message : 'N\u00e3o foi poss\u00edvel puxar a conversa');
-      await loadChats(false);
+      await loadChats(false, 'manual_refresh');
     } finally {
       setCapturingChat(false);
     }

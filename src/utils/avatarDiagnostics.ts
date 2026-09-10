@@ -14,6 +14,27 @@ type AvatarSelectionInput = {
   path: string;
 };
 
+export type AvatarTargetTraceInput = {
+  entityId?: unknown;
+  remoteJid?: unknown;
+  isGroup?: boolean;
+  remoteJidAltPresent?: boolean;
+  senderPnPresent?: boolean;
+  participantPnPresent?: boolean;
+  providerPhonePresent?: boolean;
+  snapshotProfilePicPresent?: boolean;
+  snapshotProfilePicturePresent?: boolean;
+  whatsappIdentityPresent?: boolean;
+  whatsappIdentityAvatarPresent?: boolean;
+  whatsappStoredNamePresent?: boolean;
+  whatsappStoredAvatarPresent?: boolean;
+  contactRecordPresent?: boolean;
+  contactAvatarPresent?: boolean;
+  googleLinkPresent?: boolean;
+  selectedSource: AvatarDebugSource;
+  selectedAvatar?: unknown;
+};
+
 type DebugOptions = { enabled?: boolean };
 
 const emitted = new Set<string>();
@@ -42,7 +63,7 @@ const entityToken = (value: unknown) => {
 
 const enabledByEnv = () => Boolean((import.meta as any).env?.VITE_AVATAR_DEBUG === 'true');
 
-function jidType(input: AvatarSelectionInput) {
+function jidType(input: Pick<AvatarSelectionInput, 'remoteJid' | 'isGroup'>) {
   if (input.isGroup) return 'GROUP' as const;
   const value = String(input.remoteJid || '').trim().toLowerCase();
   if (value.endsWith('@g.us')) return 'GROUP' as const;
@@ -51,7 +72,7 @@ function jidType(input: AvatarSelectionInput) {
   return 'UNKNOWN' as const;
 }
 
-function entity(input: AvatarSelectionInput) {
+function entity(input: Pick<AvatarSelectionInput, 'entityId' | 'remoteJid'>) {
   return entityToken(input.entityId ?? input.remoteJid);
 }
 
@@ -79,6 +100,37 @@ export function traceAvatarSelection(input: AvatarSelectionInput, options: Debug
   if (emitted.size >= MAX_DEDUPED_EVENTS) emitted.clear();
   emitted.add(dedupeKey);
   console.info('[AVATAR_DEBUG]', JSON.stringify(payload));
+  return true;
+}
+
+/** Opt-in, sanitized trace for the final individual conversation projection. */
+export function traceAvatarTargetSelection(input: AvatarTargetTraceInput, options: DebugOptions = {}) {
+  const debugEnabled = options.enabled ?? enabledByEnv();
+  if (!debugEnabled || input.isGroup) return false;
+  const payload = {
+    entity: entity(input),
+    jidType: jidType(input),
+    remoteJidAltPresent: Boolean(input.remoteJidAltPresent),
+    senderPnPresent: Boolean(input.senderPnPresent),
+    participantPnPresent: Boolean(input.participantPnPresent),
+    providerPhonePresent: Boolean(input.providerPhonePresent),
+    snapshotProfilePicPresent: Boolean(input.snapshotProfilePicPresent),
+    snapshotProfilePicturePresent: Boolean(input.snapshotProfilePicturePresent),
+    whatsappIdentityPresent: Boolean(input.whatsappIdentityPresent),
+    whatsappIdentityAvatarPresent: Boolean(input.whatsappIdentityAvatarPresent),
+    whatsappStoredNamePresent: Boolean(input.whatsappStoredNamePresent),
+    whatsappStoredAvatarPresent: Boolean(input.whatsappStoredAvatarPresent),
+    contactRecordPresent: Boolean(input.contactRecordPresent),
+    contactAvatarPresent: Boolean(input.contactAvatarPresent),
+    googleLinkPresent: Boolean(input.googleLinkPresent),
+    selectedSource: input.selectedSource,
+    selectedAvatarPresent: hasAvatar(input.selectedAvatar),
+  };
+  const dedupeKey = `${payload.entity}|${JSON.stringify(payload)}`;
+  if (emitted.has(dedupeKey)) return false;
+  if (emitted.size >= MAX_DEDUPED_EVENTS) emitted.clear();
+  emitted.add(dedupeKey);
+  console.info('[AVATAR_TARGET_TRACE]', JSON.stringify(payload));
   return true;
 }
 

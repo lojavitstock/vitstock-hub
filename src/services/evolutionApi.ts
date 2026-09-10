@@ -8,7 +8,7 @@ import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 import type { RealtimeEventPayload } from '../utils/realtimeUpdates';
 import { REALTIME_RECONNECTED_EVENT } from '../utils/realtimeConfig';
 import type { QuotedMessage } from '../utils/quotedMessage';
-import { traceAvatarSelection } from '../utils/avatarDiagnostics';
+import { traceAvatarSelection, traceAvatarTargetSelection } from '../utils/avatarDiagnostics';
 
 const unwrapEvolutionMessage = (message: any) => {
   let current = message || {};
@@ -455,7 +455,7 @@ export class EvolutionApiService {
       const contactsData = payload.contacts;
       const chatsData = payload.chats;
       const storedContactsData = payload.storedContacts;
-      const storedContactsMap = new Map<string, { name: string; source: string; avatarPresent?: boolean; googleAvatarPresent?: boolean }>();
+      const storedContactsMap = new Map<string, { name: string; source: string; avatarPresent?: boolean; googleLinkPresent?: boolean; googleAvatarPresent?: boolean }>();
       const whatsappNamesMap = new Map<string, { name: string; avatar?: string }>();
       const whatsappIdentitiesMap = new Map<string, { phone?: string; name?: string; avatar?: string }>();
       const groupMetadataMap = new Map<string, { subject?: string; picture?: string }>();
@@ -559,6 +559,7 @@ export class EvolutionApiService {
                 name: contact.name,
                 source: contact.source,
                 ...(typeof contact.avatarPresent === 'boolean' ? { avatarPresent: contact.avatarPresent } : {}),
+                ...(typeof contact.googleLinkPresent === 'boolean' ? { googleLinkPresent: contact.googleLinkPresent } : {}),
                 ...(typeof contact.googleAvatarPresent === 'boolean' ? { googleAvatarPresent: contact.googleAvatarPresent } : {}),
               });
             }
@@ -723,6 +724,7 @@ export class EvolutionApiService {
 
         const conversationObj: Conversation = {
           id: rawRemoteJid, // ID real para findMessages no Railway (ex: 267877160644613@lid)
+          ...(typeof item.updatedAt === 'string' ? { updatedAt: item.updatedAt } : {}),
           isGroup,
           groupName: isGroup ? displayName : undefined,
           groupAvatar: isGroup ? (groupMetadata?.picture || item.profilePicUrl || item.profilePictureUrl || item.profilePicture || '') : undefined,
@@ -778,6 +780,26 @@ export class EvolutionApiService {
           selectedAvatar,
           explicitAliasPresent: Boolean(item.remoteJidAlt || item.lastMessage?.key?.remoteJidAlt),
           path: 'evolutionApi.fetchRealChats',
+        });
+        traceAvatarTargetSelection({
+          entityId: rawRemoteJid,
+          remoteJid: rawRemoteJid,
+          isGroup,
+          remoteJidAltPresent: Boolean(item.remoteJidAlt || lastMessage?.key?.remoteJidAlt),
+          senderPnPresent: Boolean(item.senderPn || lastMessage?.senderPn || lastMessage?.key?.senderPn),
+          participantPnPresent: Boolean(item.participantPn || lastMessage?.participantPn || lastMessage?.key?.participantPn),
+          providerPhonePresent: Boolean(providerPhone),
+          snapshotProfilePicPresent: Boolean(item.profilePicUrl),
+          snapshotProfilePicturePresent: Boolean(item.profilePictureUrl || item.profilePicture),
+          whatsappIdentityPresent: Boolean(identity),
+          whatsappIdentityAvatarPresent: Boolean(identity?.avatar),
+          whatsappStoredNamePresent: Boolean(storedContact?.name || whatsappContact?.name),
+          whatsappStoredAvatarPresent: Boolean(whatsappContact?.avatar || storedContact?.avatarPresent),
+          contactRecordPresent: Boolean(savedContact || storedContact),
+          contactAvatarPresent: Boolean(savedContact?.avatar || storedContact?.avatarPresent),
+          googleLinkPresent: Boolean(storedContact?.googleLinkPresent),
+          selectedSource,
+          selectedAvatar,
         });
 
         // Se o mapa já tiver este número, atualiza apenas se a mensagem for mais recente ou se o nome for melhor que a entrada existente
