@@ -3857,6 +3857,34 @@ test('projeção compartilha alias explícito quando apenas a entrada local conh
   assert.equal(projected[0]?.lastMessage?.key?.id, 'provider-message');
 });
 
+test('self-chat PN e LID explícitos permanecem em uma única conversa', () => {
+  const projected = projectCanonicalInboxChats([
+    inboxProjectionChat('opaque-self@lid', {
+      lastMessage: { key: { id: 'self-lid-message', remoteJid: 'opaque-self@lid', fromMe: true }, message: { conversation: 'Eu' }, messageTimestamp: 1_800_000_010 },
+    }),
+    inboxProjectionChat('5521999999999@s.whatsapp.net', {
+      remoteJidAliases: ['5521999999999@s.whatsapp.net', 'opaque-self@lid'],
+      lastMessage: { key: { id: 'self-pn-message', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true }, message: { conversation: 'Eu anterior' }, messageTimestamp: 1_800_000_000 },
+    }),
+  ]);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0]?.lastMessage?.key?.id, 'self-lid-message');
+});
+
+test('self-chat provider e local usam o alias explícito sem duplicar', () => {
+  const provider = inboxProjectionChat('opaque-self-local@lid', {
+    lastMessage: { key: { id: 'self-provider-message', remoteJid: 'opaque-self-local@lid', fromMe: true }, message: { conversation: 'Provider' }, messageTimestamp: 1_800_000_000 },
+  });
+  const local = inboxProjectionChat('opaque-self-local@lid', {
+    phone: '+5521999999999',
+    remoteJidAliases: ['opaque-self-local@lid', '5521999999999@s.whatsapp.net'],
+    lastMessage: { key: { id: 'self-local-message', remoteJid: 'opaque-self-local@lid', fromMe: true }, message: { conversation: 'Local' }, messageTimestamp: 1_800_000_000 },
+  });
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(projectCanonicalInboxChats([merged]).length, 1);
+  assert.equal(merged.remoteJidAliases?.includes('5521999999999@s.whatsapp.net'), true);
+});
+
 test('snapshot administrativo com a mesma última mensagem preserva posição e atividade', () => {
   const first = conversation('first', { lastMessageAt: 2_000, lastMessage: 'Primeira' });
   const second = conversation('second', { lastMessageAt: 1_000, lastMessage: 'Segunda' });
