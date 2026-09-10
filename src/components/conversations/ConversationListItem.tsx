@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Conversation } from '../../types';
 import { ContactPhoto } from './ContactPhoto';
 import { formatConversationTimestamp } from './conversationFormatters';
@@ -11,6 +11,7 @@ type ConversationListItemProps = {
   needsResponse: boolean;
   needsAttention: boolean;
   onSelect: (conversation: Conversation) => void;
+  onResolveAvatar?: (conversationId: string) => void | Promise<void>;
 };
 
 const tagsAreEqual = (previous: Conversation['contact']['tags'], next: Conversation['contact']['tags']) => (
@@ -40,13 +41,37 @@ export const ConversationListItem = React.memo<ConversationListItemProps>(({
   needsResponse,
   needsAttention,
   onSelect,
+  onResolveAvatar,
 }) => {
+  const itemRef = useRef<HTMLButtonElement>(null);
   const handleSelect = () => onSelect(conversation);
   const preview = stripWhatsAppFormatting(conversation.lastMessage);
+
+  useEffect(() => {
+    if (!onResolveAvatar || conversation.isGroup || conversation.avatarSource === 'whatsapp') return undefined;
+    let disposed = false;
+    const resolve = () => {
+      if (!disposed) void onResolveAvatar(conversation.id);
+    };
+    if (isSelected) resolve();
+    if (typeof IntersectionObserver === 'undefined') {
+      resolve();
+      return () => { disposed = true; };
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) resolve();
+    }, { threshold: 0.01 });
+    if (itemRef.current) observer.observe(itemRef.current);
+    return () => {
+      disposed = true;
+      observer.disconnect();
+    };
+  }, [conversation.avatarSource, conversation.contact.avatar, conversation.id, conversation.isGroup, isSelected, onResolveAvatar]);
 
   return (
     <button
       type="button"
+      ref={itemRef}
       onClick={handleSelect}
       title={`${conversation.contact.name} — ${preview}`}
       aria-label={`Abrir conversa com ${conversation.contact.name}`}
@@ -107,6 +132,7 @@ export const ConversationListItem = React.memo<ConversationListItemProps>(({
   && previous.needsResponse === next.needsResponse
   && previous.needsAttention === next.needsAttention
   && previous.onSelect === next.onSelect
+  && previous.onResolveAvatar === next.onResolveAvatar
   && areVisibleFieldsEqual(previous.conversation, next.conversation)
 ));
 

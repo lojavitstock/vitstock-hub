@@ -114,6 +114,9 @@ import { outboundErrorMessage } from '../src/utils/outboundError';
 import { classifyAttachmentFile, MAX_ATTACHMENTS_PER_MESSAGE, MAX_TOTAL_ATTACHMENT_BYTES, selectAttachmentFiles } from '../src/utils/composerAttachment';
 import { resetInboxOrderDebugDedupe, traceInboxOrderProjection } from '../server/src/inboxOrderDiagnostics';
 import { traceInboxOrderChanges as traceFrontendInboxOrderChanges, traceInboxOrderEvent as traceFrontendInboxOrderEvent } from '../src/utils/inboxOrderDiagnostics';
+import { selectConversationAvatar } from '../src/utils/avatarSelection';
+import { explicitAvatarProviderPhone, avatarResolutionTtls } from '../server/src/avatarResolution';
+import { selectConversationAvatar as selectServerConversationAvatar } from '../server/src/avatarSelection';
 import type { Conversation, Message } from '../src/types';
 
 test('classifies provider JIDs and filters non-conversational entities fail-closed', () => {
@@ -3458,6 +3461,92 @@ test('avatar profile fetch trace classifica respostas sem expor a URL', () => {
   assert.match(output[0] || '', /"identityBasis":"PN"/);
   assert.match(output[0] || '', /"result":"success"/);
   assert.match(output[1] || '', /"result":"provider_4xx"/);
+});
+
+test('avatar selector mantém WhatsApp acima de Google e usa fallback somente quando necessário', () => {
+  assert.deepEqual(selectConversationAvatar({
+    snapshotWhatsAppAvatar: '  https://wa.test/snapshot.jpg  ',
+    storedWhatsAppAvatar: 'https://wa.test/stored.jpg',
+    googleAvatar: 'https://google.test/photo.jpg',
+  }), { avatar: 'https://wa.test/snapshot.jpg', source: 'whatsapp' });
+  assert.deepEqual(selectConversationAvatar({
+    storedWhatsAppAvatar: 'https://wa.test/stored.jpg',
+    googleAvatar: 'https://google.test/photo.jpg',
+  }), { avatar: 'https://wa.test/stored.jpg', source: 'whatsapp' });
+  assert.deepEqual(selectConversationAvatar({ googleAvatar: 'https://google.test/photo.jpg' }), {
+    avatar: 'https://google.test/photo.jpg',
+    source: 'google',
+  });
+  assert.deepEqual(selectConversationAvatar({ snapshotWhatsAppAvatar: '', storedWhatsAppAvatar: null, googleAvatar: '   ' }), {
+    avatar: null,
+    source: 'none',
+  });
+  assert.deepEqual(selectServerConversationAvatar({
+    snapshotWhatsAppAvatar: 'https://wa.test/snapshot.jpg',
+    googleAvatar: 'https://google.test/photo.jpg',
+  }), { avatar: 'https://wa.test/snapshot.jpg', source: 'whatsapp' });
+});
+
+test('avatar resolution só deriva PN de identidade explícita e falha fechado para LID/grupo', () => {
+  assert.equal(explicitAvatarProviderPhone({ remoteJid: 'opaque-123@lid', identities: ['5521999999999@s.whatsapp.net'] }), '5521999999999');
+  assert.equal(explicitAvatarProviderPhone({ remoteJid: 'opaque-123@lid', identities: ['5521999999999@c.us'] }), '5521999999999');
+  assert.equal(explicitAvatarProviderPhone({ remoteJid: 'opaque-123@lid', identities: ['opaque-123@lid'] }), '');
+  assert.equal(explicitAvatarProviderPhone({ remoteJid: '120363000000@g.us', identities: ['opaque-123@lid'] }), '');
+  assert.equal(explicitAvatarProviderPhone({ remoteJid: '5521999999999@s.whatsapp.net' }), '5521999999999');
+});
+
+test('avatar resolution expõe TTLs negativos e limite de concorrência coerentes', () => {
+  assert.equal(avatarResolutionTtls.success, 24 * 60 * 60_000);
+  assert.equal(avatarResolutionTtls.empty, 6 * 60 * 60_000);
+  assert.equal(avatarResolutionTtls.error, 15 * 60_000);
+  assert.equal(avatarResolutionTtls.unavailable, 60 * 60_000);
+});
+
+test('projeção da Inbox não deixa avatar Google sobrescrever fonte WhatsApp', () => {
+  const projected = projectCanonicalInboxChats([inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    contact: {
+      id: 'contact-1',
+      name: 'Cliente',
+      phone: '+5521999999999',
+      avatar: 'https://google.test/legacy.jpg',
+      tags: [],
+      createdAt: '2026-08-01',
+    },
+    whatsappAvatar: 'https://wa.test/stored.jpg',
+    googleAvatar: 'https://google.test/photo.jpg',
+    profilePicUrl: '',
+  })]);
+  assert.equal(projected[0]?.avatarSource, 'whatsapp');
+  assert.equal(projected[0]?.profilePicUrl, 'https://wa.test/stored.jpg');
+  assert.equal(projected[0]?.contact?.avatar, 'https://wa.test/stored.jpg');
+
+  const googleOnly = projectCanonicalInboxChats([inboxProjectionChat('5521888888888@s.whatsapp.net', {
+    contact: {
+      id: 'contact-2',
+      name: 'Google',
+      phone: '+5521888888888',
+      avatar: 'https://google.test/legacy.jpg',
+      tags: [],
+      createdAt: '2026-08-01',
+    },
+    googleAvatar: 'https://google.test/photo.jpg',
+  })]);
+  assert.equal(googleOnly[0]?.avatarSource, 'google');
+  assert.equal(googleOnly[0]?.profilePicUrl, undefined);
+  assert.equal(googleOnly[0]?.contact?.avatar, 'https://google.test/photo.jpg');
+
+  const noSource = projectCanonicalInboxChats([inboxProjectionChat('5521777777777@s.whatsapp.net', {
+    contact: {
+      id: 'contact-3',
+      name: 'Sem foto',
+      phone: '+5521777777777',
+      avatar: 'https://google.test/unclassified.jpg',
+      tags: [],
+      createdAt: '2026-08-01',
+    },
+  })]);
+  assert.equal(noSource[0]?.avatarSource, 'none');
+  assert.equal(noSource[0]?.contact?.avatar, '');
 });
 
 test('inbox order trace só registra mudanças reais de índice', () => {

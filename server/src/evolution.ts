@@ -85,6 +85,8 @@ import {
 } from './opaqueLidStaging.js';
 import { traceAvatarProfileFetch, traceAvatarSelection, type AvatarProfileFetchResult } from './avatarDiagnostics.js';
 import { traceInboxOrderProjection } from './inboxOrderDiagnostics.js';
+import { resolveConversationAvatar } from './avatarResolution.js';
+import { selectConversationAvatar as selectServerConversationAvatar } from './avatarSelection.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -917,6 +919,9 @@ async function loadLocalInboxChats(companyId: string) {
     last_message_at: Date | string | null;
     contact_name: string;
     avatar_url: string | null;
+    contact_source: string | null;
+    google_resource_name: string | null;
+    whatsapp_avatar_url: string | null;
     message_id: string | null;
     message_sender: string | null;
     message_sender_name: string | null;
@@ -938,8 +943,11 @@ async function loadLocalInboxChats(companyId: string) {
               END
             ) AS last_message,
             COALESCE(latest.sent_at, c.last_message_at) AS last_message_at,
-            canonical_ct.name AS contact_name,
-            canonical_ct.avatar_url,
+             canonical_ct.name AS contact_name,
+             canonical_ct.avatar_url,
+             canonical_ct.source AS contact_source,
+             canonical_ct.google_resource_name,
+             whatsapp_avatar.avatar_url AS whatsapp_avatar_url,
             latest.evolution_message_id AS message_id,
             latest.sender AS message_sender,
             latest.sender_name AS message_sender_name,
@@ -981,8 +989,16 @@ async function loadLocalInboxChats(companyId: string) {
        WHERE identity_value LIKE '%@s.whatsapp.net' OR identity_value LIKE '%@c.us'
        ORDER BY updated_at DESC, id
        LIMIT 1
-     ) canonical_phone ON true
-     LEFT JOIN LATERAL (
+      ) canonical_phone ON true
+      LEFT JOIN LATERAL (
+        SELECT w.avatar_url
+        FROM whatsapp_contact_names w
+        WHERE w.company_id = c.company_id
+          AND regexp_replace(w.phone, '\\D', '', 'g') = regexp_replace(COALESCE(canonical_phone.phone, canonical_ct.phone, ct.phone), '\\D', '', 'g')
+        ORDER BY w.updated_at DESC
+        LIMIT 1
+      ) whatsapp_avatar ON true
+      LEFT JOIN LATERAL (
        SELECT ARRAY_AGG(DISTINCT identity_value ORDER BY identity_value) AS identities
        FROM (
          SELECT ci.identity AS identity_value
@@ -1044,7 +1060,26 @@ async function loadLocalInboxChats(companyId: string) {
       unreadCount: Number(row.unread_count) || 0,
       updatedAt: dateValue ? new Date(dateValue).toISOString() : undefined,
       pushName: row.contact_name,
-      profilePicUrl: row.group_avatar_url || row.avatar_url || undefined,
+       ...(() => {
+          if (isGroup) {
+            const groupAvatar = row.group_avatar_url || row.avatar_url || undefined;
+            return {
+              profilePicUrl: groupAvatar,
+              ...(groupAvatar ? { avatarSource: 'whatsapp' as const } : {}),
+            };
+         }
+         const selection = selectServerConversationAvatar({
+           snapshotWhatsAppAvatar: undefined,
+           storedWhatsAppAvatar: row.whatsapp_avatar_url,
+           googleAvatar: row.contact_source === 'google' || Boolean(row.google_resource_name) ? row.avatar_url : undefined,
+         });
+         return {
+           profilePicUrl: selection.source === 'whatsapp' ? selection.avatar || undefined : undefined,
+           whatsappAvatar: row.whatsapp_avatar_url || undefined,
+           googleAvatar: selection.source === 'google' ? selection.avatar || undefined : undefined,
+           avatarSource: selection.source,
+         };
+       })(),
       lastMessage: {
         key: {
           id: row.message_id || `local-${remoteJid}-${timestamp}`,
@@ -3623,14 +3658,15 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     } catch (error) {
       _request.log.warn({ err: error }, 'Tabela de nomes do WhatsApp ainda não está disponível');
     }
-    let whatsappIdentities: { rows: Array<{ identity: string; identity_type: string; phone: string | null; name: string; avatar_url: string | null }> } = { rows: [] };
+    let whatsappIdentities: { rows: Array<{ identity: string; identity_type: string; phone: string | null; name: string; avatar_url: string | null; google_link_present: boolean }> } = { rows: [] };
     try {
       whatsappIdentities = await db.query(
         `SELECT ci.identity,
                 ci.identity_type,
                 phone_identity.phone,
                 c.name,
-                c.avatar_url
+                c.avatar_url,
+                (c.source = 'google' OR c.google_resource_name IS NOT NULL) AS google_link_present
          FROM contact_channel_identities ci
          JOIN contacts c ON c.id = ci.contact_id
          LEFT JOIN LATERAL (
@@ -3665,11 +3701,23 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     return {
       chats: chatsData,
       contacts: contactsData,
-      storedContacts: process.env.AVATAR_DEBUG === 'true'
-        ? storedContacts.rows.map(({ name, phone, source, avatar_url, google_link_present }) => ({ name, phone, source, avatarPresent: Boolean(avatar_url), googleLinkPresent: Boolean(google_link_present), googleAvatarPresent: Boolean(google_link_present && avatar_url) }))
-        : storedContacts.rows.map(({ name, phone, source }) => ({ name, phone, source })),
+      storedContacts: storedContacts.rows.map(({ name, phone, source, avatar_url, google_link_present }) => ({
+        name,
+        phone,
+        source,
+        ...(google_link_present && avatar_url ? { googleAvatar: avatar_url } : {}),
+        ...(process.env.AVATAR_DEBUG === 'true'
+          ? { avatarPresent: Boolean(avatar_url), googleLinkPresent: Boolean(google_link_present), googleAvatarPresent: Boolean(google_link_present && avatar_url) }
+          : {}),
+      })),
       whatsappNames: whatsappNames.rows,
-      whatsappIdentities: whatsappIdentities.rows,
+      whatsappIdentities: whatsappIdentities.rows.map(({ identity, identity_type, phone, name, avatar_url, google_link_present }) => ({
+        identity,
+        identity_type,
+        phone,
+        name,
+        ...(google_link_present && avatar_url ? { googleAvatar: avatar_url } : {}),
+      })),
       groupMetadata: snapshot.groups,
       assignments: assignments.rows,
       leases: leases.rows,
@@ -3678,6 +3726,22 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       dailyResponders: dailyResponders.rows,
       conversationTags: Array.from(conversationTags.entries()).map(([remoteJid, tags]) => ({ remoteJid, tags })),
     };
+  });
+
+  app.get<{ Params: { conversationId: string } }>('/api/evolution/conversations/:conversationId/avatar', { preHandler: requireUser }, async (request, reply) => {
+    const conversationId = String(request.params.conversationId || '').trim();
+    if (!conversationId || conversationId.length > 256) return reply.code(400).send({ error: 'Conversa inválida' });
+    try {
+      const result = await resolveConversationAvatar(request.user!.companyId, conversationId);
+      if (!result) return reply.code(404).send({ error: 'Conversa não encontrada' });
+      return {
+        avatar: result.avatar,
+        source: result.source,
+      };
+    } catch (error) {
+      request.log.warn({ err: error }, 'Não foi possível resolver o avatar da conversa');
+      return reply.code(503).send({ avatar: null, source: 'none' });
+    }
   });
 
   app.post('/api/evolution/chats/capture', { preHandler: requireUser }, async (request, reply) => {

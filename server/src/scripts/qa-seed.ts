@@ -68,9 +68,17 @@ async function seed() {
     await client.query(`UPDATE contacts SET archived_at = now(), archived_by = $2 WHERE id = $1`, [archived, adminA]);
     const avatarValid = await addContact(companyA, 'Contato QA Avatar Válido', '5521990000011', { avatarUrl: 'http://localhost:3001/api/qa/avatar/valid.svg' });
     await client.query('UPDATE contacts SET avatar_url = $2 WHERE id = $1', [avatarValid, 'http://localhost:3001/api/qa/avatar/valid.svg']);
+    await client.query(
+      `INSERT INTO whatsapp_contact_names (company_id, phone, name, avatar_url) VALUES ($1, $2, $3, $4)`,
+      [companyA, '5521990000011', 'Contato QA Avatar Válido', 'http://localhost:3001/api/qa/avatar/valid.svg'],
+    );
     await addConversation(companyA, avatarValid, '5521990000011@s.whatsapp.net', 'Avatar local válido para QA.');
     const avatarBroken = await addContact(companyA, 'Contato QA Avatar Quebrado', '5521990000012', { avatarUrl: 'http://localhost:3001/api/qa/avatar/broken.svg' });
     await client.query('UPDATE contacts SET avatar_url = $2 WHERE id = $1', [avatarBroken, 'http://localhost:3001/api/qa/avatar/broken.svg']);
+    await client.query(
+      `INSERT INTO whatsapp_contact_names (company_id, phone, name, avatar_url) VALUES ($1, $2, $3, $4)`,
+      [companyA, '5521990000012', 'Contato QA Avatar Quebrado', 'http://localhost:3001/api/qa/avatar/broken.svg'],
+    );
     await addConversation(companyA, avatarBroken, '5521990000012@s.whatsapp.net', 'Avatar quebrado esperado para QA.');
     const avatarMissing = await addContact(companyA, 'Contato QA Avatar Ausente', '5521990000013');
     await addConversation(companyA, avatarMissing, '5521990000013@s.whatsapp.net', 'Avatar ausente para QA.');

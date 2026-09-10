@@ -89,6 +89,7 @@ export const areConversationsEquivalent = (previous: Conversation, next: Convers
   && previous.contact.name === next.contact.name
   && previous.contact.phone === next.contact.phone
   && previous.contact.avatar === next.contact.avatar
+  && previous.avatarSource === next.avatarSource
   && areTagsEqual(previous.contact.tags, next.contact.tags)
   && previous.lastMessage === next.lastMessage
   && previous.lastMessageTimestamp === next.lastMessageTimestamp
@@ -133,6 +134,9 @@ export const reconcileConversations = (
     const candidate = previousConversation
       ? {
           ...conversation,
+          avatarSource: conversation.avatarSource === 'none' && previousConversation.contact.avatar
+            ? previousConversation.avatarSource || conversation.avatarSource
+            : conversation.avatarSource || previousConversation.avatarSource,
           contact: mergeContactIdentity(previousConversation.contact, conversation.contact),
           groupName: conversation.groupName || previousConversation.groupName,
           groupAvatar: conversation.groupAvatar || previousConversation.groupAvatar,

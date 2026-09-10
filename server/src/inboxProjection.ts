@@ -4,6 +4,7 @@ import { isNonRenderableProviderMessage } from './providerMessagePolicy.js';
 import { isProviderReactionEvent } from './messageReactions.js';
 import { filterConversationalProviderChats } from './providerJidPolicy.js';
 import { traceAvatarSelection } from './avatarDiagnostics.js';
+import { selectConversationAvatar } from './avatarSelection.js';
 
 type InboxChat = Record<string, any>;
 
@@ -158,28 +159,23 @@ const mergeContactData = (
   const name = contacts.map((contact: any) => usableName(contact.name)).find(Boolean)
     || stringValue(base.name)
     || items.map(({ chat }) => usableName(chat.name) || usableName(chat.pushName)).find(Boolean);
-  const storedContact = contacts.find((contact: any) => stringValue(contact.avatar));
-  const snapshotAvatar = items.map(({ chat }) => stringValue(chat.profilePicUrl || chat.profilePictureUrl)).find(Boolean);
-  const avatar = stringValue(storedContact?.avatar)
-    || stringValue(base.avatar)
-    || snapshotAvatar;
-  const selectedSource = identity.canonicalPhone && storedContact?.source === 'google'
-    ? 'google' as const
-    : storedContact?.avatar || base.avatar
-      ? 'stored' as const
-      : snapshotAvatar
-        ? 'snapshot' as const
-        : 'none' as const;
+  const snapshotAvatar = items.map(({ chat }) => stringValue(chat.profilePicUrl || chat.profilePictureUrl || chat.profilePicture)).find(Boolean);
+  const storedWhatsAppAvatar = items.map(({ chat }) => stringValue(chat.whatsappAvatar)).find(Boolean);
+  const googleAvatar = items.map(({ chat }) => stringValue(chat.googleAvatar)).find(Boolean);
+  const selection = selectConversationAvatar({
+    snapshotWhatsAppAvatar: snapshotAvatar,
+    storedWhatsAppAvatar,
+    googleAvatar,
+  });
+  const avatar = selection.avatar;
+  const selectedSource = selection.source;
   traceAvatarSelection({
     entityId: identity.key,
     remoteJid: identity.remoteJid,
     isGroup: isWhatsAppGroup(identity.remoteJid),
-    whatsappAvatar: items.map(({ chat }) => chat.whatsappAvatar || chat.profilePicUrl || chat.profilePictureUrl).find(Boolean),
-    googleAvatar: contacts
-      .filter((contact: any) => contact?.source === 'google')
-      .map((contact: any) => contact.avatar)
-      .find(Boolean),
-    storedAvatar: contacts.map((contact: any) => contact?.avatar).find(Boolean) || base.avatar,
+    whatsappAvatar: storedWhatsAppAvatar || snapshotAvatar,
+    googleAvatar,
+    storedAvatar: storedWhatsAppAvatar,
     snapshotAvatar,
     selectedSource,
     selectedAvatar: avatar,
@@ -189,7 +185,7 @@ const mergeContactData = (
   const result = {
     ...base,
     ...(name ? { name } : {}),
-    ...(avatar ? { avatar } : {}),
+    avatar: avatar || '',
     ...(identity.canonicalPhone ? { phone: `+${identity.canonicalPhone}` } : {}),
     tags: mergeTags(items.map(({ chat }) => ({ contact: chat.contact }))),
   };
@@ -201,7 +197,7 @@ const identityRank = (chat: InboxChat) => {
   const directPn = remoteJid && !isWhatsAppLid(remoteJid) && !isWhatsAppGroup(remoteJid);
   const explicitAlias = Boolean(providerPhoneDigits(chat));
   const name = usableName(chat.name) || usableName(chat.pushName) || usableName(chat.contact?.name);
-  const avatar = stringValue(chat.profilePicUrl || chat.profilePictureUrl || chat.contact?.avatar);
+  const avatar = stringValue(chat.whatsappAvatar || chat.profilePicUrl || chat.profilePictureUrl || chat.googleAvatar);
   const metadata = chat.lastMessage?.metadata;
   return (directPn ? 100 : explicitAlias ? 80 : 0)
     + (name ? 10 : 0)
@@ -256,44 +252,36 @@ const mergeBucket = (items: Array<{ chat: InboxChat; index: number }>, identity:
     merged.name = name;
     if (!merged.pushName || !usableName(merged.pushName)) merged.pushName = name;
   }
-  const snapshotAvatar = items.map(({ chat }) => stringValue(chat.profilePicUrl || chat.profilePictureUrl)).find(Boolean);
-  const storedAvatar = items.map(({ chat }) => stringValue(chat.contact?.avatar)).find(Boolean);
-  const googleAvatar = items
-    .map(({ chat }) => chat.contact?.source === 'google' ? chat.contact?.avatar : undefined)
-    .find(Boolean);
-  const whatsappAvatar = items
-    .map(({ chat }) => chat.whatsappAvatar || chat.profilePicUrl || chat.profilePictureUrl)
-    .find(Boolean);
-  const avatar = items.map(({ chat }) => stringValue(chat.profilePicUrl || chat.profilePictureUrl || chat.contact?.avatar)).find(Boolean);
-  const selectedAvatarEntry = items.map(({ chat }) => {
-    const snapshot = stringValue(chat.profilePicUrl || chat.profilePictureUrl);
-    const contactAvatar = stringValue(chat.contact?.avatar);
-    return {
-      value: snapshot || contactAvatar,
-      source: snapshot
-        ? (isWhatsAppGroup(primary.remoteJid || primary.id) ? 'group' as const : 'snapshot' as const)
-        : contactAvatar && chat.contact?.source === 'google'
-          ? 'google' as const
-          : contactAvatar
-            ? 'stored' as const
-            : 'none' as const,
-    };
-  }).find(({ value }) => Boolean(value));
-  const selectedSource = selectedAvatarEntry?.source || 'none';
+  const snapshotAvatar = items.map(({ chat }) => stringValue(chat.profilePicUrl || chat.profilePictureUrl || chat.profilePicture)).find(Boolean);
+  const storedWhatsAppAvatar = items.map(({ chat }) => stringValue(chat.whatsappAvatar)).find(Boolean);
+  const googleAvatar = items.map(({ chat }) => stringValue(chat.googleAvatar)).find(Boolean);
+  const whatsappAvatar = storedWhatsAppAvatar || snapshotAvatar;
+  const avatarSelection = selectConversationAvatar({
+    snapshotWhatsAppAvatar: snapshotAvatar,
+    storedWhatsAppAvatar,
+    googleAvatar,
+  });
+  const avatar = avatarSelection.avatar;
+  const selectedSource = isWhatsAppGroup(primary.remoteJid || primary.id)
+    ? (snapshotAvatar ? 'group' as const : 'none' as const)
+    : avatarSelection.source;
   traceAvatarSelection({
     entityId: identity.key,
     remoteJid: identity.remoteJid,
     isGroup: isWhatsAppGroup(primary.remoteJid || primary.id),
     whatsappAvatar,
     googleAvatar,
-    storedAvatar,
+    storedAvatar: storedWhatsAppAvatar,
     snapshotAvatar,
     selectedSource,
     selectedAvatar: avatar,
     explicitAliasPresent: identity.explicit,
     path: 'inboxProjection.mergeBucket',
   });
-  if (avatar) merged.profilePicUrl = avatar;
+  if (avatar && avatarSelection.source === 'whatsapp') merged.profilePicUrl = avatar;
+  if (whatsappAvatar) merged.whatsappAvatar = whatsappAvatar;
+  if (googleAvatar) merged.googleAvatar = googleAvatar;
+  if (avatarSelection.source) merged.avatarSource = avatarSelection.source;
   if (identity.canonicalPhone) merged.phone = `+${identity.canonicalPhone}`;
   const mergedContact = mergeContactData(items, primary, identity);
   if (mergedContact) merged.contact = mergedContact;

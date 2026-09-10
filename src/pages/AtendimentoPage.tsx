@@ -162,6 +162,7 @@ export const AtendimentoPage: React.FC = () => {
     loadChats,
     updateConversationActivity,
     markConversationAsRead,
+    resolveConversationAvatar,
     capturingChat,
     assignmentFeedback,
     setAssignmentFeedback,
@@ -1866,6 +1867,7 @@ export const AtendimentoPage: React.FC = () => {
               needsResponse={conversationNeedsResponse}
               needsAttention={needsAttention}
               onSelectConversation={handleSelectConversation}
+              onResolveAvatar={resolveConversationAvatar}
             />
           )}
         </div>

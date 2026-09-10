@@ -71,6 +71,7 @@ export const useConversationInbox = ({
   const inboxRequestsRef = useRef(createInFlightRequestCoordinator<void>());
   const whatsappStatusRef = useRef<'connected' | 'connecting' | 'disconnected'>('connecting');
   const messageNotificationDeduperRef = useRef(createMessageNotificationDeduper());
+  const avatarResolutionUntilRef = useRef(new Map<string, number>());
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -308,6 +309,36 @@ export const useConversationInbox = ({
     }
   }, []);
 
+  const resolveConversationAvatar = useCallback(async (conversationId: string) => {
+    if (isMock || !conversationId) return;
+    const nowMs = Date.now();
+    const cachedUntil = avatarResolutionUntilRef.current.get(conversationId) || 0;
+    if (cachedUntil > nowMs) return;
+    // The backend owns the longer-lived provider cache. This short client
+    // guard prevents a visible item from issuing the same request on every
+    // render while still allowing a later retry after an unavailable URL.
+    avatarResolutionUntilRef.current.set(conversationId, nowMs + 15 * 60_000);
+    try {
+      const result = await EvolutionApiService.resolveConversationAvatar(conversationId);
+      if (result.source === 'whatsapp') avatarResolutionUntilRef.current.set(conversationId, Date.now() + 24 * 60 * 60_000);
+      else if (result.source === 'google') avatarResolutionUntilRef.current.set(conversationId, Date.now() + 6 * 60 * 60_000);
+      if (!result.avatar) return;
+      setConversations((previous) => {
+        const next = previous.map((conversation) => conversation.id === conversationId
+          ? {
+              ...conversation,
+              avatarSource: result.source,
+              contact: { ...conversation.contact, avatar: result.avatar || conversation.contact.avatar },
+            }
+          : conversation);
+        conversationsRef.current = next;
+        return next;
+      });
+    } catch {
+      // Profile enrichment is optional and must never affect the inbox.
+    }
+  }, [isMock]);
+
   const rememberContactName = useCallback((phone: string, name: string) => {
     if (phone.toLowerCase().endsWith('@g.us')) return;
     const normalizedPhone = phone.replace(/\D/g, '');
@@ -446,6 +477,7 @@ export const useConversationInbox = ({
     loadChats,
     updateConversationActivity,
     markConversationAsRead,
+    resolveConversationAvatar,
     rememberContactName,
     capturingChat,
     assignmentFeedback,

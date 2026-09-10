@@ -172,6 +172,7 @@ export interface Conversation {
   id: string;
   /** Provider snapshot timestamp kept only for diagnostics/reconciliation. */
   updatedAt?: string;
+  avatarSource?: 'whatsapp' | 'google' | 'none';
   isGroup?: boolean;
   groupName?: string;
   groupAvatar?: string;
