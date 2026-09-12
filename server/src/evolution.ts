@@ -338,7 +338,7 @@ async function resolveUnknownGroupParticipant(companyId: string, groupJid: strin
 }
 
 async function resolveParticipantIdentity(companyId: string, seed: ParticipantIdentity) {
-  const key = `${companyId}:${seed.canonicalId || `jid:${seed.participantJid}`}`;
+  const key = `${companyId}:jid:${seed.participantJid}`;
   const cached = participantIdentityCache.get(key);
   const mergeSeed = (identity: ParticipantIdentity) => ({
     ...identity,
@@ -448,53 +448,38 @@ async function refreshParticipantIdentity(key: string, seed: ParticipantIdentity
 async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<string, ParticipantIdentity>) {
   const jids = [...seeds.keys()];
   const phones = [...new Set([...seeds.values()].map((seed) => seed.participantPhone).filter((phone): phone is string => Boolean(phone)))];
-  const identityLookupKeys = [...new Set([
-    ...jids,
-    ...jids.map((jid) => `jid:${jid}`),
-    ...phones.flatMap((phone) => [`phone:${phone}`, `jid:${phone}@s.whatsapp.net`, `jid:${phone}@c.us`]),
-  ])];
   const byJid = new Map<string, ParticipantIdentity>();
   const byPhone = new Map<string, ParticipantIdentity>();
-  const byAlias = new Map<string, ParticipantIdentity>();
-  if (jids.length === 0 && phones.length === 0) return { byJid, byPhone, byAlias };
+  if (jids.length === 0 && phones.length === 0) return { byJid, byPhone };
   try {
     const queries = await Promise.all([
       jids.length > 0
-        ? db.query<{ participant_jid: string; participant_phone: string | null; participant_name: string | null; participant_avatar: string | null; participant_canonical_id: string | null; participant_aliases: string[] | null }>(
+        ? db.query<{ participant_jid: string; participant_phone: string | null; participant_name: string | null; participant_avatar: string | null; participant_canonical_id: string | null }>(
           `SELECT metadata->>'participantJid' AS participant_jid,
                   metadata->>'participantPhone' AS participant_phone,
                   metadata->>'participantName' AS participant_name,
                   metadata->>'participantAvatar' AS participant_avatar,
-                  metadata->>'participantCanonicalId' AS participant_canonical_id,
-                  CASE WHEN jsonb_typeof(metadata->'participantAliases') = 'array'
-                    THEN ARRAY(SELECT jsonb_array_elements_text(metadata->'participantAliases'))
-                    ELSE ARRAY[]::text[]
-                  END AS participant_aliases
+                  metadata->>'participantCanonicalId' AS participant_canonical_id
            FROM messages
            WHERE company_id = $1
              AND metadata->>'participantJid' = ANY($2::text[])
            ORDER BY sent_at DESC`,
           [companyId, jids],
         )
-        : Promise.resolve({ rows: [] as Array<{ participant_jid: string; participant_phone: string | null; participant_name: string | null; participant_avatar: string | null; participant_canonical_id: string | null; participant_aliases: string[] | null }> }),
+        : Promise.resolve({ rows: [] as Array<{ participant_jid: string; participant_phone: string | null; participant_name: string | null; participant_avatar: string | null; participant_canonical_id: string | null }> }),
       jids.length > 0
         ? db.query<{ identity: string; phone: string | null; name: string | null; avatar_url: string | null; contact_id: string; aliases: string[] | null }>(
-          `SELECT ci.identity, ci.aliases, ci.contact_id, phone_identity.phone, c.name, c.avatar_url
+          `SELECT ci.identity, ci.contact_id, c.name, c.avatar_url,
+                  CASE
+                    WHEN ci.identity ~ '@(s\\.whatsapp\\.net|c\\.us)$'
+                    THEN regexp_replace(ci.identity, '\\D', '', 'g')
+                    ELSE NULL
+                  END AS phone
            FROM contact_channel_identities ci
            JOIN contacts c ON c.id = ci.contact_id
-           LEFT JOIN LATERAL (
-             SELECT regexp_replace(phone_identity.identity, '\\D', '', 'g') AS phone
-             FROM contact_channel_identities phone_identity
-             WHERE phone_identity.company_id = ci.company_id
-               AND phone_identity.contact_id = ci.contact_id
-               AND phone_identity.channel = 'whatsapp'
-               AND phone_identity.identity_type = 'remote_jid'
-             ORDER BY phone_identity.updated_at DESC
-             LIMIT 1
-           ) phone_identity ON true
            WHERE ci.company_id = $1 AND ci.channel = 'whatsapp'
-             AND (ci.identity = ANY($2::text[]) OR ci.aliases && $2::text[])`,
-          [companyId, identityLookupKeys],
+             AND lower(ci.identity) = ANY($2::text[])`,
+          [companyId, jids],
         )
         : Promise.resolve({ rows: [] as Array<{ identity: string; phone: string | null; name: string | null; avatar_url: string | null; contact_id: string; aliases: string[] | null }> }),
       phones.length > 0
@@ -526,7 +511,7 @@ async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<
     for (const row of queries[0].rows) {
       const jid = normalizeParticipantJid(row.participant_jid);
       if (!jid || byJid.has(jid)) continue;
-      const aliases = [...new Set([...(row.participant_aliases || []), ...participantAliasKeysFromRecord({ participantJid: jid, participantPhone: row.participant_phone })])];
+      const aliases = participantAliasKeysFromRecord({ participantJid: jid, participantPhone: row.participant_phone });
       const identity: ParticipantIdentity = {
         participantJid: jid,
         canonicalId: row.participant_canonical_id || (row.participant_phone ? `phone:${row.participant_phone}` : `jid:${jid}`),
@@ -536,7 +521,6 @@ async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<
         ...(row.participant_avatar ? { pictureUrl: row.participant_avatar } : {}),
       };
       byJid.set(jid, identity);
-      for (const alias of identity.aliases || []) byAlias.set(alias, identity);
     }
     for (const row of queries[1].rows) {
       const jid = normalizeParticipantJid(row.identity);
@@ -544,13 +528,12 @@ async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<
       const identity: ParticipantIdentity = {
         participantJid: jid,
         canonicalId: `contact:${row.contact_id}`,
-        aliases: [...new Set([`jid:${jid}`, ...(row.aliases || []), ...participantAliasKeysFromRecord({ participantJid: jid, participantPhone: row.phone })])],
+        aliases: participantAliasKeysFromRecord({ participantJid: jid, participantPhone: row.phone }),
         ...(row.phone ? { participantPhone: row.phone } : {}),
         ...(isUsableParticipantName(row.name) ? { displayName: row.name!.trim() } : {}),
         ...(row.avatar_url ? { pictureUrl: row.avatar_url } : {}),
       };
       byJid.set(jid, identity);
-      for (const alias of identity.aliases || []) byAlias.set(alias, identity);
     }
     for (const row of queries[2].rows) {
       const phone = String(row.phone || '').replace(/\D/g, '');
@@ -565,23 +548,21 @@ async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<
         ...(row.google_contact ? { googleContact: true } : {}),
       };
       byPhone.set(phone, identity);
-      for (const alias of identity.aliases || []) byAlias.set(alias, identity);
     }
   } catch {
     // Historical identity is an optimization; current provider data remains authoritative.
   }
-  return { byJid, byPhone, byAlias };
+  return { byJid, byPhone };
 }
 
 function mergePersistedParticipantIdentities(
   seeds: Map<string, ParticipantIdentity>,
-  persisted: { byJid: Map<string, ParticipantIdentity>; byPhone: Map<string, ParticipantIdentity>; byAlias: Map<string, ParticipantIdentity> },
+  persisted: { byJid: Map<string, ParticipantIdentity>; byPhone: Map<string, ParticipantIdentity> },
 ) {
   const merged = new Map<string, ParticipantIdentity>();
   for (const [key, seed] of seeds) {
     const aliases = participantAliasKeysFromRecord(seed);
-    const byJid = persisted.byJid.get(seed.participantJid)
-      || aliases.map((alias) => persisted.byAlias.get(alias)).find(Boolean);
+    const byJid = persisted.byJid.get(seed.participantJid);
     const byPhone = seed.participantPhone ? persisted.byPhone.get(seed.participantPhone) : undefined;
     const google = [byPhone, byJid].find((identity) => identity?.googleContact && identity.displayName);
     const known = google || byJid || byPhone;
@@ -1682,14 +1663,7 @@ function providerMessageMetadata(record: any, message: any, fromMe: boolean) {
   const call = message?.callLogMessage || message?.call || message?.offerMessage;
   const callInfo = providerCallInfo(record, message, type, fromMe);
   const metadata: Record<string, any> = { providerType: type };
-  const participantJid = firstProviderText(
-    record?.key?.participant,
-    record?.key?.participantPn,
-    record?.participant,
-    record?.participantPn,
-    record?.senderPn,
-    record?.key?.senderPn,
-  );
+  const participantJid = participantJidFromRecord(record);
   if (participantJid) metadata.participantJid = participantJid;
   const participantPhone = participantPhoneFromRecord(record);
   if (participantPhone) metadata.participantPhone = participantPhone;

@@ -63,19 +63,87 @@ test('participant identity keeps LID opaque, rejects numeric names, and enriches
   assert.equal(participantPhoneFromRecord({ key: { participant: '123456789@lid' } }), undefined);
 });
 
-test('explicit LID and phone aliases share one canonical participant identity', () => {
+test('explicit LID and phone aliases remain scoped to their participant JIDs', () => {
   const records = [
     { key: { participant: 'opaque-2968@lid' }, participantPn: '5521999992968@s.whatsapp.net', metadata: {}, pushName: 'Sidney Lisboa Chaves' },
     { key: { participant: '5521999992968@s.whatsapp.net' }, senderPn: '5521999992968@s.whatsapp.net', metadata: {}, pushName: 'Sidney Lisboa Chaves' },
   ];
   const identities = buildParticipantIdentityMap(records);
+  assert.equal(identities.size, 2);
   const lidIdentity = identities.get('opaque-2968@lid');
   const phoneIdentity = identities.get('5521999992968@s.whatsapp.net');
+  assert.notEqual(lidIdentity, phoneIdentity);
   assert.equal(lidIdentity?.canonicalId, 'phone:5521999992968');
   assert.equal(phoneIdentity?.canonicalId, 'phone:5521999992968');
   assert.equal(lidIdentity?.participantPhone, '5521999992968');
-  assert.deepEqual(lidIdentity?.aliases, phoneIdentity?.aliases);
+  assert.equal(lidIdentity?.aliases?.includes('jid:opaque-2968@lid'), true);
+  assert.equal(phoneIdentity?.aliases?.includes('jid:opaque-2968@lid'), false);
   assert.equal(participantAliasKeysFromRecord({ key: { participant: '164794086760597@lid' } }).includes('phone:164794086760597'), false);
+});
+
+test('participantAlt directly resolves a LID participant without using the conversation alias', () => {
+  const identities = buildParticipantIdentityMap([{
+    key: {
+      remoteJid: '120363000000@g.us',
+      participant: 'opaque-alt@lid',
+      participantAlt: '5521999992968@s.whatsapp.net',
+    },
+    remoteJidAlt: '5521999990000@s.whatsapp.net',
+  }]);
+  const identity = identities.get('opaque-alt@lid');
+  assert.equal(identity?.participantPhone, '5521999992968');
+  assert.equal(identity?.aliases?.includes('phone:5521999990000'), false);
+});
+
+test('a LID participant without a direct pair remains opaque', () => {
+  const record = { key: { participant: 'opaque-without-pair@lid' } };
+  const identities = buildParticipantIdentityMap([record]);
+  const identity = identities.get('opaque-without-pair@lid');
+  assert.equal(identity?.participantPhone, undefined);
+  assert.equal(participantFallbackNameFromRecord(record), 'Participante …pair');
+});
+
+test('different participants sharing an alias are not united', () => {
+  const records = [
+    { key: { participant: 'participant-a@lid' }, participantPn: '5521999992968@s.whatsapp.net', participantName: 'Participante A' },
+    { key: { participant: 'participant-b@lid' }, participantPn: '5521999992968@s.whatsapp.net', participantName: 'Participante B' },
+  ];
+  const identities = buildParticipantIdentityMap(records);
+  assert.equal(identities.size, 2);
+  assert.notEqual(identities.get('participant-a@lid'), identities.get('participant-b@lid'));
+  const enriched = enrichRecordsWithParticipantIdentities(records, identities);
+  assert.equal(enriched[0]?.metadata?.participantJid, 'participant-a@lid');
+  assert.equal(enriched[0]?.metadata?.participantName, 'Participante A');
+  assert.equal(enriched[1]?.metadata?.participantJid, 'participant-b@lid');
+  assert.equal(enriched[1]?.metadata?.participantName, 'Participante B');
+});
+
+test('a participant does not inherit an alias learned only by another participant', () => {
+  const records = [
+    { key: { participant: 'participant-a@lid' }, participantPn: '5521999992968@s.whatsapp.net' },
+    { key: { participant: 'participant-b@lid' }, participantPn: '5521999992968@s.whatsapp.net' },
+    { key: { participant: 'participant-b@lid' }, participantAlt: '5521999992969@s.whatsapp.net' },
+  ];
+  const identities = buildParticipantIdentityMap(records);
+  const participantA = identities.get('participant-a@lid');
+  const participantB = identities.get('participant-b@lid');
+  assert.equal(participantA?.aliases?.includes('phone:5521999992969'), false);
+  assert.equal(participantB?.aliases?.includes('phone:5521999992969'), true);
+});
+
+test('participant enrichment preserves conversation identity and is idempotent', () => {
+  const records = [{
+    key: { remoteJid: '120363000000@g.us', participant: 'participant-a@lid' },
+    remoteJid: '120363000000@g.us',
+    participantAlt: '5521999992968@s.whatsapp.net',
+  }];
+  const identities = buildParticipantIdentityMap(records);
+  const once = enrichRecordsWithParticipantIdentities(records, identities);
+  const twice = enrichRecordsWithParticipantIdentities(once, identities);
+  assert.deepEqual(twice, once);
+  assert.equal(once[0]?.key?.remoteJid, '120363000000@g.us');
+  assert.equal(once[0]?.remoteJid, '120363000000@g.us');
+  assert.equal(once[0]?.metadata?.participantJid, 'participant-a@lid');
 });
 
 test('canonical participant fields survive adapter normalization for SSE and polling', () => {

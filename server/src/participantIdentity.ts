@@ -57,11 +57,10 @@ export function participantJidFromRecord(record: any) {
     record?.key?.participant
       || record?.participantJid
       || record?.participant
-      || record?.participantPn
-      || record?.senderPn
       || record?.metadata?.participantJid
+      || record?.participantPn
       || record?.key?.participantPn
-      || record?.key?.senderPn,
+      || record?.metadata?.participantPn,
   );
 }
 
@@ -70,9 +69,13 @@ const explicitParticipantJidValues = (record: any) => [
   record?.participantJid,
   record?.participant,
   record?.participantPn,
-  record?.senderPn,
   record?.metadata?.participantJid,
+  record?.participantAlt,
+  record?.metadata?.participantAlt,
+  record?.metadata?.participantPn,
   record?.key?.participantPn,
+  record?.key?.participantAlt,
+  record?.senderPn,
   record?.key?.senderPn,
 ].filter((value): value is string => typeof value === 'string');
 
@@ -91,13 +94,6 @@ const normalizedPhone = (value: unknown) => {
  */
 export function participantAliasKeysFromRecord(record: any) {
   const aliases = new Set<string>();
-  const persistedAliases = [
-    ...(Array.isArray(record?.participantAliases) ? record.participantAliases : []),
-    ...(Array.isArray(record?.metadata?.participantAliases) ? record.metadata.participantAliases : []),
-  ];
-  persistedAliases
-    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-    .forEach((value) => aliases.add(value.trim().toLowerCase()));
   for (const value of explicitParticipantJidValues(record)) {
     const jid = normalizeParticipantJid(value);
     if (jid) aliases.add(`jid:${jid}`);
@@ -105,18 +101,14 @@ export function participantAliasKeysFromRecord(record: any) {
   const phoneValues = [
     record?.participantPhone,
     record?.metadata?.participantPhone,
-    record?.phoneNumber,
-    record?.phone,
-    record?.number,
-    record?.pn,
-    record?.remoteJidAlt,
-    record?.key?.phoneNumber,
-    record?.key?.phone,
-    record?.key?.remoteJidAlt,
+    record?.participantAlt,
+    record?.metadata?.participantAlt,
     record?.key?.participantPn,
-    record?.key?.senderPn,
     record?.participantPn,
+    record?.metadata?.participantPn,
     record?.senderPn,
+    record?.key?.participantAlt,
+    record?.key?.senderPn,
   ];
   for (const value of phoneValues) {
     const phone = normalizedPhone(value);
@@ -130,8 +122,6 @@ export function participantAliasKeysFromRecord(record: any) {
 }
 
 export function participantCanonicalIdFromRecord(record: any) {
-  const explicit = firstText(record?.participantCanonicalId, record?.metadata?.participantCanonicalId);
-  if (explicit) return explicit;
   const phone = participantPhoneFromRecord(record);
   if (phone) return `phone:${phone}`;
   const jid = participantJidFromRecord(record);
@@ -141,19 +131,16 @@ export function participantCanonicalIdFromRecord(record: any) {
 /** Only values explicitly supplied as alternate/sender PN are phone identities. */
 export function participantPhoneFromRecord(record: any) {
   const values = [
-    record?.senderPn,
+    record?.participantAlt,
     record?.participantPn,
-    record?.phoneNumber,
-    record?.phone,
-    record?.number,
-    record?.pn,
-    record?.metadata?.participantPhone,
-    record?.remoteJidAlt,
-    record?.key?.senderPn,
+    record?.key?.participantAlt,
     record?.key?.participantPn,
-    record?.key?.phoneNumber,
-    record?.key?.phone,
-    record?.key?.remoteJidAlt,
+    record?.senderPn,
+    record?.key?.senderPn,
+    record?.participantPhone,
+    record?.metadata?.participantAlt,
+    record?.metadata?.participantPn,
+    record?.metadata?.participantPhone,
   ];
   for (const value of values) {
     if (typeof value !== 'string' || value.trim().toLowerCase().endsWith('@lid') || value.trim().toLowerCase().endsWith('@g.us')) continue;
@@ -201,7 +188,7 @@ export function participantDisplayNameFromSources(input: {
 
 export function mergeParticipantIdentity(record: any, identity: ParticipantIdentity) {
   const metadata = { ...(record?.metadata || {}) };
-  metadata.participantJid = identity.participantJid;
+  metadata.participantJid = participantJidFromRecord(record) || identity.participantJid;
   if (identity.canonicalId) metadata.participantCanonicalId = identity.canonicalId;
   if (identity.aliases?.length) metadata.participantAliases = identity.aliases;
   if (identity.participantPhone) metadata.participantPhone = identity.participantPhone;
@@ -224,22 +211,19 @@ export function buildParticipantIdentityMap(records: any[]) {
     const participantJid = participantJidFromRecord(record);
     if (!participantJid) continue;
     const aliases = participantAliasKeysFromRecord(record);
-    const canonicalId = participantCanonicalIdFromRecord(record);
-    const current = identities.get(participantJid)
-      || [...identities.values()].find((identity) => (
-        (canonicalId && identity.canonicalId === canonicalId)
-        || aliases.some((alias) => identity.aliases?.includes(alias))
-      ))
-      || { participantJid };
+    const current = identities.get(participantJid) || { participantJid };
     const displayName = participantNameFromRecord(record);
     const participantPhone = participantPhoneFromRecord(record);
+    const canonicalId = participantPhone
+      ? `phone:${participantPhone}`
+      : `jid:${participantJid}`;
     const pictureUrl = typeof (record?.participantAvatar || record?.metadata?.participantAvatar) === 'string'
       ? (record.participantAvatar || record.metadata.participantAvatar).trim()
       : '';
     const identity: ParticipantIdentity = {
       ...current,
       participantJid,
-      ...(canonicalId ? { canonicalId } : {}),
+      canonicalId: current.participantPhone ? (current.canonicalId || `phone:${current.participantPhone}`) : canonicalId,
       ...(aliases.length ? { aliases: [...new Set([...(current.aliases || []), ...aliases])] } : {}),
       ...(current.displayName || !displayName ? {} : { displayName }),
       ...(current.participantPhone || !participantPhone ? {} : { participantPhone }),
@@ -258,13 +242,7 @@ export function buildParticipantIdentityMap(records: any[]) {
 export function enrichRecordsWithParticipantIdentities(records: any[], identities: Map<string, ParticipantIdentity>) {
   return records.map((record) => {
     const participantJid = participantJidFromRecord(record);
-    const aliases = participantAliasKeysFromRecord(record);
-    const canonicalId = participantCanonicalIdFromRecord(record);
-    const identity = (participantJid ? identities.get(participantJid) : undefined)
-      || [...identities.values()].find((candidate) => (
-        (canonicalId && candidate.canonicalId === canonicalId)
-        || aliases.some((alias) => candidate.aliases?.includes(alias))
-      ));
+    const identity = participantJid ? identities.get(participantJid) : undefined;
     return identity ? mergeParticipantIdentity(record, identity) : record;
   });
 }
