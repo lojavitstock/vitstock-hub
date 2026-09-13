@@ -2301,6 +2301,17 @@ type ProviderPersistenceResult = {
   message?: any;
 };
 
+export function selectNewReconciledMessageActivity(
+  results: Array<ProviderPersistenceResult | undefined>,
+) {
+  return results
+    .filter((result): result is ProviderPersistenceResult & { persisted: true; message: any } => (
+      result?.persisted === true && Boolean(result.message)
+    ))
+    .map((result) => result.message)
+    .sort((left, right) => Number(right?.timestampMs || 0) - Number(left?.timestampMs || 0))[0];
+}
+
 type ExistingProviderMessageIdentity = {
   conversationId: string;
   contactId: string;
@@ -4119,13 +4130,15 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     recordsById.clear();
     for (const [id, record] of enrichedRecordsById) recordsById.set(id, record);
 
+    const persistedResults: Array<ProviderPersistenceResult | undefined> = [];
     for (const record of recordsById.values()) {
       try {
-        await persistProviderMessage(request.user!.companyId, record, {
+        const persisted = await persistProviderMessage(request.user!.companyId, record, {
           incrementUnread: false,
           reopen: false,
           fallbackPhone: parsed.data.phone,
         });
+        persistedResults.push(persisted);
       } catch (error) {
         request.log.warn({ err: error, messageId: providerMessageId(record) }, 'Falha ao reconciliar mensagem da Evolution com o PostgreSQL');
       }
@@ -4166,20 +4179,19 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       reconciledMessages.rows.map(localMessageToProviderRecord),
     );
     // A background history reconciliation can discover a message that was
-    // absent from the Inbox snapshot. Publish the latest persisted
-    // renderable activity through the existing realtime protocol so the
-    // Inbox converges without a full refetch. Reaction-only records never
-    // enter recordsById and therefore cannot create activity here.
-    if (recordsById.size > 0 && reconciledMessages.rows[0]) {
-      const latestActivity = storedMessageToRealtimeMessage(reconciledMessages.rows[0]);
+    // absent from the Inbox snapshot. Publish only a message inserted by this
+    // reconciliation. Replaying a provider record that is already persisted
+    // must not be represented as new inbox activity.
+    const latestNewActivity = selectNewReconciledMessageActivity(persistedResults);
+    if (latestNewActivity) {
       publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
-        remoteJid: latestActivity.conversationId,
+        remoteJid: latestNewActivity.conversationId,
         phone: parsed.data.phone,
-        messageId: latestActivity.id,
-        timestampMs: latestActivity.timestampMs,
-        fromMe: latestActivity.sender === 'attendant',
+        messageId: latestNewActivity.id,
+        timestampMs: latestNewActivity.timestampMs,
+        fromMe: latestNewActivity.sender === 'attendant',
         incrementUnread: false,
-        message: latestActivity,
+        message: latestNewActivity,
       });
     }
     const mergedRecords = new Map<string, any>();

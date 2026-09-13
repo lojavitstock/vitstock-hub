@@ -314,6 +314,11 @@ const updateConversationFromMessageUpdate = (
   };
 };
 
+const messageIdsForEvent = (message: Message, event: RealtimeEventPayload) => new Set(
+  [message.id, message.rawKey?.id, event.messageId]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0),
+);
+
 /**
  * Applies only fields that the current conversation.updated payload actually
  * carries. Returning null means the event is insufficient and must use the
@@ -342,11 +347,21 @@ export const reconcileRealtimeConversation = (
 
   const next = previous.slice();
   next[index] = updated;
-  // Evolution returns chats with the most recent activity first. Keep that
-  // observable ordering when an incremental message arrives.
+  // Evolution returns chats with the most recent activity first. A replay of
+  // the known last message is not new activity, even when its timestamp is
+  // equal to the current value. Distinct messages may share a timestamp
+  // because the provider only exposes second precision, so a new message at
+  // the current positive timestamp is still activity. Content/key enrichment
+  // applies above, while the existing array position remains stable for the
+  // known message only.
   const eventTimestamp = Number(event.message?.timestampMs ?? event.timestampMs ?? 0);
+  const currentActivityTimestamp = Number(current.lastMessageAt || 0);
+  const eventMessageIds = event.message ? messageIdsForEvent(event.message, event) : new Set<string>();
+  const isKnownLastMessage = Boolean(current.lastMessageKey?.id && eventMessageIds.has(current.lastMessageKey.id));
   const shouldReorder = event.type === 'message.upsert'
-    && (!current.lastMessageAt || eventTimestamp >= current.lastMessageAt);
+    && eventTimestamp > 0
+    && eventTimestamp >= currentActivityTimestamp
+    && !isKnownLastMessage;
   if (shouldReorder && index > 0) {
     next.splice(index, 1);
     next.unshift(updated);

@@ -36,7 +36,7 @@ import {
   isProviderReactionEvent,
   providerReactionUpdate,
 } from '../server/src/messageReactions';
-import { providerIdentityCandidates, resolveProviderMessageTarget } from '../server/src/evolution';
+import { providerIdentityCandidates, resolveProviderMessageTarget, selectNewReconciledMessageActivity } from '../server/src/evolution';
 import { resolveEvolutionRecipient } from '../server/src/evolutionRecipient';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
 import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
@@ -506,6 +506,127 @@ test('SSE de reconciliação atualiza atividade sem incrementar unread novamente
   assert.equal(updated?.[0]?.lastMessageAt, 1_800_000_000_000);
   assert.equal(updated?.[0]?.unreadCount, 2);
   assert.equal(updated?.[0]?.needsResponse, true);
+});
+
+test('SSE replay da mesma mensagem e timestamp preserva a posição da conversa', () => {
+  const first = conversation('first', { lastMessageAt: 3_000, lastMessage: 'Primeira' });
+  const target = conversation('target', {
+    lastMessage: 'Mensagem antiga',
+    lastMessageAt: 2_000,
+    lastMessageKey: { id: 'target-message', remoteJid: 'target', fromMe: false },
+  });
+  const current = [first, target];
+  const replay = {
+    type: 'message.upsert' as const,
+    remoteJid: 'target',
+    timestampMs: 2_000,
+    message: {
+      ...message('target-message', 2_000, 'Mensagem antiga', 'read', { conversationId: 'target' }),
+    },
+  };
+
+  const updated = reconcileRealtimeConversation(current, replay);
+
+  assert.deepEqual(updated?.map((item) => item.id), ['first', 'target']);
+  assert.equal(updated?.[1]?.lastMessageAt, 2_000);
+});
+
+test('SSE message.upsert de atividade nova promove a conversa', () => {
+  const first = conversation('first', { lastMessageAt: 3_000, lastMessage: 'Primeira' });
+  const target = conversation('target', { lastMessageAt: 2_000, lastMessage: 'Mensagem antiga' });
+  const updated = reconcileRealtimeConversation([first, target], {
+    type: 'message.upsert',
+    remoteJid: 'target',
+    message: { ...message('target-new', 4_000, 'Mensagem nova', 'read', { conversationId: 'target' }) },
+  });
+
+  assert.deepEqual(updated?.map((item) => item.id), ['target', 'first']);
+  assert.equal(updated?.[0]?.lastMessage, 'Mensagem nova');
+});
+
+test('SSE message.upsert com ID novo e timestamp igual promove a conversa', () => {
+  const first = conversation('first', { lastMessageAt: 3_000, lastMessage: 'Primeira' });
+  const target = conversation('target', {
+    lastMessage: 'Mensagem M1',
+    lastMessageAt: 2_000,
+    lastMessageKey: { id: 'M1', remoteJid: 'target', fromMe: false },
+  });
+  const updated = reconcileRealtimeConversation([first, target], {
+    type: 'message.upsert',
+    remoteJid: 'target',
+    message: { ...message('M2', 2_000, 'Mensagem M2', 'read', { conversationId: 'target' }) },
+  });
+
+  assert.deepEqual(updated?.map((item) => item.id), ['target', 'first']);
+  assert.equal(updated?.[0]?.lastMessage, 'Mensagem M2');
+  assert.equal(updated?.[0]?.lastMessageAt, 2_000);
+  assert.equal(updated?.[0]?.lastMessageKey?.id, 'M2');
+});
+
+test('SSE message.upsert antigo preserva a ordem do inbox', () => {
+  const first = conversation('first', { lastMessageAt: 3_000, lastMessage: 'Primeira' });
+  const target = conversation('target', { lastMessageAt: 2_000, lastMessage: 'Mensagem atual' });
+  const current = [first, target];
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'message.upsert',
+    remoteJid: 'target',
+    message: { ...message('target-old', 1_000, 'Mensagem antiga', 'read', { conversationId: 'target' }) },
+  });
+
+  assert.strictEqual(updated, current);
+  assert.deepEqual(updated.map((item) => item.id), ['first', 'target']);
+});
+
+test('SSE replay repetido da mesma mensagem é idempotente', () => {
+  const first = conversation('first', { lastMessageAt: 3_000, lastMessage: 'Primeira' });
+  const target = conversation('target', {
+    lastMessage: 'Mensagem antiga',
+    lastMessageAt: 2_000,
+    lastMessageKey: { id: 'target-message', remoteJid: 'target', fromMe: false },
+  });
+  const current = [first, target];
+  const event = {
+    type: 'message.upsert' as const,
+    remoteJid: 'target',
+    timestampMs: 2_000,
+    message: { ...message('target-message', 2_000, 'Mensagem antiga', 'read', { conversationId: 'target' }) },
+  };
+
+  const once = reconcileRealtimeConversation(current, event);
+  const twice = reconcileRealtimeConversation(once || current, event);
+
+  assert.deepEqual(twice?.map((item) => item.id), ['first', 'target']);
+  assert.strictEqual(twice, once);
+});
+
+test('conversation.updated de mark read não reordena o inbox', () => {
+  const first = conversation('first', { lastMessageAt: 3_000 });
+  const target = conversation('target', { lastMessageAt: 2_000, unreadCount: 2 });
+  const current = [first, target];
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'conversation.updated',
+    remoteJid: 'target',
+    messageTimestamp: 2_000,
+  });
+
+  assert.deepEqual(updated?.map((item) => item.id), ['first', 'target']);
+  assert.equal(updated?.[1]?.unreadCount, 0);
+});
+
+test('reconciliação backend não publica atividade para mensagem já persistida', () => {
+  const known = { id: 'known-message', timestampMs: 2_000 };
+  assert.equal(selectNewReconciledMessageActivity([{ persisted: false, message: known }]), undefined);
+});
+
+test('reconciliação backend seleciona mensagem realmente nova para o realtime', () => {
+  const known = { id: 'known-message', timestampMs: 4_000 };
+  const fresh = { id: 'fresh-message', timestampMs: 3_000 };
+  const selected = selectNewReconciledMessageActivity([
+    { persisted: false, message: known },
+    { persisted: true, message: fresh },
+  ]);
+
+  assert.equal(selected?.id, 'fresh-message');
 });
 
 test('grupo reconciliado atualiza a Inbox e permanece estável contra polling antigo', () => {
