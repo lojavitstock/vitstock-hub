@@ -28,6 +28,51 @@ const canonicalPhoneKey = (chat: InboxChat) => {
   return normalized;
 };
 
+const humanPresentationName = (chat: InboxChat | undefined, value: unknown) => {
+  const name = usableName(value);
+  if (!name || !chat) return name;
+  const normalizedName = name.toLowerCase();
+  const identityValues = [
+    chat.id,
+    chat.remoteJid,
+    chat.remoteJidAlt,
+    chat.phone,
+    ...(Array.isArray(chat.remoteJidAliases) ? chat.remoteJidAliases : []),
+  ].map(stringValue).filter(Boolean).map((identity) => identity.toLowerCase());
+  if (isWhatsAppLid(name) || isWhatsAppGroup(name)
+    || normalizedName.endsWith('@s.whatsapp.net') || normalizedName.endsWith('@c.us')
+    || identityValues.some((identity) => normalizedName === identity || normalizedName === identity.split('@')[0])) {
+    return '';
+  }
+  return name;
+};
+
+const selectPresentationName = (providerChat: InboxChat, localChat: InboxChat) => {
+  const isGroup = isWhatsAppGroup(remoteJidOf(providerChat));
+  const candidates: Array<[InboxChat, unknown]> = [
+    [localChat, localChat.pushName],
+    [localChat, localChat.name],
+    [localChat, localChat.contact?.name],
+    [providerChat, providerChat.name],
+    [providerChat, providerChat.pushName],
+    [providerChat, providerChat.contact?.name],
+    [providerChat, providerChat.notify],
+    [providerChat, providerChat.verifiedName],
+    [providerChat, providerChat.businessName],
+    [providerChat, providerChat.contactName],
+  ];
+  const lastMessageFromMe = providerChat.lastMessage?.key?.fromMe === true || providerChat.lastMessage?.fromMe === true;
+  if (!isGroup && !lastMessageFromMe && providerChat.lastMessage) {
+    candidates.push(
+      [providerChat.lastMessage, providerChat.lastMessage.pushName],
+      [providerChat.lastMessage, providerChat.lastMessage.participantName],
+      [providerChat.lastMessage, providerChat.lastMessage.notify],
+      [providerChat.lastMessage, providerChat.lastMessage.verifiedName],
+    );
+  }
+  return candidates.map(([chat, value]) => humanPresentationName(chat, value)).find(Boolean) || '';
+};
+
 export type CanonicalInboxIdentity = {
   key: string;
   remoteJid: string;
@@ -167,6 +212,20 @@ export function mergeInboxActivity(providerChat: InboxChat, localChat?: InboxCha
   const providerTimestamp = inboxActivityTimestamp(providerChat);
   const localTimestamp = localChat ? inboxActivityTimestamp(localChat) : 0;
   const providerWithIdentity = localChat ? mergeExplicitIdentity(providerChat, localChat) : providerChat;
+  const presentationName = localChat && !isWhatsAppGroup(remoteJidOf(providerChat))
+    ? selectPresentationName(providerChat, localChat)
+    : '';
+  const providerWithPresentation = localChat
+    ? {
+        ...providerWithIdentity,
+        ...(presentationName
+          ? {
+              name: presentationName,
+              pushName: presentationName,
+            }
+          : {}),
+      }
+    : providerWithIdentity;
   const sameMessage = Boolean(localChat && messageIdOf(providerChat) && messageIdOf(providerChat) === messageIdOf(localChat));
 
   // A provider snapshot may refresh `updatedAt` after a read/status action
@@ -175,7 +234,7 @@ export function mergeInboxActivity(providerChat: InboxChat, localChat?: InboxCha
   // a new inbox activity or dropping explicit PN aliases.
   if (localChat && sameMessage && localTimestamp > 0) {
     return {
-      ...providerWithIdentity,
+      ...providerWithPresentation,
       lastMessage: localChat.lastMessage,
       ...(localChat.updatedAt ? { updatedAt: localChat.updatedAt } : {}),
       ...(localChat.lastMessageAt ? { lastMessageAt: localChat.lastMessageAt } : {}),
@@ -184,13 +243,13 @@ export function mergeInboxActivity(providerChat: InboxChat, localChat?: InboxCha
 
   if (!localChat || (!localTimestamp && providerTimestamp > 0) || providerTimestamp > localTimestamp) {
     return providerTimestamp > 0
-      ? providerWithIdentity
-      : { ...providerWithIdentity, lastMessage: undefined };
+      ? providerWithPresentation
+      : { ...providerWithPresentation, lastMessage: undefined };
   }
 
   if (localTimestamp > 0 || providerTimestamp === 0) {
     return {
-      ...providerWithIdentity,
+      ...providerWithPresentation,
       lastMessage: localChat.lastMessage,
       ...(localChat.updatedAt ? { updatedAt: localChat.updatedAt } : {}),
       ...(localChat.lastMessageAt ? { lastMessageAt: localChat.lastMessageAt } : {}),

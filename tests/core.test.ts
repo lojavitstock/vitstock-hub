@@ -3914,6 +3914,114 @@ test('merge do inbox aceita provider mais novo quando local está atrasado', () 
   assert.equal(inboxActivityTimestamp(merged), 1_900_000_000_000);
 });
 
+test('merge do inbox preserva nome humano local quando o provider tem atividade mais nova', () => {
+  const provider = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    name: '+5521999999999',
+    lastMessage: {
+      key: { id: 'provider-new', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+      message: { conversation: 'Nova atividade' },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+  const local = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    pushName: 'João',
+    lastMessage: {
+      key: { id: 'local-old', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+      message: { conversation: 'Atividade anterior' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(merged.lastMessage?.key?.id, 'provider-new');
+  assert.equal(merged.name, 'João');
+  assert.equal(merged.pushName, 'João');
+});
+
+test('merge do inbox usa nome humano do provider quando o local só tem fallback numérico', () => {
+  const provider = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    name: 'João',
+    lastMessage: {
+      key: { id: 'provider-new-name', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+      message: { conversation: 'Nova atividade' },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+  const local = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    pushName: '+5521999999999',
+    lastMessage: {
+      key: { id: 'local-old-name', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+      message: { conversation: 'Atividade anterior' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(merged.lastMessage?.key?.id, 'provider-new-name');
+  assert.equal(merged.name, 'João');
+  assert.equal(merged.pushName, 'João');
+});
+
+test('merge do inbox mantém fallback quando ambos os nomes são numéricos', () => {
+  const provider = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    name: '+5521999999999',
+    lastMessage: {
+      key: { id: 'provider-numeric', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+      message: { conversation: 'Atividade numérica' },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+  const local = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    pushName: '5521999999999',
+    lastMessage: {
+      key: { id: 'local-numeric', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+      message: { conversation: 'Atividade anterior' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(merged.lastMessage?.key?.id, 'provider-numeric');
+  assert.equal(merged.name, '+5521999999999');
+  assert.equal(merged.pushName, undefined);
+});
+
+test('merge de apresentação preserva dedup e identidade canônica', () => {
+  const provider = inboxProjectionChat('opaque-contact@lid', {
+    name: '+5521999999999',
+    remoteJidAlt: '5521999999999@s.whatsapp.net',
+    lastMessage: {
+      key: { id: 'provider-identity', remoteJid: 'opaque-contact@lid', fromMe: false },
+      message: { conversation: 'Atividade nova' },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+  const local = inboxProjectionChat('opaque-contact@lid', {
+    phone: '+5521999999999',
+    pushName: 'João',
+    remoteJidAliases: ['opaque-contact@lid', '5521999999999@s.whatsapp.net'],
+    lastMessage: {
+      key: { id: 'local-identity', remoteJid: 'opaque-contact@lid', fromMe: false },
+      message: { conversation: 'Atividade anterior' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(merged.remoteJid, 'opaque-contact@lid');
+  assert.equal(merged.remoteJidAlt, '5521999999999@s.whatsapp.net');
+  assert.deepEqual(merged.remoteJidAliases, ['opaque-contact@lid', '5521999999999@s.whatsapp.net']);
+  assert.equal(merged.name, 'João');
+
+  const projected = projectCanonicalInboxChats([
+    merged,
+    inboxProjectionChat('5521999999999@s.whatsapp.net', { name: '+5521999999999' }),
+  ]);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0]?.remoteJid, '5521999999999@s.whatsapp.net');
+  assert.equal(projected[0]?.name, 'João');
+});
+
 test('merge do inbox usa a projeção local como desempate em timestamp igual', () => {
   const provider = inboxProjectionChat('120363000000@g.us', {
     lastMessage: {
