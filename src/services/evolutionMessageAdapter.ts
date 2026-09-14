@@ -371,10 +371,16 @@ const normalizeStatus = (value: unknown): Message['status'] => {
   return 'sent';
 };
 
-const parseSignature = (content: string) => {
-  const match = content.match(/^\*(?:👤\s*)?([^*\r\n]+)\*\s*(?:\r?\n|$)/);
+const parseSignature = (content: string, expectedAuthor?: string) => {
+  // A Hub signature is a transport-only line. It must both end a line and
+  // match the explicit persisted author; otherwise a legitimate message that
+  // starts with WhatsApp formatting must remain untouched.
+  const match = content.match(/^\*(?:👤[ \t]*)?([^*\r\n]+)\*[ \t]*\r?\n/);
   if (!match) return { senderName: undefined, content };
-  return { senderName: match[1].trim(), content: content.slice(match[0].length).trimStart() };
+  const senderName = match[1].trim().replace(/:+$/, '').trim();
+  const normalizedAuthor = expectedAuthor?.trim().replace(/:+$/, '').trim();
+  if (!normalizedAuthor || senderName !== normalizedAuthor) return { senderName: undefined, content };
+  return { senderName, content: content.slice(match[0].length).trimStart() };
 };
 
 export const normalizeEvolutionMessage = (
@@ -390,7 +396,9 @@ export const normalizeEvolutionMessage = (
   const metadata = messageMetadata(record, rawMessage) || {};
   const interactive = interactiveMessage(msg);
   const content = messageText(rawMessage, record);
-  const signed = fromMe ? parseSignature(content || '[Mensagem não identificada]') : { senderName: undefined, content: content || '[Mensagem não identificada]' };
+  const signed = fromMe
+    ? parseSignature(content || '[Mensagem não identificada]', metadata.sentByUserName)
+    : { senderName: undefined, content: content || '[Mensagem não identificada]' };
   const sentByHub = fromMe
     && metadata.sentByHub === true
     && typeof metadata.sentByUserName === 'string'

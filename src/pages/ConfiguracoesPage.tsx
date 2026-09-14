@@ -8,6 +8,7 @@ import { mockAttendants, mockQuickReplies } from '../services/mockData';
 import { ConexoesPage } from './ConexoesPage';
 import { GoogleContactsIntegrationCard } from '../components/settings/GoogleContactsIntegrationCard';
 import { createQuickReply, deleteQuickReply, fetchQuickReplies, updateQuickReply } from '../services/quickRepliesApi';
+import { quickReplyShortcutError } from '../utils/quickReplies';
 
 type SettingsTab = 'attendants' | 'departments' | 'quickReplies' | 'security' | 'connections' | 'integracoes';
 type AttendantFormState = {
@@ -133,11 +134,11 @@ export const ConfiguracoesPage: React.FC = () => {
 
   useEffect(() => {
     if (activeTab !== 'quickReplies' || searchParams.get('action') !== 'new') return;
-    if (user?.role === 'admin') openNewQuickReply();
+    if (user) openNewQuickReply();
     const nextParams = new URLSearchParams(searchParams);
     nextParams.delete('action');
     setSearchParams(nextParams, { replace: true });
-  }, [activeTab, openNewQuickReply, searchParams, setSearchParams, user?.role]);
+  }, [activeTab, openNewQuickReply, searchParams, setSearchParams, user]);
 
   const resetQuickReplyForm = () => {
     setQuickReplyForm({ shortcut: '/', title: '', body: '' });
@@ -158,6 +159,11 @@ export const ConfiguracoesPage: React.FC = () => {
     const returnToAtendimento = searchParams.get('from') === 'atendimento';
     setQuickRepliesError('');
     setQuickRepliesFeedback('');
+    const shortcutError = quickReplyShortcutError(quickReplyForm.shortcut);
+    if (shortcutError) {
+      setQuickRepliesError(shortcutError);
+      return;
+    }
     setSavingQuickReply(true);
     try {
       const payload = { shortcut: quickReplyForm.shortcut, title: quickReplyForm.title, body: quickReplyForm.body, scope: 'COMPANY' as const };
@@ -587,12 +593,12 @@ export const ConfiguracoesPage: React.FC = () => {
               <h3 className="text-lg font-extrabold text-zinc-100">Respostas Rápidas</h3>
               <p className="mt-1 text-sm text-zinc-400">Atalhos compartilhados pela empresa para responder com agilidade.</p>
             </div>
-            {user?.role === 'admin' && (
+            {user && (
               <button type="button" onClick={openNewQuickReply} className="btn-primary text-sm" aria-label="Nova resposta"><Plus className="h-4 w-4" /> Nova resposta</button>
             )}
           </div>
 
-          {showQuickReplyForm && user?.role === 'admin' && (
+          {showQuickReplyForm && user && (
             <form onSubmit={handleSaveQuickReply} className="space-y-4 rounded-xl border border-amber-400/25 bg-amber-400/5 p-5">
               <div className="flex items-center justify-between">
                 <div>
@@ -603,7 +609,7 @@ export const ConfiguracoesPage: React.FC = () => {
               </div>
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="block text-sm font-bold text-zinc-300">Atalho
-                  <input required pattern="/[A-Za-z0-9][A-Za-z0-9_-]*" value={quickReplyForm.shortcut} onChange={(event) => setQuickReplyForm((current) => ({ ...current, shortcut: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 font-mono text-base text-zinc-100 outline-none focus:border-amber-400" placeholder="/saudacao" />
+                  <input required value={quickReplyForm.shortcut} onChange={(event) => setQuickReplyForm((current) => ({ ...current, shortcut: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 font-mono text-base text-zinc-100 outline-none focus:border-amber-400" placeholder="/saudacao" />
                 </label>
                 <label className="block text-sm font-bold text-zinc-300">Título
                   <input required maxLength={120} value={quickReplyForm.title} onChange={(event) => setQuickReplyForm((current) => ({ ...current, title: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 text-base text-zinc-100 outline-none focus:border-amber-400" placeholder="Saudação inicial" />
@@ -632,20 +638,14 @@ export const ConfiguracoesPage: React.FC = () => {
                   <p className="mt-2 whitespace-pre-wrap break-words text-sm text-zinc-300">{reply.body}</p>
                   <p className="mt-2 text-xs text-zinc-500">Usada {reply.usageCount} vez(es) · Empresa</p>
                 </div>
-                {user?.role === 'admin' && <div className="flex shrink-0 gap-2"><button type="button" onClick={() => openQuickReplyEditor(reply)} className="rounded-lg border border-amber-400/20 px-3 py-1.5 text-xs font-bold text-amber-300 hover:bg-amber-400/10">Editar</button><button type="button" onClick={() => void handleDeleteQuickReply(reply)} className="rounded-lg border border-red-400/20 px-3 py-1.5 text-xs font-bold text-red-300 hover:bg-red-400/10">Excluir</button></div>}
+                {user && <div className="flex shrink-0 gap-2"><button type="button" onClick={() => openQuickReplyEditor(reply)} className="rounded-lg border border-amber-400/20 px-3 py-1.5 text-xs font-bold text-amber-300 hover:bg-amber-400/10">Editar</button><button type="button" onClick={() => void handleDeleteQuickReply(reply)} className="rounded-lg border border-red-400/20 px-3 py-1.5 text-xs font-bold text-red-300 hover:bg-red-400/10">Excluir</button></div>}
               </div>
             ))}
             {!quickRepliesLoading && quickReplies.length === 0 && (
               <div className="rounded-xl border border-dashed border-zinc-800 p-10 text-center">
                 <p className="text-sm text-zinc-300">Nenhuma resposta rápida cadastrada.</p>
-                {user?.role === 'admin' ? (
-                  <>
-                    <p className="mt-2 text-sm text-zinc-500">Crie atalhos para responder seus clientes com mais agilidade.</p>
-                    <button type="button" onClick={openNewQuickReply} className="btn-primary mt-5 text-sm" aria-label="Criar primeira resposta"><Plus className="h-4 w-4" /> Criar primeira resposta</button>
-                  </>
-                ) : (
-                  <p className="mt-2 text-sm text-zinc-500">Peça a um administrador para cadastrar respostas rápidas.</p>
-                )}
+                <p className="mt-2 text-sm text-zinc-500">Crie atalhos para responder seus clientes com mais agilidade.</p>
+                {user && <button type="button" onClick={openNewQuickReply} className="btn-primary mt-5 text-sm" aria-label="Criar primeira resposta"><Plus className="h-4 w-4" /> Criar primeira resposta</button>}
               </div>
             )}
           </div>

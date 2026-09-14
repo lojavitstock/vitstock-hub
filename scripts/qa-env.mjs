@@ -12,6 +12,7 @@ export function createQaEnv() {
     NODE_ENV: 'development',
     PORT: '3001',
     DATABASE_URL: 'postgresql://vitstock@127.0.0.1:55432/vitstock_qa',
+    BACKEND_PUBLIC_URL: 'http://127.0.0.1:3001',
     EVOLUTION_API_URL: 'http://127.0.0.1:3999',
     EVOLUTION_API_KEY: 'qa-local-disabled-key',
     EVOLUTION_INSTANCE_NAME: 'vitstock_qa_mock',

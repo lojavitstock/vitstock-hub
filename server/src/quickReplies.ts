@@ -30,6 +30,20 @@ type QuickReplyRow = {
 
 export const normalizeQuickReplyShortcut = (value: string) => value.trim().toLocaleLowerCase();
 
+export const quickReplyShortcutError = (value: unknown): string | undefined => {
+  if (typeof value !== 'string' || !value.trim()) return 'Informe um atalho começando com /.';
+  const shortcut = value.trim();
+  if (/\s/.test(shortcut)) return 'O atalho não pode conter espaços. Use letras sem acento, números, hífen (-) ou sublinhado (_).';
+  if (/[^\x00-\x7F]/.test(shortcut)) return 'Use apenas letras sem acento, números, hífen (-) e sublinhado (_).';
+  if (!/^\/[a-z0-9][a-z0-9_-]*$/i.test(shortcut)) return 'Use apenas letras sem acento, números, hífen (-) e sublinhado (_).';
+  return undefined;
+};
+
+const parsedQuickReplyError = (body: unknown, fallback: string) => {
+  if (!body || typeof body !== 'object' || !Object.prototype.hasOwnProperty.call(body, 'shortcut')) return fallback;
+  return quickReplyShortcutError((body as { shortcut?: unknown }).shortcut) || fallback;
+};
+
 const toPublicQuickReply = (row: QuickReplyRow) => ({
   id: row.id,
   companyId: row.company_id,
@@ -73,11 +87,8 @@ export async function registerQuickReplyRoutes(app: FastifyInstance) {
 
   app.post('/api/quick-replies', { preHandler: requireUser }, async (request, reply) => {
     const parsed = quickReplyInputSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Informe um atalho, título e mensagem válidos.' });
+    if (!parsed.success) return reply.code(400).send({ error: parsedQuickReplyError(request.body, 'Informe um atalho, título e mensagem válidos.'), code: 'invalid_quick_reply' });
     const currentUser = request.user!;
-    if (parsed.data.scope === 'COMPANY' && currentUser.role !== 'admin') {
-      return reply.code(403).send({ error: 'Apenas administradores podem criar mensagens da empresa.' });
-    }
     const userId = parsed.data.scope === 'USER' ? currentUser.id : null;
     try {
       const result = await db.query<QuickReplyRow>(
@@ -95,13 +106,10 @@ export async function registerQuickReplyRoutes(app: FastifyInstance) {
 
   app.patch('/api/quick-replies/:id', { preHandler: requireUser }, async (request, reply) => {
     const parsed = quickReplyPatchSchema.safeParse(request.body);
-    if (!parsed.success || Object.keys(parsed.data).length === 0) return reply.code(400).send({ error: 'Informe uma alteração válida.' });
+    if (!parsed.success || Object.keys(parsed.data).length === 0) return reply.code(400).send({ error: parsedQuickReplyError(request.body, 'Informe uma alteração válida.'), code: 'invalid_quick_reply' });
     const currentUser = request.user!;
     const existing = await loadQuickReply(currentUser.companyId, currentUser.id, quickReplyId(request));
     if (!existing) return reply.code(404).send({ error: 'Mensagem rápida não encontrada.' });
-    if ((existing.scope === 'COMPANY' || parsed.data.scope === 'COMPANY') && currentUser.role !== 'admin') {
-      return reply.code(403).send({ error: 'Apenas administradores podem editar mensagens da empresa.' });
-    }
     const scope = parsed.data.scope || existing.scope;
     const userId = scope === 'USER' ? (existing.scope === 'USER' ? existing.user_id : currentUser.id) : null;
     try {
@@ -124,7 +132,6 @@ export async function registerQuickReplyRoutes(app: FastifyInstance) {
     const currentUser = request.user!;
     const existing = await loadQuickReply(currentUser.companyId, currentUser.id, quickReplyId(request));
     if (!existing) return reply.code(404).send({ error: 'Mensagem rápida não encontrada.' });
-    if (existing.scope === 'COMPANY' && currentUser.role !== 'admin') return reply.code(403).send({ error: 'Apenas administradores podem excluir mensagens da empresa.' });
     await db.query('UPDATE quick_replies SET is_active = false, updated_at = now() WHERE company_id = $1 AND id = $2', [currentUser.companyId, existing.id]);
     return { removed: true, id: existing.id };
   });

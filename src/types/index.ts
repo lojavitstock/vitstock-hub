@@ -88,6 +88,11 @@ export interface Message {
     sentByUserName?: string;
     sentOutsideHub?: boolean;
     clientMessageId?: string;
+    editedAt?: string;
+    editedByUserId?: string;
+    deletedAt?: string;
+    deletedForEveryone?: boolean;
+    deletedByUserId?: string;
     /** Explicit Evolution/Baileys identity retained for media replies after reload. */
     providerKey?: {
       id: string;
@@ -165,6 +170,9 @@ export interface Message {
 
 export interface Conversation {
   id: string;
+  /** Provider snapshot timestamp kept only for diagnostics/reconciliation. */
+  updatedAt?: string;
+  avatarSource?: 'whatsapp' | 'google' | 'none';
   isGroup?: boolean;
   groupName?: string;
   groupAvatar?: string;

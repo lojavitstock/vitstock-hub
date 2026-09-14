@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { config: loadDotenv } = require('../server/node_modules/dotenv');
 
-export const PREVIEW_FRONTEND_URL = 'https://vitstock-hub-git-preview-vitstocks-projects.vercel.app';
+export const PREVIEW_FRONTEND_URL = 'https://hub-preview.vitstock.com.br';
 export const PREVIEW_API_URL = 'https://vitstock-hub-api-preview.up.railway.app';
 const PRODUCTION_HOSTS = new Set(['vitstock-hub.vercel.app', 'vitstock-hub-api-production.up.railway.app']);
 

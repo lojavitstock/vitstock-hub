@@ -36,17 +36,42 @@ import {
   isProviderReactionEvent,
   providerReactionUpdate,
 } from '../server/src/messageReactions';
-import { providerIdentityCandidates, resolveProviderMessageTarget } from '../server/src/evolution';
+import { providerIdentityCandidates, resolveProviderMessageTarget, selectNewReconciledMessageActivity } from '../server/src/evolution';
 import { resolveEvolutionRecipient } from '../server/src/evolutionRecipient';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
 import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
-import { providerMessageKeyFromRecord } from '../server/src/providerMessageKey';
-import { canonicalInboxIdentity, projectCanonicalInboxChats } from '../server/src/inboxProjection';
+import {
+  resetAvatarDebugDedupe as resetServerAvatarDebugDedupe,
+  traceAvatarProfileFetch,
+  traceAvatarSelection as traceServerAvatarSelection,
+  traceAvatarTargetSelection,
+} from '../server/src/avatarDiagnostics';
+import {
+  providerMessageKeyFromRecord,
+  validateProviderMessageKey,
+} from '../server/src/providerMessageKey';
+import {
+  classifyMediaProviderRejection,
+  mediaFailureForInvalidProviderResponse,
+  mediaFailureForTransport,
+  mediaFailureForUpstreamStatus,
+  parseMediaProviderJson,
+} from '../server/src/mediaErrorContract';
+import { classifyProviderJid, filterConversationalProviderChats, isConversationalProviderJid } from '../server/src/providerJidPolicy';
+import {
+  canonicalInboxIdentity,
+  inboxActivityTimestamp,
+  mergeInboxActivity,
+  normalizeProviderConversationIdentity,
+  projectCanonicalInboxChats,
+} from '../server/src/inboxProjection';
 import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
 import { canDownloadMessageMedia, messageCopyText, messageMenuActionsFor } from '../src/utils/messageActions';
+import { parseWhatsAppFormatting, stripWhatsAppFormatting } from '../src/utils/whatsappFormatting';
 import { collectBrokenImages, installBrowserDiagnostics } from './e2e/support/diagnostics';
+import { resetAvatarDebugDedupe as resetFrontendAvatarDebugDedupe, traceAvatarImageError } from '../src/utils/avatarDiagnostics';
 import {
   canReactToMessage,
   nextHubReactionEmoji,
@@ -74,8 +99,8 @@ import {
 import { normalizeTagName } from '../server/src/conversationTags';
 import { conversationIdentityCandidates } from '../server/src/conversationResolver';
 import { buildExistingConversationQuery } from '../server/src/conversationQueries';
-import { filterQuickReplies, findQuickReplyToken, insertQuickReplyAtToken, resolveQuickReplyBody } from '../src/utils/quickReplies';
-import { normalizeQuickReplyShortcut } from '../server/src/quickReplies';
+import { filterQuickReplies, findQuickReplyToken, insertQuickReplyAtToken, quickReplyShortcutError, resolveQuickReplyBody } from '../src/utils/quickReplies';
+import { normalizeQuickReplyShortcut, quickReplyShortcutError as serverQuickReplyShortcutError } from '../server/src/quickReplies';
 import {
   OPAQUE_LID_STAGING_TTL_MS,
   buildReplayAliasMap,
@@ -88,7 +113,42 @@ import { normalizeConversationTags } from '../src/utils/conversationTags';
 import { formatConversationTimestamp, formatOperatorLabel } from '../src/components/conversations/conversationFormatters';
 import { outboundErrorMessage } from '../src/utils/outboundError';
 import { classifyAttachmentFile, MAX_ATTACHMENTS_PER_MESSAGE, MAX_TOTAL_ATTACHMENT_BYTES, selectAttachmentFiles } from '../src/utils/composerAttachment';
+import { resetInboxOrderDebugDedupe, traceInboxOrderProjection } from '../server/src/inboxOrderDiagnostics';
+import { traceInboxOrderChanges as traceFrontendInboxOrderChanges, traceInboxOrderEvent as traceFrontendInboxOrderEvent } from '../src/utils/inboxOrderDiagnostics';
+import { selectConversationAvatar } from '../src/utils/avatarSelection';
+import { explicitAvatarProviderPhone, avatarResolutionTtls } from '../server/src/avatarResolution';
+import { selectConversationAvatar as selectServerConversationAvatar } from '../server/src/avatarSelection';
 import type { Conversation, Message } from '../src/types';
+
+test('classifies provider JIDs and filters non-conversational entities fail-closed', () => {
+  assert.equal(classifyProviderJid('5521999999999@s.whatsapp.net'), 'PN');
+  assert.equal(classifyProviderJid('5521999999999@c.us'), 'PN');
+  assert.equal(classifyProviderJid('123456789@lid'), 'LID');
+  assert.equal(classifyProviderJid('120363000000@g.us'), 'GROUP');
+  assert.equal(classifyProviderJid('g1-rio@newsletter'), 'NEWSLETTER');
+  assert.equal(classifyProviderJid('status@broadcast'), 'STATUS_BROADCAST');
+  assert.equal(classifyProviderJid('123@broadcast'), 'OTHER_BROADCAST');
+  assert.equal(classifyProviderJid('unsupported@entity'), 'UNKNOWN');
+  assert.equal(isConversationalProviderJid('120363000000@g.us'), true);
+  assert.equal(isConversationalProviderJid('g1-rio@newsletter'), false);
+  const chats = filterConversationalProviderChats([
+    { id: '5521999999999@s.whatsapp.net' },
+    { id: '123456789@lid' },
+    { id: '120363000000@g.us' },
+    { id: 'g1-rio@newsletter' },
+    { id: 'status@broadcast' },
+    { id: 'unsupported@entity' },
+  ]);
+  assert.deepEqual(chats.map((chat) => chat.id), [
+    '5521999999999@s.whatsapp.net',
+    '123456789@lid',
+    '120363000000@g.us',
+  ]);
+  assert.deepEqual(projectCanonicalInboxChats([
+    ...chats,
+    { id: 'g1-rio@newsletter', remoteJid: 'g1-rio@newsletter', lastMessage: { message: { conversation: 'post' } } },
+  ]).map((chat) => chat.id), chats.map((chat) => chat.id));
+});
 
 test('formats inbox timestamps by local calendar day', () => {
   const now = new Date(2026, 8, 1, 12, 0);
@@ -420,6 +480,190 @@ test('SSE atualiza preview de conversa não aberta sem carregar histórico', () 
   assert.equal(updated?.[0]?.lastMessage, 'atualização do cliente');
   assert.equal(updated?.[0]?.unreadCount, 1);
   assert.strictEqual(updated?.[1], current[0]);
+});
+
+test('SSE de reconciliação atualiza atividade sem incrementar unread novamente', () => {
+  const current = [conversation('120363000000@g.us', {
+    isGroup: true,
+    unreadCount: 2,
+    lastMessage: 'Mensagem antiga',
+    lastMessageAt: 1_700_000_000_000,
+    lastMessageFromMe: false,
+  })];
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'message.upsert',
+    remoteJid: '120363000000@g.us',
+    incrementUnread: false,
+    message: {
+      ...message('reconciled-new', 1_800_000_000_000, 'Mensagem reconciliada', 'delivered', {
+        conversationId: '120363000000@g.us',
+        sender: 'contact',
+        senderName: 'Participante',
+      }),
+    },
+  });
+
+  assert.equal(updated?.[0]?.lastMessage, 'Participante: Mensagem reconciliada');
+  assert.equal(updated?.[0]?.lastMessageAt, 1_800_000_000_000);
+  assert.equal(updated?.[0]?.unreadCount, 2);
+  assert.equal(updated?.[0]?.needsResponse, true);
+});
+
+test('SSE replay da mesma mensagem e timestamp preserva a posição da conversa', () => {
+  const first = conversation('first', { lastMessageAt: 3_000, lastMessage: 'Primeira' });
+  const target = conversation('target', {
+    lastMessage: 'Mensagem antiga',
+    lastMessageAt: 2_000,
+    lastMessageKey: { id: 'target-message', remoteJid: 'target', fromMe: false },
+  });
+  const current = [first, target];
+  const replay = {
+    type: 'message.upsert' as const,
+    remoteJid: 'target',
+    timestampMs: 2_000,
+    message: {
+      ...message('target-message', 2_000, 'Mensagem antiga', 'read', { conversationId: 'target' }),
+    },
+  };
+
+  const updated = reconcileRealtimeConversation(current, replay);
+
+  assert.deepEqual(updated?.map((item) => item.id), ['first', 'target']);
+  assert.equal(updated?.[1]?.lastMessageAt, 2_000);
+});
+
+test('SSE message.upsert de atividade nova promove a conversa', () => {
+  const first = conversation('first', { lastMessageAt: 3_000, lastMessage: 'Primeira' });
+  const target = conversation('target', { lastMessageAt: 2_000, lastMessage: 'Mensagem antiga' });
+  const updated = reconcileRealtimeConversation([first, target], {
+    type: 'message.upsert',
+    remoteJid: 'target',
+    message: { ...message('target-new', 4_000, 'Mensagem nova', 'read', { conversationId: 'target' }) },
+  });
+
+  assert.deepEqual(updated?.map((item) => item.id), ['target', 'first']);
+  assert.equal(updated?.[0]?.lastMessage, 'Mensagem nova');
+});
+
+test('SSE message.upsert com ID novo e timestamp igual promove a conversa', () => {
+  const first = conversation('first', { lastMessageAt: 3_000, lastMessage: 'Primeira' });
+  const target = conversation('target', {
+    lastMessage: 'Mensagem M1',
+    lastMessageAt: 2_000,
+    lastMessageKey: { id: 'M1', remoteJid: 'target', fromMe: false },
+  });
+  const updated = reconcileRealtimeConversation([first, target], {
+    type: 'message.upsert',
+    remoteJid: 'target',
+    message: { ...message('M2', 2_000, 'Mensagem M2', 'read', { conversationId: 'target' }) },
+  });
+
+  assert.deepEqual(updated?.map((item) => item.id), ['target', 'first']);
+  assert.equal(updated?.[0]?.lastMessage, 'Mensagem M2');
+  assert.equal(updated?.[0]?.lastMessageAt, 2_000);
+  assert.equal(updated?.[0]?.lastMessageKey?.id, 'M2');
+});
+
+test('SSE message.upsert antigo preserva a ordem do inbox', () => {
+  const first = conversation('first', { lastMessageAt: 3_000, lastMessage: 'Primeira' });
+  const target = conversation('target', { lastMessageAt: 2_000, lastMessage: 'Mensagem atual' });
+  const current = [first, target];
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'message.upsert',
+    remoteJid: 'target',
+    message: { ...message('target-old', 1_000, 'Mensagem antiga', 'read', { conversationId: 'target' }) },
+  });
+
+  assert.strictEqual(updated, current);
+  assert.deepEqual(updated.map((item) => item.id), ['first', 'target']);
+});
+
+test('SSE replay repetido da mesma mensagem é idempotente', () => {
+  const first = conversation('first', { lastMessageAt: 3_000, lastMessage: 'Primeira' });
+  const target = conversation('target', {
+    lastMessage: 'Mensagem antiga',
+    lastMessageAt: 2_000,
+    lastMessageKey: { id: 'target-message', remoteJid: 'target', fromMe: false },
+  });
+  const current = [first, target];
+  const event = {
+    type: 'message.upsert' as const,
+    remoteJid: 'target',
+    timestampMs: 2_000,
+    message: { ...message('target-message', 2_000, 'Mensagem antiga', 'read', { conversationId: 'target' }) },
+  };
+
+  const once = reconcileRealtimeConversation(current, event);
+  const twice = reconcileRealtimeConversation(once || current, event);
+
+  assert.deepEqual(twice?.map((item) => item.id), ['first', 'target']);
+  assert.strictEqual(twice, once);
+});
+
+test('conversation.updated de mark read não reordena o inbox', () => {
+  const first = conversation('first', { lastMessageAt: 3_000 });
+  const target = conversation('target', { lastMessageAt: 2_000, unreadCount: 2 });
+  const current = [first, target];
+  const updated = reconcileRealtimeConversation(current, {
+    type: 'conversation.updated',
+    remoteJid: 'target',
+    messageTimestamp: 2_000,
+  });
+
+  assert.deepEqual(updated?.map((item) => item.id), ['first', 'target']);
+  assert.equal(updated?.[1]?.unreadCount, 0);
+});
+
+test('reconciliação backend não publica atividade para mensagem já persistida', () => {
+  const known = { id: 'known-message', timestampMs: 2_000 };
+  assert.equal(selectNewReconciledMessageActivity([{ persisted: false, message: known }]), undefined);
+});
+
+test('reconciliação backend seleciona mensagem realmente nova para o realtime', () => {
+  const known = { id: 'known-message', timestampMs: 4_000 };
+  const fresh = { id: 'fresh-message', timestampMs: 3_000 };
+  const selected = selectNewReconciledMessageActivity([
+    { persisted: false, message: known },
+    { persisted: true, message: fresh },
+  ]);
+
+  assert.equal(selected?.id, 'fresh-message');
+});
+
+test('grupo reconciliado atualiza a Inbox e permanece estável contra polling antigo', () => {
+  const original = conversation('120363000000@g.us', {
+    isGroup: true,
+    lastMessage: '08:27',
+    lastMessageAt: 1_700_000_000_000,
+    lastMessageFromMe: false,
+  });
+  const current = [original, conversation('120363999999@g.us', {
+    isGroup: true,
+    lastMessage: '08:00',
+    lastMessageAt: 1_699_000_000_000,
+  })];
+  const reconciled = reconcileRealtimeConversation(current, {
+    type: 'message.upsert',
+    remoteJid: '120363000000@g.us',
+    incrementUnread: false,
+    message: {
+      ...message('group-1041', 1_800_000_000_000, '10:41', 'delivered', {
+        conversationId: '120363000000@g.us',
+        sender: 'contact',
+        senderName: 'Participante',
+      }),
+    },
+  });
+
+  assert.ok(reconciled);
+  assert.equal(reconciled?.[0]?.lastMessage, 'Participante: 10:41');
+  assert.equal(reconciled?.[0]?.lastMessageAt, 1_800_000_000_000);
+  const stalePolling = reconcileConversationsMonotonic(reconciled || current, [
+    { ...original, unreadCount: 0 },
+    current[1]!,
+  ]);
+  assert.equal(stalePolling[0]?.lastMessage, 'Participante: 10:41');
+  assert.equal(stalePolling[0]?.lastMessageAt, 1_800_000_000_000);
 });
 
 test('SSE recebido com conversationId interno ainda atualiza JID @lid', () => {
@@ -1353,7 +1597,7 @@ test('assinatura enviada à Evolution não contamina o conteúdo exibido do Leon
     messageTimestamp: 1_700_000_110,
   }, 0, 'conversation-1', 'Atendente');
 
-  assert.equal(evolutionPayload, '*Leonardo*\nNova Iguaçu consigo entregar via correios');
+  assert.equal(evolutionPayload, '*Leonardo:*\nNova Iguaçu consigo entregar via correios');
   assert.equal(removeHubAgentPrefix(evolutionPayload, 'Leonardo'), 'Nova Iguaçu consigo entregar via correios');
   assert.equal(confirmed.senderName, 'Leonardo');
   assert.equal(confirmed.content, 'Nova Iguaçu consigo entregar via correios');
@@ -1432,7 +1676,7 @@ test('mensagem do Henrique preserva conteúdo legítimo iniciado por asteriscos'
     messageTimestamp: 1_700_000_111,
   }, 0, 'conversation-1', 'Atendente');
 
-  assert.equal(evolutionPayload, '*Henrique*\n*Oferta especial* para hoje');
+  assert.equal(evolutionPayload, '*Henrique:*\n*Oferta especial* para hoje');
   assert.equal(confirmed.senderName, 'Henrique');
   assert.equal(confirmed.content, '*Oferta especial* para hoje');
 });
@@ -1888,6 +2132,317 @@ test('provider key capture covers every reply-relevant provider message type', (
     assert.equal(key?.id, `provider-${index}`);
     assert.equal(key?.remoteJid, index === 1 ? 'opaque@lid' : '5521999999999@s.whatsapp.net');
   }
+});
+
+test('contrato de erro de mídia preserva semântica upstream sem expor o body', () => {
+  const cases = [
+    [400, 400, 'MEDIA_PROVIDER_REJECTED', 'invalid_key', true],
+    [404, 404, 'MEDIA_UNAVAILABLE', 'not_found', false],
+    [410, 410, 'MEDIA_UNAVAILABLE', 'expired', false],
+    [422, 422, 'MEDIA_PROVIDER_REJECTED', 'provider_rejected', true],
+    [429, 429, 'MEDIA_RATE_LIMITED', 'rate_limited', true],
+    [500, 502, 'MEDIA_UPSTREAM_ERROR', 'provider_error', true],
+  ] as const;
+
+  for (const [upstreamStatus, expectedStatus, error, reason, temporary] of cases) {
+    const result = mediaFailureForUpstreamStatus(upstreamStatus);
+    assert.equal(result.statusCode, expectedStatus);
+    assert.deepEqual(result.body, { error, reason, temporary });
+    assert.doesNotMatch(JSON.stringify(result.body), /provider-secret|base64|remoteJid/i);
+  }
+
+  assert.deepEqual(mediaFailureForTransport('timeout'), {
+    statusCode: 504,
+    body: { error: 'MEDIA_UPSTREAM_TIMEOUT', reason: 'timeout', temporary: true },
+  });
+  assert.deepEqual(mediaFailureForTransport('network'), {
+    statusCode: 502,
+    body: { error: 'MEDIA_UPSTREAM_UNAVAILABLE', reason: 'network', temporary: true },
+  });
+  assert.deepEqual(mediaFailureForInvalidProviderResponse(), {
+    statusCode: 502,
+    body: { error: 'MEDIA_UPSTREAM_INVALID_RESPONSE', reason: 'invalid_response', temporary: true },
+  });
+});
+
+test('contrato de mídia aceita JSON objeto e rejeita corpo upstream inválido', () => {
+  assert.deepEqual(parseMediaProviderJson('{"base64":"encoded","mimetype":"image/jpeg"}'), {
+    base64: 'encoded',
+    mimetype: 'image/jpeg',
+  });
+  assert.equal(parseMediaProviderJson(''), undefined);
+  assert.equal(parseMediaProviderJson('not-json'), undefined);
+  assert.equal(parseMediaProviderJson('[]'), undefined);
+  assert.equal(parseMediaProviderJson('"provider error"'), undefined);
+});
+
+test('diagnóstico de rejeição de mídia classifica respostas 400 sem expor o body upstream', () => {
+  assert.deepEqual(classifyMediaProviderRejection(
+    JSON.stringify({ code: 'MESSAGE_NOT_FOUND', message: 'message provider-id-123 not found' }),
+    'application/json',
+  ), {
+    category: 'message_not_found',
+    providerErrorCode: 'MESSAGE_NOT_FOUND',
+    providerMessageSanitized: 'provider message not found',
+    responseFormat: 'json',
+    downloadStatusClass: 'unknown',
+  });
+
+  assert.equal(classifyMediaProviderRejection(
+    JSON.stringify({ error: 'media key is missing' }),
+    'application/json',
+  ).category, 'media_key_missing');
+  assert.equal(classifyMediaProviderRejection(
+    JSON.stringify({ error: 'decryption failed: bad mac' }),
+    'application/json',
+  ).category, 'decrypt_failed');
+  assert.equal(classifyMediaProviderRejection(
+    JSON.stringify({ error: 'unable to download media' }),
+    'application/json',
+  ).category, 'download_failed');
+  assert.equal(classifyMediaProviderRejection(
+    JSON.stringify({ error: 'media type is not supported' }),
+    'application/json',
+  ).category, 'unsupported_media');
+  assert.equal(classifyMediaProviderRejection(
+    JSON.stringify({ error: 'media URL expired' }),
+    'application/json',
+  ).category, 'expired');
+
+  assert.deepEqual(classifyMediaProviderRejection(
+    JSON.stringify({ error: 'bad request', messageId: 'opaque-message-id', remoteJid: '5521999999999@s.whatsapp.net' }),
+    'application/json',
+  ), {
+    category: 'provider_rejected_unknown',
+    providerMessageSanitized: 'provider rejection',
+    responseFormat: 'json',
+    downloadStatusClass: 'unknown',
+  });
+
+  assert.equal(classifyMediaProviderRejection('unable to download media for 5521999999999@s.whatsapp.net', 'text/plain').category, 'download_failed');
+  assert.equal(classifyMediaProviderRejection('unable to download media for 5521999999999@s.whatsapp.net', 'text/plain').downloadStatusClass, 'unknown');
+  assert.equal(classifyMediaProviderRejection('not-json', 'application/json').responseFormat, 'invalid_json');
+  assert.equal(classifyMediaProviderRejection('').responseFormat, 'empty');
+});
+
+test('diagnóstico de mídia reconhece o envelope oficial da Evolution para mensagem ausente', () => {
+  const diagnostics = classifyMediaProviderRejection(JSON.stringify({
+    status: 400,
+    error: 'Bad Request',
+    response: { message: ['Message not found'] },
+  }), 'application/json');
+
+  assert.deepEqual(diagnostics, {
+    category: 'message_not_found',
+    providerMessageSanitized: 'provider message not found',
+    responseFormat: 'json',
+    downloadStatusClass: 'unknown',
+  });
+});
+
+test('diagnóstico de mídia reconhece response.message como string para tipo não suportado', () => {
+  const diagnostics = classifyMediaProviderRejection(JSON.stringify({
+    status: 400,
+    error: 'Bad Request',
+    response: { message: 'The message is not of the media type' },
+  }), 'application/json');
+
+  assert.deepEqual(diagnostics, {
+    category: 'unsupported_media',
+    providerMessageSanitized: 'provider unsupported media',
+    responseFormat: 'json',
+    downloadStatusClass: 'unsupported_media',
+  });
+});
+
+test('diagnóstico de mídia mantém mensagem desconhecida nested em categoria fixa', () => {
+  const diagnostics = classifyMediaProviderRejection(JSON.stringify({
+    status: 400,
+    error: 'Bad Request',
+    response: { message: ['provider-message-id-123 cannot be processed'] },
+  }), 'application/json');
+
+  assert.deepEqual(diagnostics, {
+    category: 'provider_rejected_unknown',
+    providerMessageSanitized: 'provider rejection',
+    responseFormat: 'json',
+    downloadStatusClass: 'unknown',
+  });
+  assert.doesNotMatch(JSON.stringify(diagnostics), /provider-message-id-123|cannot be processed/);
+});
+
+test('diagnóstico de mídia prioriza response.message sobre erro raiz genérico', () => {
+  const diagnostics = classifyMediaProviderRejection(JSON.stringify({
+    status: 400,
+    error: 'Bad Request',
+    response: { message: ['Message not found'] },
+  }), 'application/json');
+
+  assert.equal(diagnostics.category, 'message_not_found');
+  assert.equal(diagnostics.providerMessageSanitized, 'provider message not found');
+});
+
+test('diagnóstico de mídia não expõe dados sensíveis no envelope nested', () => {
+  const diagnostics = classifyMediaProviderRejection(JSON.stringify({
+    status: 400,
+    error: 'Bad Request',
+    response: {
+      message: ['unrecognized provider failure for provider-message-id-123'],
+    },
+    mediaKey: 'media-key-secret',
+    directPath: '/v/t62.7118-24/opaque-direct-path',
+    url: 'https://media.example.test/opaque-media-url',
+    apikey: 'evolution-api-key-secret',
+    'x-webhook-secret': 'webhook-secret-value',
+  }), 'application/json');
+
+  const serialized = JSON.stringify(diagnostics);
+  assert.equal(diagnostics.category, 'provider_rejected_unknown');
+  assert.doesNotMatch(serialized, /provider-message-id-123|media-key-secret|opaque-direct-path|opaque-media-url|evolution-api-key-secret|webhook-secret-value/);
+});
+
+test('diagnóstico de rejeição de mídia não conserva identificadores ou segredos', () => {
+  const diagnostics = classifyMediaProviderRejection(JSON.stringify({
+    error: 'message provider-message-id not found for 5521999999999@s.whatsapp.net',
+    mediaKey: 'media-key-secret',
+    directPath: '/v/t62.7118-24/opaque-direct-path',
+    url: 'https://media.example.test/opaque-media-url',
+    apikey: 'evolution-api-key-secret',
+    'x-webhook-secret': 'webhook-secret-value',
+  }), 'application/json');
+  const serialized = JSON.stringify(diagnostics);
+  assert.equal(diagnostics.category, 'message_not_found');
+  assert.doesNotMatch(serialized, /provider-message-id|5521999999999|media-key-secret|opaque-direct-path|opaque-media-url|evolution-api-key-secret|webhook-secret-value/);
+  assert.deepEqual(diagnostics, {
+    category: 'message_not_found',
+    providerMessageSanitized: 'provider message not found',
+    responseFormat: 'json',
+    downloadStatusClass: 'unknown',
+  });
+});
+
+test('diagnóstico de mídia distingue status internos do provider e falhas de download', () => {
+  const cases = [
+    [{ response: { output: { statusCode: 404 }, message: 'media not found' } }, 'not_found_404'],
+    [{ response: { status: 410, message: 'media expired' } }, 'gone_410'],
+    [{ error: { status: 403 }, message: 'forbidden media' }, 'forbidden_403'],
+    [{ error: { output: { statusCode: 503 } }, message: 'provider unavailable' }, 'upstream_5xx'],
+    [{ response: { message: 'decryption failed: bad mac' } }, 'decrypt_error'],
+    [{ response: { message: 'Cannot derive from empty media key' } }, 'missing_media_key'],
+    [{ response: { message: 'No valid media URL or directPath present' } }, 'missing_direct_path'],
+    [{ response: { message: 'media type is not supported' } }, 'unsupported_media'],
+    [{ response: { message: 'provider rejected the request' } }, 'unknown'],
+  ] as const;
+
+  for (const [body, expected] of cases) {
+    assert.equal(classifyMediaProviderRejection(JSON.stringify(body), 'application/json', 400).downloadStatusClass, expected);
+  }
+  assert.equal(classifyMediaProviderRejection('', 'application/json', 404).downloadStatusClass, 'not_found_404');
+  assert.equal(classifyMediaProviderRejection('{"error":"network connection timeout"}', 'application/json').downloadStatusClass, 'network_error');
+  assert.equal(classifyMediaProviderRejection('{"status":400,"message":"provider rejected"}', 'application/json').downloadStatusClass, 'unknown');
+});
+
+test('diagnóstico de mídia preserva apenas flags sanitizados quando o provider os fornece', () => {
+  const diagnostics = classifyMediaProviderRejection(JSON.stringify({
+    status: 400,
+    response: {
+      message: 'provider failure',
+      hasMediaKey: true,
+      hasDirectPath: false,
+      hasValidMmgUrl: false,
+      hasMediaMessage: true,
+      hasFullMessage: false,
+      reuploadAttempted: true,
+      reuploadSucceeded: false,
+      reuploadFailed: true,
+      messageAgeBucket: 'lt_24h',
+    },
+    mediaKey: 'media-key-secret',
+    directPath: '/opaque-direct-path',
+    url: 'https://media.example.test/opaque-url',
+    messageId: 'provider-message-id',
+    remoteJid: '5521999999999@s.whatsapp.net',
+    apikey: 'evolution-api-key-secret',
+    'x-webhook-secret': 'webhook-secret-value',
+  }), 'application/json');
+
+  assert.deepEqual(diagnostics, {
+    category: 'provider_rejected_unknown',
+    providerMessageSanitized: 'provider rejection',
+    responseFormat: 'json',
+    downloadStatusClass: 'unknown',
+    hasMediaKey: true,
+    hasDirectPath: false,
+    hasValidMmgUrl: false,
+    hasMediaMessage: true,
+    hasFullMessage: false,
+    reuploadAttempted: true,
+    reuploadSucceeded: false,
+    reuploadFailed: true,
+    messageAgeBucket: 'lt_24h',
+  });
+  const serialized = JSON.stringify(diagnostics);
+  assert.doesNotMatch(serialized, /media-key-secret|opaque-direct-path|opaque-url|provider-message-id|5521999999999|evolution-api-key-secret|webhook-secret-value/);
+});
+
+test('validação de provider key preserva PN, LID, aliases e grupo sem exigir participant', () => {
+  const pn = validateProviderMessageKey({
+    id: 'media-pn',
+    remoteJid: '5521999999999@s.whatsapp.net',
+    fromMe: false,
+  });
+  assert.equal(pn.valid, true);
+  if (pn.valid) assert.equal(pn.key.remoteJid, '5521999999999@s.whatsapp.net');
+
+  const lid = validateProviderMessageKey({
+    id: 'media-lid',
+    remoteJid: 'opaque-lid@lid',
+    remoteJidAlt: '5521999999999@s.whatsapp.net',
+    participantAlt: '5521999999999@s.whatsapp.net',
+    addressingMode: 'lid',
+    senderPn: '5521999999999@s.whatsapp.net',
+    participantPn: '5521999999999@s.whatsapp.net',
+    fromMe: false,
+  });
+  assert.equal(lid.valid, true);
+  if (lid.valid) {
+    assert.equal(lid.key.remoteJid, 'opaque-lid@lid');
+    assert.equal(lid.key.remoteJidAlt, '5521999999999@s.whatsapp.net');
+    assert.equal(lid.key.participantPn, '5521999999999@s.whatsapp.net');
+  }
+
+  const group = validateProviderMessageKey({
+    id: 'media-group',
+    remoteJid: '120363012345678901@g.us',
+    fromMe: false,
+  });
+  assert.equal(group.valid, true);
+  const groupWithParticipant = validateProviderMessageKey({
+    id: 'media-group-participant',
+    remoteJid: '120363012345678901@g.us',
+    participant: 'participant@s.whatsapp.net',
+    fromMe: false,
+  });
+  assert.equal(groupWithParticipant.valid, true);
+  if (groupWithParticipant.valid) assert.equal(groupWithParticipant.key.participant, 'participant@s.whatsapp.net');
+});
+
+test('validação de provider key rejeita ausência estrutural sem converter LID em telefone', () => {
+  const cases = [
+    [{ remoteJid: '5521999999999@s.whatsapp.net' }, 'missing_id'],
+    [{ id: 'missing-remote' }, 'missing_remote_jid'],
+    [{ id: 'bad-type', remoteJid: '5521999999999@s.whatsapp.net', fromMe: 'false' }, 'invalid_field'],
+    [null, 'not_object'],
+  ] as const;
+  for (const [input, reason] of cases) {
+    const result = validateProviderMessageKey(input);
+    assert.equal(result.valid, false);
+    if (!result.valid) assert.equal(result.reason, reason);
+  }
+
+  const opaque = validateProviderMessageKey({ id: 'opaque', remoteJid: 'opaque-lid@lid' });
+  assert.equal(opaque.valid, true);
+  if (opaque.valid) assert.equal(opaque.key.remoteJid, 'opaque-lid@lid');
 });
 
 test('normaliza resposta inbound da Evolution quando contextInfo vem ao lado de message', () => {
@@ -2695,6 +3250,72 @@ test('projeção canônica colapsa LID e PN somente com alias explícito', () =>
   assert.deepEqual([lid, pn], original);
 });
 
+test('normaliza alias direto do lastMessage antes da projeção canônica', () => {
+  const pn = inboxProjectionChat('5521999999999@s.whatsapp.net', { name: 'Cliente conhecido' });
+  const lid = normalizeProviderConversationIdentity(inboxProjectionChat('opaque-provider@lid', {
+    lastMessage: {
+      key: {
+        id: 'provider-lid',
+        remoteJid: 'opaque-provider@lid',
+        remoteJidAlt: '5521999999999@s.whatsapp.net',
+      },
+      message: { conversation: 'Atividade' },
+      messageTimestamp: 1_800_000_000,
+    },
+  }));
+
+  assert.equal(lid.remoteJidAlt, '5521999999999@s.whatsapp.net');
+  assert.deepEqual(lid.remoteJidAliases, [
+    'opaque-provider@lid',
+    '5521999999999@s.whatsapp.net',
+  ]);
+  assert.equal(projectCanonicalInboxChats([pn, lid]).length, 1);
+  assert.deepEqual(normalizeProviderConversationIdentity(lid), lid);
+});
+
+test('alias direto sobrevive quando a atividade local substitui lastMessage', () => {
+  const provider = inboxProjectionChat('opaque-provider-local@lid', {
+    lastMessage: {
+      key: {
+        id: 'provider-activity',
+        remoteJid: 'opaque-provider-local@lid',
+        remoteJidAlt: '5521999999999@s.whatsapp.net',
+      },
+      message: { conversation: 'Provider' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+  const local = inboxProjectionChat('opaque-provider-local@lid', {
+    lastMessage: {
+      key: { id: 'local-activity', remoteJid: 'opaque-provider-local@lid' },
+      message: { conversation: 'Local' },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.deepEqual(merged.remoteJidAliases, [
+    'opaque-provider-local@lid',
+    '5521999999999@s.whatsapp.net',
+  ]);
+  assert.equal(projectCanonicalInboxChats([
+    merged,
+    inboxProjectionChat('5521999999999@s.whatsapp.net'),
+  ]).length, 1);
+});
+
+test('normaliza também o pareamento explícito PN para LID', () => {
+  const normalized = normalizeProviderConversationIdentity({
+    id: '5521999999999@s.whatsapp.net',
+    remoteJid: '5521999999999@s.whatsapp.net',
+    remoteJidAlt: 'opaque-provider@lid',
+  });
+  assert.deepEqual(normalized.remoteJidAliases, [
+    '5521999999999@s.whatsapp.net',
+    'opaque-provider@lid',
+  ]);
+});
+
 test('projeção canônica reconhece representação nacional equivalente sem inferir LID', () => {
   const projected = projectCanonicalInboxChats([
     inboxProjectionChat('opaque-456@lid', { remoteJidAlt: '5521999999999@s.whatsapp.net' }),
@@ -2727,6 +3348,35 @@ test('LID opaco e PN diferentes permanecem separados', () => {
     inboxProjectionChat('5521777777777@s.whatsapp.net'),
   ]);
   assert.equal(projected.length, 3);
+});
+
+test('dois LIDs sem alias direto permanecem identities independentes', () => {
+  const projected = projectCanonicalInboxChats([
+    inboxProjectionChat('opaque-one@lid'),
+    inboxProjectionChat('opaque-two@lid'),
+  ]);
+  assert.equal(projected.length, 2);
+});
+
+test('LID opaco não herda alias de outra conversa nem fecha o grafo transitivamente', () => {
+  const projected = projectCanonicalInboxChats([
+    inboxProjectionChat('opaque-paired@lid', {
+      lastMessage: {
+        key: {
+          id: 'paired-message',
+          remoteJid: 'opaque-paired@lid',
+          remoteJidAlt: '5521999999999@s.whatsapp.net',
+        },
+        message: { conversation: 'Pareada' },
+        messageTimestamp: 1_800_000_000,
+      },
+    }),
+    inboxProjectionChat('opaque-unrelated@lid'),
+    inboxProjectionChat('5521999999999@s.whatsapp.net'),
+  ]);
+
+  assert.equal(projected.length, 2);
+  assert.equal(projected.some((chat) => chat.remoteJid === 'opaque-unrelated@lid'), true);
 });
 
 test('atividade mais recente vence e identidade PN, tags e estado são preservados', () => {
@@ -2897,6 +3547,268 @@ test('diagnóstico propaga erros inesperados do collector', async () => {
   await assert.rejects(() => collectBrokenImages(page, diagnostics as any), /collector failure/);
 });
 
+test('avatar debug do backend registra somente presença, origem e entidade sanitizada', () => {
+  const output: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { output.push(args.join(' ')); };
+  try {
+    resetServerAvatarDebugDedupe();
+    const input = {
+      entityId: '5521999999999@s.whatsapp.net',
+      remoteJid: '5521999999999@s.whatsapp.net',
+      whatsappAvatar: 'https://pps.whatsapp.net/avatar/full-path?token=secret',
+      googleAvatar: 'https://contacts.google.test/photo/full-path',
+      storedAvatar: 'https://stored.test/photo/full-path',
+      snapshotAvatar: '',
+      selectedSource: 'whatsapp' as const,
+      selectedAvatar: 'https://pps.whatsapp.net/avatar/full-path?token=secret',
+      explicitAliasPresent: true,
+      path: 'inboxProjection.mergeBucket',
+    };
+    assert.equal(traceServerAvatarSelection(input, { enabled: true }), true);
+    assert.equal(traceServerAvatarSelection(input, { enabled: true }), false);
+  } finally {
+    console.info = originalInfo;
+    resetServerAvatarDebugDedupe();
+  }
+  assert.equal(output.length, 1);
+  assert.equal(output[0]?.startsWith('[AVATAR_DEBUG] '), true);
+  assert.equal(output[0]?.includes('5521999999999'), false);
+  assert.equal(output[0]?.includes('https://pps.whatsapp.net/avatar/full-path'), false);
+  assert.equal(output[0]?.includes('token=secret'), false);
+  assert.match(output[0] || '', /"whatsappAvatarPresent":true/);
+  assert.match(output[0] || '', /"googleAvatarPresent":true/);
+  assert.match(output[0] || '', /"selectedSource":"whatsapp"/);
+});
+
+test('avatar debug do frontend registra erro sem URL completa e deduplica renders', () => {
+  const output: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { output.push(args.join(' ')); };
+  try {
+    resetFrontendAvatarDebugDedupe();
+    const input = {
+      entityId: '164794086760597@lid',
+      avatar: 'https://pps.whatsapp.net/v/t61.24694-24/12345.jpg?ccb=1&token=secret',
+      sourceCategory: 'whatsapp' as const,
+    };
+    assert.equal(traceAvatarImageError(input, { enabled: true }), true);
+    assert.equal(traceAvatarImageError(input, { enabled: true }), false);
+  } finally {
+    console.info = originalInfo;
+    resetFrontendAvatarDebugDedupe();
+  }
+  assert.equal(output.length, 1);
+  assert.equal(output[0]?.includes('164794086760597'), false);
+  assert.equal(output[0]?.includes('/v/t61.24694-24/12345.jpg'), false);
+  assert.equal(output[0]?.includes('token=secret'), false);
+  assert.match(output[0] || '', /"event":"image_error"/);
+  assert.match(output[0] || '', /"hostname":"pps.whatsapp.net"/);
+});
+
+test('avatar target trace registra somente presença/proveniência sanitizada', () => {
+  const output: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { output.push(args.join(' ')); };
+  try {
+    resetServerAvatarDebugDedupe();
+    assert.equal(traceAvatarTargetSelection({
+      entityId: '164794086760597@lid',
+      remoteJid: '164794086760597@lid',
+      remoteJidAltPresent: true,
+      senderPnPresent: false,
+      participantPnPresent: false,
+      providerPhonePresent: true,
+      snapshotProfilePicPresent: false,
+      snapshotProfilePicturePresent: true,
+      whatsappIdentityPresent: true,
+      whatsappIdentityAvatarPresent: false,
+      whatsappStoredNamePresent: true,
+      whatsappStoredAvatarPresent: false,
+      contactRecordPresent: true,
+      contactAvatarPresent: false,
+      googleLinkPresent: true,
+      selectedSource: 'none',
+      selectedAvatar: '',
+    }, { enabled: true }), true);
+    assert.equal(traceAvatarTargetSelection({
+      entityId: '164794086760597@lid',
+      remoteJid: '164794086760597@lid',
+      selectedSource: 'none',
+    }, { enabled: true }), true);
+  } finally {
+    console.info = originalInfo;
+    resetServerAvatarDebugDedupe();
+  }
+  assert.equal(output.length, 2);
+  assert.match(output[0] || '', /^\[AVATAR_TARGET_TRACE\] /);
+  assert.equal(output[0]?.includes('164794086760597'), false);
+  assert.match(output[0] || '', /"jidType":"LID"/);
+  assert.match(output[0] || '', /"googleLinkPresent":true/);
+  assert.match(output[0] || '', /"selectedAvatarPresent":false/);
+});
+
+test('avatar profile fetch trace classifica respostas sem expor a URL', () => {
+  const output: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { output.push(args.join(' ')); };
+  try {
+    resetServerAvatarDebugDedupe();
+    assert.equal(traceAvatarProfileFetch({
+      entityId: '5521999999999@s.whatsapp.net',
+      remoteJid: '5521999999999@s.whatsapp.net',
+      identityBasis: 'PN',
+      result: 'success',
+      avatarReturned: true,
+    }, { enabled: true }), true);
+    assert.equal(traceAvatarProfileFetch({
+      entityId: 'opaque@lid',
+      participantJid: 'opaque@lid',
+      identityBasis: 'OTHER',
+      result: 'provider_4xx',
+      avatarReturned: false,
+    }, { enabled: true }), true);
+  } finally {
+    console.info = originalInfo;
+    resetServerAvatarDebugDedupe();
+  }
+  assert.equal(output.length, 2);
+  assert.match(output[0] || '', /^\[AVATAR_PROFILE_FETCH\] /);
+  assert.equal(output[0]?.includes('5521999999999'), false);
+  assert.match(output[0] || '', /"identityBasis":"PN"/);
+  assert.match(output[0] || '', /"result":"success"/);
+  assert.match(output[1] || '', /"result":"provider_4xx"/);
+});
+
+test('avatar selector mantém WhatsApp acima de Google e usa fallback somente quando necessário', () => {
+  assert.deepEqual(selectConversationAvatar({
+    snapshotWhatsAppAvatar: '  https://wa.test/snapshot.jpg  ',
+    storedWhatsAppAvatar: 'https://wa.test/stored.jpg',
+    googleAvatar: 'https://google.test/photo.jpg',
+  }), { avatar: 'https://wa.test/snapshot.jpg', source: 'whatsapp' });
+  assert.deepEqual(selectConversationAvatar({
+    storedWhatsAppAvatar: 'https://wa.test/stored.jpg',
+    googleAvatar: 'https://google.test/photo.jpg',
+  }), { avatar: 'https://wa.test/stored.jpg', source: 'whatsapp' });
+  assert.deepEqual(selectConversationAvatar({ googleAvatar: 'https://google.test/photo.jpg' }), {
+    avatar: 'https://google.test/photo.jpg',
+    source: 'google',
+  });
+  assert.deepEqual(selectConversationAvatar({ snapshotWhatsAppAvatar: '', storedWhatsAppAvatar: null, googleAvatar: '   ' }), {
+    avatar: null,
+    source: 'none',
+  });
+  assert.deepEqual(selectServerConversationAvatar({
+    snapshotWhatsAppAvatar: 'https://wa.test/snapshot.jpg',
+    googleAvatar: 'https://google.test/photo.jpg',
+  }), { avatar: 'https://wa.test/snapshot.jpg', source: 'whatsapp' });
+});
+
+test('avatar resolution só deriva PN de identidade explícita e falha fechado para LID/grupo', () => {
+  assert.equal(explicitAvatarProviderPhone({ remoteJid: 'opaque-123@lid', identities: ['5521999999999@s.whatsapp.net'] }), '5521999999999');
+  assert.equal(explicitAvatarProviderPhone({ remoteJid: 'opaque-123@lid', identities: ['5521999999999@c.us'] }), '5521999999999');
+  assert.equal(explicitAvatarProviderPhone({ remoteJid: 'opaque-123@lid', identities: ['opaque-123@lid'] }), '');
+  assert.equal(explicitAvatarProviderPhone({ remoteJid: '120363000000@g.us', identities: ['opaque-123@lid'] }), '');
+  assert.equal(explicitAvatarProviderPhone({ remoteJid: '5521999999999@s.whatsapp.net' }), '5521999999999');
+});
+
+test('avatar resolution expõe TTLs negativos e limite de concorrência coerentes', () => {
+  assert.equal(avatarResolutionTtls.success, 24 * 60 * 60_000);
+  assert.equal(avatarResolutionTtls.empty, 6 * 60 * 60_000);
+  assert.equal(avatarResolutionTtls.error, 15 * 60_000);
+  assert.equal(avatarResolutionTtls.unavailable, 60 * 60_000);
+});
+
+test('projeção da Inbox não deixa avatar Google sobrescrever fonte WhatsApp', () => {
+  const projected = projectCanonicalInboxChats([inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    contact: {
+      id: 'contact-1',
+      name: 'Cliente',
+      phone: '+5521999999999',
+      avatar: 'https://google.test/legacy.jpg',
+      tags: [],
+      createdAt: '2026-08-01',
+    },
+    whatsappAvatar: 'https://wa.test/stored.jpg',
+    googleAvatar: 'https://google.test/photo.jpg',
+    profilePicUrl: '',
+  })]);
+  assert.equal(projected[0]?.avatarSource, 'whatsapp');
+  assert.equal(projected[0]?.profilePicUrl, 'https://wa.test/stored.jpg');
+  assert.equal(projected[0]?.contact?.avatar, 'https://wa.test/stored.jpg');
+
+  const googleOnly = projectCanonicalInboxChats([inboxProjectionChat('5521888888888@s.whatsapp.net', {
+    contact: {
+      id: 'contact-2',
+      name: 'Google',
+      phone: '+5521888888888',
+      avatar: 'https://google.test/legacy.jpg',
+      tags: [],
+      createdAt: '2026-08-01',
+    },
+    googleAvatar: 'https://google.test/photo.jpg',
+  })]);
+  assert.equal(googleOnly[0]?.avatarSource, 'google');
+  assert.equal(googleOnly[0]?.profilePicUrl, undefined);
+  assert.equal(googleOnly[0]?.contact?.avatar, 'https://google.test/photo.jpg');
+
+  const noSource = projectCanonicalInboxChats([inboxProjectionChat('5521777777777@s.whatsapp.net', {
+    contact: {
+      id: 'contact-3',
+      name: 'Sem foto',
+      phone: '+5521777777777',
+      avatar: 'https://google.test/unclassified.jpg',
+      tags: [],
+      createdAt: '2026-08-01',
+    },
+  })]);
+  assert.equal(noSource[0]?.avatarSource, 'none');
+  assert.equal(noSource[0]?.contact?.avatar, '');
+});
+
+test('inbox order trace só registra mudanças reais de índice', () => {
+  const output: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { output.push(args.join(' ')); };
+  try {
+    resetInboxOrderDebugDedupe();
+    const first = conversation('first', { lastMessageAt: 100, updatedAt: '2026-09-10T10:00:00.000Z' });
+    const second = conversation('second', { lastMessageAt: 200, updatedAt: '2026-09-10T10:01:00.000Z' });
+    assert.equal(traceFrontendInboxOrderChanges([first, second], [first, second], { enabled: true, trigger: 'polling' }), 0);
+    assert.equal(traceFrontendInboxOrderChanges([first, second], [second, first], { enabled: true, trigger: 'polling', activeConversationId: 'second' }), 2);
+    assert.equal(traceFrontendInboxOrderChanges([first, second], [second, first], { enabled: true, trigger: 'polling', activeConversationId: 'second' }), 2);
+    assert.equal(traceFrontendInboxOrderEvent({ event: 'mark_read_success', conversation: second, index: 0, enabled: true }), true);
+  } finally {
+    console.info = originalInfo;
+  }
+  assert.equal(output.length, 5);
+  assert.match(output[0] || '', /^\[INBOX_ORDER_TRACE\] /);
+  assert.equal(output[0]?.includes('conversation-second'), false);
+  assert.match(output[0] || '', /"fromIndex":0/);
+  assert.match(output[0] || '', /"toIndex":1/);
+  assert.match(output[2] || '', /"event":"reorder"/);
+  assert.match(output[4] || '', /"event":"mark_read_success"/);
+});
+
+test('backend inbox order trace sinaliza fallback por updatedAt e não expõe identidade', () => {
+  const output: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { output.push(args.join(' ')); };
+  try {
+    resetInboxOrderDebugDedupe();
+    const previous = [{ id: 'a@s.whatsapp.net', lastMessage: { message: {} }, updatedAt: '2026-09-10T10:00:00.000Z' }];
+    const next = [{ id: 'a@s.whatsapp.net', lastMessage: { message: {} }, updatedAt: '2026-09-10T10:01:00.000Z' }];
+    assert.equal(traceInboxOrderProjection(previous, next, { enabled: true, trigger: 'unknown' }), 1);
+  } finally {
+    console.info = originalInfo;
+    resetInboxOrderDebugDedupe();
+  }
+  assert.equal(output.length, 1);
+  assert.match(output[0] || '', /^\[INBOX_ORDER_TRACE\] /);
+  assert.equal(output[0]?.includes('a@s.whatsapp.net'), false);
+  assert.match(output[0] || '', /"orderingTimestampChosenFrom":"updatedAt"/);
+});
+
 test('diagnósticos de console.error e pageerror continuam sendo capturados', () => {
   const listeners = new Map<string, (value: any) => void>();
   const page = {
@@ -3052,4 +3964,404 @@ test('quick reply slash selection replaces only its token and preserves composer
 
 test('quick reply slash trigger opens for a bare slash', () => {
   assert.deepEqual(findQuickReplyToken('Olá /', 5), { start: 4, end: 5, value: '/' });
+});
+
+test('merge do inbox prefere atividade local renderizável mais recente', () => {
+  const provider = inboxProjectionChat('120363000000@g.us', {
+    lastMessage: {
+      key: { id: 'provider-old', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { conversation: '08:27' },
+      messageTimestamp: 1_700_000_000,
+    },
+  });
+  const local = inboxProjectionChat('120363000000@g.us', {
+    updatedAt: '2026-09-04T13:41:00.000Z',
+    lastMessage: {
+      key: { id: 'local-new', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { conversation: '10:41' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(merged.lastMessage?.key?.id, 'local-new');
+  assert.equal(merged.lastMessage?.message?.conversation, '10:41');
+  assert.equal(inboxActivityTimestamp(merged), 1_800_000_000_000);
+});
+
+test('merge do inbox aceita provider mais novo quando local está atrasado', () => {
+  const provider = inboxProjectionChat('120363000000@g.us', {
+    lastMessage: {
+      key: { id: 'provider-new', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { conversation: '11:02' },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+  const local = inboxProjectionChat('120363000000@g.us', {
+    lastMessage: {
+      key: { id: 'local-old', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { conversation: '10:41' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(merged.lastMessage?.key?.id, 'provider-new');
+  assert.equal(inboxActivityTimestamp(merged), 1_900_000_000_000);
+});
+
+test('merge do inbox preserva nome humano local quando o provider tem atividade mais nova', () => {
+  const provider = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    name: '+5521999999999',
+    lastMessage: {
+      key: { id: 'provider-new', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+      message: { conversation: 'Nova atividade' },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+  const local = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    pushName: 'João',
+    lastMessage: {
+      key: { id: 'local-old', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+      message: { conversation: 'Atividade anterior' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(merged.lastMessage?.key?.id, 'provider-new');
+  assert.equal(merged.name, 'João');
+  assert.equal(merged.pushName, 'João');
+});
+
+test('merge do inbox usa nome humano do provider quando o local só tem fallback numérico', () => {
+  const provider = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    name: 'João',
+    lastMessage: {
+      key: { id: 'provider-new-name', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+      message: { conversation: 'Nova atividade' },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+  const local = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    pushName: '+5521999999999',
+    lastMessage: {
+      key: { id: 'local-old-name', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+      message: { conversation: 'Atividade anterior' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(merged.lastMessage?.key?.id, 'provider-new-name');
+  assert.equal(merged.name, 'João');
+  assert.equal(merged.pushName, 'João');
+});
+
+test('merge do inbox mantém fallback quando ambos os nomes são numéricos', () => {
+  const provider = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    name: '+5521999999999',
+    lastMessage: {
+      key: { id: 'provider-numeric', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+      message: { conversation: 'Atividade numérica' },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+  const local = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    pushName: '5521999999999',
+    lastMessage: {
+      key: { id: 'local-numeric', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+      message: { conversation: 'Atividade anterior' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(merged.lastMessage?.key?.id, 'provider-numeric');
+  assert.equal(merged.name, '+5521999999999');
+  assert.equal(merged.pushName, undefined);
+});
+
+test('merge de apresentação preserva dedup e identidade canônica', () => {
+  const provider = inboxProjectionChat('opaque-contact@lid', {
+    name: '+5521999999999',
+    remoteJidAlt: '5521999999999@s.whatsapp.net',
+    lastMessage: {
+      key: { id: 'provider-identity', remoteJid: 'opaque-contact@lid', fromMe: false },
+      message: { conversation: 'Atividade nova' },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+  const local = inboxProjectionChat('opaque-contact@lid', {
+    phone: '+5521999999999',
+    pushName: 'João',
+    remoteJidAliases: ['opaque-contact@lid', '5521999999999@s.whatsapp.net'],
+    lastMessage: {
+      key: { id: 'local-identity', remoteJid: 'opaque-contact@lid', fromMe: false },
+      message: { conversation: 'Atividade anterior' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(merged.remoteJid, 'opaque-contact@lid');
+  assert.equal(merged.remoteJidAlt, '5521999999999@s.whatsapp.net');
+  assert.deepEqual(merged.remoteJidAliases, ['opaque-contact@lid', '5521999999999@s.whatsapp.net']);
+  assert.equal(merged.name, 'João');
+
+  const projected = projectCanonicalInboxChats([
+    merged,
+    inboxProjectionChat('5521999999999@s.whatsapp.net', { name: '+5521999999999' }),
+  ]);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0]?.remoteJid, '5521999999999@s.whatsapp.net');
+  assert.equal(projected[0]?.name, 'João');
+});
+
+test('merge do inbox usa a projeção local como desempate em timestamp igual', () => {
+  const provider = inboxProjectionChat('120363000000@g.us', {
+    lastMessage: {
+      key: { id: 'provider-copy', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { conversation: 'cópia do provedor' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+  const local = inboxProjectionChat('120363000000@g.us', {
+    lastMessage: {
+      key: { id: 'canonical-copy', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { conversation: 'cópia canônica' },
+      // Local projections may expose milliseconds directly.
+      messageTimestamp: 1_800_000_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(merged.lastMessage?.key?.id, 'canonical-copy');
+  assert.equal(merged.lastMessage?.message?.conversation, 'cópia canônica');
+  assert.equal(inboxActivityTimestamp(merged), 1_800_000_000_000);
+});
+
+test('merge do inbox preserva aliases locais quando o provider só retorna o LID', () => {
+  const provider = inboxProjectionChat('opaque-contact@lid', {
+    lastMessage: {
+      key: { id: 'provider-copy', remoteJid: 'opaque-contact@lid', fromMe: false },
+      message: { conversation: 'Provider' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+  const local = inboxProjectionChat('opaque-contact@lid', {
+    phone: '+5521999999999',
+    remoteJidAliases: ['opaque-contact@lid', '5521999999999@s.whatsapp.net'],
+    lastMessage: {
+      key: { id: 'local-copy', remoteJid: 'opaque-contact@lid', fromMe: false },
+      message: { conversation: 'Local' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+  const merged = mergeInboxActivity(provider, local);
+  assert.deepEqual(merged.remoteJidAliases, ['opaque-contact@lid', '5521999999999@s.whatsapp.net']);
+  assert.equal(merged.phone, '+5521999999999');
+  const projected = projectCanonicalInboxChats([
+    merged,
+    inboxProjectionChat('5521999999999@s.whatsapp.net'),
+  ]);
+  assert.equal(projected.length, 1);
+});
+
+test('projeção compartilha alias explícito quando apenas a entrada local conhece o LID', () => {
+  const projected = projectCanonicalInboxChats([
+    inboxProjectionChat('opaque-provider@lid', {
+      lastMessage: { key: { id: 'provider-message', remoteJid: 'opaque-provider@lid' }, message: { conversation: 'Provider' }, messageTimestamp: 1_800_000_010 },
+    }),
+    inboxProjectionChat('5521999999999@s.whatsapp.net', {
+      remoteJidAliases: ['5521999999999@s.whatsapp.net', 'opaque-provider@lid'],
+      lastMessage: { key: { id: 'local-message', remoteJid: '5521999999999@s.whatsapp.net' }, message: { conversation: 'Local' }, messageTimestamp: 1_800_000_000 },
+    }),
+  ]);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0]?.lastMessage?.key?.id, 'provider-message');
+});
+
+test('self-chat PN e LID explícitos permanecem em uma única conversa', () => {
+  const projected = projectCanonicalInboxChats([
+    inboxProjectionChat('opaque-self@lid', {
+      lastMessage: { key: { id: 'self-lid-message', remoteJid: 'opaque-self@lid', fromMe: true }, message: { conversation: 'Eu' }, messageTimestamp: 1_800_000_010 },
+    }),
+    inboxProjectionChat('5521999999999@s.whatsapp.net', {
+      remoteJidAliases: ['5521999999999@s.whatsapp.net', 'opaque-self@lid'],
+      lastMessage: { key: { id: 'self-pn-message', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true }, message: { conversation: 'Eu anterior' }, messageTimestamp: 1_800_000_000 },
+    }),
+  ]);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0]?.lastMessage?.key?.id, 'self-lid-message');
+});
+
+test('self-chat colapsa o par direto do provider preservando nome e atividade', () => {
+  const pn = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    name: 'Leonardo Vitstock',
+    lastMessage: {
+      key: { id: 'self-pn-provider', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
+      message: { conversation: 'Anterior' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+  const lid = normalizeProviderConversationIdentity(inboxProjectionChat('opaque-self-provider@lid', {
+    name: '+5521999999999',
+    lastMessage: {
+      key: {
+        id: 'self-lid-provider',
+        remoteJid: 'opaque-self-provider@lid',
+        remoteJidAlt: '5521999999999@s.whatsapp.net',
+        fromMe: true,
+      },
+      message: { conversation: 'Mais recente' },
+      messageTimestamp: 1_800_000_010,
+    },
+  }));
+
+  const projected = projectCanonicalInboxChats([pn, lid]);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0]?.remoteJid, '5521999999999@s.whatsapp.net');
+  assert.equal(projected[0]?.name, 'Leonardo Vitstock');
+  assert.equal(projected[0]?.lastMessage?.key?.id, 'self-lid-provider');
+  assert.equal(inboxActivityTimestamp(projected[0]!), 1_800_000_010_000);
+  assert.deepEqual(projected[0]?.remoteJidAliases, [
+    '5521999999999@s.whatsapp.net',
+    'opaque-self-provider@lid',
+  ]);
+  assert.deepEqual(projectCanonicalInboxChats(projected), projected);
+});
+
+test('self-chat provider e local usam o alias explícito sem duplicar', () => {
+  const provider = inboxProjectionChat('opaque-self-local@lid', {
+    lastMessage: { key: { id: 'self-provider-message', remoteJid: 'opaque-self-local@lid', fromMe: true }, message: { conversation: 'Provider' }, messageTimestamp: 1_800_000_000 },
+  });
+  const local = inboxProjectionChat('opaque-self-local@lid', {
+    phone: '+5521999999999',
+    remoteJidAliases: ['opaque-self-local@lid', '5521999999999@s.whatsapp.net'],
+    lastMessage: { key: { id: 'self-local-message', remoteJid: 'opaque-self-local@lid', fromMe: true }, message: { conversation: 'Local' }, messageTimestamp: 1_800_000_000 },
+  });
+  const merged = mergeInboxActivity(provider, local);
+  assert.equal(projectCanonicalInboxChats([merged]).length, 1);
+  assert.equal(merged.remoteJidAliases?.includes('5521999999999@s.whatsapp.net'), true);
+});
+
+test('snapshot administrativo com a mesma última mensagem preserva posição e atividade', () => {
+  const first = conversation('first', { lastMessageAt: 2_000, lastMessage: 'Primeira' });
+  const second = conversation('second', { lastMessageAt: 1_000, lastMessage: 'Segunda' });
+  const current = [first, second];
+  const snapshot = [
+    { ...cloneConversation(second), updatedAt: '2026-09-10T12:00:00.000Z' },
+    { ...cloneConversation(first), lastMessageAt: 9_000, updatedAt: '2026-09-10T12:01:00.000Z' },
+  ];
+  const reconciled = reconcileConversationsMonotonic(current, snapshot);
+  assert.deepEqual(reconciled.map((conversation) => conversation.id), ['first', 'second']);
+  assert.equal(reconciled[0]?.lastMessageAt, 2_000);
+});
+
+test('mensagem nova continua podendo reordenar a conversa para o topo', () => {
+  const first = conversation('first', { lastMessageAt: 2_000, lastMessage: 'Primeira' });
+  const second = conversation('second', { lastMessageAt: 1_000, lastMessage: 'Segunda' });
+  const snapshot = [
+    { ...cloneConversation(second), lastMessage: 'Nova segunda', lastMessageAt: 3_000, lastMessageKey: { ...second.lastMessageKey!, id: 'message-second-new' } },
+    cloneConversation(first),
+  ];
+  const reconciled = reconcileConversationsMonotonic([first, second], snapshot);
+  assert.deepEqual(reconciled.map((conversation) => conversation.id), ['second', 'first']);
+  assert.equal(reconciled[0]?.lastMessage, 'Nova segunda');
+});
+
+test('reação mais nova não substitui atividade renderizável do inbox', () => {
+  const providerReaction = inboxProjectionChat('120363000000@g.us', {
+    lastMessage: {
+      key: { id: 'reaction-event', remoteJid: '120363000000@g.us', fromMe: false },
+      message: {
+        reactionMessage: {
+          key: { id: 'local-new' },
+          text: '❤️',
+        },
+      },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+  const local = inboxProjectionChat('120363000000@g.us', {
+    lastMessage: {
+      key: { id: 'local-new', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { conversation: '10:41' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(providerReaction, local);
+  assert.equal(merged.lastMessage?.key?.id, 'local-new');
+  assert.equal(inboxActivityTimestamp(merged), 1_800_000_000_000);
+});
+
+test('reação sem projeção local não cria atividade no inbox', () => {
+  const reaction = inboxProjectionChat('120363000000@g.us', {
+    updatedAt: '2026-09-04T14:00:00.000Z',
+    lastMessage: {
+      key: { id: 'reaction-event', remoteJid: '120363000000@g.us', fromMe: false },
+      message: { reactionMessage: { key: { id: 'original' }, text: '❤️' } },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(reaction);
+  assert.equal(merged.lastMessage, undefined);
+  assert.equal(inboxActivityTimestamp(merged), 0);
+});
+
+test('atalhos rápidos rejeitam acentos, espaços e caracteres especiais com orientação específica', () => {
+  for (const shortcut of ['/saudacao', '/pos-venda', '/garantia_1', '/pix']) {
+    assert.equal(quickReplyShortcutError(shortcut), undefined);
+    assert.equal(serverQuickReplyShortcutError(shortcut), undefined);
+  }
+  assert.match(quickReplyShortcutError('/saudação')!, /sem acento/);
+  assert.match(serverQuickReplyShortcutError('/saudação')!, /sem acento/);
+  assert.match(quickReplyShortcutError('/bom dia')!, /não pode conter espaços/);
+  assert.match(serverQuickReplyShortcutError('/bom dia')!, /não pode conter espaços/);
+  assert.match(quickReplyShortcutError('/teste!')!, /sem acento/);
+  assert.match(serverQuickReplyShortcutError('/teste!')!, /sem acento/);
+  assert.match(quickReplyShortcutError('/')!, /letras sem acento/);
+  assert.match(serverQuickReplyShortcutError('/')!, /letras sem acento/);
+});
+
+test('prefixo externo do operador usa um único dois-pontos sem alterar autoria interna', () => {
+  assert.equal(formatHubOutboundText(' Fernanda: ', 'Olá'), '*Fernanda:*\nOlá');
+  assert.equal(removeHubAgentPrefix('*Fernanda:*\nOlá', 'Fernanda'), 'Olá');
+  assert.equal(removeHubAgentPrefix('*Fernanda*\nOlá', 'Fernanda'), 'Olá');
+  assert.equal(formatHubOutboundText('', 'Olá'), 'Olá');
+});
+
+test('formatação nativa do WhatsApp é renderizada sem quebrar texto literal ou URLs', () => {
+  const tokens = parseWhatsAppFormatting('Olá, *Leonardo*! _pronto_ ~antigo~ ```código```');
+  assert.deepEqual(tokens.map((token) => token.type), ['text', 'bold', 'text', 'italic', 'text', 'strikethrough', 'text', 'monospace']);
+  assert.equal(stripWhatsAppFormatting('*Fernanda:* Segue o _orçamento_.'), 'Fernanda: Segue o orçamento.');
+  assert.equal(stripWhatsAppFormatting('~tachado~'), 'tachado');
+  assert.equal(stripWhatsAppFormatting('https://meu_site.com/teste'), 'https://meu_site.com/teste');
+  assert.equal(stripWhatsAppFormatting('2 * 5 = 10'), '2 * 5 = 10');
+  assert.equal(stripWhatsAppFormatting('*Leonardo'), '*Leonardo');
+  assert.equal(stripWhatsAppFormatting('*_texto_*'), 'texto');
+});
+
+test('corpo Hub iniciado por formatação não é confundido com assinatura após recarregar', () => {
+  const formattedBodies = ['*negrito*', '_italico_', '~tachado~', '```mono```', '*negrito*\ncontinuação'];
+  for (const body of formattedBodies) {
+    const persisted = normalizeEvolutionMessage({
+      key: { id: `persisted-${body}`, fromMe: true },
+      metadataScope: 'persisted_message',
+      metadata: { sentByHub: true, sentByUserId: 'user-e2e', sentByUserName: 'E2E Preview' },
+      message: { conversation: body },
+    }, 0, 'conversation-1', 'Atendente');
+    assert.equal(persisted.content, body);
+
+    const providerEcho = normalizeEvolutionMessage({
+      key: { id: `echo-${body}`, fromMe: true },
+      metadataScope: 'persisted_message',
+      metadata: { sentByHub: true, sentByUserId: 'user-e2e', sentByUserName: 'E2E Preview' },
+      message: { conversation: formatHubOutboundText('E2E Preview', body) },
+    }, 0, 'conversation-1', 'Atendente');
+    assert.equal(providerEcho.content, body);
+  }
 });

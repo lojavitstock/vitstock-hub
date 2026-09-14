@@ -97,7 +97,7 @@ Vercel Preview → Railway Preview → PostgreSQL Preview
 
 URLs atuais:
 
-- Frontend: <https://vitstock-hub-git-preview-vitstocks-projects.vercel.app>
+- Frontend: <https://hub-preview.vitstock.com.br>
 - Backend: <https://vitstock-hub-api-preview.up.railway.app>
 
 Preview nunca pode utilizar banco, Redis, Evolution, backend ou callback Google

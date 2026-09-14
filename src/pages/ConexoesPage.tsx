@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { LogOut, QrCode, RefreshCw, Smartphone, ShieldCheck, CheckCircle } from 'lucide-react';
+import { LogOut, QrCode, RefreshCw, Smartphone, ShieldCheck, CheckCircle, WifiOff } from 'lucide-react';
+import { useAuth } from '../auth/AuthContext';
 import { WhatsappInstance } from '../types';
 import { EvolutionApiService } from '../services/evolutionApi';
 
@@ -10,7 +11,7 @@ type ConexoesPageProps = {
 const CONNECTING_GRACE_MS = 15_000;
 const QR_REFRESH_INTERVAL_MS = 30_000;
 
-type ConnectionUiMode = 'connected' | 'auto-reconnecting' | 'waiting-for-qr' | 'requesting-qr' | 'error';
+type ConnectionUiMode = 'connected' | 'auto-reconnecting' | 'connecting' | 'disconnected' | 'waiting-for-qr' | 'requesting-qr' | 'error';
 
 type PairingMemory = {
   active: boolean;
@@ -40,8 +41,10 @@ const isRememberedQrStale = () => (
 );
 
 export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) => {
+  const { user } = useAuth();
   const instanceName = 'vitstock_atendimento';
   const isMock = import.meta.env.VITE_USE_MOCK_DATA === 'true';
+  const canManage = user?.role === 'admin';
   const initialUiMode: ConnectionUiMode = pairingMemory.active
     ? (pairingMemory.qrCode ? 'waiting-for-qr' : 'requesting-qr')
     : 'requesting-qr';
@@ -80,7 +83,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
   }, []);
 
   const requestQrCode = useCallback(async (force = false) => {
-    if (isMock) return null;
+    if (!canManage || isMock) return null;
     rememberPairing();
     setUiModeSafe('requesting-qr');
 
@@ -119,7 +122,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
       });
     sharedQrRequest = request;
     return request;
-  }, [instanceName, isMock, setUiModeSafe, updateQrCode]);
+  }, [canManage, instanceName, isMock, setUiModeSafe, updateQrCode]);
 
   const clearReconnectTimers = useCallback(() => {
     if (connectingTimerRef.current !== null) {
@@ -173,6 +176,14 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
       return;
     }
 
+    if (!canManage) {
+      clearReconnectTimers();
+      updateQrCode(null);
+      setUiModeSafe(status === 'connecting' ? 'connecting' : 'disconnected');
+      setConnectionError(null);
+      return;
+    }
+
     if (status !== 'connecting') clearConnectingTimer();
 
     const knownQr = qrCodeRef.current || pairingMemory.qrCode;
@@ -202,7 +213,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
       }
       scheduleQrRefresh();
     });
-  }, [clearConnectingTimer, clearReconnectTimers, requestQrCode, scheduleConnectingFallback, scheduleQrRefresh, setUiModeSafe, updateQrCode]);
+  }, [canManage, clearConnectingTimer, clearReconnectTimers, requestQrCode, scheduleConnectingFallback, scheduleQrRefresh, setUiModeSafe, updateQrCode]);
 
   // A consulta de status e a busca do QR Code são automáticas; o botão acima é apenas fallback.
   useEffect(() => {
@@ -256,6 +267,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
   };
 
   const handleDisconnect = async () => {
+    if (!canManage) return;
     if (!window.confirm('Desconectar o WhatsApp e gerar um novo QR Code? O pareamento atual será encerrado.')) return;
 
     setDisconnecting(true);
@@ -289,6 +301,8 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
   const visibleStatus = instance.status;
   const isConnected = uiMode === 'connected';
   const isAutoReconnecting = uiMode === 'auto-reconnecting';
+  const isConnecting = uiMode === 'connecting';
+  const isDisconnected = uiMode === 'disconnected';
   const isPairingError = uiMode === 'error';
 
   return (
@@ -303,9 +317,13 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-bold">
                 WhatsApp Conectado em Tempo Real
               </span>
-            ) : isAutoReconnecting ? (
+            ) : isAutoReconnecting || isConnecting ? (
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-400/10 text-amber-300 border border-amber-400/30 font-bold animate-pulse">
-                Reconectando
+                {isAutoReconnecting ? 'Reconectando' : 'Conectando'}
+              </span>
+            ) : isDisconnected ? (
+              <span className="text-xs px-2.5 py-0.5 rounded-full bg-red-500/10 text-red-300 border border-red-500/30 font-bold">
+                Desconectado
               </span>
             ) : isPairingError ? (
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-red-500/10 text-red-300 border border-red-500/30 font-bold">
@@ -318,7 +336,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
             )}
           </h1>
           <p className="mt-1 text-sm text-zinc-400">
-            Conexão com a Evolution API v2 em produção na Oracle Cloud
+            Conexão do canal WhatsApp com o provedor configurado neste ambiente
           </p>
         </div>
 
@@ -355,14 +373,14 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
               <span className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-2 ${
                 isConnected
                   ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 shadow-[0_0_12px_rgba(16,185,129,0.2)]' 
-                  : isAutoReconnecting
-                    ? 'bg-amber-400/10 text-amber-300 border border-amber-400/30'
-                    : isPairingError
-                      ? 'bg-red-500/10 text-red-300 border border-red-500/30'
-                      : 'bg-amber-400/10 text-amber-300 border border-amber-400/30'
+                    : isAutoReconnecting || isConnecting
+                      ? 'bg-amber-400/10 text-amber-300 border border-amber-400/30'
+                      : isDisconnected || isPairingError
+                        ? 'bg-red-500/10 text-red-300 border border-red-500/30'
+                        : 'bg-amber-400/10 text-amber-300 border border-amber-400/30'
               }`}>
-                <span className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse' : isPairingError ? 'bg-red-500' : 'bg-amber-400 animate-pulse'}`} />
-                {isConnected ? 'ONLINE (Conectado)' : isAutoReconnecting ? 'Reconectando sessão' : uiMode === 'error' ? 'Falha ao obter QR Code' : 'Aguardando novo QR Code'}
+                <span className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse' : isPairingError || isDisconnected ? 'bg-red-500' : 'bg-amber-400 animate-pulse'}`} />
+                {isConnected ? 'ONLINE (Conectado)' : isAutoReconnecting ? 'Reconectando sessão' : isConnecting ? 'Conectando sessão' : isDisconnected ? 'WhatsApp desconectado' : uiMode === 'error' ? 'Falha ao obter QR Code' : 'Aguardando novo QR Code'}
               </span>
             </div>
           </div>
@@ -375,17 +393,21 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
               </div>
               <h4 className="text-sm font-bold text-emerald-400">WhatsApp Pareado & Pronto para Atendimento!</h4>
               <p className="text-xs text-zinc-400 max-w-md mx-auto">
-                Suas mensagens de entrada e saída estão sendo sincronizadas em tempo real com a sua Evolution API na Oracle Cloud.
+                Suas mensagens de entrada e saída estão sendo sincronizadas em tempo real pelo canal WhatsApp.
               </p>
-              <button
-                type="button"
-                onClick={handleDisconnect}
-                disabled={disconnecting || loading}
-                className="mx-auto mt-2 px-4 py-2 rounded-lg border border-red-400/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 hover:border-red-300/50 disabled:opacity-50 text-xs font-bold transition-all flex items-center gap-2"
-              >
-                <LogOut className="w-4 h-4" />
-                {disconnecting ? 'Desconectando...' : 'Desconectar e gerar novo QR Code'}
-              </button>
+              {canManage ? (
+                <button
+                  type="button"
+                  onClick={handleDisconnect}
+                  disabled={disconnecting || loading}
+                  className="mx-auto mt-2 px-4 py-2 rounded-lg border border-red-400/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 hover:border-red-300/50 disabled:opacity-50 text-xs font-bold transition-all flex items-center gap-2"
+                >
+                  <LogOut className="w-4 h-4" />
+                  {disconnecting ? 'Desconectando...' : 'Desconectar e gerar novo QR Code'}
+                </button>
+              ) : (
+                <p className="text-xs text-zinc-400">Apenas administradores podem conectar ou desconectar o WhatsApp.</p>
+              )}
             </div>
           ) : isAutoReconnecting ? (
             <div className="p-8 rounded-xl bg-amber-400/5 border border-amber-400/20 text-center space-y-3 animate-fade-in">
@@ -401,6 +423,19 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
                 <LogOut className="w-4 h-4" />
                 {disconnecting ? 'Desconectando...' : 'Desconectar e gerar novo QR Code'}
               </button>
+            </div>
+          ) : isConnecting ? (
+            <div className="p-8 rounded-xl bg-amber-400/5 border border-amber-400/20 text-center space-y-3 animate-fade-in">
+              <RefreshCw className="w-8 h-8 text-amber-300 animate-spin mx-auto" />
+              <h4 className="text-sm font-bold text-amber-200">Conectando o WhatsApp</h4>
+              <p className="text-xs text-zinc-400">A conexão está em andamento. Um administrador pode acompanhar o pareamento em Canais.</p>
+            </div>
+          ) : isDisconnected ? (
+            <div className="p-8 rounded-xl bg-red-400/5 border border-red-400/20 text-center space-y-3 animate-fade-in">
+              <WifiOff className="w-8 h-8 text-red-300 mx-auto" />
+              <h4 className="text-sm font-bold text-red-200">WhatsApp desconectado</h4>
+              <p className="text-xs text-zinc-400">Reconecte o canal para voltar a receber e enviar mensagens.</p>
+              {!canManage && <p className="text-xs text-zinc-400">Apenas administradores podem conectar ou desconectar o WhatsApp.</p>}
             </div>
           ) : (
             /* Sem conexão aberta: exibir o QR Code enquanto a reconexão é concluída */
@@ -432,9 +467,9 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
           {/* Dados técnicos da conexão */}
           <div className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800/80 grid grid-cols-3 gap-4 text-xs">
             <div>
-              <span className="text-zinc-500 block mb-0.5 font-bold">Servidor API Nuvem</span>
-              <span className="text-zinc-200 font-mono font-semibold truncate block" title={import.meta.env.VITE_API_URL || 'Backend Railway'}>
-                {import.meta.env.VITE_API_URL || 'Backend Railway'}
+              <span className="text-zinc-500 block mb-0.5 font-bold">Servidor da API</span>
+              <span className="text-zinc-200 font-mono font-semibold truncate block" title={import.meta.env.VITE_API_URL || 'API configurada neste ambiente'}>
+                {import.meta.env.VITE_API_URL || 'API configurada neste ambiente'}
               </span>
             </div>
             <div>
@@ -445,7 +480,7 @@ export const ConexoesPage: React.FC<ConexoesPageProps> = ({ embedded = false }) 
             </div>
             <div>
               <span className="text-zinc-500 block mb-0.5 font-bold">Banco de Dados</span>
-              <span className="text-zinc-200 font-mono">PostgreSQL (Railway)</span>
+              <span className="text-zinc-200 font-mono">PostgreSQL</span>
             </div>
           </div>
 

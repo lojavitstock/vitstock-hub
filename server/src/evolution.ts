@@ -1,13 +1,19 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import { randomUUID } from 'node:crypto';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
 import { config, isAllowedFrontendOrigin, isQaMode } from './config.js';
-import { requireUser } from './auth.js';
+import { requireAdmin, requireUser } from './auth.js';
 import { db } from './db.js';
 import { buildHasOlderMessagesQuery } from './hasOlderMessagesQuery.js';
 import { buildExistingConversationQuery } from './conversationQueries.js';
 import { publishRealtimeEvent, registerRealtimeClient } from './realtime.js';
+import {
+  buildEvolutionWebhookContract,
+  createEvolutionWebhookMonitor,
+  EVOLUTION_WEBHOOK_RECONCILE_INTERVAL_MS,
+  matchesWebhookSecret,
+} from './evolutionWebhook.js';
 import { acquireConversationLease, type ConversationLease } from './conversationLease.js';
 import { evolutionMessageReferenceFromResponse, evolutionReactionPayload, formatHubOutboundText, removeHubAgentPrefix } from './outboundMessage.js';
 import { createOutboundRequestCoordinator, outboundDispatchAction, outboundIdempotencyLockKey } from './outboundIdempotency.js';
@@ -16,7 +22,7 @@ import { canonicalPhone, normalizeContactPhone } from './contactDomain.js';
 import { phoneLookupKeys, upsertContactPhone } from './contactPhones.js';
 import { isWhatsAppLid, providerPhoneDigits, providerPhoneJid } from './whatsappIdentity.js';
 import { resolveEvolutionRecipient } from './evolutionRecipient.js';
-import { projectCanonicalInboxChats } from './inboxProjection.js';
+import { mergeInboxActivity, normalizeProviderConversationIdentity, projectCanonicalInboxChats } from './inboxProjection.js';
 import { parseGroupMetadata, type GroupMetadata } from './groupMetadata.js';
 import {
   buildParticipantIdentityMap,
@@ -38,13 +44,37 @@ import {
   normalizeStoredReactions,
   providerReactionUpdate,
 } from './messageReactions.js';
-import { providerMessageKeyFromRecord, providerMessageKeyFromStoredMessage } from './providerMessageKey.js';
+import {
+  providerMessageKeyDiagnostics,
+  providerMessageKeyFromRecord,
+  providerMessageKeyFromStoredMessage,
+  validateProviderMessageKey,
+} from './providerMessageKey.js';
+import {
+  classifyMediaProviderRejection,
+  mediaFailureForInvalidProviderResponse,
+  mediaFailureForTransport,
+  mediaFailureForUpstreamStatus,
+  mediaKeyInvalid,
+  mediaRequestInvalid,
+  parseMediaProviderJson,
+} from './mediaErrorContract.js';
 import { hasQaProviderOnlyChat, qaEvolutionResponse } from './qa.js';
 import { loadConversationTags } from './conversationTags.js';
 import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.js';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
 import { buildReplyFailureTrace } from './replyFailureTrace.js';
 import { resolveConversationForOperation, resolveConversationWithClient } from './conversationResolver.js';
+import { filterConversationalProviderChats, isConversationalProviderJid } from './providerJidPolicy.js';
+import {
+  deletedMessageMetadata,
+  editedMessageMetadata,
+  evolutionDeleteMessagePayload,
+  evolutionEditMessagePayload,
+  isProviderTimeout,
+  MessageMutationError,
+  MESSAGE_MUTATION_ERROR_CODES,
+} from './messageMutations.js';
 import {
   OPAQUE_LID_STAGING_CLEANUP_INTERVAL_MS,
   OPAQUE_LID_STAGING_TTL_MS,
@@ -53,6 +83,10 @@ import {
   shouldStageOpaqueLidMessage,
   type OpaqueLidStagingEnvelope,
 } from './opaqueLidStaging.js';
+import { traceAvatarProfileFetch, traceAvatarSelection, type AvatarProfileFetchResult } from './avatarDiagnostics.js';
+import { traceInboxOrderProjection } from './inboxOrderDiagnostics.js';
+import { resolveConversationAvatar } from './avatarResolution.js';
+import { selectConversationAvatar as selectServerConversationAvatar } from './avatarSelection.js';
 
 const jidSchema = z.object({
   remoteJid: z.string().min(3).max(128),
@@ -119,6 +153,7 @@ const sendReactionSchema = z.object({
   messageId: z.string().trim().min(1).max(256),
   emoji: z.union([z.enum(['👍', '❤️', '😂', '😮', '😢', '🙏']), z.null()]),
 });
+const editMessageSchema = z.object({ text: z.string().trim().min(1).max(4096) });
 const mediaSchema = z.object({ messageKey: z.record(z.string(), z.unknown()) });
 const phoneSchema = z.object({ number: z.string().regex(/^\d{8,20}$/) });
 const noteSchema = z.object({
@@ -146,13 +181,6 @@ const conversationReadSchema = z.object({
   }).passthrough().optional(),
 });
 
-function matchesWebhookSecret(value: string | undefined) {
-  if (!value) return false;
-  const actual = Buffer.from(value);
-  const expected = Buffer.from(config.WEBHOOK_SECRET);
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
-}
-
 async function evolutionRequest(path: string, init?: RequestInit, timeoutMs = 15_000) {
   if (isQaMode) return qaEvolutionResponse(path, init);
   return fetch(`${config.EVOLUTION_API_URL}${path}`, {
@@ -165,6 +193,14 @@ async function evolutionRequest(path: string, init?: RequestInit, timeoutMs = 15
     signal: AbortSignal.timeout(timeoutMs),
   });
 }
+
+const avatarProfileFetchErrorResult = (error: unknown): AvatarProfileFetchResult => {
+  const name = error instanceof Error ? error.name : '';
+  const message = error instanceof Error ? error.message : String(error || '');
+  return name === 'AbortError' || name === 'TimeoutError' || /timeout|timed out|aborted/i.test(message)
+    ? 'timeout'
+    : 'error';
+};
 
 type EvolutionChatsSnapshot = { chats: any[]; contacts: any[]; groups: GroupMetadata[]; expiresAt: number; staleUntil: number };
 const evolutionChatsCache = new Map<string, EvolutionChatsSnapshot>();
@@ -302,7 +338,7 @@ async function resolveUnknownGroupParticipant(companyId: string, groupJid: strin
 }
 
 async function resolveParticipantIdentity(companyId: string, seed: ParticipantIdentity) {
-  const key = `${companyId}:${seed.canonicalId || `jid:${seed.participantJid}`}`;
+  const key = `${companyId}:jid:${seed.participantJid}`;
   const cached = participantIdentityCache.get(key);
   const mergeSeed = (identity: ParticipantIdentity) => ({
     ...identity,
@@ -339,20 +375,50 @@ async function refreshParticipantIdentity(key: string, seed: ParticipantIdentity
     let pictureUrl = seed.pictureUrl || baseIdentity?.pictureUrl;
     try {
       if (!pictureUrl) {
-        const response = await evolutionRequest(
-          `/chat/fetchProfilePictureUrl/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
-          { method: 'POST', body: JSON.stringify({ number: seed.participantPhone ? providerPhoneJid({ remoteJid: seed.participantPhone }) : seed.participantJid }) },
-          10_000,
-        );
-        if (response.ok) {
-          const body: any = await response.json().catch(() => ({}));
-          pictureUrl = body?.profilePictureUrl
-            || body?.profilePicUrl
-            || body?.pictureUrl
-            || body?.data?.profilePictureUrl
-            || body?.data?.profilePicUrl
-            || body?.data?.pictureUrl
-            || pictureUrl;
+        const identityBasis = seed.participantPhone
+          ? 'PN' as const
+          : seed.aliases?.some((alias) => alias.startsWith('phone:') || alias.includes('@s.whatsapp.net'))
+            ? 'explicitAlias' as const
+            : 'OTHER' as const;
+        try {
+          const response = await evolutionRequest(
+            `/chat/fetchProfilePictureUrl/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+            { method: 'POST', body: JSON.stringify({ number: seed.participantPhone ? providerPhoneJid({ remoteJid: seed.participantPhone }) : seed.participantJid }) },
+            10_000,
+          );
+          if (!response.ok) {
+            traceAvatarProfileFetch({
+              entityId: seed.participantJid,
+              participantJid: seed.participantJid,
+              identityBasis,
+              result: response.status >= 500 ? 'provider_5xx' : 'provider_4xx',
+              avatarReturned: false,
+            });
+          } else {
+            const body: any = await response.json().catch(() => ({}));
+            pictureUrl = body?.profilePictureUrl
+              || body?.profilePicUrl
+              || body?.pictureUrl
+              || body?.data?.profilePictureUrl
+              || body?.data?.profilePicUrl
+              || body?.data?.pictureUrl
+              || pictureUrl;
+            traceAvatarProfileFetch({
+              entityId: seed.participantJid,
+              participantJid: seed.participantJid,
+              identityBasis,
+              result: pictureUrl ? 'success' : 'empty',
+              avatarReturned: Boolean(pictureUrl),
+            });
+          }
+        } catch (error) {
+          traceAvatarProfileFetch({
+            entityId: seed.participantJid,
+            participantJid: seed.participantJid,
+            identityBasis,
+            result: avatarProfileFetchErrorResult(error),
+            avatarReturned: false,
+          });
         }
       }
     } catch {
@@ -382,53 +448,38 @@ async function refreshParticipantIdentity(key: string, seed: ParticipantIdentity
 async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<string, ParticipantIdentity>) {
   const jids = [...seeds.keys()];
   const phones = [...new Set([...seeds.values()].map((seed) => seed.participantPhone).filter((phone): phone is string => Boolean(phone)))];
-  const identityLookupKeys = [...new Set([
-    ...jids,
-    ...jids.map((jid) => `jid:${jid}`),
-    ...phones.flatMap((phone) => [`phone:${phone}`, `jid:${phone}@s.whatsapp.net`, `jid:${phone}@c.us`]),
-  ])];
   const byJid = new Map<string, ParticipantIdentity>();
   const byPhone = new Map<string, ParticipantIdentity>();
-  const byAlias = new Map<string, ParticipantIdentity>();
-  if (jids.length === 0 && phones.length === 0) return { byJid, byPhone, byAlias };
+  if (jids.length === 0 && phones.length === 0) return { byJid, byPhone };
   try {
     const queries = await Promise.all([
       jids.length > 0
-        ? db.query<{ participant_jid: string; participant_phone: string | null; participant_name: string | null; participant_avatar: string | null; participant_canonical_id: string | null; participant_aliases: string[] | null }>(
+        ? db.query<{ participant_jid: string; participant_phone: string | null; participant_name: string | null; participant_avatar: string | null; participant_canonical_id: string | null }>(
           `SELECT metadata->>'participantJid' AS participant_jid,
                   metadata->>'participantPhone' AS participant_phone,
                   metadata->>'participantName' AS participant_name,
                   metadata->>'participantAvatar' AS participant_avatar,
-                  metadata->>'participantCanonicalId' AS participant_canonical_id,
-                  CASE WHEN jsonb_typeof(metadata->'participantAliases') = 'array'
-                    THEN ARRAY(SELECT jsonb_array_elements_text(metadata->'participantAliases'))
-                    ELSE ARRAY[]::text[]
-                  END AS participant_aliases
+                  metadata->>'participantCanonicalId' AS participant_canonical_id
            FROM messages
            WHERE company_id = $1
              AND metadata->>'participantJid' = ANY($2::text[])
            ORDER BY sent_at DESC`,
           [companyId, jids],
         )
-        : Promise.resolve({ rows: [] as Array<{ participant_jid: string; participant_phone: string | null; participant_name: string | null; participant_avatar: string | null; participant_canonical_id: string | null; participant_aliases: string[] | null }> }),
+        : Promise.resolve({ rows: [] as Array<{ participant_jid: string; participant_phone: string | null; participant_name: string | null; participant_avatar: string | null; participant_canonical_id: string | null }> }),
       jids.length > 0
         ? db.query<{ identity: string; phone: string | null; name: string | null; avatar_url: string | null; contact_id: string; aliases: string[] | null }>(
-          `SELECT ci.identity, ci.aliases, ci.contact_id, phone_identity.phone, c.name, c.avatar_url
+          `SELECT ci.identity, ci.contact_id, c.name, c.avatar_url,
+                  CASE
+                    WHEN ci.identity ~ '@(s\\.whatsapp\\.net|c\\.us)$'
+                    THEN regexp_replace(ci.identity, '\\D', '', 'g')
+                    ELSE NULL
+                  END AS phone
            FROM contact_channel_identities ci
            JOIN contacts c ON c.id = ci.contact_id
-           LEFT JOIN LATERAL (
-             SELECT regexp_replace(phone_identity.identity, '\\D', '', 'g') AS phone
-             FROM contact_channel_identities phone_identity
-             WHERE phone_identity.company_id = ci.company_id
-               AND phone_identity.contact_id = ci.contact_id
-               AND phone_identity.channel = 'whatsapp'
-               AND phone_identity.identity_type = 'remote_jid'
-             ORDER BY phone_identity.updated_at DESC
-             LIMIT 1
-           ) phone_identity ON true
            WHERE ci.company_id = $1 AND ci.channel = 'whatsapp'
-             AND (ci.identity = ANY($2::text[]) OR ci.aliases && $2::text[])`,
-          [companyId, identityLookupKeys],
+             AND lower(ci.identity) = ANY($2::text[])`,
+          [companyId, jids],
         )
         : Promise.resolve({ rows: [] as Array<{ identity: string; phone: string | null; name: string | null; avatar_url: string | null; contact_id: string; aliases: string[] | null }> }),
       phones.length > 0
@@ -460,7 +511,7 @@ async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<
     for (const row of queries[0].rows) {
       const jid = normalizeParticipantJid(row.participant_jid);
       if (!jid || byJid.has(jid)) continue;
-      const aliases = [...new Set([...(row.participant_aliases || []), ...participantAliasKeysFromRecord({ participantJid: jid, participantPhone: row.participant_phone })])];
+      const aliases = participantAliasKeysFromRecord({ participantJid: jid, participantPhone: row.participant_phone });
       const identity: ParticipantIdentity = {
         participantJid: jid,
         canonicalId: row.participant_canonical_id || (row.participant_phone ? `phone:${row.participant_phone}` : `jid:${jid}`),
@@ -470,7 +521,6 @@ async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<
         ...(row.participant_avatar ? { pictureUrl: row.participant_avatar } : {}),
       };
       byJid.set(jid, identity);
-      for (const alias of identity.aliases || []) byAlias.set(alias, identity);
     }
     for (const row of queries[1].rows) {
       const jid = normalizeParticipantJid(row.identity);
@@ -478,13 +528,12 @@ async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<
       const identity: ParticipantIdentity = {
         participantJid: jid,
         canonicalId: `contact:${row.contact_id}`,
-        aliases: [...new Set([`jid:${jid}`, ...(row.aliases || []), ...participantAliasKeysFromRecord({ participantJid: jid, participantPhone: row.phone })])],
+        aliases: participantAliasKeysFromRecord({ participantJid: jid, participantPhone: row.phone }),
         ...(row.phone ? { participantPhone: row.phone } : {}),
         ...(isUsableParticipantName(row.name) ? { displayName: row.name!.trim() } : {}),
         ...(row.avatar_url ? { pictureUrl: row.avatar_url } : {}),
       };
       byJid.set(jid, identity);
-      for (const alias of identity.aliases || []) byAlias.set(alias, identity);
     }
     for (const row of queries[2].rows) {
       const phone = String(row.phone || '').replace(/\D/g, '');
@@ -499,26 +548,43 @@ async function loadPersistedParticipantIdentities(companyId: string, seeds: Map<
         ...(row.google_contact ? { googleContact: true } : {}),
       };
       byPhone.set(phone, identity);
-      for (const alias of identity.aliases || []) byAlias.set(alias, identity);
     }
   } catch {
     // Historical identity is an optimization; current provider data remains authoritative.
   }
-  return { byJid, byPhone, byAlias };
+  return { byJid, byPhone };
 }
 
 function mergePersistedParticipantIdentities(
   seeds: Map<string, ParticipantIdentity>,
-  persisted: { byJid: Map<string, ParticipantIdentity>; byPhone: Map<string, ParticipantIdentity>; byAlias: Map<string, ParticipantIdentity> },
+  persisted: { byJid: Map<string, ParticipantIdentity>; byPhone: Map<string, ParticipantIdentity> },
 ) {
   const merged = new Map<string, ParticipantIdentity>();
   for (const [key, seed] of seeds) {
     const aliases = participantAliasKeysFromRecord(seed);
-    const byJid = persisted.byJid.get(seed.participantJid)
-      || aliases.map((alias) => persisted.byAlias.get(alias)).find(Boolean);
+    const byJid = persisted.byJid.get(seed.participantJid);
     const byPhone = seed.participantPhone ? persisted.byPhone.get(seed.participantPhone) : undefined;
     const google = [byPhone, byJid].find((identity) => identity?.googleContact && identity.displayName);
     const known = google || byJid || byPhone;
+    const selectedPicture = seed.pictureUrl || known?.pictureUrl;
+    const selectedSource = seed.pictureUrl
+      ? 'whatsapp' as const
+      : google?.pictureUrl
+        ? 'google' as const
+        : known?.pictureUrl
+          ? 'stored' as const
+          : 'none' as const;
+    traceAvatarSelection({
+      entityId: seed.participantJid,
+      participantJid: seed.participantJid,
+      whatsappAvatar: seed.pictureUrl,
+      googleAvatar: google?.pictureUrl,
+      storedAvatar: known?.pictureUrl,
+      selectedSource,
+      selectedAvatar: selectedPicture,
+      explicitAliasPresent: Boolean(seed.aliases?.length),
+      path: 'evolution.participantIdentity',
+    });
     merged.set(key, {
       ...(known || { participantJid: seed.participantJid }),
       ...seed,
@@ -666,7 +732,17 @@ async function refreshGroupMetadata(companyId: string) {
             { method: 'POST', body: JSON.stringify({ number: group.groupJid }) },
             10_000,
           );
-          if (!profile.ok) return group;
+          if (!profile.ok) {
+            traceAvatarProfileFetch({
+              entityId: group.groupJid,
+              remoteJid: group.groupJid,
+              isGroup: true,
+              identityBasis: 'GROUP',
+              result: profile.status >= 500 ? 'provider_5xx' : 'provider_4xx',
+              avatarReturned: false,
+            });
+            return group;
+          }
           const body: any = await profile.json().catch(() => ({}));
           const picture = body?.profilePictureUrl
             || body?.profilePicUrl
@@ -674,10 +750,26 @@ async function refreshGroupMetadata(companyId: string) {
             || body?.data?.profilePictureUrl
             || body?.data?.profilePicUrl
             || body?.data?.pictureUrl;
+          traceAvatarProfileFetch({
+            entityId: group.groupJid,
+            remoteJid: group.groupJid,
+            isGroup: true,
+            identityBasis: 'GROUP',
+            result: picture ? 'success' : 'empty',
+            avatarReturned: Boolean(picture),
+          });
           return typeof picture === 'string' && picture.trim()
             ? { ...group, picture: picture.trim() }
             : group;
-        } catch {
+        } catch (error) {
+          traceAvatarProfileFetch({
+            entityId: group.groupJid,
+            remoteJid: group.groupJid,
+            isGroup: true,
+            identityBasis: 'GROUP',
+            result: avatarProfileFetchErrorResult(error),
+            avatarReturned: false,
+          });
           return group;
         }
       }));
@@ -692,6 +784,16 @@ async function refreshGroupMetadata(companyId: string) {
           metadata: group,
           expiresAt: now + GROUP_METADATA_TTL_MS,
           staleUntil: now + GROUP_METADATA_STALE_MS,
+        });
+        traceAvatarSelection({
+          entityId: group.groupJid,
+          remoteJid: group.groupJid,
+          isGroup: true,
+          snapshotAvatar: group.picture,
+          selectedSource: group.picture ? 'group' : 'none',
+          selectedAvatar: group.picture,
+          explicitAliasPresent: true,
+          path: 'evolution.groupMetadata',
         });
       });
       void persistGroupMetadata(companyId, groups);
@@ -743,8 +845,10 @@ async function refreshEvolutionChatsSnapshot(companyId: string) {
       contactsResponse.json().catch(() => []),
     ]);
     const snapshot = {
-      chats: Array.isArray(chats) ? chats : [],
-      contacts: Array.isArray(contacts) ? contacts : [],
+      chats: Array.isArray(chats)
+        ? filterConversationalProviderChats(chats.map(normalizeProviderConversationIdentity))
+        : [],
+      contacts: Array.isArray(contacts) ? filterConversationalProviderChats(contacts) : [],
     };
     evolutionChatsCache.set(companyId, {
       ...snapshot,
@@ -798,6 +902,9 @@ async function loadLocalInboxChats(companyId: string) {
     last_message_at: Date | string | null;
     contact_name: string;
     avatar_url: string | null;
+    contact_source: string | null;
+    google_resource_name: string | null;
+    whatsapp_avatar_url: string | null;
     message_id: string | null;
     message_sender: string | null;
     message_sender_name: string | null;
@@ -819,8 +926,11 @@ async function loadLocalInboxChats(companyId: string) {
               END
             ) AS last_message,
             COALESCE(latest.sent_at, c.last_message_at) AS last_message_at,
-            canonical_ct.name AS contact_name,
-            canonical_ct.avatar_url,
+             canonical_ct.name AS contact_name,
+             canonical_ct.avatar_url,
+             canonical_ct.source AS contact_source,
+             canonical_ct.google_resource_name,
+             whatsapp_avatar.avatar_url AS whatsapp_avatar_url,
             latest.evolution_message_id AS message_id,
             latest.sender AS message_sender,
             latest.sender_name AS message_sender_name,
@@ -862,8 +972,16 @@ async function loadLocalInboxChats(companyId: string) {
        WHERE identity_value LIKE '%@s.whatsapp.net' OR identity_value LIKE '%@c.us'
        ORDER BY updated_at DESC, id
        LIMIT 1
-     ) canonical_phone ON true
-     LEFT JOIN LATERAL (
+      ) canonical_phone ON true
+      LEFT JOIN LATERAL (
+        SELECT w.avatar_url
+        FROM whatsapp_contact_names w
+        WHERE w.company_id = c.company_id
+          AND regexp_replace(w.phone, '\\D', '', 'g') = regexp_replace(COALESCE(canonical_phone.phone, canonical_ct.phone, ct.phone), '\\D', '', 'g')
+        ORDER BY w.updated_at DESC
+        LIMIT 1
+      ) whatsapp_avatar ON true
+      LEFT JOIN LATERAL (
        SELECT ARRAY_AGG(DISTINCT identity_value ORDER BY identity_value) AS identities
        FROM (
          SELECT ci.identity AS identity_value
@@ -890,6 +1008,13 @@ async function loadLocalInboxChats(companyId: string) {
        LIMIT 1
      ) latest ON true
      WHERE c.company_id = $1
+       AND (
+         LOWER(c.evolution_remote_jid) LIKE '%@s.whatsapp.net'
+         OR LOWER(c.evolution_remote_jid) LIKE '%@c.us'
+         OR LOWER(c.evolution_remote_jid) LIKE '%@lid'
+         OR LOWER(c.evolution_remote_jid) LIKE '%@g.us'
+         OR c.evolution_remote_jid ~ '^[0-9]{8,20}$'
+       )
      ORDER BY COALESCE(latest.sent_at, c.last_message_at, c.updated_at) DESC`,
     [companyId],
   );
@@ -918,7 +1043,26 @@ async function loadLocalInboxChats(companyId: string) {
       unreadCount: Number(row.unread_count) || 0,
       updatedAt: dateValue ? new Date(dateValue).toISOString() : undefined,
       pushName: row.contact_name,
-      profilePicUrl: row.group_avatar_url || row.avatar_url || undefined,
+       ...(() => {
+          if (isGroup) {
+            const groupAvatar = row.group_avatar_url || row.avatar_url || undefined;
+            return {
+              profilePicUrl: groupAvatar,
+              ...(groupAvatar ? { avatarSource: 'whatsapp' as const } : {}),
+            };
+         }
+         const selection = selectServerConversationAvatar({
+           snapshotWhatsAppAvatar: undefined,
+           storedWhatsAppAvatar: row.whatsapp_avatar_url,
+           googleAvatar: row.contact_source === 'google' || Boolean(row.google_resource_name) ? row.avatar_url : undefined,
+         });
+         return {
+           profilePicUrl: selection.source === 'whatsapp' ? selection.avatar || undefined : undefined,
+           whatsappAvatar: row.whatsapp_avatar_url || undefined,
+           googleAvatar: selection.source === 'google' ? selection.avatar || undefined : undefined,
+           avatarSource: selection.source,
+         };
+       })(),
       lastMessage: {
         key: {
           id: row.message_id || `local-${remoteJid}-${timestamp}`,
@@ -939,8 +1083,8 @@ async function loadLocalInboxChats(companyId: string) {
 
 async function fetchLocalInboxChats(companyId: string) {
   const cached = localInboxCache.get(companyId);
-  if (cached && cached.expiresAt > Date.now()) return cached.chats;
-  const chats = await loadLocalInboxChats(companyId);
+  if (cached && cached.expiresAt > Date.now()) return filterConversationalProviderChats(cached.chats);
+  const chats = filterConversationalProviderChats(await loadLocalInboxChats(companyId));
   localInboxCache.set(companyId, { chats, expiresAt: Date.now() + 5_000 });
   return chats;
 }
@@ -958,6 +1102,83 @@ async function forwardEvolutionRequest(path: string, reply: FastifyReply, init?:
     reply.request.log.warn({ err: error, path }, 'Evolution API não respondeu');
     return reply.code(502).send({ error: 'Evolution API indisponível no momento' });
   }
+}
+
+function isEvolutionTimeout(error: unknown) {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { name?: unknown; code?: unknown; message?: unknown };
+  return candidate.name === 'TimeoutError'
+    || candidate.code === 'ETIMEDOUT'
+    || /timed? ?out|timeout/i.test(String(candidate.message || ''));
+}
+
+async function forwardMediaRequest(
+  path: string,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  messageKey: Record<string, unknown>,
+) {
+  const key = providerMessageKeyDiagnostics(messageKey);
+  let response: Response;
+  try {
+    response = await evolutionRequest(path, { method: 'POST', body: JSON.stringify({ message: { key: messageKey }, convertToMp4: false }) });
+  } catch (error) {
+    const failure = mediaFailureForTransport(isEvolutionTimeout(error) ? 'timeout' : 'network');
+    request.log.warn({
+      media: key,
+      downloadStatusClass: 'network_error',
+      failureStage: 'request',
+      failure: failure.body.error,
+      reason: failure.body.reason,
+    }, '[EVOLUTION_MEDIA] provider_rejected');
+    return reply.code(failure.statusCode).send(failure.body);
+  }
+
+  let rawBody: string;
+  try {
+    rawBody = await response.text();
+  } catch (error) {
+    const failure = mediaFailureForTransport(isEvolutionTimeout(error) ? 'timeout' : 'network');
+    request.log.warn({
+      media: key,
+      downloadStatusClass: 'network_error',
+      failureStage: 'response_body',
+      failure: failure.body.error,
+      reason: failure.body.reason,
+    }, '[EVOLUTION_MEDIA] provider_rejected');
+    return reply.code(failure.statusCode).send(failure.body);
+  }
+  if (!response.ok) {
+    const failure = mediaFailureForUpstreamStatus(response.status);
+    const diagnostics = classifyMediaProviderRejection(rawBody, response.headers.get('content-type'), response.status);
+    request.log.warn({
+      media: key,
+      keySource: 'messageKey',
+      idSource: 'unknown',
+      ...key,
+      upstreamStatus: response.status,
+      failureStage: 'provider_response',
+      failure: failure.body.error,
+      reason: failure.body.reason,
+      ...diagnostics,
+    }, '[EVOLUTION_MEDIA] provider_rejected');
+    return reply.code(failure.statusCode).send(failure.body);
+  }
+
+  const body = parseMediaProviderJson(rawBody);
+  if (!body) {
+    const failure = mediaFailureForInvalidProviderResponse();
+    request.log.warn({
+      media: key,
+      upstreamStatus: response.status,
+      downloadStatusClass: 'unknown',
+      failureStage: 'provider_response',
+      failure: failure.body.error,
+      reason: failure.body.reason,
+    }, '[EVOLUTION_MEDIA] provider_rejected');
+    return reply.code(failure.statusCode).send(failure.body);
+  }
+  return body;
 }
 
 function assignmentJids(input: { remoteJid: string; phone?: string }) {
@@ -1444,14 +1665,7 @@ function providerMessageMetadata(record: any, message: any, fromMe: boolean) {
   const call = message?.callLogMessage || message?.call || message?.offerMessage;
   const callInfo = providerCallInfo(record, message, type, fromMe);
   const metadata: Record<string, any> = { providerType: type };
-  const participantJid = firstProviderText(
-    record?.key?.participant,
-    record?.key?.participantPn,
-    record?.participant,
-    record?.participantPn,
-    record?.senderPn,
-    record?.key?.senderPn,
-  );
+  const participantJid = participantJidFromRecord(record);
   if (participantJid) metadata.participantJid = participantJid;
   const participantPhone = participantPhoneFromRecord(record);
   if (participantPhone) metadata.participantPhone = participantPhone;
@@ -1952,6 +2166,15 @@ function localMessageToProviderRecord(row: any) {
   };
 }
 
+function providerKeyForOutboundResponse(body: any, messageId: string | undefined) {
+  if (!messageId) return undefined;
+  const candidates = [body?.message, body?.data?.message, body?.data, body].filter(Boolean);
+  const providerKey = candidates
+    .map((candidate) => providerMessageKeyFromRecord(candidate, messageId))
+    .find((candidate) => candidate?.id && candidate.remoteJid && candidate.fromMe === true);
+  return providerKey ? { ...providerKey, id: messageId } : undefined;
+}
+
 function storedMessageToRealtimeMessage(row: any) {
   const timestampMs = new Date(row.sent_at).getTime();
   const id = row.evolution_message_id || row.id;
@@ -1985,6 +2208,91 @@ function storedMessageToRealtimeMessage(row: any) {
   };
 }
 
+type MessageMutationDbRow = {
+  id: string;
+  company_id: string;
+  conversation_id: string;
+  evolution_message_id: string | null;
+  sender: 'contact' | 'attendant' | 'system';
+  sender_name: string | null;
+  content: string;
+  media_url: string | null;
+  media_type: string | null;
+  metadata: Record<string, any> | null;
+  status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
+  sent_at: string;
+  evolution_remote_jid: string;
+  contact_phone: string;
+  is_group: boolean;
+};
+
+const messageMutationTargetQuery = `
+  SELECT m.id, m.company_id, m.conversation_id, m.evolution_message_id, m.sender, m.sender_name,
+         m.content, m.media_url, m.media_type, m.metadata, m.status, m.sent_at,
+         c.evolution_remote_jid, c.is_group,
+         regexp_replace(contact.phone, '\\D', '', 'g') AS contact_phone
+  FROM messages m
+  INNER JOIN conversations c ON c.id = m.conversation_id
+  INNER JOIN contacts contact ON contact.id = c.contact_id
+  WHERE m.company_id = $1::uuid
+    AND (m.evolution_message_id = $2::text OR m.id::text = $2::text)
+    AND m.is_internal_note = false
+  LIMIT 1`;
+
+async function findMessageMutationTarget(companyId: string, messageId: string) {
+  const result = await db.query<MessageMutationDbRow>(messageMutationTargetQuery, [companyId, messageId]);
+  return result.rows[0];
+}
+
+async function persistMessageMutation(input: {
+  target: MessageMutationDbRow;
+  operation: 'edit' | 'delete';
+  userId: string;
+  text?: string;
+}) {
+  const changedAt = new Date().toISOString();
+  const metadata = input.operation === 'edit'
+    ? editedMessageMetadata(input.target.metadata, input.userId, changedAt)
+    : deletedMessageMetadata(input.target.metadata, input.userId, changedAt);
+  const content = input.operation === 'edit' ? input.text!.trim() : 'Mensagem apagada';
+  const updated = await db.query(
+    `UPDATE messages
+     SET content = $1::text,
+         metadata = $2::jsonb
+     WHERE id = $3::uuid
+       AND company_id = $4::uuid
+     RETURNING id`,
+    [content, JSON.stringify(metadata), input.target.id, input.target.company_id],
+  );
+  if (!updated.rowCount) throw new Error('message_mutation_persist_failed');
+
+  // Keep the inbox preview in place only when this message is still the last
+  // visible activity. The timestamp and ordering are intentionally untouched.
+  const preview = input.target.is_group
+    ? `${input.target.sender_name || 'Atendente'}: ${content}`
+    : content;
+  await db.query(
+    `UPDATE conversations c
+     SET last_message = $1::text,
+         updated_at = now()
+     WHERE c.id = $2::uuid
+       AND NOT EXISTS (
+         SELECT 1
+         FROM messages newer
+         WHERE newer.conversation_id = c.id
+           AND (
+             newer.sent_at > $3::timestamptz
+             OR (newer.sent_at = $3::timestamptz AND newer.id <> $4::uuid)
+           )
+       )`,
+    [preview, input.target.conversation_id, input.target.sent_at, input.target.id],
+  );
+
+  const persisted = await findMessageMutationTarget(input.target.company_id, input.target.id);
+  if (!persisted) throw new Error('message_mutation_reload_failed');
+  return persisted;
+}
+
 type ProviderPersistenceResult = {
   persisted: boolean;
   ignored?: boolean;
@@ -1994,6 +2302,17 @@ type ProviderPersistenceResult = {
   conversationRemoteJid?: string;
   message?: any;
 };
+
+export function selectNewReconciledMessageActivity(
+  results: Array<ProviderPersistenceResult | undefined>,
+) {
+  return results
+    .filter((result): result is ProviderPersistenceResult & { persisted: true; message: any } => (
+      result?.persisted === true && Boolean(result.message)
+    ))
+    .map((result) => result.message)
+    .sort((left, right) => Number(right?.timestampMs || 0) - Number(left?.timestampMs || 0))[0];
+}
 
 type ExistingProviderMessageIdentity = {
   conversationId: string;
@@ -2300,6 +2619,12 @@ async function persistProviderMessage(
   record: any,
   options: { incrementUnread: boolean; reopen: boolean; fallbackPhone?: string; skipOpaqueLidReconcile?: boolean },
 ): Promise<ProviderPersistenceResult | undefined> {
+  // Newsletters, broadcasts and unknown provider entities are not customer
+  // conversations. Ignore them before opening a transaction or materializing
+  // contacts/conversations, while still acknowledging their webhook safely.
+  if (!isConversationalProviderJid(providerRemoteJid(record))) {
+    return { persisted: false, ignored: true, message: undefined };
+  }
   if (isNonRenderableProviderMessage(record)) {
     return { persisted: false, ignored: true, message: undefined };
   }
@@ -2657,6 +2982,81 @@ function extractWebhookMessageStatus(body: any) {
   return typeof messageId === 'string' && status ? { messageId, status } : undefined;
 }
 
+const providerMutationEvents = new Set([
+  'messages.edit',
+  'messages.edited',
+  'messages.delete',
+  'messages.update',
+  'messages.updated',
+  'message.update',
+  'send.message.update',
+  'message.edited',
+  'message.deleted',
+]);
+
+const providerMutationKeyCandidates = (body: any) => {
+  const data = body?.data || body?.payload || body;
+  const values = [
+    ...(Array.isArray(data?.keys) ? data.keys : []),
+    data?.key,
+    data?.message?.key,
+    data?.editedMessage?.key,
+    data?.message?.editedMessage?.key,
+    data?.protocolMessage?.key,
+    data,
+  ];
+  const keys = values
+    .map((value) => value?.key && typeof value.key === 'object' ? value.key : value)
+    .filter((value) => value && typeof value === 'object' && typeof value.id === 'string' && value.id.trim());
+  return [...new Map(keys.map((key) => [key.id.trim(), key])).values()];
+};
+
+const providerMutationText = (body: any) => {
+  const data = body?.data || body?.payload || body;
+  const candidates = [
+    data?.message?.editedMessage?.message,
+    data?.editedMessage?.message,
+    data?.protocolMessage?.editedMessage?.message,
+    data?.message?.protocolMessage?.editedMessage?.message,
+    data?.message,
+    data?.editedMessage,
+  ];
+  for (const message of candidates) {
+    const text = firstProviderText(
+      message?.conversation,
+      message?.extendedTextMessage?.text,
+      message?.imageMessage?.caption,
+      message?.videoMessage?.caption,
+      message?.documentMessage?.caption,
+    );
+    if (text) return text;
+  }
+  return undefined;
+};
+
+async function persistProviderMessageMutation(
+  companyId: string,
+  body: any,
+  reason: 'edited' | 'deleted',
+) {
+  const content = reason === 'edited' ? providerMutationText(body) : undefined;
+  if (reason === 'edited' && !content) return undefined;
+
+  for (const key of providerMutationKeyCandidates(body)) {
+    const target = await findMessageMutationTarget(companyId, key.id.trim());
+    if (!target) continue;
+    if (reason === 'deleted' && target.metadata?.deletedForEveryone === true) return undefined;
+    const persisted = await persistMessageMutation({
+      target,
+      operation: reason === 'edited' ? 'edit' : 'delete',
+      userId: 'evolution-webhook',
+      ...(content ? { text: content } : {}),
+    });
+    return { message: storedMessageToRealtimeMessage(persisted), remoteJid: persisted.evolution_remote_jid };
+  }
+  return undefined;
+}
+
 async function recordDailyResponder(companyId: string, number: string, user: { id: string; name: string }) {
   if (isWhatsAppGroupJid(number)) return undefined;
   const remoteJid = canonicalPhoneJid(number);
@@ -2888,15 +3288,19 @@ async function ensureOutboundMessage(input: {
   }
 }
 
-async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed', evolutionMessageId?: string) {
+async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed', evolutionMessageId?: string, providerKey?: Record<string, unknown>) {
   try {
     await db.query(
       `UPDATE messages
        SET status = $2,
            evolution_message_id = COALESCE($3, evolution_message_id),
+           metadata = CASE
+             WHEN $4::jsonb IS NULL THEN metadata
+             ELSE COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('providerKey', $4::jsonb)
+           END,
            sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END
        WHERE id = $1`,
-      [messageId, status, evolutionMessageId || null],
+      [messageId, status, evolutionMessageId || null, providerKey ? JSON.stringify(providerKey) : null],
     );
   } catch (error: any) {
     // Se o webhook vinculou o ID alguns milissegundos antes, a restrição
@@ -2929,7 +3333,10 @@ async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed
              ELSE $4
            END
        WHERE id = $1`,
-      [providerMessage.rows[0].id, pending.sender_name, JSON.stringify(pending.metadata || {}), status],
+      [providerMessage.rows[0].id, pending.sender_name, JSON.stringify({
+        ...(pending.metadata || {}),
+        ...(providerKey ? { providerKey } : {}),
+      }), status],
     );
     await db.query(
       `DELETE FROM messages
@@ -2940,6 +3347,32 @@ async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed
 }
 
 export async function registerEvolutionRoutes(app: FastifyInstance) {
+  const webhookMonitor = createEvolutionWebhookMonitor({
+    contract: buildEvolutionWebhookContract({
+      publicBackendUrl: config.BACKEND_PUBLIC_URL,
+      instanceName: config.EVOLUTION_INSTANCE_NAME,
+      webhookSecret: config.WEBHOOK_SECRET,
+    }),
+    request: (path, init) => evolutionRequest(path, init),
+    logger: (level, details, message) => {
+      if (level === 'warn') app.log.warn(details, message);
+      else app.log.info(details, message);
+    },
+  });
+  let webhookReconcileTimer: NodeJS.Timeout | undefined;
+  app.addHook('onReady', () => {
+    if (config.NODE_ENV === 'test') return;
+    void webhookMonitor.ensure();
+    webhookReconcileTimer = setInterval(() => {
+      void webhookMonitor.ensure();
+    }, EVOLUTION_WEBHOOK_RECONCILE_INTERVAL_MS);
+    webhookReconcileTimer.unref?.();
+  });
+  app.addHook('onClose', async () => {
+    if (webhookReconcileTimer) clearInterval(webhookReconcileTimer);
+    webhookReconcileTimer = undefined;
+  });
+
   app.get('/api/evolution/events', { preHandler: requireUser }, async (request, reply) => {
     // EventSource não passa pelo ciclo normal de resposta do Fastify: o stream
     // fica aberto e recebe somente eventos da empresa do usuário autenticado.
@@ -2961,20 +3394,28 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/evolution/status', { preHandler: requireUser }, async (_request, reply) => {
-    return forwardEvolutionRequest(
-      `/instance/connectionState/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
-      reply,
-    );
+    if (webhookMonitor.shouldCheck()) void webhookMonitor.ensure();
+    let response: Response;
+    try {
+      response = await evolutionRequest(`/instance/connectionState/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`);
+    } catch (error) {
+      _request.log.warn({ err: error, path: '/instance/connectionState' }, 'Evolution API não respondeu');
+      return reply.code(502).send({ error: 'Evolution API indisponível no momento', webhook: webhookMonitor.snapshot() });
+    }
+    const body = await response.json().catch(() => ({ error: 'Resposta inválida da Evolution API' }));
+    if (!response.ok) return reply.code(502).send({ error: 'Evolution API indisponível', webhook: webhookMonitor.snapshot() });
+    if (body && typeof body === 'object' && !Array.isArray(body)) return { ...body, webhook: webhookMonitor.snapshot() };
+    return { connection: body, webhook: webhookMonitor.snapshot() };
   });
 
-  app.get('/api/evolution/connect', { preHandler: requireUser }, async (_request, reply) => {
+  app.get('/api/evolution/connect', { preHandler: requireAdmin }, async (_request, reply) => {
     return forwardEvolutionRequest(
       `/instance/connect/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
       reply,
     );
   });
 
-  app.post('/api/evolution/logout', { preHandler: requireUser }, async (_request, reply) => {
+  app.post('/api/evolution/logout', { preHandler: requireAdmin }, async (_request, reply) => {
     return forwardEvolutionRequest(
       `/instance/logout/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
       reply,
@@ -2985,12 +3426,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.get('/api/evolution/chats', { preHandler: requireUser }, async (_request, reply) => {
     let snapshot: { chats: any[]; contacts: any[]; groups: GroupMetadata[] };
     let usingLocalInboxFallback = false;
+    let localChatsForTrace: any[] = [];
     try {
       snapshot = await fetchEvolutionChatsSnapshot(_request.user!.companyId);
     } catch (error) {
       _request.log.warn({ err: error }, 'Evolution nÃ£o respondeu a consulta de conversas');
       try {
-        snapshot = { chats: await fetchLocalInboxChats(_request.user!.companyId), contacts: [], groups: [] };
+        localChatsForTrace = await fetchLocalInboxChats(_request.user!.companyId);
+        snapshot = { chats: localChatsForTrace, contacts: [], groups: [] };
         usingLocalInboxFallback = true;
       } catch (localError) {
         _request.log.error({ err: localError }, 'NÃ£o foi possÃ­vel recuperar o inbox persistido');
@@ -3000,6 +3443,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     if (snapshot.chats.length === 0) {
       try {
         const localChats = await fetchLocalInboxChats(_request.user!.companyId);
+        localChatsForTrace = localChats;
         if (localChats.length > 0) {
           snapshot = { chats: localChats, contacts: snapshot.contacts, groups: snapshot.groups };
           usingLocalInboxFallback = true;
@@ -3008,8 +3452,8 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         _request.log.warn({ err: error }, 'Inbox local indisponÃ­vel durante a resposta vazia da Evolution');
       }
     }
-    let chatsData = snapshot.chats;
-    const contactsData = snapshot.contacts;
+    let chatsData = filterConversationalProviderChats(snapshot.chats);
+    const contactsData = filterConversationalProviderChats(snapshot.contacts);
     // Inbox previews and conversation history use the same persisted
     // participant resolver. This is read-only enrichment; provider data is
     // not refetched per chat and no message is written here.
@@ -3047,8 +3491,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       const remoteJid = String(chat?.remoteJid || chat?.id || '');
       return { ...chat, conversationTags: conversationTags.get(remoteJid) || [] };
     });
-    // O webhook pode chegar antes da próxima atualização da Evolution. Mesclamos
-    // o estado local recente sem substituir o snapshot do provedor.
+    // O webhook/reconciliação pode persistir atividade antes da próxima
+    // atualização da Evolution. Mesclamos a projeção local por timestamp
+    // canônico, preservando a atividade renderizável mais recente.
     try {
       const localChats = await fetchLocalInboxChats(_request.user!.companyId);
       const knownRemoteJids = new Set(chatsData.map((chat: any) => String(chat?.remoteJid || chat?.id || '')));
@@ -3059,13 +3504,12 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         .filter(([phone]) => Boolean(phone)));
       chatsData = chatsData.map((chat: any) => {
         // A reaction is a metadata update, not a chat activity. Evolution may
-        // still expose it as lastMessage in findChats, so always replace it
-        // with the last persisted user-visible message before serializing the
-        // inbox snapshot.
-        if (!isNonRenderableProviderMessage(chat?.lastMessage) && !isProviderReactionEvent(chat?.lastMessage)) return chat;
-        return localByRemoteJid.get(String(chat?.remoteJid || chat?.id || ''))
+        // still expose it as lastMessage in findChats; mergeInboxActivity
+        // compares it with the latest persisted renderable message before
+        // serializing the inbox snapshot.
+        const local = localByRemoteJid.get(String(chat?.remoteJid || chat?.id || ''))
           || localByPhone.get(providerContactPhone(chat))
-          || { ...chat, lastMessage: undefined };
+        return mergeInboxActivity(chat, local);
       });
       const missingLocalChats = localChats.filter((chat: any) => {
         const remoteJid = String(chat?.remoteJid || chat?.id || '');
@@ -3080,9 +3524,16 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     // The provider and the persisted inbox may expose both a LID and its PN
     // alias. Collapse only identities with explicit phone evidence before the
     // snapshot reaches the frontend; opaque LIDs remain independent rows.
+    const chatsBeforeCanonicalProjection = chatsData;
     chatsData = projectCanonicalInboxChats(chatsData);
+    traceInboxOrderProjection(chatsBeforeCanonicalProjection, chatsData, {
+      localChats: localChatsForTrace,
+      trigger: 'unknown',
+    });
     const providerNames = new Map<string, { phone: string; name: string; avatar_url: string | null }>();
     const rememberProviderContact = (value: any) => {
+      const entityJid = String(value?.remoteJid || value?.id || value?.key?.remoteJid || '').trim();
+      if (!isConversationalProviderJid(entityJid)) return;
       // A fromMe message describes the local operator, never the recipient.
       // Provider pushName/notify values from such records must not become a
       // persisted WhatsApp contact name during an inbox snapshot.
@@ -3117,7 +3568,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         _request.log.warn({ err: error }, 'Tabela de nomes do WhatsApp ainda não está disponível');
       }
     }
-    let storedContacts: { rows: Array<{ name: string; phone: string; source: string }> };
+    let storedContacts: { rows: Array<{ name: string; phone: string; source: string; avatar_url: string | null; google_link_present: boolean }> };
     let assignments: { rows: Array<{ evolution_remote_jid: string; user_id: string; user_name: string }> };
     let leases: { rows: Array<{ evolution_remote_jid: string; phone: string; owner_user_id: string; owner_name: string; expires_at: string }> };
     let statuses: { rows: Array<{ evolution_remote_jid: string; status: 'open' | 'pending' | 'resolved'; updated_at: string }> };
@@ -3127,8 +3578,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       name: string;
       phone: string;
       source: string;
+      avatar_url: string | null;
+      google_link_present: boolean;
       }>(
-      `SELECT name, phone, source
+      `SELECT name, phone, source, avatar_url,
+              (source = 'google' OR google_resource_name IS NOT NULL) AS google_link_present
        FROM contacts
        WHERE company_id = $1
        ORDER BY CASE source WHEN 'google' THEN 0 WHEN 'hub' THEN 1 ELSE 2 END`,
@@ -3191,14 +3645,15 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     } catch (error) {
       _request.log.warn({ err: error }, 'Tabela de nomes do WhatsApp ainda não está disponível');
     }
-    let whatsappIdentities: { rows: Array<{ identity: string; identity_type: string; phone: string | null; name: string; avatar_url: string | null }> } = { rows: [] };
+    let whatsappIdentities: { rows: Array<{ identity: string; identity_type: string; phone: string | null; name: string; avatar_url: string | null; google_link_present: boolean }> } = { rows: [] };
     try {
       whatsappIdentities = await db.query(
         `SELECT ci.identity,
                 ci.identity_type,
                 phone_identity.phone,
                 c.name,
-                c.avatar_url
+                c.avatar_url,
+                (c.source = 'google' OR c.google_resource_name IS NOT NULL) AS google_link_present
          FROM contact_channel_identities ci
          JOIN contacts c ON c.id = ci.contact_id
          LEFT JOIN LATERAL (
@@ -3233,9 +3688,23 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     return {
       chats: chatsData,
       contacts: contactsData,
-      storedContacts: storedContacts.rows,
+      storedContacts: storedContacts.rows.map(({ name, phone, source, avatar_url, google_link_present }) => ({
+        name,
+        phone,
+        source,
+        ...(google_link_present && avatar_url ? { googleAvatar: avatar_url } : {}),
+        ...(process.env.AVATAR_DEBUG === 'true'
+          ? { avatarPresent: Boolean(avatar_url), googleLinkPresent: Boolean(google_link_present), googleAvatarPresent: Boolean(google_link_present && avatar_url) }
+          : {}),
+      })),
       whatsappNames: whatsappNames.rows,
-      whatsappIdentities: whatsappIdentities.rows,
+      whatsappIdentities: whatsappIdentities.rows.map(({ identity, identity_type, phone, name, avatar_url, google_link_present }) => ({
+        identity,
+        identity_type,
+        phone,
+        name,
+        ...(google_link_present && avatar_url ? { googleAvatar: avatar_url } : {}),
+      })),
       groupMetadata: snapshot.groups,
       assignments: assignments.rows,
       leases: leases.rows,
@@ -3244,6 +3713,22 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       dailyResponders: dailyResponders.rows,
       conversationTags: Array.from(conversationTags.entries()).map(([remoteJid, tags]) => ({ remoteJid, tags })),
     };
+  });
+
+  app.get<{ Params: { conversationId: string } }>('/api/evolution/conversations/:conversationId/avatar', { preHandler: requireUser }, async (request, reply) => {
+    const conversationId = String(request.params.conversationId || '').trim();
+    if (!conversationId || conversationId.length > 256) return reply.code(400).send({ error: 'Conversa inválida' });
+    try {
+      const result = await resolveConversationAvatar(request.user!.companyId, conversationId);
+      if (!result) return reply.code(404).send({ error: 'Conversa não encontrada' });
+      return {
+        avatar: result.avatar,
+        source: result.source,
+      };
+    } catch (error) {
+      request.log.warn({ err: error }, 'Não foi possível resolver o avatar da conversa');
+      return reply.code(503).send({ avatar: null, source: 'none' });
+    }
   });
 
   app.post('/api/evolution/chats/capture', { preHandler: requireUser }, async (request, reply) => {
@@ -3294,6 +3779,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
   app.post('/api/evolution/chats/release', { preHandler: requireUser }, async (request, reply) => {
     const parsed = assignmentSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Conversa inválida' });
+    if (!isConversationalProviderJid(parsed.data.remoteJid)) {
+      return reply.code(404).send({ error: 'Conversa não encontrada' });
+    }
     const currentUser = request.user!;
     const jids = assignmentJids(parsed.data);
     const existing = await db.query<{ assigned_user_id: string | null }>(
@@ -3374,6 +3862,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
 
   app.post('/api/evolution/chats/read', { preHandler: requireUser }, async (request, reply) => {
     const parsed = conversationReadSchema.safeParse(request.body);
+    if (parsed.success && !isConversationalProviderJid(parsed.data.remoteJid)) {
+      return reply.code(404).send({ error: 'Conversa não encontrada' });
+    }
     let providerMarked = false;
     if (parsed.success && parsed.data.messageKey && !parsed.data.messageKey.fromMe) {
       try {
@@ -3497,6 +3988,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     void cleanupExpiredOpaqueLidStaging();
     const parsed = jidSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Conversa inválida' });
+    if (!isConversationalProviderJid(parsed.data.remoteJid)) {
+      return reply.code(404).send({ error: 'Conversa não encontrada' });
+    }
     // Alguns contatos alternam entre o JID do telefone e o JID interno (@lid).
     // Buscamos os dois para preservar todo o historico da conversa.
     const jids = new Set([parsed.data.remoteJid]);
@@ -3615,6 +4109,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       if (!Array.isArray(records)) continue;
       records.forEach((record: any, index: number) => {
         if (isNonRenderableProviderMessage(record)) return;
+        if (!isConversationalProviderJid(providerRemoteJid(record))) return;
         if (isProviderReactionEvent(record)) {
           reactionRecords.push(record);
           return;
@@ -3637,13 +4132,15 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     recordsById.clear();
     for (const [id, record] of enrichedRecordsById) recordsById.set(id, record);
 
+    const persistedResults: Array<ProviderPersistenceResult | undefined> = [];
     for (const record of recordsById.values()) {
       try {
-        await persistProviderMessage(request.user!.companyId, record, {
+        const persisted = await persistProviderMessage(request.user!.companyId, record, {
           incrementUnread: false,
           reopen: false,
           fallbackPhone: parsed.data.phone,
         });
+        persistedResults.push(persisted);
       } catch (error) {
         request.log.warn({ err: error, messageId: providerMessageId(record) }, 'Falha ao reconciliar mensagem da Evolution com o PostgreSQL');
       }
@@ -3683,6 +4180,22 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       request.user!.companyId,
       reconciledMessages.rows.map(localMessageToProviderRecord),
     );
+    // A background history reconciliation can discover a message that was
+    // absent from the Inbox snapshot. Publish only a message inserted by this
+    // reconciliation. Replaying a provider record that is already persisted
+    // must not be represented as new inbox activity.
+    const latestNewActivity = selectNewReconciledMessageActivity(persistedResults);
+    if (latestNewActivity) {
+      publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
+        remoteJid: latestNewActivity.conversationId,
+        phone: parsed.data.phone,
+        messageId: latestNewActivity.id,
+        timestampMs: latestNewActivity.timestampMs,
+        fromMe: latestNewActivity.sender === 'attendant',
+        incrementUnread: false,
+        message: latestNewActivity,
+      });
+    }
     const mergedRecords = new Map<string, any>();
     for (const record of recordsById.values()) {
       const id = String(record?.key?.id || record?.id || '');
@@ -3728,6 +4241,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const clientMessageId = parsed.data.clientMessageId || `hub-${randomUUID()}`;
     const replyTraceId = quotedMessage ? (parsed.data.replyTraceId || `reply-${randomUUID()}`) : undefined;
     const canonicalRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : canonicalPhoneJid(number));
+    if (!isConversationalProviderJid(canonicalRemoteJid)) {
+      return reply.code(400).send({ error: 'Destinatário não conversacional', code: 'unsupported_provider_entity' });
+    }
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
     traceOutbound(request, 'received', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
@@ -3890,6 +4406,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
     const evolutionMessageId = evolutionMessageReference?.messageId;
+    const outboundProviderKey = providerKeyForOutboundResponse(dispatch.body, evolutionMessageId);
     traceOutbound(request, 'evolution.response', {
       clientMessageId,
       replyTraceId,
@@ -3900,7 +4417,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       elapsedMs: Date.now() - outboundStartedAt,
       evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
     });
-    await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
+    await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined, outboundProviderKey);
     traceOutbound(request, 'persistence.confirmed', {
       clientMessageId,
       replyTraceId,
@@ -3931,8 +4448,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
           ...(normalizedQuote
             ? { quotedMessage: normalizedQuote }
             : {}),
+          ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
         },
-        rawKey: { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
+        rawKey: outboundProviderKey || { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
         timestampMs: realtimeTimestampMs,
         timestamp: new Date(realtimeTimestampMs).toISOString(),
         status: 'sent',
@@ -3958,7 +4476,13 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       dailyResponder,
       lease: leaseAcquisition.lease,
       remoteJid: canonicalRemoteJid,
-      message: { id: localMessage.messageId, evolutionMessageId, status: 'sent', senderName: request.user!.name },
+      message: {
+        id: localMessage.messageId,
+        evolutionMessageId,
+        status: 'sent',
+        senderName: request.user!.name,
+        ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+      },
     };
   });
 
@@ -3998,6 +4522,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const clientMessageId = parsed.data.clientMessageId || `hub-${randomUUID()}`;
     const replyTraceId = quotedMessage ? (parsed.data.replyTraceId || `reply-${randomUUID()}`) : undefined;
     const canonicalRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : canonicalPhoneJid(number));
+    if (!isConversationalProviderJid(canonicalRemoteJid)) {
+      return reply.code(400).send({ error: 'Destinatário não conversacional', code: 'unsupported_provider_entity' });
+    }
     const evolutionRecipient = resolveEvolutionRecipient({ remoteJid: canonicalRemoteJid, canonicalPhone: number });
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
@@ -4224,6 +4751,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
     const evolutionMessageId = evolutionMessageReference?.messageId;
+    const outboundProviderKey = providerKeyForOutboundResponse(dispatch.body, evolutionMessageId);
     traceOutbound(request, 'evolution.response', {
       clientMessageId,
       replyTraceId,
@@ -4234,7 +4762,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       elapsedMs: Date.now() - outboundStartedAt,
       evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
     });
-    await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined);
+    await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined, outboundProviderKey);
     traceOutbound(request, 'persistence.confirmed', {
       clientMessageId,
       replyTraceId,
@@ -4269,8 +4797,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
           ...(normalizedQuote
             ? { quotedMessage: normalizedQuote }
             : {}),
+          ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
         },
-        rawKey: { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
+        rawKey: outboundProviderKey || { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
         timestampMs: realtimeTimestampMs,
         timestamp: new Date(realtimeTimestampMs).toISOString(),
         status: 'sent',
@@ -4295,8 +4824,152 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       dailyResponder,
       lease: leaseAcquisition.lease,
       remoteJid: canonicalRemoteJid,
-      message: { id: localMessage.messageId, evolutionMessageId, status: 'sent', senderName: request.user!.name },
+      message: {
+        id: localMessage.messageId,
+        evolutionMessageId,
+        status: 'sent',
+        senderName: request.user!.name,
+        ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+      },
     };
+  });
+
+  app.patch('/api/evolution/messages/:messageId', { preHandler: requireUser }, async (request, reply) => {
+    const parsed = editMessageSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Texto de edição inválido', code: MESSAGE_MUTATION_ERROR_CODES.unsupportedType });
+    const messageId = String((request.params as { messageId?: string })?.messageId || '').trim();
+    if (!messageId) return reply.code(404).send({ error: 'Mensagem não encontrada', code: MESSAGE_MUTATION_ERROR_CODES.notFound });
+
+    const target = await findMessageMutationTarget(request.user!.companyId, messageId);
+    if (!target) return reply.code(404).send({ error: 'Mensagem não encontrada', code: MESSAGE_MUTATION_ERROR_CODES.notFound });
+
+    let payload: ReturnType<typeof evolutionEditMessagePayload>;
+    try {
+      payload = evolutionEditMessagePayload(target, parsed.data.text);
+    } catch (error) {
+      if (error instanceof MessageMutationError) return reply.code(error.statusCode).send({ error: error.message, code: error.code });
+      throw error;
+    }
+
+    const leaseNumber = target.is_group ? target.evolution_remote_jid : target.contact_phone || target.evolution_remote_jid;
+    const leaseAcquisition = await acquireOutboundLease({
+      companyId: request.user!.companyId,
+      user: request.user!,
+      number: leaseNumber,
+      remoteJid: target.evolution_remote_jid,
+    });
+    if (!leaseAcquisition.acquired) {
+      return reply.code(409).send({
+        error: `Atendimento em andamento por ${leaseAcquisition.lease.ownerName}`,
+        code: 'conversation_lease_active',
+        lease: leaseAcquisition.lease,
+      });
+    }
+    publishRealtimeEvent(request.user!.companyId, 'conversation.updated', leaseRealtimePayload({
+      remoteJid: target.evolution_remote_jid,
+      phone: leaseNumber,
+      lease: leaseAcquisition.lease,
+    }));
+
+    let response: Response;
+    try {
+      response = await evolutionRequest(
+        `/chat/updateMessage/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+        { method: 'POST', body: JSON.stringify(payload) },
+      );
+    } catch (error) {
+      request.log.warn({ err: error, messageId }, 'Falha ao editar mensagem na Evolution API');
+      const timeout = isProviderTimeout(error);
+      return reply.code(timeout ? 504 : 502).send({
+        error: timeout ? 'A Evolution API excedeu o tempo limite' : 'A Evolution API recusou a edição',
+        code: timeout ? MESSAGE_MUTATION_ERROR_CODES.providerTimeout : MESSAGE_MUTATION_ERROR_CODES.editRejected,
+      });
+    }
+    if (!response.ok) {
+      request.log.warn({ messageId, providerStatus: response.status }, 'Evolution API recusou a edição de mensagem');
+      return reply.code(502).send({ error: 'A Evolution API recusou a edição', code: MESSAGE_MUTATION_ERROR_CODES.editRejected });
+    }
+
+    const persisted = await persistMessageMutation({ target, operation: 'edit', userId: request.user!.id, text: parsed.data.text });
+    const message = storedMessageToRealtimeMessage(persisted);
+    publishRealtimeEvent(request.user!.companyId, 'message.updated', {
+      remoteJid: persisted.evolution_remote_jid,
+      phone: leaseNumber,
+      messageId: message.id,
+      timestampMs: message.timestampMs,
+      fromMe: true,
+      reason: 'edited',
+      message,
+    });
+    return { message, reason: 'edited' };
+  });
+
+  app.delete('/api/evolution/messages/:messageId', { preHandler: requireUser }, async (request, reply) => {
+    const messageId = String((request.params as { messageId?: string })?.messageId || '').trim();
+    if (!messageId) return reply.code(404).send({ error: 'Mensagem não encontrada', code: MESSAGE_MUTATION_ERROR_CODES.notFound });
+
+    const target = await findMessageMutationTarget(request.user!.companyId, messageId);
+    if (!target) return reply.code(404).send({ error: 'Mensagem não encontrada', code: MESSAGE_MUTATION_ERROR_CODES.notFound });
+
+    let payload: ReturnType<typeof evolutionDeleteMessagePayload>;
+    try {
+      payload = evolutionDeleteMessagePayload(target);
+    } catch (error) {
+      if (error instanceof MessageMutationError) return reply.code(error.statusCode).send({ error: error.message, code: error.code });
+      throw error;
+    }
+
+    const leaseNumber = target.is_group ? target.evolution_remote_jid : target.contact_phone || target.evolution_remote_jid;
+    const leaseAcquisition = await acquireOutboundLease({
+      companyId: request.user!.companyId,
+      user: request.user!,
+      number: leaseNumber,
+      remoteJid: target.evolution_remote_jid,
+    });
+    if (!leaseAcquisition.acquired) {
+      return reply.code(409).send({
+        error: `Atendimento em andamento por ${leaseAcquisition.lease.ownerName}`,
+        code: 'conversation_lease_active',
+        lease: leaseAcquisition.lease,
+      });
+    }
+    publishRealtimeEvent(request.user!.companyId, 'conversation.updated', leaseRealtimePayload({
+      remoteJid: target.evolution_remote_jid,
+      phone: leaseNumber,
+      lease: leaseAcquisition.lease,
+    }));
+
+    let response: Response;
+    try {
+      response = await evolutionRequest(
+        `/chat/deleteMessageForEveryone/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+        { method: 'DELETE', body: JSON.stringify(payload) },
+      );
+    } catch (error) {
+      request.log.warn({ err: error, messageId }, 'Falha ao apagar mensagem na Evolution API');
+      const timeout = isProviderTimeout(error);
+      return reply.code(timeout ? 504 : 502).send({
+        error: timeout ? 'A Evolution API excedeu o tempo limite' : 'A Evolution API recusou a exclusão',
+        code: timeout ? MESSAGE_MUTATION_ERROR_CODES.providerTimeout : MESSAGE_MUTATION_ERROR_CODES.deleteRejected,
+      });
+    }
+    if (!response.ok) {
+      request.log.warn({ messageId, providerStatus: response.status }, 'Evolution API recusou a exclusão de mensagem');
+      return reply.code(502).send({ error: 'A Evolution API recusou a exclusão', code: MESSAGE_MUTATION_ERROR_CODES.deleteRejected });
+    }
+
+    const persisted = await persistMessageMutation({ target, operation: 'delete', userId: request.user!.id });
+    const message = storedMessageToRealtimeMessage(persisted);
+    publishRealtimeEvent(request.user!.companyId, 'message.updated', {
+      remoteJid: persisted.evolution_remote_jid,
+      phone: leaseNumber,
+      messageId: message.id,
+      timestampMs: message.timestampMs,
+      fromMe: true,
+      reason: 'deleted',
+      message,
+    });
+    return { message, reason: 'deleted' };
   });
 
   app.post('/api/evolution/messages/reaction', { preHandler: requireUser }, async (request, reply) => {
@@ -4304,6 +4977,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     if (!parsed.success) return reply.code(400).send({ error: 'Reação inválida' });
 
     const { number, remoteJid, messageId, emoji } = parsed.data;
+    if (!isConversationalProviderJid(remoteJid)) {
+      return reply.code(400).send({ error: 'Conversa não encontrada', code: 'unsupported_provider_entity' });
+    }
     const phone = number.replace(/\D/g, '');
     // The frontend supplies an id only to address a visible message. The
     // target itself is always resolved inside the authenticated company.
@@ -4406,11 +5082,24 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
 
   app.post('/api/evolution/media', { preHandler: requireUser }, async (request, reply) => {
     const parsed = mediaSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Mensagem de mídia inválida' });
-    return forwardEvolutionRequest(
+    if (!parsed.success) {
+      request.log.warn({ failure: 'MEDIA_REQUEST_INVALID', reason: 'invalid_request' }, 'Evolution media request was invalid');
+      return reply.code(mediaRequestInvalid().statusCode).send(mediaRequestInvalid().body);
+    }
+    const keyValidation = validateProviderMessageKey(parsed.data.messageKey);
+    if (!keyValidation.valid) {
+      request.log.warn({
+        media: keyValidation.diagnostics,
+        failure: 'MEDIA_KEY_INVALID',
+        reason: keyValidation.reason,
+      }, 'Evolution media request contained an invalid provider key');
+      return reply.code(mediaKeyInvalid().statusCode).send(mediaKeyInvalid().body);
+    }
+    return forwardMediaRequest(
       `/chat/getBase64FromMediaMessage/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+      request,
       reply,
-      { method: 'POST', body: JSON.stringify({ message: { key: parsed.data.messageKey }, convertToMp4: false }) },
+      keyValidation.key,
     );
   });
 
@@ -4453,15 +5142,38 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     void cleanupExpiredOpaqueLidStaging();
     const providedSecret = request.headers['x-webhook-secret'];
     const value = Array.isArray(providedSecret) ? providedSecret[0] : providedSecret;
-    if (!matchesWebhookSecret(value)) return reply.code(401).send({ error: 'Webhook não autorizado' });
+    if (!matchesWebhookSecret(value, config.WEBHOOK_SECRET)) return reply.code(401).send({ error: 'Webhook não autorizado' });
 
     const body = request.body as any;
     const event = String(body?.event || body?.type || 'unknown');
     const normalizedEvent = event.toLowerCase().replace(/_/g, '.');
     const isMessageEvent = normalizedEvent === 'messages.upsert' || normalizedEvent === 'messages.set';
+    const isProviderMutationEvent = providerMutationEvents.has(normalizedEvent);
     let persistedMessages = 0;
     const company = await db.query<{ id: string }>('SELECT id FROM companies ORDER BY created_at LIMIT 1');
     const companyId = company.rows[0]?.id;
+
+    if (companyId && isProviderMutationEvent) {
+      try {
+        const mutation = await persistProviderMessageMutation(
+          companyId,
+          body,
+          normalizedEvent.includes('delete') ? 'deleted' : 'edited',
+        );
+        if (mutation) {
+          publishRealtimeEvent(companyId, 'message.updated', {
+            remoteJid: mutation.remoteJid,
+            messageId: mutation.message.id,
+            timestampMs: mutation.message.timestampMs,
+            fromMe: mutation.message.sender === 'attendant',
+            reason: normalizedEvent.includes('delete') ? 'deleted' : 'edited',
+            message: mutation.message,
+          });
+        }
+      } catch (error) {
+        request.log.warn({ err: error, event }, 'Falha ao reconciliar edição/exclusão recebida da Evolution');
+      }
+    }
 
     if (isMessageEvent) {
       const data = body?.data || body?.payload || body;

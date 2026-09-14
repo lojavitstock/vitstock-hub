@@ -10,6 +10,7 @@ export type QaGoogleScenario = 'success' | 'conflict' | 'rate-limit' | 'timeout'
 
 let googleScenario: QaGoogleScenario = 'success';
 let providerOnlyChat: Record<string, any> | null = null;
+let qaWebhookConfig: Record<string, any> | null = null;
 
 export function currentQaGoogleScenario() {
   return googleScenario;
@@ -168,10 +169,28 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
   const method = (init?.method || 'GET').toUpperCase();
   let requestBody: any = {};
   try { requestBody = typeof init?.body === 'string' ? JSON.parse(init.body) : {}; } catch { requestBody = {}; }
+  if (path.includes('/webhook/find/')) {
+    return Promise.resolve(new Response(JSON.stringify(qaWebhookConfig), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+  }
+  if (path.includes('/webhook/set/') && method === 'POST') {
+    const webhook = requestBody?.webhook;
+    qaWebhookConfig = webhook && typeof webhook === 'object'
+      ? {
+        ...webhook,
+        webhookByEvents: webhook.byEvents,
+        webhookBase64: webhook.base64,
+      }
+      : null;
+    return Promise.resolve(new Response(JSON.stringify(qaWebhookConfig), { status: 201, headers: { 'Content-Type': 'application/json' } }));
+  }
   const participantNumber = String(requestBody?.number || '');
+  const providerRemoteJid = participantNumber.includes('@')
+    ? participantNumber
+    : `${participantNumber.replace(/\D/g, '')}@s.whatsapp.net`;
   const body = path.includes('/message/sendText/') || path.includes('/message/sendMedia/')
-    ? { key: { id: `qa-evolution-${randomUUID()}` } }
+    ? { key: { id: `qa-evolution-${randomUUID()}`, remoteJid: providerRemoteJid, fromMe: true } }
       : path.includes('/message/sendReaction/') ? { status: 'ok' }
+        : path.includes('/chat/updateMessage/') || path.includes('/chat/deleteMessageForEveryone/') ? { status: 'ok' }
         : path.includes('/connectionState/') ? { instance: { state: 'open' } }
             : path.includes('/group/fetchAllGroups/') ? qaGroupMetadataRecords()
             : path.includes('/group/participants/') ? [
@@ -193,9 +212,9 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
                 : path.includes('/instance/connect/') ? { code: 'QA_MOCK_CONNECTED' }
             : path.includes('/instance/logout/') ? { status: 'loggedOut' }
               : path.includes('/chat/getBase64FromMediaMessage') ? { base64: '' }
-                : path.includes('/fetchProfilePictureUrl/') ? (participantNumber.includes('444444444@lid') || participantNumber.includes('333333333@lid') || participantNumber.includes('120363000002@g.us')
+                : path.includes('/fetchProfilePictureUrl/') ? (participantNumber.includes('444444444@lid') || participantNumber.includes('333333333@lid') || participantNumber.includes('120363000002@g.us') || participantNumber.includes('5521990000013')
                   ? { profilePictureUrl: null }
-                  : { profilePictureUrl: `http://localhost:3001/api/qa/avatar/${participantNumber.includes('5521999000001') ? 'a' : participantNumber.includes('222222222') ? 'b' : participantNumber.includes('120363000001@g.us') ? 'b' : 'valid'}.svg` })
+                   : { profilePictureUrl: `http://localhost:3001/api/qa/avatar/${participantNumber.includes('5521990000012') ? 'broken' : participantNumber.includes('5521999000001') ? 'a' : participantNumber.includes('222222222') ? 'b' : participantNumber.includes('120363000001@g.us') ? 'b' : 'valid'}.svg` })
                 : path.includes('/profile/') ? { name: 'Vitstock QA', picture: null }
                   : null;
   if (body === null) throw new Error(`QA_MODE bloqueou chamada Evolution não simulada: ${method} ${path}`);

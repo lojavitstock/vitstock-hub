@@ -1,5 +1,6 @@
 import React from 'react';
 import { UserRound } from 'lucide-react';
+import { traceAvatarImageError, type AvatarDebugSource } from '../../utils/avatarDiagnostics';
 
 type ContactPhotoProps = {
   name: string;
@@ -7,6 +8,7 @@ type ContactPhotoProps = {
   size?: 'small' | 'medium' | 'large';
   emphasized?: boolean;
   lazy?: boolean;
+  sourceCategory?: AvatarDebugSource;
 };
 
 export const ContactPhoto = React.memo<ContactPhotoProps>(({
@@ -15,6 +17,7 @@ export const ContactPhoto = React.memo<ContactPhotoProps>(({
   size = 'medium',
   emphasized = false,
   lazy = false,
+  sourceCategory,
 }) => {
   const sizeClass = size === 'small' ? 'w-8 h-8' : size === 'large' ? 'w-16 h-16' : 'w-11 h-11';
   const iconClass = size === 'small' ? 'w-4 h-4' : size === 'large' ? 'w-7 h-7' : 'w-5 h-5';
@@ -31,7 +34,14 @@ export const ContactPhoto = React.memo<ContactPhotoProps>(({
           alt=""
           loading={lazy ? 'lazy' : undefined}
           className="absolute inset-0 h-full w-full object-cover"
-          onError={(event) => { event.currentTarget.style.display = 'none'; }}
+          onError={(event) => {
+            traceAvatarImageError({
+              entityId: name,
+              avatar: event.currentTarget.currentSrc || event.currentTarget.src,
+              sourceCategory,
+            });
+            event.currentTarget.style.display = 'none';
+          }}
         />
       )}
     </div>

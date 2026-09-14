@@ -5,6 +5,9 @@ const password = process.env.E2E_PASSWORD;
 const remoteJid = '164700009999@lid';
 const qaPhone = '5521990099999';
 const qaContactName = 'Contato QA Scroll';
+const oldOnlyRemoteJid = '164700009998@lid';
+const oldOnlyPhone = '5521990099988';
+const oldOnlyContactName = 'Contato QA Histórico Antigo';
 
 type ScrollMetrics = {
   scrollTop: number;
@@ -49,7 +52,12 @@ async function getScrollMetrics(container: Locator): Promise<ScrollMetrics> {
   });
 }
 
-async function injectInbound(page: Page, content: string, timestampMs?: number) {
+async function injectInbound(
+  page: Page,
+  content: string,
+  timestampMs?: number,
+  target: { remoteJid?: string; phone?: string; name?: string } = {},
+) {
   const response = await page.evaluate(async ({ content: nextContent, remoteJid: nextRemoteJid, phone: nextPhone, name: nextName, timestamp: nextTimestamp }) => {
     const result = await fetch('http://localhost:3001/api/qa/evolution/inbound', {
       method: 'POST',
@@ -64,7 +72,13 @@ async function injectInbound(page: Page, content: string, timestampMs?: number) 
       }),
     });
     return { status: result.status, body: await result.text() };
-  }, { content, remoteJid, phone: qaPhone, name: qaContactName, timestamp: timestampMs });
+  }, {
+    content,
+    remoteJid: target.remoteJid || remoteJid,
+    phone: target.phone || qaPhone,
+    name: target.name || qaContactName,
+    timestamp: timestampMs,
+  });
   expect(response.status, response.body).toBe(200);
 }
 
@@ -72,12 +86,24 @@ test('Atendimento mantém o final, preserva leitura e oferece retorno ao final',
   test.setTimeout(60_000);
   await login(page);
   const container = timeline(page);
+  const runId = Date.now();
+
+  // A conversation with no recent activity must still open on its latest
+  // persisted message. This is the regression for the former seven-day
+  // presentation filter.
+  const oldOnlyText = `Scroll QA única mensagem antiga ${runId}`;
+  await injectInbound(
+    page,
+    oldOnlyText,
+    Date.now() - (30 * 24 * 60 * 60 * 1000),
+    { remoteJid: oldOnlyRemoteJid, phone: oldOnlyPhone, name: oldOnlyContactName },
+  );
 
   // Gera volume suficiente para exercitar overflow e o carregamento de histórico.
   const oldBaseTimestamp = Date.now() - (8 * 24 * 60 * 60 * 1000);
-  for (let index = 0; index < 105; index += 1) {
+  for (let index = 0; index < 150; index += 1) {
     const timestamp = index < 5 ? oldBaseTimestamp + (index * 1_000) : undefined;
-    await injectInbound(page, `Scroll QA histórico ${Date.now()}-${index}`, timestamp);
+    await injectInbound(page, `Scroll QA histórico ${runId}-${index}`, timestamp);
   }
 
   await expect.poll(async () => page.evaluate(async (nextRemoteJid) => {
@@ -88,6 +114,12 @@ test('Atendimento mantém o final, preserva leitura e oferece retorno ao final',
   }, remoteJid), { timeout: 15_000 }).toBe(true);
 
   await page.reload();
+  const oldOnlyConversation = page.locator('button[title*="Scroll QA única mensagem antiga"]').first();
+  await expect(oldOnlyConversation).toBeVisible({ timeout: 15_000 });
+  await oldOnlyConversation.click();
+  await expect(container.locator('[data-message-id]').filter({ hasText: oldOnlyText })).toBeVisible({ timeout: 15_000 });
+  await expect(container.getByRole('button', { name: /Carregar (histórico anterior|mensagens anteriores)/ })).toHaveCount(0);
+
   const targetConversation = page.locator('button[title*="Scroll QA histórico"]').first();
   await expect(targetConversation).toBeVisible({ timeout: 15_000 });
   await targetConversation.click();

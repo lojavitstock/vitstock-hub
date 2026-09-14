@@ -122,7 +122,7 @@ O backend carrega `.env.local` da raiz e também aceita um `.env.local` dentro d
 
 Variáveis `VITE_*` já representadas no modelo, como `VITE_API_URL` e `VITE_USE_MOCK_DATA`, são públicas no bundle. Nunca coloque segredos nelas.
 
-Segredos e integrações pertencem ao backend: `DATABASE_URL`, `SESSION_SECRET`, `WEBHOOK_SECRET`, `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, credenciais Google OAuth e as origens autorizadas pelo backend.
+Segredos e integrações pertencem ao backend: `DATABASE_URL`, `SESSION_SECRET`, `WEBHOOK_SECRET`, `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, credenciais Google OAuth e as origens autorizadas pelo backend. `BACKEND_PUBLIC_URL` identifica a URL pública da API usada pelo self-heal do webhook; em ambientes legados, o backend aceita `VITE_API_URL` como fonte de compatibilidade.
 
 ### Local não é necessariamente sandbox
 

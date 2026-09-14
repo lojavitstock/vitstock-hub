@@ -98,7 +98,7 @@ test('Google phone plans deduplicate formatted variants before persistence', () 
 
 test('Google callback URL uses the configured environment URI', () => {
   assert.equal(
-    resolveGoogleCallbackUrl('https://vitstock-hub-git-preview-vitstocks-projects.vercel.app', 'https://vitstock-hub-api-preview.up.railway.app/api/google/callback'),
+    resolveGoogleCallbackUrl('https://hub-preview.vitstock.com.br', 'https://vitstock-hub-api-preview.up.railway.app/api/google/callback'),
     'https://vitstock-hub-api-preview.up.railway.app/api/google/callback',
   );
   assert.equal(

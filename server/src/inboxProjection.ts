@@ -1,11 +1,64 @@
 import { canonicalPhone } from './contactDomain.js';
 import { isWhatsAppGroup, isWhatsAppLid, providerPhoneDigits } from './whatsappIdentity.js';
+import { isNonRenderableProviderMessage } from './providerMessagePolicy.js';
+import { isProviderReactionEvent } from './messageReactions.js';
+import { filterConversationalProviderChats } from './providerJidPolicy.js';
+import { traceAvatarSelection } from './avatarDiagnostics.js';
+import { selectConversationAvatar } from './avatarSelection.js';
 
 type InboxChat = Record<string, any>;
 
 const weakNames = new Set(['', 'Contato', 'Participante', 'WhatsApp Business', 'Você']);
 
 const stringValue = (value: unknown) => typeof value === 'string' ? value.trim() : '';
+
+const normalizeProviderIdentityValue = (value: unknown) => {
+  const candidate = stringValue(value);
+  if (!candidate) return '';
+  const lower = candidate.toLowerCase();
+  if (lower.endsWith('@lid')
+    || lower.endsWith('@g.us')
+    || lower.endsWith('@s.whatsapp.net')
+    || lower.endsWith('@c.us')) return candidate;
+  const digits = candidate.replace(/\D/g, '');
+  return digits.length >= 8 && digits.length <= 20 ? `${digits}@s.whatsapp.net` : '';
+};
+
+/**
+ * Promote only direct provider conversation aliases to the shallow chat
+ * projection. The nested last-message key belongs to the same findChats
+ * entity, so it is valid conversation evidence; participant/message fields
+ * outside these explicit alternate-JID fields are deliberately ignored.
+ */
+export function normalizeProviderConversationIdentity(chat: InboxChat): InboxChat {
+  if (!chat || typeof chat !== 'object') return chat;
+  const directAliases = [
+    chat.remoteJidAlt,
+    chat.key?.remoteJidAlt,
+    chat.lastMessage?.key?.remoteJidAlt,
+  ].map(normalizeProviderIdentityValue).filter(Boolean);
+  if (directAliases.length === 0) return chat;
+
+  const remoteJid = normalizeProviderIdentityValue(chat.remoteJid || chat.id || chat.key?.remoteJid);
+  const existingAliases = Array.isArray(chat.remoteJidAliases)
+    ? chat.remoteJidAliases.map(normalizeProviderIdentityValue).filter(Boolean)
+    : [];
+  const aliases = Array.from(new Set([
+    ...(remoteJid ? [remoteJid] : []),
+    ...existingAliases,
+    ...directAliases,
+  ]));
+  const remoteJidAlt = directAliases[0]!;
+  if (chat.remoteJidAlt === remoteJidAlt
+    && Array.isArray(chat.remoteJidAliases)
+    && aliases.length === chat.remoteJidAliases.length
+    && aliases.every((alias, index) => alias === chat.remoteJidAliases[index])) return chat;
+  return {
+    ...chat,
+    remoteJidAlt,
+    remoteJidAliases: aliases,
+  };
+}
 
 const usableName = (value: unknown) => {
   const name = stringValue(value);
@@ -21,6 +74,51 @@ const canonicalPhoneKey = (chat: InboxChat) => {
   const canonical = canonicalPhone(digits, { defaultCountry: 'BR' });
   const normalized = canonical?.replace(/\D/g, '') || digits;
   return normalized;
+};
+
+const humanPresentationName = (chat: InboxChat | undefined, value: unknown) => {
+  const name = usableName(value);
+  if (!name || !chat) return name;
+  const normalizedName = name.toLowerCase();
+  const identityValues = [
+    chat.id,
+    chat.remoteJid,
+    chat.remoteJidAlt,
+    chat.phone,
+    ...(Array.isArray(chat.remoteJidAliases) ? chat.remoteJidAliases : []),
+  ].map(stringValue).filter(Boolean).map((identity) => identity.toLowerCase());
+  if (isWhatsAppLid(name) || isWhatsAppGroup(name)
+    || normalizedName.endsWith('@s.whatsapp.net') || normalizedName.endsWith('@c.us')
+    || identityValues.some((identity) => normalizedName === identity || normalizedName === identity.split('@')[0])) {
+    return '';
+  }
+  return name;
+};
+
+const selectPresentationName = (providerChat: InboxChat, localChat: InboxChat) => {
+  const isGroup = isWhatsAppGroup(remoteJidOf(providerChat));
+  const candidates: Array<[InboxChat, unknown]> = [
+    [localChat, localChat.pushName],
+    [localChat, localChat.name],
+    [localChat, localChat.contact?.name],
+    [providerChat, providerChat.name],
+    [providerChat, providerChat.pushName],
+    [providerChat, providerChat.contact?.name],
+    [providerChat, providerChat.notify],
+    [providerChat, providerChat.verifiedName],
+    [providerChat, providerChat.businessName],
+    [providerChat, providerChat.contactName],
+  ];
+  const lastMessageFromMe = providerChat.lastMessage?.key?.fromMe === true || providerChat.lastMessage?.fromMe === true;
+  if (!isGroup && !lastMessageFromMe && providerChat.lastMessage) {
+    candidates.push(
+      [providerChat.lastMessage, providerChat.lastMessage.pushName],
+      [providerChat.lastMessage, providerChat.lastMessage.participantName],
+      [providerChat.lastMessage, providerChat.lastMessage.notify],
+      [providerChat.lastMessage, providerChat.lastMessage.verifiedName],
+    );
+  }
+  return candidates.map(([chat, value]) => humanPresentationName(chat, value)).find(Boolean) || '';
 };
 
 export type CanonicalInboxIdentity = {
@@ -49,16 +147,172 @@ export function canonicalInboxIdentity(chat: InboxChat): CanonicalInboxIdentity 
   return { key: `jid:${lowerRemoteJid}`, remoteJid, canonicalPhone: '', explicit: false };
 }
 
+const explicitIdentityAliases = (chat: InboxChat) => [
+  remoteJidOf(chat),
+  chat.remoteJidAlt,
+  ...(Array.isArray(chat.remoteJidAliases) ? chat.remoteJidAliases : []),
+].map(stringValue).filter(Boolean).map((value) => value.toLowerCase());
+
+/**
+ * An opaque provider row may omit its aliases while another row in the same
+ * snapshot (usually the persisted local projection) still carries the
+ * explicit LID↔PN evidence. Index only unambiguous aliases so a missing or
+ * conflicting mapping remains fail-closed.
+ */
+const buildExplicitAliasIndex = (chats: InboxChat[]) => {
+  const index = new Map<string, Set<string>>();
+  chats.forEach((chat) => {
+    const identity = canonicalInboxIdentity(chat);
+    if (!identity.explicit || !identity.key.startsWith('phone:')) return;
+    explicitIdentityAliases(chat).forEach((alias) => {
+      const keys = index.get(alias) || new Set<string>();
+      keys.add(identity.key);
+      index.set(alias, keys);
+    });
+  });
+  return index;
+};
+
+const projectedInboxIdentity = (
+  chat: InboxChat,
+  aliasIndex: Map<string, Set<string>>,
+): CanonicalInboxIdentity => {
+  const identity = canonicalInboxIdentity(chat);
+  if (identity.explicit) return identity;
+  const matches = new Set<string>();
+  explicitIdentityAliases(chat).forEach((alias) => {
+    (aliasIndex.get(alias) || []).forEach((key) => matches.add(key));
+  });
+  if (matches.size !== 1) return identity;
+  const key = [...matches][0]!;
+  return {
+    ...identity,
+    key,
+    canonicalPhone: key.slice('phone:'.length),
+    explicit: true,
+  };
+};
+
+const numericTimestampMs = (value: unknown) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    if (typeof value === 'string') {
+      const parsed = Date.parse(value);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    }
+    return 0;
+  }
+  // Evolution normally returns epoch seconds, while local projections and
+  // realtime payloads use milliseconds. Normalize both forms before any
+  // comparison so a provider snapshot cannot win merely due to units.
+  return numeric < 10_000_000_000 ? Math.floor(numeric * 1000) : Math.floor(numeric);
+};
+
 const activityTimestamp = (chat: InboxChat) => {
-  const messageTimestamp = Number(chat.lastMessage?.messageTimestamp);
-  if (Number.isFinite(messageTimestamp) && messageTimestamp > 0) return messageTimestamp * 1000;
-  const lastMessageAt = Number(chat.lastMessageAt);
-  if (Number.isFinite(lastMessageAt) && lastMessageAt > 0) return lastMessageAt;
+  const messageTimestamp = numericTimestampMs(chat.lastMessage?.messageTimestamp);
+  if (messageTimestamp > 0) return messageTimestamp;
+  const lastMessageAt = numericTimestampMs(chat.lastMessageAt);
+  if (lastMessageAt > 0) return lastMessageAt;
   const updatedAt = Date.parse(stringValue(chat.updatedAt));
   return Number.isFinite(updatedAt) ? updatedAt : 0;
 };
 
+const hasRenderableActivity = (chat: InboxChat) => {
+  const message = chat?.lastMessage;
+  if (!message || typeof message !== 'object') return false;
+  if (isNonRenderableProviderMessage(message) || isProviderReactionEvent(message)) return false;
+  return activityTimestamp(chat) > 0;
+};
+
+/**
+ * Returns the canonical numeric activity timestamp used by Inbox ordering.
+ * Reactions and provider-only protocol records are deliberately excluded.
+ */
+export function inboxActivityTimestamp(chat: InboxChat) {
+  return hasRenderableActivity(chat) ? activityTimestamp(chat) : 0;
+}
+
+const messageIdOf = (chat: InboxChat) => {
+  const value = chat?.lastMessage?.key?.id || chat?.lastMessage?.id;
+  return typeof value === 'string' ? value.trim() : '';
+};
+
+const mergeExplicitIdentity = (providerChat: InboxChat, localChat: InboxChat) => {
+  const aliases = Array.from(new Set([
+    ...(Array.isArray(providerChat.remoteJidAliases) ? providerChat.remoteJidAliases : []),
+    ...(Array.isArray(localChat.remoteJidAliases) ? localChat.remoteJidAliases : []),
+  ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0)));
+  return {
+    ...providerChat,
+    ...(providerChat.remoteJidAlt || !localChat.remoteJidAlt ? {} : { remoteJidAlt: localChat.remoteJidAlt }),
+    ...(aliases.length ? { remoteJidAliases: aliases } : {}),
+    ...(providerChat.phone || !localChat.phone ? {} : { phone: localChat.phone }),
+  };
+};
+
+/**
+ * Combines a provider chat with its persisted local projection without
+ * allowing an older provider snapshot to hide a newer renderable message.
+ * Equal timestamps prefer the persisted projection because it carries the
+ * canonical message identity and preview.
+ */
+export function mergeInboxActivity(providerChat: InboxChat, localChat?: InboxChat) {
+  const normalizedProviderChat = normalizeProviderConversationIdentity(providerChat);
+  const providerTimestamp = inboxActivityTimestamp(normalizedProviderChat);
+  const localTimestamp = localChat ? inboxActivityTimestamp(localChat) : 0;
+  const providerWithIdentity = localChat ? mergeExplicitIdentity(normalizedProviderChat, localChat) : normalizedProviderChat;
+  const presentationName = localChat && !isWhatsAppGroup(remoteJidOf(normalizedProviderChat))
+    ? selectPresentationName(normalizedProviderChat, localChat)
+    : '';
+  const providerWithPresentation = localChat
+    ? {
+        ...providerWithIdentity,
+        ...(presentationName
+          ? {
+              name: presentationName,
+              pushName: presentationName,
+            }
+          : {}),
+      }
+    : providerWithIdentity;
+  const sameMessage = Boolean(localChat && messageIdOf(normalizedProviderChat) && messageIdOf(normalizedProviderChat) === messageIdOf(localChat));
+
+  // A provider snapshot may refresh `updatedAt` after a read/status action
+  // while still carrying the same last message. Keep the persisted activity
+  // timestamp and identity instead of turning that administrative update into
+  // a new inbox activity or dropping explicit PN aliases.
+  if (localChat && sameMessage && localTimestamp > 0) {
+    return {
+      ...providerWithPresentation,
+      lastMessage: localChat.lastMessage,
+      ...(localChat.updatedAt ? { updatedAt: localChat.updatedAt } : {}),
+      ...(localChat.lastMessageAt ? { lastMessageAt: localChat.lastMessageAt } : {}),
+    };
+  }
+
+  if (!localChat || (!localTimestamp && providerTimestamp > 0) || providerTimestamp > localTimestamp) {
+    return providerTimestamp > 0
+      ? providerWithPresentation
+      : { ...providerWithPresentation, lastMessage: undefined };
+  }
+
+  if (localTimestamp > 0 || providerTimestamp === 0) {
+    return {
+      ...providerWithPresentation,
+      lastMessage: localChat.lastMessage,
+      ...(localChat.updatedAt ? { updatedAt: localChat.updatedAt } : {}),
+      ...(localChat.lastMessageAt ? { lastMessageAt: localChat.lastMessageAt } : {}),
+    };
+  }
+
+  return normalizedProviderChat;
+}
+
 const stateTimestamp = (chat: InboxChat) => {
+  // A reaction/protocol record is metadata, never a state/activity source for
+  // the inbox. Keep it from winning alias-bucket state selection by virtue of
+  // a newer provider `updatedAt` value.
+  if (chat?.lastMessage && !hasRenderableActivity(chat)) return 0;
   const updatedAt = Date.parse(stringValue(chat.updatedAt));
   return Number.isFinite(updatedAt) ? updatedAt : activityTimestamp(chat);
 };
@@ -92,13 +346,33 @@ const mergeContactData = (
   const name = contacts.map((contact: any) => usableName(contact.name)).find(Boolean)
     || stringValue(base.name)
     || items.map(({ chat }) => usableName(chat.name) || usableName(chat.pushName)).find(Boolean);
-  const avatar = contacts.map((contact: any) => stringValue(contact.avatar)).find(Boolean)
-    || stringValue(base.avatar)
-    || items.map(({ chat }) => stringValue(chat.profilePicUrl || chat.profilePictureUrl)).find(Boolean);
+  const snapshotAvatar = items.map(({ chat }) => stringValue(chat.profilePicUrl || chat.profilePictureUrl || chat.profilePicture)).find(Boolean);
+  const storedWhatsAppAvatar = items.map(({ chat }) => stringValue(chat.whatsappAvatar)).find(Boolean);
+  const googleAvatar = items.map(({ chat }) => stringValue(chat.googleAvatar)).find(Boolean);
+  const selection = selectConversationAvatar({
+    snapshotWhatsAppAvatar: snapshotAvatar,
+    storedWhatsAppAvatar,
+    googleAvatar,
+  });
+  const avatar = selection.avatar;
+  const selectedSource = selection.source;
+  traceAvatarSelection({
+    entityId: identity.key,
+    remoteJid: identity.remoteJid,
+    isGroup: isWhatsAppGroup(identity.remoteJid),
+    whatsappAvatar: storedWhatsAppAvatar || snapshotAvatar,
+    googleAvatar,
+    storedAvatar: storedWhatsAppAvatar,
+    snapshotAvatar,
+    selectedSource,
+    selectedAvatar: avatar,
+    explicitAliasPresent: identity.explicit,
+    path: 'inboxProjection.mergeContactData',
+  });
   const result = {
     ...base,
     ...(name ? { name } : {}),
-    ...(avatar ? { avatar } : {}),
+    avatar: avatar || '',
     ...(identity.canonicalPhone ? { phone: `+${identity.canonicalPhone}` } : {}),
     tags: mergeTags(items.map(({ chat }) => ({ contact: chat.contact }))),
   };
@@ -110,7 +384,7 @@ const identityRank = (chat: InboxChat) => {
   const directPn = remoteJid && !isWhatsAppLid(remoteJid) && !isWhatsAppGroup(remoteJid);
   const explicitAlias = Boolean(providerPhoneDigits(chat));
   const name = usableName(chat.name) || usableName(chat.pushName) || usableName(chat.contact?.name);
-  const avatar = stringValue(chat.profilePicUrl || chat.profilePictureUrl || chat.contact?.avatar);
+  const avatar = stringValue(chat.whatsappAvatar || chat.profilePicUrl || chat.profilePictureUrl || chat.googleAvatar);
   const metadata = chat.lastMessage?.metadata;
   return (directPn ? 100 : explicitAlias ? 80 : 0)
     + (name ? 10 : 0)
@@ -131,7 +405,7 @@ const choosePrimary = (items: Array<{ chat: InboxChat; index: number }>) => item
 const chooseActivity = (items: Array<{ chat: InboxChat; index: number }>) => items
   .slice()
   .sort((left, right) => (
-    activityTimestamp(right.chat) - activityTimestamp(left.chat)
+    inboxActivityTimestamp(right.chat) - inboxActivityTimestamp(left.chat)
     || stateTimestamp(right.chat) - stateTimestamp(left.chat)
     || left.index - right.index
   ))[0];
@@ -140,7 +414,7 @@ const chooseState = (items: Array<{ chat: InboxChat; index: number }>) => items
   .slice()
   .sort((left, right) => (
     stateTimestamp(right.chat) - stateTimestamp(left.chat)
-    || activityTimestamp(right.chat) - activityTimestamp(left.chat)
+    || inboxActivityTimestamp(right.chat) - inboxActivityTimestamp(left.chat)
     || left.index - right.index
   ))[0];
 
@@ -159,14 +433,50 @@ const mergeBucket = (items: Array<{ chat: InboxChat; index: number }>, identity:
   merged.id = canonicalRemoteJid;
   merged.remoteJid = canonicalRemoteJid;
   if (identity.canonicalPhone) merged.remoteJidAlt = `${identity.canonicalPhone}@s.whatsapp.net`;
+  const aliases = Array.from(new Set(items.flatMap(({ chat }) => [
+    remoteJidOf(chat),
+    chat.remoteJidAlt,
+    ...(Array.isArray(chat.remoteJidAliases) ? chat.remoteJidAliases : []),
+  ]).map(stringValue).filter(Boolean)));
+  if (aliases.length > 1 || items.some(({ chat }) => Array.isArray(chat.remoteJidAliases) && chat.remoteJidAliases.length > 0)) {
+    merged.remoteJidAliases = aliases;
+  }
 
   const name = items.map(({ chat }) => usableName(chat.name) || usableName(chat.pushName) || usableName(chat.contact?.name)).find(Boolean);
   if (name) {
     merged.name = name;
     if (!merged.pushName || !usableName(merged.pushName)) merged.pushName = name;
   }
-  const avatar = items.map(({ chat }) => stringValue(chat.profilePicUrl || chat.profilePictureUrl || chat.contact?.avatar)).find(Boolean);
-  if (avatar) merged.profilePicUrl = avatar;
+  const snapshotAvatar = items.map(({ chat }) => stringValue(chat.profilePicUrl || chat.profilePictureUrl || chat.profilePicture)).find(Boolean);
+  const storedWhatsAppAvatar = items.map(({ chat }) => stringValue(chat.whatsappAvatar)).find(Boolean);
+  const googleAvatar = items.map(({ chat }) => stringValue(chat.googleAvatar)).find(Boolean);
+  const whatsappAvatar = storedWhatsAppAvatar || snapshotAvatar;
+  const avatarSelection = selectConversationAvatar({
+    snapshotWhatsAppAvatar: snapshotAvatar,
+    storedWhatsAppAvatar,
+    googleAvatar,
+  });
+  const avatar = avatarSelection.avatar;
+  const selectedSource = isWhatsAppGroup(primary.remoteJid || primary.id)
+    ? (snapshotAvatar ? 'group' as const : 'none' as const)
+    : avatarSelection.source;
+  traceAvatarSelection({
+    entityId: identity.key,
+    remoteJid: identity.remoteJid,
+    isGroup: isWhatsAppGroup(primary.remoteJid || primary.id),
+    whatsappAvatar,
+    googleAvatar,
+    storedAvatar: storedWhatsAppAvatar,
+    snapshotAvatar,
+    selectedSource,
+    selectedAvatar: avatar,
+    explicitAliasPresent: identity.explicit,
+    path: 'inboxProjection.mergeBucket',
+  });
+  if (avatar && avatarSelection.source === 'whatsapp') merged.profilePicUrl = avatar;
+  if (whatsappAvatar) merged.whatsappAvatar = whatsappAvatar;
+  if (googleAvatar) merged.googleAvatar = googleAvatar;
+  if (avatarSelection.source) merged.avatarSource = avatarSelection.source;
   if (identity.canonicalPhone) merged.phone = `+${identity.canonicalPhone}`;
   const mergedContact = mergeContactData(items, primary, identity);
   if (mergedContact) merged.contact = mergedContact;
@@ -206,9 +516,13 @@ const mergeBucket = (items: Array<{ chat: InboxChat; index: number }>, identity:
  * bucket, where k is the number of aliases for that identity.
  */
 export function projectCanonicalInboxChats(chats: InboxChat[]) {
+  const conversationalChats = filterConversationalProviderChats(chats).map(normalizeProviderConversationIdentity);
+  const aliasIndex = buildExplicitAliasIndex(conversationalChats);
+  const identityByChat = new Map<InboxChat, CanonicalInboxIdentity>();
   const buckets = new Map<string, Array<{ chat: InboxChat; index: number }>>();
-  chats.forEach((chat, index) => {
-    const identity = canonicalInboxIdentity(chat);
+  conversationalChats.forEach((chat, index) => {
+    const identity = projectedInboxIdentity(chat, aliasIndex);
+    identityByChat.set(chat, identity);
     const bucket = buckets.get(identity.key) || [];
     bucket.push({ chat, index });
     buckets.set(identity.key, bucket);
@@ -217,9 +531,9 @@ export function projectCanonicalInboxChats(chats: InboxChat[]) {
   return Array.from(buckets.entries())
     .map(([key, items]) => {
       const firstItem = items[0]!;
-      const identity = canonicalInboxIdentity(firstItem.chat);
+      const identity = identityByChat.get(firstItem.chat) || canonicalInboxIdentity(firstItem.chat);
       return { chat: mergeBucket(items, identity), index: Math.min(...items.map((item) => item.index)), key };
     })
-    .sort((left, right) => activityTimestamp(right.chat) - activityTimestamp(left.chat) || left.index - right.index)
+    .sort((left, right) => inboxActivityTimestamp(right.chat) - inboxActivityTimestamp(left.chat) || left.index - right.index)
     .map(({ chat }) => chat);
 }

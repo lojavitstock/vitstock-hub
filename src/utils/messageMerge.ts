@@ -110,6 +110,12 @@ const areMetadataEqual = (
     && previous.reaction === next.reaction
     && previous.systemLabel === next.systemLabel
     && previous.forwarded === next.forwarded
+    && previous.editedAt === next.editedAt
+    && previous.editedByUserId === next.editedByUserId
+    && previous.deletedAt === next.deletedAt
+    && previous.deletedForEveryone === next.deletedForEveryone
+    && previous.deletedByUserId === next.deletedByUserId
+    && areProviderKeysEqual(previous.providerKey, next.providerKey)
     && areLocationEqual(previous.location, next.location)
     && areContactCardsEqual(previous.contactCard, next.contactCard);
 };

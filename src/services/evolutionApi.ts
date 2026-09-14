@@ -8,6 +8,8 @@ import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 import type { RealtimeEventPayload } from '../utils/realtimeUpdates';
 import { REALTIME_RECONNECTED_EVENT } from '../utils/realtimeConfig';
 import type { QuotedMessage } from '../utils/quotedMessage';
+import { traceAvatarSelection, traceAvatarTargetSelection } from '../utils/avatarDiagnostics';
+import { selectConversationAvatar } from '../utils/avatarSelection';
 
 const unwrapEvolutionMessage = (message: any) => {
   let current = message || {};
@@ -417,7 +419,10 @@ export class EvolutionApiService {
    * Encerrar a sessão atual para permitir um novo pareamento por QR Code.
    */
   static async logoutInstance(instanceName: string) {
-    if (USE_MOCK) return { status: 'SUCCESS' };
+    if (USE_MOCK) {
+      this.publishStatus('disconnected');
+      return { status: 'SUCCESS' };
+    }
 
     const response = await apiFetch('/api/evolution/logout', {
       method: 'POST',
@@ -428,6 +433,7 @@ export class EvolutionApiService {
         throw new Error(body?.error || 'Não foi possível desconectar o WhatsApp');
       }
       this.statusCache.delete(instanceName);
+      this.publishStatus('disconnected');
       return body;
   }
 
@@ -450,9 +456,9 @@ export class EvolutionApiService {
       const contactsData = payload.contacts;
       const chatsData = payload.chats;
       const storedContactsData = payload.storedContacts;
-      const storedContactsMap = new Map<string, { name: string; source: string }>();
+      const storedContactsMap = new Map<string, { name: string; source: string; avatarPresent?: boolean; googleLinkPresent?: boolean; googleAvatar?: string; googleAvatarPresent?: boolean }>();
       const whatsappNamesMap = new Map<string, { name: string; avatar?: string }>();
-      const whatsappIdentitiesMap = new Map<string, { phone?: string; name?: string; avatar?: string }>();
+      const whatsappIdentitiesMap = new Map<string, { phone?: string; name?: string; googleAvatar?: string }>();
       const groupMetadataMap = new Map<string, { subject?: string; picture?: string }>();
       const assignmentsMap = new Map<string, { id: string; name: string }>();
       const assignmentsByNumber = new Map<string, { id: string; name: string }>();
@@ -550,7 +556,14 @@ export class EvolutionApiService {
           if (!contact?.name || !contact?.phone) return;
           phoneVariants(contact.phone).forEach((phone) => {
             if (!storedContactsMap.has(phone)) {
-              storedContactsMap.set(phone, { name: contact.name, source: contact.source });
+              storedContactsMap.set(phone, {
+                name: contact.name,
+                source: contact.source,
+                ...(typeof contact.avatarPresent === 'boolean' ? { avatarPresent: contact.avatarPresent } : {}),
+                ...(typeof contact.googleLinkPresent === 'boolean' ? { googleLinkPresent: contact.googleLinkPresent } : {}),
+                ...(typeof contact.googleAvatar === 'string' ? { googleAvatar: contact.googleAvatar } : {}),
+                ...(typeof contact.googleAvatarPresent === 'boolean' ? { googleAvatarPresent: contact.googleAvatarPresent } : {}),
+              });
             }
           });
         });
@@ -578,7 +591,7 @@ export class EvolutionApiService {
           const value = {
             phone,
             name: typeof identity?.name === 'string' ? identity.name : undefined,
-            avatar: typeof identity?.avatar_url === 'string' ? identity.avatar_url : undefined,
+            googleAvatar: typeof identity?.googleAvatar === 'string' ? identity.googleAvatar : undefined,
           };
           whatsappIdentitiesMap.set(key, value);
           if (phone) phoneVariants(phone).forEach((variant) => whatsappIdentitiesMap.set(`phone:${variant}`, value));
@@ -711,8 +724,25 @@ export class EvolutionApiService {
           ? new Date(item.updatedAt || Number(lastMessage.messageTimestamp) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
           : 'Hoje';
 
+        const snapshotWhatsAppAvatar = [
+          savedContact?.avatar,
+          item.profilePicUrl,
+          item.profilePictureUrl,
+          item.profilePicture,
+        ].find((value) => typeof value === 'string' && value.trim());
+        const googleAvatar = storedContact?.googleAvatar || identity?.googleAvatar;
+        const avatarSelection = isGroup
+          ? { avatar: (groupMetadata?.picture || item.profilePicUrl || item.profilePictureUrl || item.profilePicture || ''), source: 'whatsapp' as const }
+          : selectConversationAvatar({
+            snapshotWhatsAppAvatar,
+            storedWhatsAppAvatar: whatsappContact?.avatar,
+            googleAvatar,
+          });
+
         const conversationObj: Conversation = {
           id: rawRemoteJid, // ID real para findMessages no Railway (ex: 267877160644613@lid)
+          ...(typeof item.updatedAt === 'string' ? { updatedAt: item.updatedAt } : {}),
+          avatarSource: avatarSelection.source,
           isGroup,
           groupName: isGroup ? displayName : undefined,
           groupAvatar: isGroup ? (groupMetadata?.picture || item.profilePicUrl || item.profilePictureUrl || item.profilePicture || '') : undefined,
@@ -720,7 +750,7 @@ export class EvolutionApiService {
             id: rawRemoteJid,
             name: displayName,
             phone: isGroup ? rawRemoteJid : cleanNumber ? `+${cleanNumber}` : '',
-            avatar: savedContact?.avatar || identity?.avatar || whatsappContact?.avatar || item.profilePicUrl || item.profilePictureUrl || '',
+            avatar: avatarSelection.avatar || '',
             tags: dailyResponder
               ? [{ id: `daily-responder-${dailyResponder.id}`, name: `👤 ${dailyResponder.name}`, color: '#A78BFA' }]
               : [],
@@ -743,6 +773,43 @@ export class EvolutionApiService {
           lease,
         };
 
+        const snapshotAvatar = snapshotWhatsAppAvatar || '';
+        const selectedAvatar = conversationObj.contact.avatar;
+        const selectedSource = isGroup ? 'group' as const : avatarSelection.source === 'google' ? 'google' as const : avatarSelection.source === 'whatsapp' ? 'whatsapp' as const : 'none' as const;
+        traceAvatarSelection({
+          entityId: rawRemoteJid,
+          remoteJid: rawRemoteJid,
+          isGroup,
+          whatsappAvatar: savedContact?.avatar || whatsappContact?.avatar,
+          googleAvatar: storedContact?.googleAvatarPresent ? 'present' : undefined,
+          storedAvatar: whatsappContact?.avatar || (storedContact?.avatarPresent ? 'present' : undefined),
+          snapshotAvatar,
+          selectedSource,
+          selectedAvatar,
+          explicitAliasPresent: Boolean(item.remoteJidAlt || item.lastMessage?.key?.remoteJidAlt),
+          path: 'evolutionApi.fetchRealChats',
+        });
+        traceAvatarTargetSelection({
+          entityId: rawRemoteJid,
+          remoteJid: rawRemoteJid,
+          isGroup,
+          remoteJidAltPresent: Boolean(item.remoteJidAlt || lastMessage?.key?.remoteJidAlt),
+          senderPnPresent: Boolean(item.senderPn || lastMessage?.senderPn || lastMessage?.key?.senderPn),
+          participantPnPresent: Boolean(item.participantPn || lastMessage?.participantPn || lastMessage?.key?.participantPn),
+          providerPhonePresent: Boolean(providerPhone),
+          snapshotProfilePicPresent: Boolean(item.profilePicUrl),
+          snapshotProfilePicturePresent: Boolean(item.profilePictureUrl || item.profilePicture),
+          whatsappIdentityPresent: Boolean(identity),
+          whatsappIdentityAvatarPresent: false,
+          whatsappStoredNamePresent: Boolean(storedContact?.name || whatsappContact?.name),
+          whatsappStoredAvatarPresent: Boolean(whatsappContact?.avatar || storedContact?.avatarPresent),
+          contactRecordPresent: Boolean(savedContact || storedContact),
+          contactAvatarPresent: Boolean(savedContact?.avatar || storedContact?.avatarPresent),
+          googleLinkPresent: Boolean(storedContact?.googleLinkPresent),
+          selectedSource,
+          selectedAvatar,
+        });
+
         // Se o mapa já tiver este número, atualiza apenas se a mensagem for mais recente ou se o nome for melhor que a entrada existente
         if (conversationsMap.has(conversationKey)) {
           const existing = conversationsMap.get(conversationKey)!;
@@ -759,6 +826,17 @@ export class EvolutionApiService {
       console.error('[EvolutionAPI] Erro ao carregar chats/contatos:', err);
       return [];
     }
+  }
+
+  static async resolveConversationAvatar(conversationId: string): Promise<{ avatar: string | null; source: 'whatsapp' | 'google' | 'none' }> {
+    if (USE_MOCK) return { avatar: null, source: 'none' };
+    const response = await apiFetch(`/api/evolution/conversations/${encodeURIComponent(conversationId)}/avatar`);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) return { avatar: null, source: 'none' };
+    return {
+      avatar: typeof body?.avatar === 'string' && body.avatar.trim() ? body.avatar.trim() : null,
+      source: body?.source === 'whatsapp' || body?.source === 'google' ? body.source : 'none',
+    };
   }
 
   static async captureChat(remoteJid: string, phone?: string) {
@@ -928,6 +1006,32 @@ export class EvolutionApiService {
       console.error('[EvolutionAPI] Erro ao enviar mensagem:', err);
       throw err;
     }
+  }
+
+  static async editMessage(messageId: string, text: string): Promise<{ message: Message; reason?: string }> {
+    if (USE_MOCK) {
+      return { message: {} as Message, reason: 'edited' };
+    }
+    const response = await apiFetch(`/api/evolution/messages/${encodeURIComponent(messageId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ text }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw errorFromResponse(response, body, 'Não foi possível editar a mensagem');
+    return body as { message: Message; reason?: string };
+  }
+
+  static async deleteMessageForEveryone(messageId: string): Promise<{ message: Message; reason?: string }> {
+    if (USE_MOCK) {
+      return { message: {} as Message, reason: 'deleted' };
+    }
+    const response = await apiFetch(`/api/evolution/messages/${encodeURIComponent(messageId)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({}),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw errorFromResponse(response, body, 'Não foi possível apagar a mensagem');
+    return body as { message: Message; reason?: string };
   }
 
   static async sendMessageReaction(input: {
@@ -1108,6 +1212,7 @@ export class EvolutionApiService {
     const pending = this.mediaInFlight.get(cacheKey);
     if (pending) return pending;
 
+    let cacheTtlMs = 30_000;
     const request = (async () => {
       try {
         const res = await apiFetch('/api/evolution/media', {
@@ -1115,9 +1220,14 @@ export class EvolutionApiService {
           body: JSON.stringify({ messageKey })
         });
 
-        if (!res.ok) return null;
-        const data = await res.json();
-        if (data.base64) {
+        const data = await res.json().catch(() => null);
+        if (!res.ok) {
+          if (res.status === 404 || res.status === 410 || data?.temporary === false) {
+            cacheTtlMs = 10 * 60_000;
+          }
+          return null;
+        }
+        if (typeof data?.base64 === 'string' && data.base64) {
           return data.base64.startsWith('data:') ? data.base64 : `data:${data.mimetype || 'image/jpeg'};base64,${data.base64}`;
         }
         return null;
@@ -1129,7 +1239,7 @@ export class EvolutionApiService {
     this.mediaInFlight.set(cacheKey, request);
     try {
       const data = await request;
-      this.mediaCache.set(cacheKey, { data, expiresAt: Date.now() + (data ? 10 * 60_000 : 30_000) });
+      this.mediaCache.set(cacheKey, { data, expiresAt: Date.now() + (data ? 10 * 60_000 : cacheTtlMs) });
       return data;
     } finally {
       this.mediaInFlight.delete(cacheKey);

@@ -2,6 +2,7 @@ import type { Conversation, Message, Tag } from '../types';
 import { phoneVariants } from './phone';
 import { mergeConversationMessages } from './messageMerge';
 import { mergeContactIdentity, reconcileConversations } from './conversationReconciliation';
+import { stripWhatsAppFormatting } from './whatsappFormatting';
 
 export type RealtimeEventPayload = {
   type: string;
@@ -21,6 +22,8 @@ export type RealtimeEventPayload = {
   conversationTags?: Tag[];
   trafficSource?: string | null;
   messageTimestamp?: number;
+  /** Historical/reconciliation events must not increment unread again. */
+  incrementUnread?: boolean;
   message?: Message;
   [key: string]: unknown;
 };
@@ -87,9 +90,14 @@ const mediaPreview = (mediaType?: Message['mediaType']) => {
   return '';
 };
 
-const comparableMessagePreview = (message: Message) => (
-  message.content.trim().replace(/^\*[^*\r\n]+\*\s*(?:\r?\n|$)/, '').trim()
-);
+const comparableMessagePreview = (message: Message) => {
+  const normalized = stripWhatsAppFormatting(message.content).trim();
+  // The Hub's generated operator signature is transport-only. Ignore it when
+  // comparing a provider echo with the canonical preview already in the inbox.
+  return /^\*[^*\r\n]+:?\*\r?\n/.test(message.content)
+    ? normalized.replace(/^[^\r\n]+\r?\n/, '').trim()
+    : normalized;
+};
 
 const messageKeyForConversation = (message: Message, event: RealtimeEventPayload, conversation: Conversation) => {
   const rawKey = message.rawKey;
@@ -130,7 +138,7 @@ const updateConversationFromMessage = (
 
   const isSameMessage = conversation.lastMessageKey?.id === message.id;
   const nextStatus = conversation.status === 'resolved' && isIncoming ? 'open' : conversation.status;
-  const nextUnreadCount = isIncoming && !isSameMessage
+  const nextUnreadCount = isIncoming && !isSameMessage && event.incrementUnread !== false
     ? conversation.unreadCount + 1
     : conversation.unreadCount;
   const next: Conversation = {
@@ -280,6 +288,37 @@ const updateConversationFromStatus = (
   return changed ? next : conversation;
 };
 
+const updateConversationFromMessageUpdate = (
+  conversation: Conversation,
+  event: RealtimeEventPayload,
+): Conversation | null => {
+  const message = event.message;
+  if (!message?.id || !eventMatchesConversation(conversation, event)) return null;
+  const messageIds = new Set([message.id, message.rawKey?.id, event.messageId].filter((value): value is string => typeof value === 'string'));
+  const isLastMessage = Boolean(conversation.lastMessageKey?.id && messageIds.has(conversation.lastMessageKey.id));
+  if (!isLastMessage) return conversation;
+
+  const isIncoming = message.sender === 'contact';
+  const messagePreview = comparableMessagePreview(message);
+  const nextPreview = conversation.isGroup
+    ? `${isIncoming ? (message.senderName || 'Participante') : (message.senderName || 'Atendente')}: ${messagePreview || mediaPreview(message.mediaType) || conversation.lastMessage}`
+    : messagePreview || mediaPreview(message.mediaType) || conversation.lastMessage;
+  const nextKey = messageKeyForConversation(message, event, conversation);
+  if (conversation.lastMessage === nextPreview && conversation.lastMessageKey?.id === nextKey.id) return conversation;
+  return {
+    ...conversation,
+    lastMessage: nextPreview,
+    lastMessageKey: nextKey,
+    // A semantic mutation is not a new activity: retain timestamp, unread,
+    // needsResponse and array position exactly as they were.
+  };
+};
+
+const messageIdsForEvent = (message: Message, event: RealtimeEventPayload) => new Set(
+  [message.id, message.rawKey?.id, event.messageId]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0),
+);
+
 /**
  * Applies only fields that the current conversation.updated payload actually
  * carries. Returning null means the event is insufficient and must use the
@@ -289,7 +328,7 @@ export const reconcileRealtimeConversation = (
   previous: Conversation[],
   event: RealtimeEventPayload,
 ): Conversation[] | null => {
-  if (event.type !== 'conversation.updated' && event.type !== 'message.upsert') return null;
+  if (event.type !== 'conversation.updated' && event.type !== 'message.upsert' && event.type !== 'message.updated') return null;
   // A reaction updates metadata on an existing message. It is never a new
   // conversation activity and must not move the chat or alter unread state.
   if (event.type === 'message.upsert' && event.reaction === true) return previous;
@@ -300,17 +339,29 @@ export const reconcileRealtimeConversation = (
   const current = previous[index];
   const updated = event.type === 'message.upsert'
     ? updateConversationFromMessage(current, event)
-    : updateConversationFromStatus(current, event);
+    : event.type === 'message.updated'
+      ? updateConversationFromMessageUpdate(current, event)
+      : updateConversationFromStatus(current, event);
   if (!updated) return null;
   if (updated === current) return previous;
 
   const next = previous.slice();
   next[index] = updated;
-  // Evolution returns chats with the most recent activity first. Keep that
-  // observable ordering when an incremental message arrives.
+  // Evolution returns chats with the most recent activity first. A replay of
+  // the known last message is not new activity, even when its timestamp is
+  // equal to the current value. Distinct messages may share a timestamp
+  // because the provider only exposes second precision, so a new message at
+  // the current positive timestamp is still activity. Content/key enrichment
+  // applies above, while the existing array position remains stable for the
+  // known message only.
   const eventTimestamp = Number(event.message?.timestampMs ?? event.timestampMs ?? 0);
+  const currentActivityTimestamp = Number(current.lastMessageAt || 0);
+  const eventMessageIds = event.message ? messageIdsForEvent(event.message, event) : new Set<string>();
+  const isKnownLastMessage = Boolean(current.lastMessageKey?.id && eventMessageIds.has(current.lastMessageKey.id));
   const shouldReorder = event.type === 'message.upsert'
-    && (!current.lastMessageAt || eventTimestamp >= current.lastMessageAt);
+    && eventTimestamp > 0
+    && eventTimestamp >= currentActivityTimestamp
+    && !isKnownLastMessage;
   if (shouldReorder && index > 0) {
     next.splice(index, 1);
     next.unshift(updated);
@@ -340,6 +391,15 @@ export const reconcileRealtimeMessages = (
     if (!message?.id || (message.conversationId && message.conversationId !== activeConversationId)) return null;
     // mergeConversationMessages correlates a provider ID that arrives before
     // the POST response with the matching optimistic outbound message.
+    return mergeConversationMessages(current, [message]);
+  }
+
+  if (event.type === 'message.updated') {
+    const message = event.message;
+    if (!message?.id || (message.conversationId && message.conversationId !== activeConversationId)) return null;
+    // Semantic updates replace an existing item only. They must never append
+    // a second copy when the target is outside the loaded timeline window.
+    if (!current.some((item) => item.id === message.id)) return current;
     return mergeConversationMessages(current, [message]);
   }
 

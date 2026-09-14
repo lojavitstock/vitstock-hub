@@ -10,6 +10,7 @@ type ConversationListProps = {
   needsResponse: (conversation: Conversation) => boolean;
   needsAttention: (conversation: Conversation) => boolean;
   onSelectConversation: (conversation: Conversation) => void;
+  onResolveAvatar?: (conversationId: string) => void | Promise<void>;
 };
 
 export const ConversationList = React.memo<ConversationListProps>(
@@ -20,6 +21,7 @@ export const ConversationList = React.memo<ConversationListProps>(
   needsResponse,
   needsAttention,
   onSelectConversation,
+  onResolveAvatar,
 }) => {
   if (conversations.length === 0) {
     return (
@@ -56,6 +58,7 @@ export const ConversationList = React.memo<ConversationListProps>(
           needsResponse={needsResponse(conversation)}
           needsAttention={needsAttention(conversation)}
           onSelect={onSelectConversation}
+          onResolveAvatar={onResolveAvatar}
         />
       ))}
     </>
