@@ -12,6 +12,54 @@ const weakNames = new Set(['', 'Contato', 'Participante', 'WhatsApp Business', '
 
 const stringValue = (value: unknown) => typeof value === 'string' ? value.trim() : '';
 
+const normalizeProviderIdentityValue = (value: unknown) => {
+  const candidate = stringValue(value);
+  if (!candidate) return '';
+  const lower = candidate.toLowerCase();
+  if (lower.endsWith('@lid')
+    || lower.endsWith('@g.us')
+    || lower.endsWith('@s.whatsapp.net')
+    || lower.endsWith('@c.us')) return candidate;
+  const digits = candidate.replace(/\D/g, '');
+  return digits.length >= 8 && digits.length <= 20 ? `${digits}@s.whatsapp.net` : '';
+};
+
+/**
+ * Promote only direct provider conversation aliases to the shallow chat
+ * projection. The nested last-message key belongs to the same findChats
+ * entity, so it is valid conversation evidence; participant/message fields
+ * outside these explicit alternate-JID fields are deliberately ignored.
+ */
+export function normalizeProviderConversationIdentity(chat: InboxChat): InboxChat {
+  if (!chat || typeof chat !== 'object') return chat;
+  const directAliases = [
+    chat.remoteJidAlt,
+    chat.key?.remoteJidAlt,
+    chat.lastMessage?.key?.remoteJidAlt,
+  ].map(normalizeProviderIdentityValue).filter(Boolean);
+  if (directAliases.length === 0) return chat;
+
+  const remoteJid = normalizeProviderIdentityValue(chat.remoteJid || chat.id || chat.key?.remoteJid);
+  const existingAliases = Array.isArray(chat.remoteJidAliases)
+    ? chat.remoteJidAliases.map(normalizeProviderIdentityValue).filter(Boolean)
+    : [];
+  const aliases = Array.from(new Set([
+    ...(remoteJid ? [remoteJid] : []),
+    ...existingAliases,
+    ...directAliases,
+  ]));
+  const remoteJidAlt = directAliases[0]!;
+  if (chat.remoteJidAlt === remoteJidAlt
+    && Array.isArray(chat.remoteJidAliases)
+    && aliases.length === chat.remoteJidAliases.length
+    && aliases.every((alias, index) => alias === chat.remoteJidAliases[index])) return chat;
+  return {
+    ...chat,
+    remoteJidAlt,
+    remoteJidAliases: aliases,
+  };
+}
+
 const usableName = (value: unknown) => {
   const name = stringValue(value);
   if (!name || weakNames.has(name) || /^Participante …\S+$/.test(name) || /^\+?[\d\s().-]+$/.test(name)) return '';
@@ -209,11 +257,12 @@ const mergeExplicitIdentity = (providerChat: InboxChat, localChat: InboxChat) =>
  * canonical message identity and preview.
  */
 export function mergeInboxActivity(providerChat: InboxChat, localChat?: InboxChat) {
-  const providerTimestamp = inboxActivityTimestamp(providerChat);
+  const normalizedProviderChat = normalizeProviderConversationIdentity(providerChat);
+  const providerTimestamp = inboxActivityTimestamp(normalizedProviderChat);
   const localTimestamp = localChat ? inboxActivityTimestamp(localChat) : 0;
-  const providerWithIdentity = localChat ? mergeExplicitIdentity(providerChat, localChat) : providerChat;
-  const presentationName = localChat && !isWhatsAppGroup(remoteJidOf(providerChat))
-    ? selectPresentationName(providerChat, localChat)
+  const providerWithIdentity = localChat ? mergeExplicitIdentity(normalizedProviderChat, localChat) : normalizedProviderChat;
+  const presentationName = localChat && !isWhatsAppGroup(remoteJidOf(normalizedProviderChat))
+    ? selectPresentationName(normalizedProviderChat, localChat)
     : '';
   const providerWithPresentation = localChat
     ? {
@@ -226,7 +275,7 @@ export function mergeInboxActivity(providerChat: InboxChat, localChat?: InboxCha
           : {}),
       }
     : providerWithIdentity;
-  const sameMessage = Boolean(localChat && messageIdOf(providerChat) && messageIdOf(providerChat) === messageIdOf(localChat));
+  const sameMessage = Boolean(localChat && messageIdOf(normalizedProviderChat) && messageIdOf(normalizedProviderChat) === messageIdOf(localChat));
 
   // A provider snapshot may refresh `updatedAt` after a read/status action
   // while still carrying the same last message. Keep the persisted activity
@@ -256,7 +305,7 @@ export function mergeInboxActivity(providerChat: InboxChat, localChat?: InboxCha
     };
   }
 
-  return providerChat;
+  return normalizedProviderChat;
 }
 
 const stateTimestamp = (chat: InboxChat) => {
@@ -384,6 +433,14 @@ const mergeBucket = (items: Array<{ chat: InboxChat; index: number }>, identity:
   merged.id = canonicalRemoteJid;
   merged.remoteJid = canonicalRemoteJid;
   if (identity.canonicalPhone) merged.remoteJidAlt = `${identity.canonicalPhone}@s.whatsapp.net`;
+  const aliases = Array.from(new Set(items.flatMap(({ chat }) => [
+    remoteJidOf(chat),
+    chat.remoteJidAlt,
+    ...(Array.isArray(chat.remoteJidAliases) ? chat.remoteJidAliases : []),
+  ]).map(stringValue).filter(Boolean)));
+  if (aliases.length > 1 || items.some(({ chat }) => Array.isArray(chat.remoteJidAliases) && chat.remoteJidAliases.length > 0)) {
+    merged.remoteJidAliases = aliases;
+  }
 
   const name = items.map(({ chat }) => usableName(chat.name) || usableName(chat.pushName) || usableName(chat.contact?.name)).find(Boolean);
   if (name) {
@@ -459,7 +516,7 @@ const mergeBucket = (items: Array<{ chat: InboxChat; index: number }>, identity:
  * bucket, where k is the number of aliases for that identity.
  */
 export function projectCanonicalInboxChats(chats: InboxChat[]) {
-  const conversationalChats = filterConversationalProviderChats(chats);
+  const conversationalChats = filterConversationalProviderChats(chats).map(normalizeProviderConversationIdentity);
   const aliasIndex = buildExplicitAliasIndex(conversationalChats);
   const identityByChat = new Map<InboxChat, CanonicalInboxIdentity>();
   const buckets = new Map<string, Array<{ chat: InboxChat; index: number }>>();

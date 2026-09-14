@@ -62,6 +62,7 @@ import {
   canonicalInboxIdentity,
   inboxActivityTimestamp,
   mergeInboxActivity,
+  normalizeProviderConversationIdentity,
   projectCanonicalInboxChats,
 } from '../server/src/inboxProjection';
 import { toQuotedMessage } from '../src/utils/quotedMessage';
@@ -3249,6 +3250,72 @@ test('projeção canônica colapsa LID e PN somente com alias explícito', () =>
   assert.deepEqual([lid, pn], original);
 });
 
+test('normaliza alias direto do lastMessage antes da projeção canônica', () => {
+  const pn = inboxProjectionChat('5521999999999@s.whatsapp.net', { name: 'Cliente conhecido' });
+  const lid = normalizeProviderConversationIdentity(inboxProjectionChat('opaque-provider@lid', {
+    lastMessage: {
+      key: {
+        id: 'provider-lid',
+        remoteJid: 'opaque-provider@lid',
+        remoteJidAlt: '5521999999999@s.whatsapp.net',
+      },
+      message: { conversation: 'Atividade' },
+      messageTimestamp: 1_800_000_000,
+    },
+  }));
+
+  assert.equal(lid.remoteJidAlt, '5521999999999@s.whatsapp.net');
+  assert.deepEqual(lid.remoteJidAliases, [
+    'opaque-provider@lid',
+    '5521999999999@s.whatsapp.net',
+  ]);
+  assert.equal(projectCanonicalInboxChats([pn, lid]).length, 1);
+  assert.deepEqual(normalizeProviderConversationIdentity(lid), lid);
+});
+
+test('alias direto sobrevive quando a atividade local substitui lastMessage', () => {
+  const provider = inboxProjectionChat('opaque-provider-local@lid', {
+    lastMessage: {
+      key: {
+        id: 'provider-activity',
+        remoteJid: 'opaque-provider-local@lid',
+        remoteJidAlt: '5521999999999@s.whatsapp.net',
+      },
+      message: { conversation: 'Provider' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+  const local = inboxProjectionChat('opaque-provider-local@lid', {
+    lastMessage: {
+      key: { id: 'local-activity', remoteJid: 'opaque-provider-local@lid' },
+      message: { conversation: 'Local' },
+      messageTimestamp: 1_900_000_000,
+    },
+  });
+
+  const merged = mergeInboxActivity(provider, local);
+  assert.deepEqual(merged.remoteJidAliases, [
+    'opaque-provider-local@lid',
+    '5521999999999@s.whatsapp.net',
+  ]);
+  assert.equal(projectCanonicalInboxChats([
+    merged,
+    inboxProjectionChat('5521999999999@s.whatsapp.net'),
+  ]).length, 1);
+});
+
+test('normaliza também o pareamento explícito PN para LID', () => {
+  const normalized = normalizeProviderConversationIdentity({
+    id: '5521999999999@s.whatsapp.net',
+    remoteJid: '5521999999999@s.whatsapp.net',
+    remoteJidAlt: 'opaque-provider@lid',
+  });
+  assert.deepEqual(normalized.remoteJidAliases, [
+    '5521999999999@s.whatsapp.net',
+    'opaque-provider@lid',
+  ]);
+});
+
 test('projeção canônica reconhece representação nacional equivalente sem inferir LID', () => {
   const projected = projectCanonicalInboxChats([
     inboxProjectionChat('opaque-456@lid', { remoteJidAlt: '5521999999999@s.whatsapp.net' }),
@@ -3281,6 +3348,35 @@ test('LID opaco e PN diferentes permanecem separados', () => {
     inboxProjectionChat('5521777777777@s.whatsapp.net'),
   ]);
   assert.equal(projected.length, 3);
+});
+
+test('dois LIDs sem alias direto permanecem identities independentes', () => {
+  const projected = projectCanonicalInboxChats([
+    inboxProjectionChat('opaque-one@lid'),
+    inboxProjectionChat('opaque-two@lid'),
+  ]);
+  assert.equal(projected.length, 2);
+});
+
+test('LID opaco não herda alias de outra conversa nem fecha o grafo transitivamente', () => {
+  const projected = projectCanonicalInboxChats([
+    inboxProjectionChat('opaque-paired@lid', {
+      lastMessage: {
+        key: {
+          id: 'paired-message',
+          remoteJid: 'opaque-paired@lid',
+          remoteJidAlt: '5521999999999@s.whatsapp.net',
+        },
+        message: { conversation: 'Pareada' },
+        messageTimestamp: 1_800_000_000,
+      },
+    }),
+    inboxProjectionChat('opaque-unrelated@lid'),
+    inboxProjectionChat('5521999999999@s.whatsapp.net'),
+  ]);
+
+  assert.equal(projected.length, 2);
+  assert.equal(projected.some((chat) => chat.remoteJid === 'opaque-unrelated@lid'), true);
 });
 
 test('atividade mais recente vence e identidade PN, tags e estado são preservados', () => {
@@ -4098,6 +4194,42 @@ test('self-chat PN e LID explícitos permanecem em uma única conversa', () => {
   ]);
   assert.equal(projected.length, 1);
   assert.equal(projected[0]?.lastMessage?.key?.id, 'self-lid-message');
+});
+
+test('self-chat colapsa o par direto do provider preservando nome e atividade', () => {
+  const pn = inboxProjectionChat('5521999999999@s.whatsapp.net', {
+    name: 'Leonardo Vitstock',
+    lastMessage: {
+      key: { id: 'self-pn-provider', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
+      message: { conversation: 'Anterior' },
+      messageTimestamp: 1_800_000_000,
+    },
+  });
+  const lid = normalizeProviderConversationIdentity(inboxProjectionChat('opaque-self-provider@lid', {
+    name: '+5521999999999',
+    lastMessage: {
+      key: {
+        id: 'self-lid-provider',
+        remoteJid: 'opaque-self-provider@lid',
+        remoteJidAlt: '5521999999999@s.whatsapp.net',
+        fromMe: true,
+      },
+      message: { conversation: 'Mais recente' },
+      messageTimestamp: 1_800_000_010,
+    },
+  }));
+
+  const projected = projectCanonicalInboxChats([pn, lid]);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0]?.remoteJid, '5521999999999@s.whatsapp.net');
+  assert.equal(projected[0]?.name, 'Leonardo Vitstock');
+  assert.equal(projected[0]?.lastMessage?.key?.id, 'self-lid-provider');
+  assert.equal(inboxActivityTimestamp(projected[0]!), 1_800_000_010_000);
+  assert.deepEqual(projected[0]?.remoteJidAliases, [
+    '5521999999999@s.whatsapp.net',
+    'opaque-self-provider@lid',
+  ]);
+  assert.deepEqual(projectCanonicalInboxChats(projected), projected);
 });
 
 test('self-chat provider e local usam o alias explícito sem duplicar', () => {

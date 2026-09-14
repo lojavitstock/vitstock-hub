@@ -22,7 +22,7 @@ import { canonicalPhone, normalizeContactPhone } from './contactDomain.js';
 import { phoneLookupKeys, upsertContactPhone } from './contactPhones.js';
 import { isWhatsAppLid, providerPhoneDigits, providerPhoneJid } from './whatsappIdentity.js';
 import { resolveEvolutionRecipient } from './evolutionRecipient.js';
-import { mergeInboxActivity, projectCanonicalInboxChats } from './inboxProjection.js';
+import { mergeInboxActivity, normalizeProviderConversationIdentity, projectCanonicalInboxChats } from './inboxProjection.js';
 import { parseGroupMetadata, type GroupMetadata } from './groupMetadata.js';
 import {
   buildParticipantIdentityMap,
@@ -845,7 +845,9 @@ async function refreshEvolutionChatsSnapshot(companyId: string) {
       contactsResponse.json().catch(() => []),
     ]);
     const snapshot = {
-      chats: Array.isArray(chats) ? filterConversationalProviderChats(chats) : [],
+      chats: Array.isArray(chats)
+        ? filterConversationalProviderChats(chats.map(normalizeProviderConversationIdentity))
+        : [],
       contacts: Array.isArray(contacts) ? filterConversationalProviderChats(contacts) : [],
     };
     evolutionChatsCache.set(companyId, {
