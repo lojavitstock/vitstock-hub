@@ -19,8 +19,13 @@ export const ContactPhoto = React.memo<ContactPhotoProps>(({
   lazy = false,
   sourceCategory,
 }) => {
+  const [imageError, setImageError] = React.useState(false);
   const sizeClass = size === 'small' ? 'w-8 h-8' : size === 'large' ? 'w-16 h-16' : 'w-11 h-11';
   const iconClass = size === 'small' ? 'w-4 h-4' : size === 'large' ? 'w-7 h-7' : 'w-5 h-5';
+
+  React.useEffect(() => {
+    setImageError(false);
+  }, [avatar]);
 
   return (
     <div
@@ -28,7 +33,7 @@ export const ContactPhoto = React.memo<ContactPhotoProps>(({
       title={name}
     >
       <UserRound className={`${iconClass} text-slate-400`} />
-      {avatar && (
+      {avatar && !imageError && (
         <img
           src={avatar}
           alt=""
@@ -40,7 +45,7 @@ export const ContactPhoto = React.memo<ContactPhotoProps>(({
               avatar: event.currentTarget.currentSrc || event.currentTarget.src,
               sourceCategory,
             });
-            event.currentTarget.style.display = 'none';
+            setImageError(true);
           }}
         />
       )}
