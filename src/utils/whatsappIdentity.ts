@@ -1,3 +1,5 @@
+import { displayablePhoneDigits } from './phone';
+
 export type ProviderIdentityInput = {
   remoteJid?: unknown;
   remoteJidAlt?: unknown;
@@ -20,7 +22,7 @@ export function isWhatsAppLid(value: unknown) {
   return typeof value === 'string' && value.trim().toLowerCase().endsWith('@lid');
 }
 
-export function providerPhoneDigits(input: ProviderIdentityInput) {
+const providerPhoneCandidate = (input: ProviderIdentityInput) => {
   const values = [
     input.remoteJidAlt,
     input.lastMessage?.key?.remoteJidAlt,
@@ -42,9 +44,18 @@ export function providerPhoneDigits(input: ProviderIdentityInput) {
     const candidate = value.trim();
     if (!candidate || isWhatsAppLid(candidate) || candidate.toLowerCase().endsWith('@g.us')) continue;
     const digits = candidate.split('@')[0].replace(/\D/g, '');
-    if (digits.length >= 8 && digits.length <= 20) return digits;
+    if (digits.length >= 8 && digits.length <= 20) return candidate;
   }
   return '';
+};
+
+export function providerPhoneDigits(input: ProviderIdentityInput) {
+  const candidate = providerPhoneCandidate(input);
+  return candidate ? candidate.split('@')[0].replace(/\D/g, '') : '';
+}
+
+export function providerPhoneDigitsForDisplay(input: ProviderIdentityInput) {
+  return displayablePhoneDigits(providerPhoneCandidate(input));
 }
 
 export function providerIdentityKey(value: unknown) {

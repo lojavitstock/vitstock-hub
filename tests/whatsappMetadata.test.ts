@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import { parseGroupMetadata } from '../server/src/groupMetadata';
 import { providerPhoneDigits, providerPhoneJid } from '../server/src/whatsappIdentity';
-import { providerDisplayName, providerFallbackDisplayName, providerIdentityKey, providerPhoneDigits as frontendProviderPhoneDigits } from '../src/utils/whatsappIdentity';
+import { providerDisplayName, providerFallbackDisplayName, providerIdentityKey, providerPhoneDigits as frontendProviderPhoneDigits, providerPhoneDigitsForDisplay } from '../src/utils/whatsappIdentity';
 import { buildParticipantIdentityMap, enrichRecordsWithParticipantIdentities, participantAliasKeysFromRecord, participantDisplayNameFromSources, participantFallbackNameFromRecord, participantJidFromRecord, participantNameFromRecord, participantPhoneFromRecord } from '../server/src/participantIdentity';
 import { qaGroupMetadataRecords, qaGroupParticipantIdentityRecords, qaGroupParticipantRecords, qaIndividualIdentityRecords, qaNewGroupParticipantWebhookRecords } from '../server/src/qa';
 import { normalizeEvolutionMessage } from '../src/services/evolutionMessageAdapter';
@@ -20,6 +20,25 @@ test('explicit alternate phone identity resolves a LID conversation', () => {
   assert.equal(providerPhoneDigits(record), '5521997402785');
   assert.equal(providerPhoneJid(record), '5521997402785@s.whatsapp.net');
   assert.equal(frontendProviderPhoneDigits(record), '5521997402785');
+});
+
+test('provider phone display keeps only validated phone evidence', () => {
+  assert.equal(providerPhoneDigitsForDisplay({ remoteJid: '5521997402785@s.whatsapp.net' }), '5521997402785');
+  assert.equal(providerPhoneDigitsForDisplay({ remoteJidAlt: '+12125550100@s.whatsapp.net' }), '12125550100');
+
+  const shortProviderAlias = {
+    remoteJid: '903612345678901@lid',
+    remoteJidAlt: '76504431@s.whatsapp.net',
+  };
+  assert.equal(frontendProviderPhoneDigits(shortProviderAlias), '76504431');
+  assert.equal(providerPhoneDigitsForDisplay(shortProviderAlias), '');
+  assert.equal(shortProviderAlias.remoteJidAlt, '76504431@s.whatsapp.net');
+
+  assert.equal(providerPhoneDigitsForDisplay({ remoteJid: '164794086760597@lid' }), '');
+  assert.equal(providerPhoneDigitsForDisplay({
+    remoteJid: '164794086760597@lid',
+    remoteJidAlt: '5521997402785@s.whatsapp.net',
+  }), '5521997402785');
 });
 
 test('identity keys are stable and case-insensitive', () => {

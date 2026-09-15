@@ -1,8 +1,8 @@
 import { ChatStatus, WhatsappInstance, Conversation, Message } from '../types';
 import { mockInstances, mockConversations } from './mockData';
 import { evolutionMessagePreview, isEvolutionReactionEvent, normalizeEvolutionMessage } from './evolutionMessageAdapter';
-import { canonicalPhoneDigits, phoneVariants } from '../utils/phone';
-import { providerDisplayName, providerFallbackDisplayName, providerIdentityKey, providerPhoneDigits } from '../utils/whatsappIdentity';
+import { canonicalPhoneDigits, displayablePhoneDigits, phoneVariants } from '../utils/phone';
+import { providerDisplayName, providerFallbackDisplayName, providerIdentityKey, providerPhoneDigits, providerPhoneDigitsForDisplay } from '../utils/whatsappIdentity';
 import { callMessageInfo } from '../utils/callMessage';
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 import type { RealtimeEventPayload } from '../utils/realtimeUpdates';
@@ -585,8 +585,8 @@ export class EvolutionApiService {
         payload.whatsappIdentities.forEach((identity: any) => {
           const key = providerIdentityKey(identity?.identity);
           if (!key) return;
-          const phone = typeof identity?.phone === 'string' && identity.phone.replace(/\D/g, '').length >= 8
-            ? canonicalPhoneDigits(identity.phone)
+          const phone = typeof identity?.phone === 'string'
+            ? displayablePhoneDigits(identity.phone)
             : undefined;
           const value = {
             phone,
@@ -640,6 +640,7 @@ export class EvolutionApiService {
         const identity = whatsappIdentitiesMap.get(providerIdentityKey(rawRemoteJid))
           || phoneVariants(providerPhone).map((phone) => whatsappIdentitiesMap.get(`phone:${phone}`)).find(Boolean);
         const cleanNumber = isGroup ? '' : (canonicalPhoneDigits(identity?.phone) || providerPhone || '');
+        const displayNumber = isGroup ? '' : (displayablePhoneDigits(identity?.phone) || providerPhoneDigitsForDisplay(item) || '');
         const conversationKey = isGroup ? rawRemoteJid : cleanNumber || rawRemoteJid;
         const altJid = item.lastMessage?.key?.remoteJidAlt;
         const assignment = assignmentsMap.get(rawRemoteJid)
@@ -749,7 +750,7 @@ export class EvolutionApiService {
           contact: {
             id: rawRemoteJid,
             name: displayName,
-            phone: isGroup ? rawRemoteJid : cleanNumber ? `+${cleanNumber}` : '',
+            phone: isGroup ? rawRemoteJid : displayNumber ? `+${displayNumber}` : '',
             avatar: avatarSelection.avatar || '',
             tags: dailyResponder
               ? [{ id: `daily-responder-${dailyResponder.id}`, name: `👤 ${dailyResponder.name}`, color: '#A78BFA' }]
