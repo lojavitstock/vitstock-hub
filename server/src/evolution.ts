@@ -21,7 +21,7 @@ import { isNonRenderableProviderMessage, providerMessageType, unwrapProviderMess
 import { canonicalPhone, normalizeContactPhone } from './contactDomain.js';
 import { phoneLookupKeys, upsertContactPhone } from './contactPhones.js';
 import { isWhatsAppLid, providerPhoneDigits, providerPhoneJid } from './whatsappIdentity.js';
-import { resolveEvolutionRecipient } from './evolutionRecipient.js';
+import { isValidEvolutionTextRecipient, resolveEvolutionRecipient, resolveEvolutionTextRecipient } from './evolutionRecipient.js';
 import { mergeInboxActivity, normalizeProviderConversationIdentity, projectCanonicalInboxChats } from './inboxProjection.js';
 import { parseGroupMetadata, type GroupMetadata } from './groupMetadata.js';
 import {
@@ -110,7 +110,7 @@ const evolutionRecipientSchema = z.string().min(3).max(128).refine((value) => (
 ), 'destinatário Evolution inválido');
 const replyTraceIdSchema = z.string().trim().min(8).max(128).regex(/^[A-Za-z0-9._:-]+$/);
 const sendTextSchema = z.object({
-  number: evolutionRecipientSchema,
+  number: z.string().trim().max(128).optional().default(''),
   text: z.string().min(1).max(4096),
   remoteJid: z.string().min(3).max(128).optional(),
   clientMessageId: z.string().trim().min(1).max(128).optional(),
@@ -134,6 +134,14 @@ const sendTextSchema = z.object({
       participantPn: z.string().trim().min(3).max(128).optional(),
     }).optional(),
   }).optional(),
+}).superRefine((value, context) => {
+  if (!isValidEvolutionTextRecipient(value)) {
+    context.addIssue({
+      code: 'custom',
+      path: [value.remoteJid !== undefined ? 'remoteJid' : 'number'],
+      message: 'destinatário Evolution inválido',
+    });
+  }
 });
 const sendMediaSchema = z.object({
   number: evolutionRecipientSchema,
@@ -1391,8 +1399,9 @@ async function acquireOutboundLease(input: {
   user: { id: string };
   number: string;
   remoteJid: string;
+  conversationId?: string;
 }) {
-  const conversationId = await prepareOutboundConversation({
+  const conversationId = input.conversationId || await prepareOutboundConversation({
     companyId: input.companyId,
     number: input.number,
     remoteJid: input.remoteJid,
@@ -3132,9 +3141,13 @@ async function ensureOutboundMessage(input: {
       idempotencyLockMs = Date.now() - lockStartedAt;
     }
     const isGroup = isWhatsAppGroupJid(input.remoteJid);
+    const phoneDigits = input.number.replace(/\D/g, '');
+    const phoneJid = phoneDigits.length >= 8 && phoneDigits.length <= 20
+      ? canonicalPhoneJid(input.number)
+      : '';
     const identityCandidates = isGroup
       ? [input.remoteJid]
-      : [input.remoteJid, canonicalPhoneJid(input.number)];
+      : [input.remoteJid, phoneJid].filter(Boolean);
     const canonicalConversation = isGroup
       ? undefined
       : await resolveConversationWithClient(client, {
@@ -4244,6 +4257,17 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     if (!isConversationalProviderJid(canonicalRemoteJid)) {
       return reply.code(400).send({ error: 'Destinatário não conversacional', code: 'unsupported_provider_entity' });
     }
+    const explicitRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : undefined);
+    const evolutionRecipient = resolveEvolutionTextRecipient({ remoteJid: explicitRemoteJid, number });
+    const existingConversation = explicitRemoteJid
+      ? await resolveConversationForOperation({
+        companyId: request.user!.companyId,
+        remoteJid: canonicalRemoteJid,
+      }, { createIfMissing: false })
+      : undefined;
+    if (explicitRemoteJid && !number && !existingConversation) {
+      return reply.code(404).send({ error: 'Conversa não encontrada', code: 'conversation_not_found' });
+    }
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
     traceOutbound(request, 'received', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
@@ -4252,6 +4276,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       user: request.user!,
       number,
       remoteJid: canonicalRemoteJid,
+      conversationId: existingConversation?.id,
     });
     if (!leaseAcquisition.acquired) {
       traceReplyFailure(request, {
@@ -4337,7 +4362,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
             {
               method: 'POST',
               body: JSON.stringify({
-                number: isWhatsAppGroupJid(canonicalRemoteJid) ? canonicalRemoteJid : number,
+                number: evolutionRecipient.number,
                 text: formatHubOutboundText(request.user!.name, text),
                 delay: 1200,
                 linkPreview: true,

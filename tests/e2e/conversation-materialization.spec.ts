@@ -93,7 +93,15 @@ test('provider-only chat accepts tags before the first reply', async ({ page }, 
 
     const composer = page.locator('textarea[placeholder*="Digite sua mensagem"]');
     await composer.fill('Primeira resposta QA');
+    const sendResponsePromise = page.waitForResponse((response) => (
+      response.url().includes('/api/evolution/messages/send')
+      && response.request().method() === 'POST'
+    ));
     await composer.press('Enter');
+    const sendResponse = await sendResponsePromise;
+    expect(sendResponse.status()).toBe(200);
+    const sendBody = await sendResponse.json() as { evolution?: { key?: { remoteJid?: string } } };
+    expect(sendBody.evolution?.key?.remoteJid).toBe(fixtureBody.remoteJid);
     await expect(page.locator('[data-message-id]').filter({ hasText: 'Primeira resposta QA' })).toBeVisible({ timeout: 15_000 });
     await expect(providerOnly).toBeVisible();
     await expect(page.getByText('Conversa não encontrada', { exact: true })).toHaveCount(0);

@@ -1,4 +1,5 @@
 import { isWhatsAppGroup, isWhatsAppLid } from './whatsappIdentity.js';
+import { isConversationalProviderJid } from './providerJidPolicy.js';
 
 export type EvolutionRecipientStrategy = 'lid' | 'pn' | 'group';
 
@@ -31,4 +32,29 @@ export function resolveEvolutionRecipient(input: {
     number: canonicalPhone || remoteJid,
     strategy: 'pn',
   };
+}
+
+export function isValidEvolutionTextRecipient(input: {
+  remoteJid?: unknown;
+  number?: unknown;
+}) {
+  if (input.remoteJid !== undefined) {
+    return typeof input.remoteJid === 'string' && isConversationalProviderJid(input.remoteJid.trim());
+  }
+  const number = typeof input.number === 'string' ? input.number.trim() : '';
+  return /^\d{8,20}$/.test(number) || isWhatsAppGroup(number);
+}
+
+export function resolveEvolutionTextRecipient(input: {
+  remoteJid?: string | null;
+  number?: string | null;
+}): EvolutionRecipient {
+  const remoteJid = String(input.remoteJid || '').trim();
+  if (remoteJid) return resolveEvolutionRecipient({ remoteJid });
+
+  const number = String(input.number || '').trim();
+  return resolveEvolutionRecipient({
+    remoteJid: isWhatsAppGroup(number) ? number : undefined,
+    canonicalPhone: number,
+  });
 }
