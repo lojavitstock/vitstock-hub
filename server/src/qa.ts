@@ -11,6 +11,10 @@ export type QaGoogleScenario = 'success' | 'conflict' | 'rate-limit' | 'timeout'
 let googleScenario: QaGoogleScenario = 'success';
 let providerOnlyChat: Record<string, any> | null = null;
 let qaWebhookConfig: Record<string, any> | null = null;
+const qaImageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+const qaMediaFixtures = new Map<string, { base64: string; mimetype: string; available: boolean }>();
+const qaMediaRequests: Array<Record<string, unknown>> = [];
+const qaEvolutionSends: Array<Record<string, unknown>> = [];
 
 export function currentQaGoogleScenario() {
   return googleScenario;
@@ -55,6 +59,13 @@ export function qaGooglePeople() {
     },
   ];
   return googleScenario === 'external-delete' ? people.slice(1) : people;
+}
+
+export function qaEvolutionSendState() {
+  return {
+    sends: qaEvolutionSends.map((send) => ({ ...send })),
+    mediaRequests: qaMediaRequests.map((request) => ({ ...request })),
+  };
 }
 
 /** Deterministic group fixture used by local QA to exercise PN, LID and retroactive identity. */
@@ -187,6 +198,28 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
   const providerRemoteJid = participantNumber.includes('@')
     ? participantNumber
     : `${participantNumber.replace(/\D/g, '')}@s.whatsapp.net`;
+  if (path.includes('/chat/getBase64FromMediaMessage')) {
+    const messageKey = requestBody?.message?.key;
+    qaMediaRequests.push({
+      id: messageKey?.id,
+      remoteJid: messageKey?.remoteJid,
+      fromMe: messageKey?.fromMe,
+    });
+    const fixture = qaMediaFixtures.get(String(messageKey?.id || ''));
+    if (!fixture || !fixture.available) {
+      return Promise.resolve(new Response(JSON.stringify({ error: 'MEDIA_NOT_FOUND' }), { status: 404, headers: { 'Content-Type': 'application/json' } }));
+    }
+    return Promise.resolve(new Response(JSON.stringify({ base64: fixture.base64, mimetype: fixture.mimetype }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+  }
+  if (path.includes('/message/sendMedia/')) {
+    qaEvolutionSends.push({
+      number: requestBody?.number,
+      mediatype: requestBody?.mediatype,
+      mimetype: requestBody?.mimetype,
+      media: requestBody?.media,
+      ...(typeof requestBody?.caption === 'string' ? { caption: requestBody.caption } : {}),
+    });
+  }
   const body = path.includes('/message/sendText/') || path.includes('/message/sendMedia/')
     ? { key: { id: `qa-evolution-${randomUUID()}`, remoteJid: providerRemoteJid, fromMe: true } }
       : path.includes('/message/sendReaction/') ? { status: 'ok' }
@@ -225,9 +258,15 @@ const qaInboundSchema = z.object({
   remoteJid: z.string().min(3).max(128),
   phone: z.string().min(8).max(32).optional(),
   name: z.string().min(2).max(160).default('Contato QA'),
-  content: z.string().min(1).max(4096),
+  content: z.string().max(4096).optional().default(''),
+  mediaType: z.literal('image').optional(),
+  mediaAvailable: z.boolean().optional().default(true),
   isGroup: z.boolean().optional().default(false),
   timestampMs: z.number().int().positive().optional(),
+}).superRefine((value, context) => {
+  if (!value.mediaType && !value.content.trim()) {
+    context.addIssue({ code: 'custom', path: ['content'], message: 'conteúdo obrigatório' });
+  }
 });
 
 export async function registerQaRoutes(app: FastifyInstance) {
@@ -275,6 +314,9 @@ export async function registerQaRoutes(app: FastifyInstance) {
     const input = parsed.data;
     const timestampMs = input.timestampMs ?? Date.now();
     const phone = input.phone?.replace(/\D/g, '') || input.remoteJid.split('@')[0];
+    const evolutionMessageId = `qa-inbound-${randomUUID()}`;
+    const providerKey = { id: evolutionMessageId, remoteJid: input.remoteJid, fromMe: false };
+    const content = input.content || (input.mediaType === 'image' ? '[Imagem]' : '');
     const contact = await db.query<{ id: string }>(
       `INSERT INTO contacts (company_id, name, phone, source)
        VALUES ($1, $2, $3, 'system')
@@ -286,21 +328,25 @@ export async function registerQaRoutes(app: FastifyInstance) {
       `INSERT INTO conversations (company_id, contact_id, evolution_remote_jid, is_group, group_name, last_message, last_message_at, unread_count)
        VALUES ($1, $2, $3, $4, $5, $6, now(), 1)
        ON CONFLICT (company_id, evolution_remote_jid) DO UPDATE SET last_message = EXCLUDED.last_message, last_message_at = EXCLUDED.last_message_at, unread_count = conversations.unread_count + 1, updated_at = now()
-       RETURNING id`, [request.user!.companyId, contactId, input.remoteJid, input.isGroup, input.isGroup ? input.name : null, input.content],
+       RETURNING id`, [request.user!.companyId, contactId, input.remoteJid, input.isGroup, input.isGroup ? input.name : null, content],
     );
     const conversationId = conversation.rows[0]!.id;
-    const evolutionMessageId = `qa-inbound-${randomUUID()}`;
     await db.query(
-      `INSERT INTO messages (company_id, conversation_id, evolution_message_id, sender, sender_name, content, status, sent_at)
-       VALUES ($1, $2, $3, 'contact', $4, $5, 'delivered', to_timestamp($6::numeric / 1000))`,
-      [request.user!.companyId, conversationId, evolutionMessageId, input.name, input.content, timestampMs],
+      `INSERT INTO messages (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_type, metadata, status, sent_at)
+       VALUES ($1, $2, $3, 'contact', $4, $5, $6, $7::jsonb, 'delivered', to_timestamp($8::numeric / 1000))`,
+      [request.user!.companyId, conversationId, evolutionMessageId, input.name, content, input.mediaType || null, JSON.stringify(input.mediaType ? { providerKey } : {}), timestampMs],
     );
+    if (input.mediaType === 'image') {
+      qaMediaFixtures.set(evolutionMessageId, { base64: qaImageBase64, mimetype: 'image/png', available: input.mediaAvailable });
+    }
     publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
       remoteJid: input.remoteJid, phone, messageId: evolutionMessageId, timestampMs, fromMe: false,
-      message: { id: evolutionMessageId, conversationId: input.remoteJid, sender: 'contact', senderName: input.name, content: input.content, status: 'delivered', isInternalNote: false, timestampMs },
+      message: { id: evolutionMessageId, conversationId: input.remoteJid, sender: 'contact', senderName: input.name, content, ...(input.mediaType ? { mediaType: input.mediaType, metadata: { providerKey }, rawKey: providerKey } : {}), status: 'delivered', isInternalNote: false, timestampMs },
     });
     return { injected: true, remoteJid: input.remoteJid, evolutionMessageId };
   });
+
+  app.get('/api/qa/evolution/sends', { preHandler: requireAdmin }, async () => qaEvolutionSendState());
 
   app.post('/api/qa/provider-only', { preHandler: requireAdmin }, async () => {
     const fixtureSuffix = `${Date.now()}${Math.floor(Math.random() * 10_000).toString().padStart(4, '0')}`.slice(-13);

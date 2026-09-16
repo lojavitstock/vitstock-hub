@@ -38,6 +38,9 @@ export const ForwardMessageDialog: React.FC<ForwardMessageDialogProps> = ({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [clientMessageId] = useState(createClientMessageId);
+  const sourcePreview = message.mediaType === 'image'
+    ? `Imagem${message.content.trim() && message.content.trim() !== '[Imagem]' ? ` — ${message.content.trim()}` : ''}`
+    : message.content.trim();
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -91,7 +94,7 @@ export const ForwardMessageDialog: React.FC<ForwardMessageDialogProps> = ({
         <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
           <div>
             <h2 id="forward-message-title" className="flex items-center gap-2 text-base font-extrabold text-slate-100"><Forward className="h-4 w-4 text-amber-300" /> Encaminhar mensagem</h2>
-            <p className="mt-1 max-w-sm truncate text-xs text-slate-400">{message.content.trim()}</p>
+            <p className="mt-1 max-w-sm truncate text-xs text-slate-400">{sourcePreview}</p>
           </div>
           <button type="button" disabled={sending} onClick={onCancel} aria-label="Fechar encaminhamento" className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-white/5 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"><X className="h-4 w-4" /></button>
         </div>

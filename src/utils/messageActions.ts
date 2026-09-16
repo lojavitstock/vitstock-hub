@@ -49,16 +49,15 @@ export const canDownloadMessageMedia = (message: Message) => Boolean(
   message.mediaType && (message.rawKey || message.mediaUrl),
 );
 
-/** Only confirmed, ordinary text messages can be forwarded in the MVP. */
+/** Only confirmed, ordinary text or image messages can be forwarded. */
 export const canForwardMessage = (message: Message) => Boolean(
   message.id.trim()
     && (message.sender === 'contact' || message.sender === 'attendant')
     && message.status !== 'pending'
     && message.status !== 'failed'
-    && !message.mediaType
     && !message.isInternalNote
     && message.metadata?.deletedForEveryone !== true
-    && Boolean(message.content.trim()),
+    && (!message.mediaType ? Boolean(message.content.trim()) : message.mediaType === 'image'),
 );
 
 export const messageCopyText = (message: Message) => message.metadata?.deletedForEveryone === true

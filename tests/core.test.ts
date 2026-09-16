@@ -38,7 +38,7 @@ import {
 } from '../server/src/messageReactions';
 import { providerIdentityCandidates, resolveProviderMessageTarget, selectNewReconciledMessageActivity } from '../server/src/evolution';
 import { isValidEvolutionTextRecipient, resolveEvolutionRecipient, resolveEvolutionTextRecipient } from '../server/src/evolutionRecipient';
-import { evolutionTextPayload, forwardableTextFromSource, type ForwardSourceMessage } from '../server/src/messageForward';
+import { evolutionTextPayload, forwardableImageFromSource, forwardableTextFromSource, type ForwardSourceMessage } from '../server/src/messageForward';
 import { qaEvolutionResponse } from '../server/src/qa';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
 import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
@@ -2641,14 +2641,20 @@ test('posiciona popovers da mensagem dentro da viewport nas duas bordas', () => 
   }
 });
 
-test('menu de mensagem expõe encaminhar apenas para texto confirmado, com download apenas para mídia', () => {
+test('menu de mensagem expõe encaminhar para texto/imagem confirmados, com download apenas para mídia', () => {
   const text = message('menu-text', 1_709, 'Texto do cliente');
+  const image = message('menu-image', 1_709.5, '[Imagem]', 'read', {
+    mediaType: 'image',
+    rawKey: { id: 'menu-image', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+  });
   const document = message('menu-document', 1_710, '[Documento]', 'read', {
     mediaType: 'document',
     rawKey: { id: 'menu-document', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
   });
 
   assert.deepEqual(messageMenuActionsFor(text), ['reply', 'forward', 'react', 'copy']);
+  assert.deepEqual(messageMenuActionsFor(image), ['reply', 'forward', 'react', 'copy', 'download']);
+  assert.equal(canForwardMessage(image), true);
   assert.deepEqual(messageMenuActionsFor(document), ['reply', 'react', 'copy', 'download']);
   assert.equal(canForwardMessage(text), true);
   assert.equal(canForwardMessage(document), false);
@@ -3276,6 +3282,15 @@ test('forward text payload preserves PN, LID and group transport identities', ()
     assert.equal(payload.quoted, undefined);
     assert.match(payload.text, /Texto original/);
   }
+});
+
+test('forward image accepts captions but never treats the media placeholder as a caption', () => {
+  const image = forwardSource({ media_type: 'image', content: 'Legenda original' });
+  assert.deepEqual(forwardableImageFromSource(image), { caption: 'Legenda original' });
+  assert.deepEqual(forwardableImageFromSource(forwardSource({ media_type: 'image', content: '[Imagem]' })), { caption: undefined });
+  assert.equal(forwardableImageFromSource(forwardSource({ media_type: 'video' })), undefined);
+  assert.equal(forwardableImageFromSource(forwardSource({ media_type: 'image', status: 'pending' })), undefined);
+  assert.equal(forwardableImageFromSource(forwardSource({ media_type: 'image', metadata: { deletedForEveryone: true } })), undefined);
 });
 
 const inboxProjectionChat = (remoteJid: string, overrides: Record<string, any> = {}) => ({
