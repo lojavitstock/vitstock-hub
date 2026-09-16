@@ -62,7 +62,7 @@ import {
 import { hasQaProviderOnlyChat, qaEvolutionResponse } from './qa.js';
 import { loadConversationTags } from './conversationTags.js';
 import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.js';
-import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
+import { buildEvolutionSendLocationErrorDiagnostic, buildEvolutionSendLocationTransportDiagnostic, evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
 import { buildReplyFailureTrace } from './replyFailureTrace.js';
 import { resolveConversationForOperation, resolveConversationWithClient } from './conversationResolver.js';
 import { filterConversationalProviderChats, isConversationalProviderJid } from './providerJidPolicy.js';
@@ -3727,7 +3727,12 @@ async function dispatchForwardedLocation(input: {
           status: response.status,
           statusText: response.statusText,
           body,
-          providerError: response.ok ? undefined : sanitizeEvolutionProviderError(rawBody),
+          providerError: response.ok ? undefined : sanitizeEvolutionProviderError(rawBody, [
+            String(location.latitude),
+            String(location.longitude),
+            location.name || '',
+            location.address || '',
+          ]),
         };
       },
     );
@@ -3743,7 +3748,15 @@ async function dispatchForwardedLocation(input: {
       errorCode: 'evolution_unavailable',
       failureOrigin: 'evolution_network',
     });
-    request.log.warn({ err: error }, 'Falha de comunicação com a Evolution API ao encaminhar localização');
+    request.log.warn(
+      buildEvolutionSendLocationTransportDiagnostic({
+        error,
+        number: evolutionRecipient.number,
+        remoteJid,
+        instanceName: config.EVOLUTION_INSTANCE_NAME,
+      }),
+      '[EVOLUTION_SEND_LOCATION_TRANSPORT_ERROR]',
+    );
     return reply.code(502).send({ error: 'Evolution API indisponível', messageId: localMessage.messageId });
   }
   if (!dispatch.ok) {
@@ -3763,19 +3776,21 @@ async function dispatchForwardedLocation(input: {
       evolutionStatusText: dispatch.statusText,
       providerError: dispatch.providerError,
     });
-    if (outboundTraceEnabled) {
-      request.log.warn({
-        operation: 'evolution.forwardLocation',
-        httpStatus: dispatch.status,
-        statusText: dispatch.statusText,
-        ...recipientDiagnostics,
+    request.log.warn(
+      buildEvolutionSendLocationErrorDiagnostic({
+        providerStatus: dispatch.status,
+        providerStatusText: dispatch.statusText,
+        providerResponse: dispatch.providerError,
+        number: evolutionRecipient.number,
+        remoteJid,
         latitude: location.latitude,
         longitude: location.longitude,
-        hasName: Boolean(location.name),
-        hasAddress: Boolean(location.address),
-        providerError: dispatch.providerError,
-      }, 'Evolution forward-location rejected');
-    }
+        name: location.name,
+        address: location.address,
+        instanceName: config.EVOLUTION_INSTANCE_NAME,
+      }),
+      '[EVOLUTION_SEND_LOCATION_ERROR]',
+    );
     return reply.code(status).send({
       error: status === 502 ? 'Evolution API indisponível' : 'Evolution API rejeitou a localização',
       code: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',

@@ -40,7 +40,7 @@ import { providerIdentityCandidates, resolveProviderMessageTarget, selectNewReco
 import { isValidEvolutionTextRecipient, resolveEvolutionRecipient, resolveEvolutionTextRecipient } from '../server/src/evolutionRecipient';
 import { evolutionTextPayload, forwardableImageFromSource, forwardableLocationFromSource, forwardableTextFromSource, type ForwardSourceMessage } from '../server/src/messageForward';
 import { qaEvolutionResponse } from '../server/src/qa';
-import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
+import { buildEvolutionSendLocationErrorDiagnostic, buildEvolutionSendLocationTransportDiagnostic, evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
 import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
 import {
   resetAvatarDebugDedupe as resetServerAvatarDebugDedupe,
@@ -3608,6 +3608,57 @@ test('send-media provider diagnostics keep only safe fields and redact identifie
   assert.equal('base64' in sanitized, false);
   assert.equal('authorization' in sanitized, false);
   assert.equal(String(sanitizeEvolutionProviderError('Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789')).includes('abcdefghijklmnopqrstuvwxyz'), false);
+});
+
+test('send-location diagnostics keep provider rejection useful without sensitive request data', () => {
+  const diagnostic = buildEvolutionSendLocationErrorDiagnostic({
+    providerStatus: 422,
+    providerStatusText: 'Unprocessable Entity',
+    providerResponse: {
+      status: 422,
+      code: 'invalid_location',
+      message: 'location rejected at -23.55052,-46.63331 for 5521999999999@s.whatsapp.net',
+      details: { latitude: -23.55052, longitude: -46.63331 },
+      apikey: 'super-secret-key',
+    },
+    number: '5521999999999@s.whatsapp.net',
+    remoteJid: '5521999999999@s.whatsapp.net',
+    latitude: -23.55052,
+    longitude: -46.63331,
+    name: 'Loja Vitstock',
+    address: 'Rua sensível, 123',
+    instanceName: 'preview-instance',
+  });
+  const serialized = JSON.stringify(diagnostic);
+  assert.equal(diagnostic.event, 'evolution.send_location.error');
+  assert.equal(diagnostic.providerStatus, 422);
+  assert.equal(diagnostic.recipientClass, 'pn');
+  assert.equal(diagnostic.latitudeValid, true);
+  assert.equal(diagnostic.longitudeValid, true);
+  assert.equal(diagnostic.instancePresent, true);
+  assert.equal(serialized.includes('5521999999999'), false);
+  assert.equal(serialized.includes('23.55052'), false);
+  assert.equal(serialized.includes('46.63331'), false);
+  assert.equal(serialized.includes('Loja Vitstock'), false);
+  assert.equal(serialized.includes('Rua sensível'), false);
+  assert.equal(serialized.includes('super-secret-key'), false);
+  assert.match(serialized, /invalid_location/);
+});
+
+test('send-location transport diagnostics expose only safe classification', () => {
+  const diagnostic = buildEvolutionSendLocationTransportDiagnostic({
+    error: new Error('request failed with apikey=super-secret-key for 5521999999999@s.whatsapp.net'),
+    number: '5521999999999@s.whatsapp.net',
+    remoteJid: '5521999999999@s.whatsapp.net',
+    instanceName: 'preview-instance',
+  });
+  assert.deepEqual(diagnostic, {
+    event: 'evolution.send_location.transport_error',
+    errorClass: 'Error',
+    safeMessage: 'provider_request_failed_before_http_response',
+    recipientClass: 'pn',
+    instancePresent: true,
+  });
 });
 
 test('emoji insertion preserves the current cursor and Unicode sequence', () => {
