@@ -113,6 +113,7 @@ export const AtendimentoPage: React.FC = () => {
   const [conversationTags, setConversationTags] = useState<Tag[]>([]);
   const [showConversationTagMenu, setShowConversationTagMenu] = useState(false);
   const conversationTagMenuRef = useRef<HTMLDivElement>(null);
+  const conversationSearchInputRef = useRef<HTMLInputElement>(null);
 
   const revokeAttachmentPreview = useCallback((draft: AttachmentDraft) => {
     if (draft.previewUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
@@ -1751,11 +1752,26 @@ export const AtendimentoPage: React.FC = () => {
             <input 
               type="text" 
               placeholder="Buscar cliente, telefone..."
+              ref={conversationSearchInputRef}
               value={conversationSearch}
               onChange={(event) => setConversationSearch(event.target.value)}
               aria-label="Buscar atendimento por nome ou telefone"
-              className="h-11 w-full rounded-xl border border-transparent bg-[#2a343a] pl-10 pr-3 text-[13px] text-slate-100 placeholder-slate-400 transition-colors focus:border-amber-400/70 focus:outline-none"
+              className="h-11 w-full rounded-xl border border-transparent bg-[#2a343a] pl-10 pr-10 text-[13px] text-slate-100 placeholder-slate-400 transition-colors focus:border-amber-400/70 focus:outline-none"
             />
+            {conversationSearch.length > 0 && (
+              <button
+                type="button"
+                aria-label="Limpar busca"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  setConversationSearch('');
+                  conversationSearchInputRef.current?.focus();
+                }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-white/10 hover:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-amber-300/70"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
           </div>
 
           {/* Filtros de atendimento */}
@@ -1910,15 +1926,6 @@ export const AtendimentoPage: React.FC = () => {
                   <CheckCircle className="w-3.5 h-3.5" />
                   {activeConv.status === 'resolved' ? 'Reabrir Conversa' : 'Concluído'}
                 </button>
-                {activeConv.status !== 'resolved' && (
-                  <button
-                    type="button"
-                    onClick={() => updateActiveChatStatus(activeConv.status === 'pending' ? 'open' : 'pending')}
-                    className="px-3 py-1.5 text-xs font-bold rounded-lg bg-slate-400/10 text-slate-300 border border-slate-400/20 hover:bg-slate-400 hover:text-zinc-950 transition-all"
-                  >
-                    {activeConv.status === 'pending' ? 'Retirar da Entrega' : 'Solicitar Entrega'}
-                  </button>
-                )}
                 <div ref={conversationTagMenuRef} className="relative">
                   <button
                     type="button"

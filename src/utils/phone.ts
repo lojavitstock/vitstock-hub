@@ -46,6 +46,31 @@ export const canonicalPhoneDigits = (value: string | undefined, defaultCountry =
   return identity.canonical?.replace(/\D/g, '') || normalizePhone(raw);
 };
 
+/**
+ * Returns phone digits only when a provider value has enough explicit phone
+ * context to be displayed. Provider aliases remain valid identity values,
+ * but a bare short @s.whatsapp.net local-part is not a displayable phone.
+ */
+export const displayablePhoneDigits = (value: string | undefined, defaultCountry = 'BR') => {
+  const raw = String(value || '').trim();
+  const lower = raw.toLowerCase();
+  if (!raw || lower.endsWith('@lid') || lower.endsWith('@g.us')) return '';
+
+  const providerSuffix = lower.endsWith('@s.whatsapp.net') || lower.endsWith('@c.us');
+  const candidate = providerSuffix ? raw.slice(0, raw.lastIndexOf('@')) : raw;
+  const identity = normalizePhoneIdentity(candidate, defaultCountry);
+  const digits = identity.canonical?.replace(/\D/g, '') || '';
+  if (!digits || digits.length > 15) return '';
+
+  // A provider JID without an explicit international prefix is displayable
+  // only for the existing full Brazilian representation. Other provider
+  // aliases remain available for identity/reconciliation, not phone display.
+  if (providerSuffix && !candidate.startsWith('+') && !/^00\d/.test(candidate)
+    && !(digits.startsWith('55') && (digits.length === 12 || digits.length === 13))) return '';
+
+  return digits;
+};
+
 export type ContactPhoneValue = { phone?: string; is_primary?: boolean };
 
 /**

@@ -37,7 +37,8 @@ import {
   providerReactionUpdate,
 } from '../server/src/messageReactions';
 import { providerIdentityCandidates, resolveProviderMessageTarget, selectNewReconciledMessageActivity } from '../server/src/evolution';
-import { resolveEvolutionRecipient } from '../server/src/evolutionRecipient';
+import { isValidEvolutionTextRecipient, resolveEvolutionRecipient, resolveEvolutionTextRecipient } from '../server/src/evolutionRecipient';
+import { qaEvolutionResponse } from '../server/src/qa';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
 import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
 import {
@@ -3208,6 +3209,30 @@ test('sendMedia usa o JID completo para destinatários LID e preserva PN/grupo',
     remoteJid: '120363000000@g.us',
     canonicalPhone: '5521999999999',
   }), { number: '120363000000@g.us', strategy: 'group' });
+});
+
+test('envio textual preserva o destinatário efetivo do mock Evolution', async () => {
+  const sendToMock = async (input: { remoteJid?: string; number?: string }) => {
+    const recipient = resolveEvolutionTextRecipient(input);
+    const response = await qaEvolutionResponse('/message/sendText/vitstock-qa', {
+      method: 'POST',
+      body: JSON.stringify({ number: recipient.number, text: 'Mensagem QA' }),
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { key?: { remoteJid?: string } };
+    return body.key?.remoteJid;
+  };
+
+  const pn = '5521999999999@s.whatsapp.net';
+  const lid = '903612345678901@lid';
+  const group = '120363000000@g.us';
+  assert.equal(await sendToMock({ remoteJid: pn, number: '' }), pn);
+  assert.equal(await sendToMock({ remoteJid: lid, number: '' }), lid);
+  assert.equal(await sendToMock({ remoteJid: group, number: '' }), group);
+  assert.equal(await sendToMock({ number: '5521999999999' }), `${'5521999999999'}@s.whatsapp.net`);
+  assert.equal(isValidEvolutionTextRecipient({ number: '' }), false);
+  assert.equal(isValidEvolutionTextRecipient({ remoteJid: 'status@broadcast', number: '' }), false);
+  assert.equal(await sendToMock({ remoteJid: pn, number: '5521888888888' }), pn);
 });
 
 const inboxProjectionChat = (remoteJid: string, overrides: Record<string, any> = {}) => ({

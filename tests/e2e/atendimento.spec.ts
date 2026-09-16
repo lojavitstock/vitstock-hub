@@ -132,7 +132,8 @@ test('Atendimento abre a lista e uma conversa sem enviar mensagens', async ({ pa
     await expect(brokenAvatar).toBeVisible();
     await expect.poll(() => validAvatar.locator('img').evaluate((image) => (image as HTMLImageElement).naturalWidth > 0)).toBe(true);
     await expect(missingAvatar.locator('img')).toHaveCount(0);
-    await expect.poll(() => brokenAvatar.locator('img').evaluate((image) => (image as HTMLImageElement).style.display === 'none')).toBe(true);
+    await expect(brokenAvatar.locator('img')).toHaveCount(0);
+    await expect(brokenAvatar.locator('svg')).toHaveCount(1);
 
     const expectedAvatarFailures = diagnostics.entries.filter((entry) => entry.url?.includes('/api/qa/avatar/broken.svg')
       && ((entry.kind === 'http-error' && entry.status === 404) || entry.kind === 'requestfailed'));
