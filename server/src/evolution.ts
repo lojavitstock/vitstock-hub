@@ -66,6 +66,7 @@ import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '.
 import { buildReplyFailureTrace } from './replyFailureTrace.js';
 import { resolveConversationForOperation, resolveConversationWithClient } from './conversationResolver.js';
 import { filterConversationalProviderChats, isConversationalProviderJid } from './providerJidPolicy.js';
+import { evolutionTextPayload, forwardableTextFromSource, type ForwardSourceMessage } from './messageForward.js';
 import {
   deletedMessageMetadata,
   editedMessageMetadata,
@@ -154,6 +155,19 @@ const sendMediaSchema = z.object({
   clientMessageId: z.string().trim().min(1).max(128).optional(),
   replyTraceId: replyTraceIdSchema.optional(),
   quotedMessage: sendTextSchema.shape.quotedMessage,
+});
+const forwardTextSchema = z.object({
+  sourceMessageId: z.string().trim().min(1).max(256),
+  destinationRemoteJid: z.string().trim().min(3).max(128),
+  clientMessageId: z.string().trim().min(1).max(128),
+}).strict().superRefine((value, context) => {
+  if (!isConversationalProviderJid(value.destinationRemoteJid)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['destinationRemoteJid'],
+      message: 'destinatário Evolution inválido',
+    });
+  }
 });
 const sendReactionSchema = z.object({
   number: evolutionRecipientSchema,
@@ -2253,6 +2267,20 @@ async function findMessageMutationTarget(companyId: string, messageId: string) {
   return result.rows[0];
 }
 
+const forwardSourceMessageQuery = `
+  SELECT m.id, m.conversation_id, m.sender, m.content, m.media_url,
+         m.media_type, m.metadata, m.is_internal_note
+  FROM messages m
+  WHERE m.company_id = $1::uuid
+    AND (m.evolution_message_id = $2::text OR m.id::text = $2::text)
+  ORDER BY m.sent_at DESC
+  LIMIT 1`;
+
+async function findForwardSourceMessage(companyId: string, sourceMessageId: string) {
+  const result = await db.query<ForwardSourceMessage>(forwardSourceMessageQuery, [companyId, sourceMessageId]);
+  return result.rows[0];
+}
+
 async function persistMessageMutation(input: {
   target: MessageMutationDbRow;
   operation: 'edit' | 'delete';
@@ -3359,6 +3387,233 @@ async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed
   }
 }
 
+async function dispatchOutboundText(input: {
+  request: FastifyRequest;
+  reply: FastifyReply;
+  number: string;
+  remoteJid: string;
+  text: string;
+  clientMessageId: string;
+  replyTraceId?: string;
+  normalizedQuote?: QuotedMessage;
+  evolutionQuote?: unknown;
+  evolutionRecipient?: ReturnType<typeof resolveEvolutionTextRecipient>;
+  leaseAcquisition: Awaited<ReturnType<typeof acquireOutboundLease>>;
+  outboundStartedAt: number;
+}) {
+  const { request, reply, number, remoteJid, text, clientMessageId, replyTraceId, normalizedQuote, evolutionQuote } = input;
+  const evolutionRecipient = input.evolutionRecipient || resolveEvolutionTextRecipient({ remoteJid, number });
+  let localMessage: Awaited<ReturnType<typeof ensureOutboundMessage>>;
+  try {
+    localMessage = await ensureOutboundMessage({
+      companyId: request.user!.companyId,
+      userId: request.user!.id,
+      userName: request.user!.name,
+      number,
+      remoteJid,
+      content: text,
+      clientMessageId,
+      quotedMessage: normalizedQuote,
+    });
+  } catch (error) {
+    traceReplyFailure(request, {
+      replyTraceId,
+      conversationId: remoteJid,
+      localMessageId: clientMessageId,
+      clientMessageId,
+      quote: normalizedQuote,
+      recipient: { number, remoteJid },
+      messageType: normalizedQuote?.mediaType || 'text',
+      backendStatus: 500,
+      errorCode: 'persistence_failed',
+      failureOrigin: 'backend_rejected',
+    });
+    throw error;
+  }
+  traceOutbound(request, 'outbox.prepared', {
+    clientMessageId,
+    replyTraceId,
+    remoteJid,
+    evolutionMessageId: localMessage.evolutionMessageId || undefined,
+    deduplicated: localMessage.deduplicated,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+    idempotencyLockMs: localMessage.idempotencyLockMs,
+    persistenceMs: localMessage.persistenceMs,
+  });
+  if (localMessage.deduplicated) {
+    return {
+      remoteJid,
+      message: {
+        id: localMessage.messageId,
+        evolutionMessageId: localMessage.evolutionMessageId || undefined,
+        status: localMessage.status,
+        senderName: request.user!.name,
+      },
+      deduplicated: true,
+    };
+  }
+
+  let dispatch: { ok: boolean; status: number; statusText: string; body: any; providerError?: unknown };
+  const evolutionRequestStartedAt = Date.now();
+  try {
+    dispatch = await outboundEvolutionRequests.run(
+      `${request.user!.companyId}:${clientMessageId}`,
+      async () => {
+        traceOutbound(request, 'evolution.request', { clientMessageId, replyTraceId, remoteJid, elapsedMs: Date.now() - input.outboundStartedAt });
+        const response = await evolutionRequest(
+          `/message/sendText/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+          {
+            method: 'POST',
+            body: JSON.stringify(evolutionTextPayload({
+              recipient: evolutionRecipient.number,
+              text,
+              userName: request.user!.name,
+              quoted: evolutionQuote,
+            })),
+          },
+        );
+        const rawBody = await response.text();
+        let body: unknown;
+        try {
+          body = rawBody ? JSON.parse(rawBody) : undefined;
+        } catch {
+          body = rawBody;
+        }
+        return {
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+          body,
+          providerError: response.ok ? undefined : sanitizeEvolutionProviderError(rawBody, [text]),
+        };
+      },
+    );
+  } catch (error) {
+    await updateOutboundMessage(localMessage.messageId, 'failed');
+    traceReplyFailure(request, {
+      replyTraceId,
+      conversationId: remoteJid,
+      localMessageId: localMessage.messageId,
+      clientMessageId,
+      quote: normalizedQuote,
+      recipient: { number, remoteJid },
+      messageType: normalizedQuote?.mediaType || 'text',
+      backendStatus: 502,
+      errorCode: 'evolution_unavailable',
+      failureOrigin: 'evolution_network',
+    });
+    request.log.warn({ err: error }, 'Falha de comunicação com a Evolution API');
+    return reply.code(502).send({ error: 'Evolution API unavailable', messageId: localMessage.messageId, ...(replyTraceId ? { replyTraceId } : {}) });
+  }
+  if (!dispatch.ok) {
+    await updateOutboundMessage(localMessage.messageId, 'failed');
+    const status = [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(dispatch.status) ? dispatch.status : 502;
+    traceReplyFailure(request, {
+      replyTraceId,
+      conversationId: remoteJid,
+      localMessageId: localMessage.messageId,
+      clientMessageId,
+      quote: normalizedQuote,
+      recipient: { number, remoteJid },
+      messageType: normalizedQuote?.mediaType || 'text',
+      backendStatus: status,
+      errorCode: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
+      failureOrigin: 'evolution_rejected',
+      evolutionStatus: dispatch.status,
+      evolutionStatusText: dispatch.statusText,
+      providerError: dispatch.providerError,
+    });
+    return reply.code(status).send({
+      error: status === 502 ? 'Evolution API unavailable' : 'Evolution API rejected the message',
+      code: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
+      providerStatus: dispatch.status,
+      messageId: localMessage.messageId,
+      ...(replyTraceId ? { replyTraceId } : {}),
+    });
+  }
+
+  const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
+  const evolutionMessageId = evolutionMessageReference?.messageId;
+  const outboundProviderKey = providerKeyForOutboundResponse(dispatch.body, evolutionMessageId);
+  traceOutbound(request, 'evolution.response', {
+    clientMessageId,
+    replyTraceId,
+    remoteJid,
+    evolutionMessageId,
+    evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
+    ok: dispatch.ok,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+    evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
+  });
+  await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined, outboundProviderKey);
+  traceOutbound(request, 'persistence.confirmed', {
+    clientMessageId,
+    replyTraceId,
+    remoteJid,
+    evolutionMessageId,
+    evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+  });
+  const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
+  const realtimeTimestampMs = Date.now();
+  publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
+    remoteJid,
+    phone: number,
+    messageId: realtimeMessageId,
+    timestampMs: realtimeTimestampMs,
+    fromMe: true,
+    message: {
+      id: realtimeMessageId,
+      conversationId: remoteJid,
+      sender: 'attendant',
+      senderName: request.user!.name,
+      content: text,
+      metadata: {
+        sentByHub: true,
+        sentByUserId: request.user!.id,
+        sentByUserName: request.user!.name,
+        ...(clientMessageId ? { clientMessageId } : {}),
+        ...(normalizedQuote ? { quotedMessage: normalizedQuote } : {}),
+        ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+      },
+      rawKey: outboundProviderKey || { id: realtimeMessageId, remoteJid, fromMe: true },
+      timestampMs: realtimeTimestampMs,
+      timestamp: new Date(realtimeTimestampMs).toISOString(),
+      status: 'sent',
+      isInternalNote: false,
+    },
+  });
+  traceOutbound(request, 'sse.published', {
+    clientMessageId,
+    replyTraceId,
+    remoteJid,
+    evolutionMessageId: realtimeMessageId,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+  });
+
+  let dailyResponder: { id: string; name: string; date: string } | undefined;
+  if (number) {
+    try {
+      dailyResponder = await recordDailyResponder(request.user!.companyId, number, request.user!);
+    } catch (error) {
+      request.log.warn({ err: error }, 'Não foi possível registrar o primeiro atendente do dia');
+    }
+  }
+  return {
+    evolution: dispatch.body,
+    dailyResponder,
+    lease: input.leaseAcquisition.lease,
+    remoteJid,
+    message: {
+      id: localMessage.messageId,
+      evolutionMessageId,
+      status: 'sent',
+      senderName: request.user!.name,
+      ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+    },
+  };
+}
+
 export async function registerEvolutionRoutes(app: FastifyInstance) {
   const webhookMonitor = createEvolutionWebhookMonitor({
     contract: buildEvolutionWebhookContract({
@@ -4301,214 +4556,82 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       phone: number,
       lease: leaseAcquisition.lease,
     }));
-    let localMessage: Awaited<ReturnType<typeof ensureOutboundMessage>>;
-    try {
-      localMessage = await ensureOutboundMessage({
-        companyId: request.user!.companyId,
-        userId: request.user!.id,
-        userName: request.user!.name,
-        number,
-        remoteJid: canonicalRemoteJid,
-        content: text,
-        clientMessageId,
-        quotedMessage: normalizedQuote,
-      });
-    } catch (error) {
-      traceReplyFailure(request, {
-        replyTraceId,
-        conversationId: canonicalRemoteJid,
-        localMessageId: clientMessageId,
-        clientMessageId,
-        quote: normalizedQuote,
-        recipient: { number, remoteJid: canonicalRemoteJid },
-        messageType: normalizedQuote?.mediaType || 'text',
-        backendStatus: 500,
-        errorCode: 'persistence_failed',
-        failureOrigin: 'backend_rejected',
-      });
-      throw error;
-    }
-    traceOutbound(request, 'outbox.prepared', {
+    return dispatchOutboundText({
+      request,
+      reply,
+      number,
+      remoteJid: canonicalRemoteJid,
+      text,
       clientMessageId,
       replyTraceId,
-      remoteJid: canonicalRemoteJid,
-      evolutionMessageId: localMessage.evolutionMessageId || undefined,
-      deduplicated: localMessage.deduplicated,
-      elapsedMs: Date.now() - outboundStartedAt,
-      idempotencyLockMs: localMessage.idempotencyLockMs,
-      persistenceMs: localMessage.persistenceMs,
+      normalizedQuote,
+      evolutionQuote,
+      evolutionRecipient,
+      leaseAcquisition,
+      outboundStartedAt,
     });
-    if (localMessage.deduplicated) {
-      return {
-        remoteJid: canonicalRemoteJid,
-        message: {
-          id: localMessage.messageId,
-          evolutionMessageId: localMessage.evolutionMessageId || undefined,
-          status: localMessage.status,
-          senderName: request.user!.name,
-        },
-        deduplicated: true,
-      };
+  });
+
+  app.post('/api/evolution/messages/forward', { preHandler: requireUser }, async (request, reply) => {
+    const parsed = forwardTextSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Encaminhamento inválido', code: 'invalid_forward_payload' });
     }
-    let dispatch: { ok: boolean; status: number; statusText: string; body: any; providerError?: unknown };
-    const evolutionRequestStartedAt = Date.now();
-    try {
-      dispatch = await outboundEvolutionRequests.run(
-        `${request.user!.companyId}:${clientMessageId}`,
-        async () => {
-          traceOutbound(request, 'evolution.request', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
-          const response = await evolutionRequest(
-            `/message/sendText/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
-            {
-              method: 'POST',
-              body: JSON.stringify({
-                number: evolutionRecipient.number,
-                text: formatHubOutboundText(request.user!.name, text),
-                delay: 1200,
-                linkPreview: true,
-                ...(evolutionQuote ? { quoted: evolutionQuote } : {}),
-              }),
-            },
-          );
-          const rawBody = await response.text();
-          let body: unknown;
-          try {
-            body = rawBody ? JSON.parse(rawBody) : undefined;
-          } catch {
-            body = rawBody;
-          }
-          return {
-            ok: response.ok,
-            status: response.status,
-            statusText: response.statusText,
-            body,
-            providerError: response.ok ? undefined : sanitizeEvolutionProviderError(rawBody, [text]),
-          };
-        },
-      );
-    } catch (error) {
-      await updateOutboundMessage(localMessage.messageId, 'failed');
-      traceReplyFailure(request, {
-        replyTraceId,
-        conversationId: canonicalRemoteJid,
-        localMessageId: localMessage.messageId,
-        clientMessageId,
-        quote: normalizedQuote,
-        recipient: { number, remoteJid: canonicalRemoteJid },
-        messageType: normalizedQuote?.mediaType || 'text',
-        backendStatus: 502,
-        errorCode: 'evolution_unavailable',
-        failureOrigin: 'evolution_network',
-      });
-      request.log.warn({ err: error }, 'Falha de comunicação com a Evolution API');
-      return reply.code(502).send({ error: 'Evolution API unavailable', messageId: localMessage.messageId, ...(replyTraceId ? { replyTraceId } : {}) });
+
+    const source = await findForwardSourceMessage(request.user!.companyId, parsed.data.sourceMessageId);
+    if (!source) {
+      return reply.code(404).send({ error: 'Mensagem não encontrada', code: 'source_message_not_found' });
     }
-    if (!dispatch.ok) {
-      await updateOutboundMessage(localMessage.messageId, 'failed');
-      const status = [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(dispatch.status) ? dispatch.status : 502;
-      traceReplyFailure(request, {
-        replyTraceId,
-        conversationId: canonicalRemoteJid,
-        localMessageId: localMessage.messageId,
-        clientMessageId,
-        quote: normalizedQuote,
-        recipient: { number, remoteJid: canonicalRemoteJid },
-        messageType: normalizedQuote?.mediaType || 'text',
-        backendStatus: status,
-        errorCode: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
-        failureOrigin: 'evolution_rejected',
-        evolutionStatus: dispatch.status,
-        evolutionStatusText: dispatch.statusText,
-        providerError: dispatch.providerError,
-      });
-      return reply.code(status).send({
-        error: status === 502 ? 'Evolution API unavailable' : 'Evolution API rejected the message',
-        code: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
-        providerStatus: dispatch.status,
-        messageId: localMessage.messageId,
-        ...(replyTraceId ? { replyTraceId } : {}),
+    const text = forwardableTextFromSource(source);
+    if (!text) {
+      return reply.code(422).send({ error: 'A mensagem não pode ser encaminhada', code: 'source_message_unsupported' });
+    }
+
+    const destinationRemoteJid = parsed.data.destinationRemoteJid.trim();
+    const destination = await resolveConversationForOperation({
+      companyId: request.user!.companyId,
+      remoteJid: destinationRemoteJid,
+    }, { createIfMissing: false });
+    if (!destination) {
+      return reply.code(404).send({ error: 'Conversa de destino não encontrada', code: 'destination_conversation_not_found' });
+    }
+
+    const outboundStartedAt = Date.now();
+    const leaseAcquisition = await acquireOutboundLease({
+      companyId: request.user!.companyId,
+      user: request.user!,
+      number: '',
+      remoteJid: destinationRemoteJid,
+      conversationId: destination.id,
+    });
+    if (!leaseAcquisition.acquired) {
+      return reply.code(409).send({
+        error: `Atendimento em andamento por ${leaseAcquisition.lease.ownerName}`,
+        code: 'conversation_lease_active',
+        lease: leaseAcquisition.lease,
       });
     }
-    const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
-    const evolutionMessageId = evolutionMessageReference?.messageId;
-    const outboundProviderKey = providerKeyForOutboundResponse(dispatch.body, evolutionMessageId);
-    traceOutbound(request, 'evolution.response', {
-      clientMessageId,
-      replyTraceId,
-      remoteJid: canonicalRemoteJid,
-      evolutionMessageId,
-      evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
-      ok: dispatch.ok,
-      elapsedMs: Date.now() - outboundStartedAt,
-      evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
-    });
-    await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined, outboundProviderKey);
-    traceOutbound(request, 'persistence.confirmed', {
-      clientMessageId,
-      replyTraceId,
-      remoteJid: canonicalRemoteJid,
-      evolutionMessageId,
-      evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
-      elapsedMs: Date.now() - outboundStartedAt,
-    });
-    const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
-    const realtimeTimestampMs = Date.now();
-    publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
-      remoteJid: canonicalRemoteJid,
-      phone: number,
-      messageId: realtimeMessageId,
-      timestampMs: realtimeTimestampMs,
-      fromMe: true,
-      message: {
-        id: realtimeMessageId,
-        conversationId: canonicalRemoteJid,
-        sender: 'attendant',
-        senderName: request.user!.name,
-        content: text,
-        metadata: {
-          sentByHub: true,
-          sentByUserId: request.user!.id,
-          sentByUserName: request.user!.name,
-          ...(clientMessageId ? { clientMessageId } : {}),
-          ...(normalizedQuote
-            ? { quotedMessage: normalizedQuote }
-            : {}),
-          ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
-        },
-        rawKey: outboundProviderKey || { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
-        timestampMs: realtimeTimestampMs,
-        timestamp: new Date(realtimeTimestampMs).toISOString(),
-        status: 'sent',
-        isInternalNote: false,
-      },
-    });
-    traceOutbound(request, 'sse.published', {
-      clientMessageId,
-      replyTraceId,
-      remoteJid: canonicalRemoteJid,
-      evolutionMessageId: realtimeMessageId,
+    publishRealtimeEvent(request.user!.companyId, 'conversation.updated', leaseRealtimePayload({
+      remoteJid: destinationRemoteJid,
+      phone: '',
+      lease: leaseAcquisition.lease,
+    }));
+    traceOutbound(request, 'received', {
+      clientMessageId: parsed.data.clientMessageId,
+      remoteJid: destinationRemoteJid,
       elapsedMs: Date.now() - outboundStartedAt,
     });
 
-    let dailyResponder: { id: string; name: string; date: string } | undefined;
-    try {
-      dailyResponder = await recordDailyResponder(request.user!.companyId, number, request.user!);
-    } catch (error) {
-      request.log.warn({ err: error }, 'NÃ£o foi possÃ­vel registrar o primeiro atendente do dia');
-    }
-    return {
-      evolution: dispatch.body,
-      dailyResponder,
-      lease: leaseAcquisition.lease,
-      remoteJid: canonicalRemoteJid,
-      message: {
-        id: localMessage.messageId,
-        evolutionMessageId,
-        status: 'sent',
-        senderName: request.user!.name,
-        ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
-      },
-    };
+    return dispatchOutboundText({
+      request,
+      reply,
+      number: '',
+      remoteJid: destinationRemoteJid,
+      text,
+      clientMessageId: parsed.data.clientMessageId,
+      leaseAcquisition,
+      outboundStartedAt,
+    });
   });
 
   app.post('/api/evolution/messages/send-media', { preHandler: requireUser, bodyLimit: MAX_MEDIA_REQUEST_BYTES }, async (request, reply) => {

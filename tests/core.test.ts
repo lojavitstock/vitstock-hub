@@ -38,6 +38,7 @@ import {
 } from '../server/src/messageReactions';
 import { providerIdentityCandidates, resolveProviderMessageTarget, selectNewReconciledMessageActivity } from '../server/src/evolution';
 import { isValidEvolutionTextRecipient, resolveEvolutionRecipient, resolveEvolutionTextRecipient } from '../server/src/evolutionRecipient';
+import { evolutionTextPayload, forwardableTextFromSource, type ForwardSourceMessage } from '../server/src/messageForward';
 import { qaEvolutionResponse } from '../server/src/qa';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
 import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
@@ -69,7 +70,7 @@ import {
 import { toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
-import { canDownloadMessageMedia, messageCopyText, messageMenuActionsFor } from '../src/utils/messageActions';
+import { canDownloadMessageMedia, canForwardMessage, messageCopyText, messageMenuActionsFor } from '../src/utils/messageActions';
 import { parseWhatsAppFormatting, stripWhatsAppFormatting } from '../src/utils/whatsappFormatting';
 import { collectBrokenImages, installBrowserDiagnostics } from './e2e/support/diagnostics';
 import { resetAvatarDebugDedupe as resetFrontendAvatarDebugDedupe, traceAvatarImageError } from '../src/utils/avatarDiagnostics';
@@ -2640,15 +2641,21 @@ test('posiciona popovers da mensagem dentro da viewport nas duas bordas', () => 
   }
 });
 
-test('menu de mensagem expõe reagir, responder e copiar, com download apenas para mídia', () => {
+test('menu de mensagem expõe encaminhar apenas para texto confirmado, com download apenas para mídia', () => {
   const text = message('menu-text', 1_709, 'Texto do cliente');
   const document = message('menu-document', 1_710, '[Documento]', 'read', {
     mediaType: 'document',
     rawKey: { id: 'menu-document', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
   });
 
-  assert.deepEqual(messageMenuActionsFor(text), ['reply', 'react', 'copy']);
+  assert.deepEqual(messageMenuActionsFor(text), ['reply', 'forward', 'react', 'copy']);
   assert.deepEqual(messageMenuActionsFor(document), ['reply', 'react', 'copy', 'download']);
+  assert.equal(canForwardMessage(text), true);
+  assert.equal(canForwardMessage(document), false);
+  assert.equal(canForwardMessage(message('menu-empty', 1_711, '   ')), false);
+  assert.equal(canForwardMessage(message('menu-note', 1_712, 'Nota', 'sent', { isInternalNote: true })), false);
+  assert.equal(canForwardMessage(message('menu-deleted', 1_713, 'Texto', 'sent', { metadata: { deletedForEveryone: true } })), false);
+  assert.equal(canForwardMessage(message('menu-pending', 1_714, 'Texto', 'pending')), false);
   assert.equal(canDownloadMessageMedia(text), false);
   assert.equal(canDownloadMessageMedia(document), true);
   assert.equal(messageCopyText(text), 'Texto do cliente');
@@ -3233,6 +3240,42 @@ test('envio textual preserva o destinatário efetivo do mock Evolution', async (
   assert.equal(isValidEvolutionTextRecipient({ number: '' }), false);
   assert.equal(isValidEvolutionTextRecipient({ remoteJid: 'status@broadcast', number: '' }), false);
   assert.equal(await sendToMock({ remoteJid: pn, number: '5521888888888' }), pn);
+});
+
+const forwardSource = (overrides: Partial<ForwardSourceMessage> = {}): ForwardSourceMessage => ({
+  id: 'source-message',
+  conversation_id: 'source-conversation',
+  sender: 'contact',
+  content: 'Texto original',
+  media_url: null,
+  media_type: null,
+  metadata: {},
+  is_internal_note: false,
+  ...overrides,
+});
+
+test('forward text accepts only ordinary textual source messages', () => {
+  assert.equal(forwardableTextFromSource(forwardSource()), 'Texto original');
+  assert.equal(forwardableTextFromSource(forwardSource({ sender: 'system' })), undefined);
+  assert.equal(forwardableTextFromSource(forwardSource({ is_internal_note: true })), undefined);
+  assert.equal(forwardableTextFromSource(forwardSource({ media_type: 'image' })), undefined);
+  assert.equal(forwardableTextFromSource(forwardSource({ media_url: 'https://example.test/media' })), undefined);
+  assert.equal(forwardableTextFromSource(forwardSource({ metadata: { deletedForEveryone: true } })), undefined);
+  assert.equal(forwardableTextFromSource(forwardSource({ content: '   ' })), undefined);
+});
+
+test('forward text payload preserves PN, LID and group transport identities', () => {
+  const destinations = [
+    '5521999999999@s.whatsapp.net',
+    '903612345678901@lid',
+    '120363000000@g.us',
+  ];
+  for (const destination of destinations) {
+    const payload = evolutionTextPayload({ recipient: destination, text: 'Texto original', userName: 'Atendente QA' });
+    assert.equal(payload.number, destination);
+    assert.equal(payload.quoted, undefined);
+    assert.match(payload.text, /Texto original/);
+  }
 });
 
 const inboxProjectionChat = (remoteJid: string, overrides: Record<string, any> = {}) => ({

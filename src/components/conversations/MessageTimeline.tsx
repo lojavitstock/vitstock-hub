@@ -10,6 +10,7 @@ import {
   FileArchive,
   FileSpreadsheet,
   FileText,
+  Forward,
   Image as ImageIcon,
   Lock,
   MapPin,
@@ -35,7 +36,7 @@ import { formatMessageDay, formatMessageTimestamp, formatOperatorLabel } from '.
 import { quotedMediaLabel, quotedMessageExcerpt } from '../../utils/quotedMessage';
 import { getDocumentPresentation } from '../../utils/documentMedia';
 import { mediaViewerItemFrom, type MediaViewerItem } from '../../utils/mediaViewer';
-import { canDeleteMessageForEveryone, canDownloadMessageMedia, canEditMessage, messageCopyText } from '../../utils/messageActions';
+import { canDeleteMessageForEveryone, canDownloadMessageMedia, canEditMessage, canForwardMessage, messageCopyText } from '../../utils/messageActions';
 import { COMMON_REACTION_EMOJIS, canReactToMessage, type CommonReactionEmoji } from '../../utils/messageReactionActions';
 import { positionMessageActionMenu, positionReactionPalette, type PopoverPosition } from '../../utils/messagePopoverPosition';
 import { providerDisplayName, providerFallbackDisplayName } from '../../utils/whatsappIdentity';
@@ -56,6 +57,7 @@ type MessageTimelineProps = {
   onJumpToLatest?: () => void;
   onRetryMessage: (message: Message) => void;
   onReplyMessage: (message: Message) => void;
+  onForwardMessage: (message: Message) => void;
   onReactMessage: (message: Message, emoji: CommonReactionEmoji) => void;
   onEditMessage: (message: Message) => void;
   onDeleteMessage: (message: Message) => void;
@@ -142,13 +144,14 @@ const MessageActionMenu: React.FC<{
   triggerRef: React.RefObject<HTMLButtonElement>;
   onClose: () => void;
   onReply: () => void;
+  onForward?: () => void;
   onReact: (emoji: CommonReactionEmoji) => void;
   onCopy: () => void;
   onDownload?: () => void;
   onEdit?: () => void;
   onDelete?: () => void;
   actionBusy?: boolean;
-}> = ({ message, isOpen, align, triggerRef, onClose, onReply, onReact, onCopy, onDownload, onEdit, onDelete, actionBusy = false }) => {
+}> = ({ message, isOpen, align, triggerRef, onClose, onReply, onForward, onReact, onCopy, onDownload, onEdit, onDelete, actionBusy = false }) => {
   const menuRef = React.useRef<HTMLDivElement>(null);
   const paletteRef = React.useRef<HTMLDivElement>(null);
   const reactionTriggerRef = React.useRef<HTMLButtonElement>(null);
@@ -222,6 +225,7 @@ const MessageActionMenu: React.FC<{
     <>
     <div ref={menuRef} role="menu" aria-label="Ações da mensagem" className="fixed z-[60] w-44 rounded-lg border border-white/10 bg-[#243038] py-1 shadow-2xl" style={menuPosition}>
       <button type="button" role="menuitem" onClick={onReply} className={itemClass}><Reply className="h-3.5 w-3.5 text-amber-300" /> Responder</button>
+      {onForward && <button type="button" role="menuitem" onClick={onForward} className={itemClass}><Forward className="h-3.5 w-3.5 text-amber-300" /> Encaminhar</button>}
       <button
         ref={reactionTriggerRef}
         type="button"
@@ -559,7 +563,7 @@ const MediaMessageContent: React.FC<{
   return null;
 };
 
-export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, isNearBottom = true, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage, onReplyMessage, onReactMessage, onEditMessage, onDeleteMessage, messageActionBusyId, onLayoutChange }) => {
+export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, activeConversation, instanceName, containerRef, hasMoreMessages = false, loadingOlderMessages = false, loadingMessages = false, historyExpanded = false, isNearBottom = true, newMessagesCount = 0, onLoadOlder, onJumpToLatest, onRetryMessage, onReplyMessage, onForwardMessage, onReactMessage, onEditMessage, onDeleteMessage, messageActionBusyId, onLayoutChange }) => {
   const shouldShowIndicator = !isNearBottom && Boolean(onJumpToLatest);
   const participantIdentityMap = React.useMemo(() => {
     const map = new Map<string, { name?: string; avatar?: string }>();
@@ -741,6 +745,7 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
                 triggerRef={menuTriggerRef}
                 onClose={() => setOpenMenuMessageId(null)}
                 onReply={() => { setOpenMenuMessageId(null); onReplyMessage(message); }}
+                onForward={canForwardMessage(message) ? () => { setOpenMenuMessageId(null); onForwardMessage(message); } : undefined}
                 onReact={(emoji) => onReactMessage(message, emoji)}
                 onCopy={() => void copyMessage(message)}
                 onDownload={canDownloadMessageMedia(message) ? () => void downloadMessage(message) : undefined}

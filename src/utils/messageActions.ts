@@ -49,12 +49,25 @@ export const canDownloadMessageMedia = (message: Message) => Boolean(
   message.mediaType && (message.rawKey || message.mediaUrl),
 );
 
+/** Only confirmed, ordinary text messages can be forwarded in the MVP. */
+export const canForwardMessage = (message: Message) => Boolean(
+  message.id.trim()
+    && (message.sender === 'contact' || message.sender === 'attendant')
+    && message.status !== 'pending'
+    && message.status !== 'failed'
+    && !message.mediaType
+    && !message.isInternalNote
+    && message.metadata?.deletedForEveryone !== true
+    && Boolean(message.content.trim()),
+);
+
 export const messageCopyText = (message: Message) => message.metadata?.deletedForEveryone === true
   ? 'Mensagem apagada'
   : message.content;
 
 export const messageMenuActionsFor = (message: Message) => [
   'reply',
+  ...(canForwardMessage(message) ? ['forward'] : []),
   'react',
   'copy',
   ...(canEditMessage(message) ? ['edit'] : []),
