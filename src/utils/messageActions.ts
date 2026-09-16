@@ -49,16 +49,20 @@ export const canDownloadMessageMedia = (message: Message) => Boolean(
   message.mediaType && (message.rawKey || message.mediaUrl),
 );
 
-/** Only confirmed, ordinary text or image messages can be forwarded. */
-export const canForwardMessage = (message: Message) => Boolean(
-  message.id.trim()
-    && (message.sender === 'contact' || message.sender === 'attendant')
-    && message.status !== 'pending'
-    && message.status !== 'failed'
-    && !message.isInternalNote
-    && message.metadata?.deletedForEveryone !== true
-    && (!message.mediaType ? Boolean(message.content.trim()) : message.mediaType === 'image'),
-);
+/** Only confirmed, ordinary text, image or fixed-location messages can be forwarded. */
+export const canForwardMessage = (message: Message) => {
+  const isFixedLocation = Boolean(message.metadata?.location) && !message.mediaType;
+  return Boolean(
+    message.id.trim()
+      && (message.sender === 'contact' || message.sender === 'attendant')
+      && message.status !== 'pending'
+      && message.status !== 'failed'
+      && !message.isInternalNote
+      && message.metadata?.deletedForEveryone !== true
+      && (isFixedLocation
+        || (!message.mediaType ? Boolean(message.content.trim()) : message.mediaType === 'image')),
+  );
+};
 
 export const messageCopyText = (message: Message) => message.metadata?.deletedForEveryone === true
   ? 'Mensagem apagada'

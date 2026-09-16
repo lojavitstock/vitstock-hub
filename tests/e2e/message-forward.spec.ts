@@ -16,6 +16,12 @@ type InboundOptions = {
   mediaAvailable?: boolean;
   phone?: string;
   isGroup?: boolean;
+  location?: {
+    latitude?: number;
+    longitude?: number;
+    name?: string;
+    address?: string;
+  };
 };
 
 async function createInbound(page: Page, remoteJid: string, content: string, name = 'Cliente Forward QA', options: InboundOptions = {}) {
@@ -303,6 +309,118 @@ test('forward text uses existing PN, LID and group identities and is idempotent'
     expect(retry.status()).toBe(200);
     expect((await retry.json()).deduplicated).toBe(true);
   }
+});
+
+test('encaminha localização fixa pela UI sem enviar coordenadas no payload do Hub', async ({ page }) => {
+  test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
+  await login(page);
+
+  const suffix = Date.now().toString().slice(-7);
+  const sourceName = `Forward Location UI Source ${suffix}`;
+  const destinationName = `Forward Location UI Destination ${suffix}`;
+  const source = await createInbound(page, `552188${suffix}@s.whatsapp.net`, '', sourceName, {
+    location: { latitude: -22.9068, longitude: -43.1729, name: 'Ponto do Rio', address: 'Endereço QA' },
+  });
+  const destinationRemoteJid = `552187${suffix}@s.whatsapp.net`;
+  await createInbound(page, destinationRemoteJid, `Destino localização ${suffix}`, destinationName);
+  const beforeState = await getEvolutionSendState(page);
+
+  const dialog = await openForwardDialog(page, sourceName, source.evolutionMessageId);
+  await expect(dialog).toContainText('Localização compartilhada');
+  const forwardRequests: Array<Record<string, unknown>> = [];
+  page.on('request', (request) => {
+    if (request.url().endsWith('/api/evolution/messages/forward')) forwardRequests.push(request.postDataJSON() as Record<string, unknown>);
+  });
+  expect(forwardRequests).toHaveLength(0);
+
+  await dialog.getByRole('textbox', { name: 'Buscar conversa de destino' }).fill(destinationName);
+  await dialog.getByRole('option', { name: new RegExp(destinationName) }).click();
+  const responsePromise = page.waitForResponse((response) => response.url().endsWith('/api/evolution/messages/forward'));
+  await dialog.getByRole('button', { name: 'Encaminhar', exact: true }).click();
+  expect((await responsePromise).status()).toBe(200);
+  await expect.poll(() => forwardRequests.length).toBe(1);
+  expect(forwardRequests[0]).toEqual(expect.objectContaining({
+    sourceMessageId: source.evolutionMessageId,
+    destinationRemoteJid,
+  }));
+  expect(forwardRequests[0]).not.toHaveProperty('latitude');
+  expect(forwardRequests[0]).not.toHaveProperty('longitude');
+  await expect(dialog).toHaveCount(0);
+
+  const afterState = await getEvolutionSendState(page);
+  const send = afterState.sends.slice(beforeState.sends.length).at(-1);
+  expect(send).toEqual(expect.objectContaining({
+    number: destinationRemoteJid,
+    latitude: -22.9068,
+    longitude: -43.1729,
+    name: 'Ponto do Rio',
+    address: 'Endereço QA',
+  }));
+  expect(send).not.toHaveProperty('url');
+  expect(send).not.toHaveProperty('text');
+});
+
+test('forward location preserves PN, LID and group identities, validates coordinates and is idempotent', async ({ page }) => {
+  test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
+  await login(page);
+
+  const suffix = Date.now().toString().slice(-7);
+  const source = await createInbound(page, `552186${suffix}@s.whatsapp.net`, '', `Forward Location API Source ${suffix}`, {
+    location: { latitude: 0, longitude: 0 },
+  });
+  const destinations = [
+    `552185${suffix}@s.whatsapp.net`,
+    `16470000000${suffix.slice(-2)}@lid`,
+    `12036300000${suffix.slice(-2)}@g.us`,
+  ];
+  for (const [index, destinationRemoteJid] of destinations.entries()) {
+    await createInbound(page, destinationRemoteJid, `Destino localização ${index} ${suffix}`, `Forward Location Destination ${index} ${suffix}`, {
+      isGroup: destinationRemoteJid.endsWith('@g.us'),
+    });
+  }
+  const beforeState = await getEvolutionSendState(page);
+  const clientMessageIds = destinations.map((_, index) => `qa-forward-location-${Date.now()}-${index}`);
+
+  for (const [index, destinationRemoteJid] of destinations.entries()) {
+    const response = await page.request.post(`${apiBase}/api/evolution/messages/forward`, {
+      data: {
+        sourceMessageId: source.evolutionMessageId,
+        destinationRemoteJid,
+        clientMessageId: clientMessageIds[index],
+      },
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json() as { remoteJid?: string; evolution?: { key?: { remoteJid?: string } } };
+    expect(body.remoteJid).toBe(destinationRemoteJid);
+    expect(body.evolution?.key?.remoteJid).toBe(destinationRemoteJid);
+  }
+
+  const afterState = await getEvolutionSendState(page);
+  const newSends = afterState.sends.slice(beforeState.sends.length);
+  expect(newSends).toHaveLength(destinations.length);
+  expect(newSends.map((send) => send.number)).toEqual(destinations);
+  for (const send of newSends) {
+    expect(send).toEqual(expect.objectContaining({ latitude: 0, longitude: 0 }));
+    expect(send).not.toHaveProperty('url');
+    expect(send).not.toHaveProperty('text');
+  }
+
+  const retry = await page.request.post(`${apiBase}/api/evolution/messages/forward`, {
+    data: { sourceMessageId: source.evolutionMessageId, destinationRemoteJid: destinations[0], clientMessageId: clientMessageIds[0] },
+  });
+  expect(retry.status()).toBe(200);
+  expect((await retry.json()).deduplicated).toBe(true);
+  expect((await getEvolutionSendState(page)).sends).toHaveLength(afterState.sends.length);
+
+  const invalidSource = await createInbound(page, `552184${suffix}@s.whatsapp.net`, '', `Forward Invalid Location ${suffix}`, {
+    location: { latitude: 91, longitude: 0 },
+  });
+  const invalid = await page.request.post(`${apiBase}/api/evolution/messages/forward`, {
+    data: { sourceMessageId: invalidSource.evolutionMessageId, destinationRemoteJid: destinations[0], clientMessageId: `qa-forward-location-invalid-${Date.now()}` },
+  });
+  expect(invalid.status()).toBe(422);
+  expect((await invalid.json()).code).toBe('source_location_invalid');
+  expect((await getEvolutionSendState(page)).sends).toHaveLength(afterState.sends.length);
 });
 
 test('forward text rejects arbitrary destinations, cross-tenant records and number payloads', async ({ page, browser }) => {

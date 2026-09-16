@@ -66,7 +66,7 @@ import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '.
 import { buildReplyFailureTrace } from './replyFailureTrace.js';
 import { resolveConversationForOperation, resolveConversationWithClient } from './conversationResolver.js';
 import { filterConversationalProviderChats, isConversationalProviderJid } from './providerJidPolicy.js';
-import { evolutionTextPayload, forwardableImageFromSource, forwardableTextFromSource, type ForwardSourceMessage } from './messageForward.js';
+import { evolutionTextPayload, forwardableImageFromSource, forwardableLocationFromSource, forwardableTextFromSource, hasPersistedLocation, type ForwardableLocation, type ForwardSourceMessage } from './messageForward.js';
 import {
   deletedMessageMetadata,
   editedMessageMetadata,
@@ -3163,6 +3163,7 @@ async function ensureOutboundMessage(input: {
   content: string;
   mediaType?: 'image' | 'video' | 'document';
   document?: { fileName?: string; mimeType?: string; fileSize?: number };
+  location?: ForwardableLocation;
   clientMessageId?: string;
   quotedMessage?: QuotedMessage;
 }) {
@@ -3317,6 +3318,7 @@ async function ensureOutboundMessage(input: {
         sentByUserId: input.userId,
         sentByUserName: input.userName,
         ...(input.document ? { document: input.document } : {}),
+        ...(input.location ? { location: input.location } : {}),
         ...(quotedMessage
           ? { quotedMessage }
           : {}),
@@ -3594,6 +3596,226 @@ async function dispatchForwardedMedia(input: {
         sentByHub: true,
         sentByUserId: request.user!.id,
         sentByUserName: request.user!.name,
+        ...(clientMessageId ? { clientMessageId } : {}),
+        ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+      },
+      rawKey: outboundProviderKey || { id: realtimeMessageId, remoteJid, fromMe: true },
+      timestampMs: realtimeTimestampMs,
+      timestamp: new Date(realtimeTimestampMs).toISOString(),
+      status: 'sent',
+      isInternalNote: false,
+    },
+  });
+  traceOutbound(request, 'sse.published', {
+    clientMessageId,
+    remoteJid,
+    evolutionMessageId: realtimeMessageId,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+  });
+  let dailyResponder: { id: string; name: string; date: string } | undefined;
+  if (number) {
+    try {
+      dailyResponder = await recordDailyResponder(request.user!.companyId, number, request.user!);
+    } catch (error) {
+      request.log.warn({ err: error }, 'Não foi possível registrar o primeiro atendente do dia');
+    }
+  }
+  return {
+    evolution: dispatch.body,
+    dailyResponder,
+    lease: input.leaseAcquisition.lease,
+    remoteJid,
+    message: {
+      id: localMessage.messageId,
+      evolutionMessageId,
+      status: 'sent',
+      senderName: request.user!.name,
+      ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+    },
+  };
+}
+
+async function dispatchForwardedLocation(input: {
+  request: FastifyRequest;
+  reply: FastifyReply;
+  number: string;
+  remoteJid: string;
+  location: ForwardableLocation;
+  clientMessageId: string;
+  leaseAcquisition: Awaited<ReturnType<typeof acquireOutboundLease>>;
+  outboundStartedAt: number;
+}) {
+  const { request, reply, number, remoteJid, location, clientMessageId } = input;
+  const text = '[Localização compartilhada]';
+  const evolutionRecipient = resolveEvolutionRecipient({ remoteJid, canonicalPhone: number });
+  let localMessage: Awaited<ReturnType<typeof ensureOutboundMessage>>;
+  try {
+    localMessage = await ensureOutboundMessage({
+      companyId: request.user!.companyId,
+      userId: request.user!.id,
+      userName: request.user!.name,
+      number,
+      remoteJid,
+      content: text,
+      location,
+      clientMessageId,
+    });
+  } catch (error) {
+    traceReplyFailure(request, {
+      conversationId: remoteJid,
+      localMessageId: clientMessageId,
+      clientMessageId,
+      recipient: { number: evolutionRecipient.number, remoteJid },
+      messageType: 'location',
+      backendStatus: 500,
+      errorCode: 'persistence_failed',
+      failureOrigin: 'backend_rejected',
+    });
+    throw error;
+  }
+  traceOutbound(request, 'outbox.prepared', {
+    clientMessageId,
+    remoteJid,
+    evolutionMessageId: localMessage.evolutionMessageId || undefined,
+    deduplicated: localMessage.deduplicated,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+    idempotencyLockMs: localMessage.idempotencyLockMs,
+    persistenceMs: localMessage.persistenceMs,
+  });
+  if (localMessage.deduplicated) {
+    return {
+      remoteJid,
+      message: {
+        id: localMessage.messageId,
+        evolutionMessageId: localMessage.evolutionMessageId || undefined,
+        status: localMessage.status,
+        senderName: request.user!.name,
+      },
+      deduplicated: true,
+    };
+  }
+
+  let dispatch: { ok: boolean; status: number; statusText: string; body: any; providerError?: unknown };
+  const evolutionRequestStartedAt = Date.now();
+  try {
+    dispatch = await outboundEvolutionRequests.run(
+      `${request.user!.companyId}:${clientMessageId}`,
+      async () => {
+        traceOutbound(request, 'evolution.request', { clientMessageId, remoteJid, elapsedMs: Date.now() - input.outboundStartedAt });
+        const response = await evolutionRequest(
+          `/message/sendLocation/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              number: evolutionRecipient.number,
+              latitude: location.latitude,
+              longitude: location.longitude,
+              ...(location.name ? { name: location.name } : {}),
+              ...(location.address ? { address: location.address } : {}),
+            }),
+          },
+        );
+        const rawBody = await response.text();
+        let body: unknown;
+        try {
+          body = rawBody ? JSON.parse(rawBody) : undefined;
+        } catch {
+          body = rawBody;
+        }
+        return {
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+          body,
+          providerError: response.ok ? undefined : sanitizeEvolutionProviderError(rawBody),
+        };
+      },
+    );
+  } catch (error) {
+    await updateOutboundMessage(localMessage.messageId, 'failed');
+    traceReplyFailure(request, {
+      conversationId: remoteJid,
+      localMessageId: localMessage.messageId,
+      clientMessageId,
+      recipient: { number: evolutionRecipient.number, remoteJid },
+      messageType: 'location',
+      backendStatus: 502,
+      errorCode: 'evolution_unavailable',
+      failureOrigin: 'evolution_network',
+    });
+    request.log.warn({ err: error }, 'Falha de comunicação com a Evolution API ao encaminhar localização');
+    return reply.code(502).send({ error: 'Evolution API indisponível', messageId: localMessage.messageId });
+  }
+  if (!dispatch.ok) {
+    await updateOutboundMessage(localMessage.messageId, 'failed');
+    const recipientDiagnostics = evolutionRecipientDiagnostics({ number: evolutionRecipient.number, remoteJid });
+    const status = [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(dispatch.status) ? dispatch.status : 502;
+    traceReplyFailure(request, {
+      conversationId: remoteJid,
+      localMessageId: localMessage.messageId,
+      clientMessageId,
+      recipient: { number: evolutionRecipient.number, remoteJid },
+      messageType: 'location',
+      backendStatus: status,
+      errorCode: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
+      failureOrigin: 'evolution_rejected',
+      evolutionStatus: dispatch.status,
+      evolutionStatusText: dispatch.statusText,
+      providerError: dispatch.providerError,
+    });
+    if (outboundTraceEnabled) {
+      request.log.warn({
+        operation: 'evolution.forwardLocation',
+        httpStatus: dispatch.status,
+        statusText: dispatch.statusText,
+        ...recipientDiagnostics,
+        latitude: location.latitude,
+        longitude: location.longitude,
+        hasName: Boolean(location.name),
+        hasAddress: Boolean(location.address),
+        providerError: dispatch.providerError,
+      }, 'Evolution forward-location rejected');
+    }
+    return reply.code(status).send({
+      error: status === 502 ? 'Evolution API indisponível' : 'Evolution API rejeitou a localização',
+      code: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
+      providerStatus: dispatch.status,
+      messageId: localMessage.messageId,
+    });
+  }
+
+  const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
+  const evolutionMessageId = evolutionMessageReference?.messageId;
+  const outboundProviderKey = providerKeyForOutboundResponse(dispatch.body, evolutionMessageId);
+  traceOutbound(request, 'evolution.response', {
+    clientMessageId,
+    remoteJid,
+    evolutionMessageId,
+    evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
+    ok: dispatch.ok,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+    evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
+  });
+  await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined, outboundProviderKey);
+  const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
+  const realtimeTimestampMs = Date.now();
+  publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
+    remoteJid,
+    phone: number,
+    messageId: realtimeMessageId,
+    timestampMs: realtimeTimestampMs,
+    fromMe: true,
+    message: {
+      id: realtimeMessageId,
+      conversationId: remoteJid,
+      sender: 'attendant',
+      senderName: request.user!.name,
+      content: text,
+      metadata: {
+        sentByHub: true,
+        sentByUserId: request.user!.id,
+        sentByUserName: request.user!.name,
+        location,
         ...(clientMessageId ? { clientMessageId } : {}),
         ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
       },
@@ -4828,9 +5050,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     if (!source) {
       return reply.code(404).send({ error: 'Mensagem não encontrada', code: 'source_message_not_found' });
     }
-    const text = forwardableTextFromSource(source);
-    const image = text ? undefined : forwardableImageFromSource(source);
-    if (!text && !image) {
+    const sourceHasLocation = hasPersistedLocation(source);
+    const location = sourceHasLocation ? forwardableLocationFromSource(source) : undefined;
+    if (sourceHasLocation && !location) {
+      return reply.code(422).send({ error: 'A localização não é válida para encaminhamento', code: 'source_location_invalid' });
+    }
+    const text = sourceHasLocation ? undefined : forwardableTextFromSource(source);
+    const image = sourceHasLocation || text ? undefined : forwardableImageFromSource(source);
+    if (!text && !image && !location) {
       return reply.code(422).send({ error: 'A mensagem não pode ser encaminhada', code: 'source_message_unsupported' });
     }
 
@@ -4910,6 +5137,19 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       remoteJid: destinationRemoteJid,
       elapsedMs: Date.now() - outboundStartedAt,
     });
+
+    if (location) {
+      return dispatchForwardedLocation({
+        request,
+        reply,
+        number: '',
+        remoteJid: destinationRemoteJid,
+        location,
+        clientMessageId: parsed.data.clientMessageId,
+        leaseAcquisition,
+        outboundStartedAt,
+      });
+    }
 
     if (sourceMedia) {
       return dispatchForwardedMedia({

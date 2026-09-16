@@ -220,7 +220,16 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
       ...(typeof requestBody?.caption === 'string' ? { caption: requestBody.caption } : {}),
     });
   }
-  const body = path.includes('/message/sendText/') || path.includes('/message/sendMedia/')
+  if (path.includes('/message/sendLocation/')) {
+    qaEvolutionSends.push({
+      number: requestBody?.number,
+      latitude: requestBody?.latitude,
+      longitude: requestBody?.longitude,
+      ...(typeof requestBody?.name === 'string' ? { name: requestBody.name } : {}),
+      ...(typeof requestBody?.address === 'string' ? { address: requestBody.address } : {}),
+    });
+  }
+  const body = path.includes('/message/sendText/') || path.includes('/message/sendMedia/') || path.includes('/message/sendLocation/')
     ? { key: { id: `qa-evolution-${randomUUID()}`, remoteJid: providerRemoteJid, fromMe: true } }
       : path.includes('/message/sendReaction/') ? { status: 'ok' }
         : path.includes('/chat/updateMessage/') || path.includes('/chat/deleteMessageForEveryone/') ? { status: 'ok' }
@@ -260,11 +269,17 @@ const qaInboundSchema = z.object({
   name: z.string().min(2).max(160).default('Contato QA'),
   content: z.string().max(4096).optional().default(''),
   mediaType: z.literal('image').optional(),
+  location: z.object({
+    latitude: z.number().optional(),
+    longitude: z.number().optional(),
+    name: z.string().max(200).optional(),
+    address: z.string().max(500).optional(),
+  }).optional(),
   mediaAvailable: z.boolean().optional().default(true),
   isGroup: z.boolean().optional().default(false),
   timestampMs: z.number().int().positive().optional(),
 }).superRefine((value, context) => {
-  if (!value.mediaType && !value.content.trim()) {
+  if (!value.mediaType && !value.location && !value.content.trim()) {
     context.addIssue({ code: 'custom', path: ['content'], message: 'conteúdo obrigatório' });
   }
 });
@@ -316,7 +331,7 @@ export async function registerQaRoutes(app: FastifyInstance) {
     const phone = input.phone?.replace(/\D/g, '') || input.remoteJid.split('@')[0];
     const evolutionMessageId = `qa-inbound-${randomUUID()}`;
     const providerKey = { id: evolutionMessageId, remoteJid: input.remoteJid, fromMe: false };
-    const content = input.content || (input.mediaType === 'image' ? '[Imagem]' : '');
+    const content = input.content || (input.mediaType === 'image' ? '[Imagem]' : input.location ? '[Localização compartilhada]' : '');
     const contact = await db.query<{ id: string }>(
       `INSERT INTO contacts (company_id, name, phone, source)
        VALUES ($1, $2, $3, 'system')
@@ -334,14 +349,34 @@ export async function registerQaRoutes(app: FastifyInstance) {
     await db.query(
       `INSERT INTO messages (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_type, metadata, status, sent_at)
        VALUES ($1, $2, $3, 'contact', $4, $5, $6, $7::jsonb, 'delivered', to_timestamp($8::numeric / 1000))`,
-      [request.user!.companyId, conversationId, evolutionMessageId, input.name, content, input.mediaType || null, JSON.stringify(input.mediaType ? { providerKey } : {}), timestampMs],
+      [request.user!.companyId, conversationId, evolutionMessageId, input.name, content, input.mediaType || null, JSON.stringify({
+        ...(input.mediaType || input.location ? { providerKey } : {}),
+        ...(input.location !== undefined ? { location: input.location } : {}),
+      }), timestampMs],
     );
     if (input.mediaType === 'image') {
       qaMediaFixtures.set(evolutionMessageId, { base64: qaImageBase64, mimetype: 'image/png', available: input.mediaAvailable });
     }
     publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
       remoteJid: input.remoteJid, phone, messageId: evolutionMessageId, timestampMs, fromMe: false,
-      message: { id: evolutionMessageId, conversationId: input.remoteJid, sender: 'contact', senderName: input.name, content, ...(input.mediaType ? { mediaType: input.mediaType, metadata: { providerKey }, rawKey: providerKey } : {}), status: 'delivered', isInternalNote: false, timestampMs },
+      message: {
+        id: evolutionMessageId,
+        conversationId: input.remoteJid,
+        sender: 'contact',
+        senderName: input.name,
+        content,
+        ...(input.mediaType ? { mediaType: input.mediaType } : {}),
+        ...((input.mediaType || input.location) ? {
+          metadata: {
+            ...(input.mediaType || input.location ? { providerKey } : {}),
+            ...(input.location !== undefined ? { location: input.location } : {}),
+          },
+          rawKey: providerKey,
+        } : {}),
+        status: 'delivered',
+        isInternalNote: false,
+        timestampMs,
+      },
     });
     return { injected: true, remoteJid: input.remoteJid, evolutionMessageId };
   });

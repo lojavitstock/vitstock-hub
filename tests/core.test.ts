@@ -38,7 +38,7 @@ import {
 } from '../server/src/messageReactions';
 import { providerIdentityCandidates, resolveProviderMessageTarget, selectNewReconciledMessageActivity } from '../server/src/evolution';
 import { isValidEvolutionTextRecipient, resolveEvolutionRecipient, resolveEvolutionTextRecipient } from '../server/src/evolutionRecipient';
-import { evolutionTextPayload, forwardableImageFromSource, forwardableTextFromSource, type ForwardSourceMessage } from '../server/src/messageForward';
+import { evolutionTextPayload, forwardableImageFromSource, forwardableLocationFromSource, forwardableTextFromSource, type ForwardSourceMessage } from '../server/src/messageForward';
 import { qaEvolutionResponse } from '../server/src/qa';
 import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
 import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
@@ -2641,7 +2641,7 @@ test('posiciona popovers da mensagem dentro da viewport nas duas bordas', () => 
   }
 });
 
-test('menu de mensagem expõe encaminhar para texto/imagem confirmados, com download apenas para mídia', () => {
+test('menu de mensagem expõe encaminhar para texto/imagem/localização confirmados, com download apenas para mídia', () => {
   const text = message('menu-text', 1_709, 'Texto do cliente');
   const image = message('menu-image', 1_709.5, '[Imagem]', 'read', {
     mediaType: 'image',
@@ -2658,6 +2658,9 @@ test('menu de mensagem expõe encaminhar para texto/imagem confirmados, com down
   assert.deepEqual(messageMenuActionsFor(document), ['reply', 'react', 'copy', 'download']);
   assert.equal(canForwardMessage(text), true);
   assert.equal(canForwardMessage(document), false);
+  assert.equal(canForwardMessage(message('menu-location', 1_715, '[Localização compartilhada]', 'delivered', {
+    metadata: { location: { latitude: 0, longitude: 0 } },
+  })), true);
   assert.equal(canForwardMessage(message('menu-empty', 1_711, '   ')), false);
   assert.equal(canForwardMessage(message('menu-note', 1_712, 'Nota', 'sent', { isInternalNote: true })), false);
   assert.equal(canForwardMessage(message('menu-deleted', 1_713, 'Texto', 'sent', { metadata: { deletedForEveryone: true } })), false);
@@ -3268,6 +3271,35 @@ test('forward text accepts only ordinary textual source messages', () => {
   assert.equal(forwardableTextFromSource(forwardSource({ media_url: 'https://example.test/media' })), undefined);
   assert.equal(forwardableTextFromSource(forwardSource({ metadata: { deletedForEveryone: true } })), undefined);
   assert.equal(forwardableTextFromSource(forwardSource({ content: '   ' })), undefined);
+  assert.equal(forwardableTextFromSource(forwardSource({ content: '[Localização compartilhada]', metadata: { location: { latitude: 0, longitude: 0 } } })), undefined);
+});
+
+test('forward location accepts fixed coordinates and rejects invalid source metadata', () => {
+  assert.deepEqual(forwardableLocationFromSource(forwardSource({
+    content: '[Localização compartilhada]',
+    metadata: { location: { latitude: 0, longitude: 0, name: 'Ponto QA', address: 'Rua QA' } },
+  })), {
+    latitude: 0,
+    longitude: 0,
+    name: 'Ponto QA',
+    address: 'Rua QA',
+  });
+  assert.deepEqual(forwardableLocationFromSource(forwardSource({
+    metadata: { location: { latitude: -90, longitude: 180 } },
+  })), { latitude: -90, longitude: 180 });
+  for (const location of [
+    { latitude: -90.1, longitude: 0 },
+    { latitude: 90.1, longitude: 0 },
+    { latitude: 0, longitude: -180.1 },
+    { latitude: 0, longitude: 180.1 },
+    { latitude: '0', longitude: 0 },
+    { latitude: 0, longitude: Number.NaN },
+    {},
+  ]) {
+    assert.equal(forwardableLocationFromSource(forwardSource({ metadata: { location } })), undefined);
+  }
+  assert.equal(forwardableLocationFromSource(forwardSource({ media_type: 'image', metadata: { location: { latitude: 1, longitude: 2 } } })), undefined);
+  assert.equal(forwardableLocationFromSource(forwardSource({ status: 'failed', metadata: { location: { latitude: 1, longitude: 2 } } })), undefined);
 });
 
 test('forward text payload preserves PN, LID and group transport identities', () => {

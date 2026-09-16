@@ -38,9 +38,11 @@ export const ForwardMessageDialog: React.FC<ForwardMessageDialogProps> = ({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [clientMessageId] = useState(createClientMessageId);
-  const sourcePreview = message.mediaType === 'image'
-    ? `Imagem${message.content.trim() && message.content.trim() !== '[Imagem]' ? ` — ${message.content.trim()}` : ''}`
-    : message.content.trim();
+  const sourcePreview = message.metadata?.location
+    ? 'Localização compartilhada'
+    : message.mediaType === 'image'
+      ? `Imagem${message.content.trim() && message.content.trim() !== '[Imagem]' ? ` — ${message.content.trim()}` : ''}`
+      : message.content.trim();
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
