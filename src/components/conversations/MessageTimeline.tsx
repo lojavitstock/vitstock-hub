@@ -132,7 +132,7 @@ const QuotedMessageBlock: React.FC<{
       title="Ir para a mensagem citada"
     >
       <span className="block truncate text-xs font-bold text-emerald-200">{quoted.authorName || 'Mensagem citada'}</span>
-      <span className="mt-0.5 block truncate text-xs text-slate-200/80">{mediaLabel ? `${mediaLabel}${quoted.content && !hasOnlyMediaPlaceholder ? ` · ${quoted.content}` : ''}` : excerpt}</span>
+      <span className="mt-0.5 block whitespace-pre-wrap break-words text-xs text-slate-200/80">{mediaLabel ? `${mediaLabel}${quoted.content && !hasOnlyMediaPlaceholder ? ` · ${quoted.content}` : ''}` : excerpt}</span>
     </button>
   );
 };
@@ -722,7 +722,7 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
             size="small"
             lazy
           />}
-          <div>
+          <div className="min-w-0">
             {activeConversation.isGroup && !isMe && displayedParticipantName && (
               <p className="mb-1 px-1 text-[11px] font-extrabold text-emerald-300">{displayedParticipantName}</p>
             )}
