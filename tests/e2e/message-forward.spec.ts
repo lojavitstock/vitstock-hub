@@ -345,6 +345,8 @@ test('encaminha localização fixa pela UI sem enviar coordenadas no payload do 
   }));
   expect(forwardRequests[0]).not.toHaveProperty('latitude');
   expect(forwardRequests[0]).not.toHaveProperty('longitude');
+  expect(forwardRequests[0]).not.toHaveProperty('name');
+  expect(forwardRequests[0]).not.toHaveProperty('address');
   await expect(dialog).toHaveCount(0);
 
   const afterState = await getEvolutionSendState(page);
@@ -400,7 +402,7 @@ test('forward location preserves PN, LID and group identities, validates coordin
   expect(newSends).toHaveLength(destinations.length);
   expect(newSends.map((send) => send.number)).toEqual(destinations);
   for (const send of newSends) {
-    expect(send).toEqual(expect.objectContaining({ latitude: 0, longitude: 0 }));
+    expect(send).toEqual(expect.objectContaining({ latitude: 0, longitude: 0, name: '', address: '' }));
     expect(send).not.toHaveProperty('url');
     expect(send).not.toHaveProperty('text');
   }

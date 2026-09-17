@@ -3710,8 +3710,8 @@ async function dispatchForwardedLocation(input: {
               number: evolutionRecipient.number,
               latitude: location.latitude,
               longitude: location.longitude,
-              ...(location.name ? { name: location.name } : {}),
-              ...(location.address ? { address: location.address } : {}),
+              name: location.name ?? '',
+              address: location.address ?? '',
             }),
           },
         );

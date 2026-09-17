@@ -221,12 +221,15 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
     });
   }
   if (path.includes('/message/sendLocation/')) {
+    if (typeof requestBody?.name !== 'string' || typeof requestBody?.address !== 'string') {
+      return Promise.resolve(new Response(JSON.stringify({ error: 'INVALID_LOCATION_PAYLOAD' }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+    }
     qaEvolutionSends.push({
       number: requestBody?.number,
       latitude: requestBody?.latitude,
       longitude: requestBody?.longitude,
-      ...(typeof requestBody?.name === 'string' ? { name: requestBody.name } : {}),
-      ...(typeof requestBody?.address === 'string' ? { address: requestBody.address } : {}),
+      name: requestBody.name,
+      address: requestBody.address,
     });
   }
   const body = path.includes('/message/sendText/') || path.includes('/message/sendMedia/') || path.includes('/message/sendLocation/')
