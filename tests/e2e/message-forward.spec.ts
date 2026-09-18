@@ -12,10 +12,17 @@ async function login(page: Page, credentials = { email, password }) {
 }
 
 type InboundOptions = {
-  mediaType?: 'image';
+  mediaType?: 'image' | 'document';
   mediaAvailable?: boolean;
+  includeProviderKey?: boolean;
+  mediaUrl?: string;
   phone?: string;
   isGroup?: boolean;
+  document?: {
+    fileName?: string;
+    mimeType?: string;
+    fileSize?: number;
+  };
   location?: {
     latitude?: number;
     longitude?: number;
@@ -39,6 +46,15 @@ async function getEvolutionSendState(page: Page) {
     sends: Array<Record<string, unknown>>;
     mediaRequests: Array<Record<string, unknown>>;
   };
+}
+
+async function getConversationRecords(page: Page, remoteJid: string) {
+  const response = await page.request.post(`${apiBase}/api/evolution/messages`, {
+    data: { remoteJid, limit: 100 },
+  });
+  expect(response.status()).toBe(200);
+  const body = await response.json() as { messages?: { records?: Array<Record<string, any>> }; records?: Array<Record<string, any>> };
+  return body.messages?.records || body.records || [];
 }
 
 async function openForwardDialog(page: Page, sourceName: string, sourceMessageId: string) {
@@ -169,7 +185,7 @@ test('encaminha imagem pela mesma UI, recupera a mídia e preserva a legenda', a
   const send = newSends.at(-1);
   expect(send).toEqual(expect.objectContaining({ number: destinationRemoteJid, mediatype: 'image', mimetype: 'image/png' }));
   expect(String(send?.media || '')).not.toHaveLength(0);
-  expect(String(send?.caption || '')).toContain(sourceCaption);
+  expect(send?.caption).toBe(sourceCaption);
   expect('quoted' in (send || {})).toBe(false);
   expect(afterState.mediaRequests.some((request) => request.id === source.evolutionMessageId && request.remoteJid === `552197${suffix}@s.whatsapp.net`)).toBe(true);
 });
@@ -273,6 +289,175 @@ test('falha de recuperação da imagem mantém o diálogo aberto e permite cance
   await dialog.getByRole('button', { name: 'Cancelar', exact: true }).click();
   await expect(dialog).toHaveCount(0);
   expect(forwardRequests).toHaveLength(1);
+});
+
+test('forward document preserves metadata, captions, provider identity and idempotency', async ({ page }) => {
+  test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
+  await login(page);
+
+  const suffix = Date.now().toString().slice(-7);
+  const pdf = await createInbound(page, `552180${suffix}@s.whatsapp.net`, `Legenda PDF ${suffix}`, `Forward PDF Source ${suffix}`, {
+    mediaType: 'document',
+    document: { fileName: `contrato-${suffix}.pdf`, mimeType: 'application/pdf', fileSize: 4096 },
+  });
+  const generic = await createInbound(page, `552181${suffix}@s.whatsapp.net`, '', `Forward TXT Source ${suffix}`, {
+    mediaType: 'document',
+    document: { fileName: `instrucoes-${suffix}.txt`, mimeType: 'text/plain', fileSize: 128 },
+  });
+  const destinations = [
+    `552182${suffix}@s.whatsapp.net`,
+    `16470000000${suffix.slice(-2)}@lid`,
+    `12036300000${suffix.slice(-2)}@g.us`,
+  ];
+  for (const [index, destinationRemoteJid] of destinations.entries()) {
+    await createInbound(page, destinationRemoteJid, `Destino documento ${index} ${suffix}`, `Forward Document Destination ${index} ${suffix}`, {
+      isGroup: destinationRemoteJid.endsWith('@g.us'),
+    });
+  }
+
+  const beforeState = await getEvolutionSendState(page);
+  const firstClientMessageId = `qa-forward-document-${Date.now()}`;
+  const forwards = [
+    { source: pdf, destinationRemoteJid: destinations[0], clientMessageId: firstClientMessageId },
+    { source: generic, destinationRemoteJid: destinations[0], clientMessageId: `${firstClientMessageId}-generic` },
+    { source: pdf, destinationRemoteJid: destinations[1], clientMessageId: `${firstClientMessageId}-lid` },
+    { source: pdf, destinationRemoteJid: destinations[2], clientMessageId: `${firstClientMessageId}-group` },
+  ];
+  for (const item of forwards) {
+    const response = await page.request.post(`${apiBase}/api/evolution/messages/forward`, {
+      data: { sourceMessageId: item.source.evolutionMessageId, destinationRemoteJid: item.destinationRemoteJid, clientMessageId: item.clientMessageId },
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json() as { remoteJid?: string; evolution?: { key?: { remoteJid?: string } } };
+    expect(body.remoteJid).toBe(item.destinationRemoteJid);
+    expect(body.evolution?.key?.remoteJid).toBe(item.destinationRemoteJid);
+  }
+
+  const stateAfterFirstPass = await getEvolutionSendState(page);
+  const newSends = stateAfterFirstPass.sends.slice(beforeState.sends.length);
+  expect(newSends).toHaveLength(forwards.length);
+  const expectedDocumentSends = [
+    {
+      number: destinations[0],
+      mimetype: 'application/pdf',
+      fileName: `contrato-${suffix}.pdf`,
+      caption: `Legenda PDF ${suffix}`,
+    },
+    {
+      number: destinations[0],
+      mimetype: 'text/plain',
+      fileName: `instrucoes-${suffix}.txt`,
+      caption: undefined,
+    },
+    {
+      number: destinations[1],
+      mimetype: 'application/pdf',
+      fileName: `contrato-${suffix}.pdf`,
+      caption: `Legenda PDF ${suffix}`,
+    },
+    {
+      number: destinations[2],
+      mimetype: 'application/pdf',
+      fileName: `contrato-${suffix}.pdf`,
+      caption: `Legenda PDF ${suffix}`,
+    },
+  ];
+  for (const expected of expectedDocumentSends) {
+    const matchingSends = newSends.filter((send) => (
+      send.number === expected.number
+      && send.mediatype === 'document'
+      && send.mimetype === expected.mimetype
+      && send.fileName === expected.fileName
+    ));
+    expect(matchingSends).toHaveLength(1);
+    expect(matchingSends[0]?.caption).toBe(expected.caption);
+  }
+  expect(newSends.filter((send) => send.number === destinations[0])).toHaveLength(2);
+  expect(newSends.filter((send) => send.number === destinations[1])).toHaveLength(1);
+  expect(newSends.filter((send) => send.number === destinations[2])).toHaveLength(1);
+  expect(newSends[0]).toEqual(expect.objectContaining({
+    number: destinations[0],
+    mediatype: 'document',
+    mimetype: 'application/pdf',
+    fileName: `contrato-${suffix}.pdf`,
+  }));
+  expect(newSends[0]?.caption).toBe(`Legenda PDF ${suffix}`);
+  expect(newSends[1]).toEqual(expect.objectContaining({
+    number: destinations[0],
+    mediatype: 'document',
+    mimetype: 'text/plain',
+    fileName: `instrucoes-${suffix}.txt`,
+  }));
+  expect(newSends[1]?.caption).toBeUndefined();
+  for (const send of newSends) {
+    expect(String(send.media || '')).not.toHaveLength(0);
+    expect('quoted' in send).toBe(false);
+  }
+
+  const persisted = await getConversationRecords(page, destinations[0]);
+  const persistedDocuments = persisted.filter((record) => record.message?.documentMessage);
+  expect(persistedDocuments.some((record) => record.message.documentMessage.fileName === `contrato-${suffix}.pdf` && record.message.documentMessage.mimetype === 'application/pdf')).toBe(true);
+  expect(persistedDocuments.some((record) => record.message.documentMessage.fileName === `instrucoes-${suffix}.txt` && record.message.documentMessage.mimetype === 'text/plain')).toBe(true);
+
+  const retry = await page.request.post(`${apiBase}/api/evolution/messages/forward`, {
+    data: { sourceMessageId: pdf.evolutionMessageId, destinationRemoteJid: destinations[0], clientMessageId: firstClientMessageId },
+  });
+  expect(retry.status()).toBe(200);
+  expect((await retry.json()).deduplicated).toBe(true);
+  expect((await getEvolutionSendState(page)).sends).toHaveLength(stateAfterFirstPass.sends.length);
+  expect(stateAfterFirstPass.mediaRequests.some((request) => request.id === pdf.evolutionMessageId && request.remoteJid === `552180${suffix}@s.whatsapp.net`)).toBe(true);
+});
+
+test('forward document rejects unavailable provider media and client media injection', async ({ page }) => {
+  test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
+  await login(page);
+
+  const suffix = Date.now().toString().slice(-7);
+  const source = await createInbound(page, `552183${suffix}@s.whatsapp.net`, '', `Forward Document Unavailable ${suffix}`, {
+    mediaType: 'document',
+    document: { fileName: `indisponivel-${suffix}.pdf`, mimeType: 'application/pdf' },
+    mediaAvailable: false,
+  });
+  const noKeySource = await createInbound(page, `552184${suffix}@s.whatsapp.net`, '', `Forward Document No Key ${suffix}`, {
+    mediaType: 'document',
+    document: { fileName: `sem-chave-${suffix}.txt`, mimeType: 'text/plain' },
+    includeProviderKey: false,
+    mediaUrl: 'https://example.test/document-fallback.txt',
+  });
+  const destinationRemoteJid = `552185${suffix}@s.whatsapp.net`;
+  await createInbound(page, destinationRemoteJid, `Destino documento indisponível ${suffix}`, `Forward Document Error Destination ${suffix}`);
+  const beforeState = await getEvolutionSendState(page);
+
+  const unavailable = await page.request.post(`${apiBase}/api/evolution/messages/forward`, {
+    data: { sourceMessageId: source.evolutionMessageId, destinationRemoteJid, clientMessageId: `qa-forward-document-unavailable-${Date.now()}` },
+  });
+  expect(unavailable.status()).toBe(422);
+  expect((await unavailable.json()).code).toBe('forward_media_unavailable');
+
+  const noKey = await page.request.post(`${apiBase}/api/evolution/messages/forward`, {
+    data: { sourceMessageId: noKeySource.evolutionMessageId, destinationRemoteJid, clientMessageId: `qa-forward-document-no-key-${Date.now()}` },
+  });
+  expect(noKey.status()).toBe(422);
+  expect((await noKey.json()).code).toBe('forward_media_unavailable');
+
+  const injected = await page.request.post(`${apiBase}/api/evolution/messages/forward`, {
+    data: {
+      sourceMessageId: source.evolutionMessageId,
+      destinationRemoteJid,
+      clientMessageId: `qa-forward-document-injected-${Date.now()}`,
+      media: 'arbitrary',
+      mediaUrl: 'https://example.test/injected.pdf',
+      fileName: 'injected.pdf',
+      mimetype: 'application/pdf',
+      caption: 'caption injected',
+      providerKey: { id: 'injected', remoteJid: destinationRemoteJid },
+    },
+  });
+  expect(injected.status()).toBe(400);
+  expect((await getEvolutionSendState(page)).sends).toHaveLength(beforeState.sends.length);
+  const stateAfter = await getEvolutionSendState(page);
+  expect(stateAfter.mediaRequests.some((request) => request.id === source.evolutionMessageId)).toBe(true);
+  expect(stateAfter.mediaRequests.some((request) => request.id === noKeySource.evolutionMessageId)).not.toBe(true);
 });
 
 test('forward text uses existing PN, LID and group identities and is idempotent', async ({ page }) => {

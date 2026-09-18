@@ -12,6 +12,7 @@ let googleScenario: QaGoogleScenario = 'success';
 let providerOnlyChat: Record<string, any> | null = null;
 let qaWebhookConfig: Record<string, any> | null = null;
 const qaImageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+const qaDocumentBase64 = 'ZHVjdW1lbnRvLXFh';
 const qaMediaFixtures = new Map<string, { base64: string; mimetype: string; available: boolean }>();
 const qaMediaRequests: Array<Record<string, unknown>> = [];
 const qaEvolutionSends: Array<Record<string, unknown>> = [];
@@ -212,11 +213,24 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
     return Promise.resolve(new Response(JSON.stringify({ base64: fixture.base64, mimetype: fixture.mimetype }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
   }
   if (path.includes('/message/sendMedia/')) {
+    if (requestBody?.mediatype === 'document' && (
+      typeof requestBody?.number !== 'string'
+      || !requestBody.number.trim()
+      || typeof requestBody?.media !== 'string'
+      || !requestBody.media.trim()
+      || typeof requestBody?.mimetype !== 'string'
+      || !requestBody.mimetype.includes('/')
+      || typeof requestBody?.fileName !== 'string'
+      || !requestBody.fileName.trim()
+    )) {
+      return Promise.resolve(new Response(JSON.stringify({ error: 'INVALID_DOCUMENT_FILENAME' }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+    }
     qaEvolutionSends.push({
       number: requestBody?.number,
       mediatype: requestBody?.mediatype,
       mimetype: requestBody?.mimetype,
       media: requestBody?.media,
+      ...(typeof requestBody?.fileName === 'string' ? { fileName: requestBody.fileName } : {}),
       ...(typeof requestBody?.caption === 'string' ? { caption: requestBody.caption } : {}),
     });
   }
@@ -271,7 +285,12 @@ const qaInboundSchema = z.object({
   phone: z.string().min(8).max(32).optional(),
   name: z.string().min(2).max(160).default('Contato QA'),
   content: z.string().max(4096).optional().default(''),
-  mediaType: z.literal('image').optional(),
+  mediaType: z.enum(['image', 'document']).optional(),
+  document: z.object({
+    fileName: z.string().trim().max(180).optional(),
+    mimeType: z.string().trim().min(3).max(100).optional(),
+    fileSize: z.number().finite().nonnegative().optional(),
+  }).optional(),
   location: z.object({
     latitude: z.number().optional(),
     longitude: z.number().optional(),
@@ -279,11 +298,16 @@ const qaInboundSchema = z.object({
     address: z.string().max(500).optional(),
   }).optional(),
   mediaAvailable: z.boolean().optional().default(true),
+  includeProviderKey: z.boolean().optional().default(true),
+  mediaUrl: z.string().url().max(2048).optional(),
   isGroup: z.boolean().optional().default(false),
   timestampMs: z.number().int().positive().optional(),
 }).superRefine((value, context) => {
   if (!value.mediaType && !value.location && !value.content.trim()) {
     context.addIssue({ code: 'custom', path: ['content'], message: 'conteúdo obrigatório' });
+  }
+  if (value.mediaType === 'document' && !value.document) {
+    context.addIssue({ code: 'custom', path: ['document'], message: 'metadados documentais obrigatórios' });
   }
 });
 
@@ -334,7 +358,7 @@ export async function registerQaRoutes(app: FastifyInstance) {
     const phone = input.phone?.replace(/\D/g, '') || input.remoteJid.split('@')[0];
     const evolutionMessageId = `qa-inbound-${randomUUID()}`;
     const providerKey = { id: evolutionMessageId, remoteJid: input.remoteJid, fromMe: false };
-    const content = input.content || (input.mediaType === 'image' ? '[Imagem]' : input.location ? '[Localização compartilhada]' : '');
+    const content = input.content || (input.mediaType === 'image' ? '[Imagem]' : input.mediaType === 'document' ? '[Documento]' : input.location ? '[Localização compartilhada]' : '');
     const contact = await db.query<{ id: string }>(
       `INSERT INTO contacts (company_id, name, phone, source)
        VALUES ($1, $2, $3, 'system')
@@ -350,15 +374,20 @@ export async function registerQaRoutes(app: FastifyInstance) {
     );
     const conversationId = conversation.rows[0]!.id;
     await db.query(
-      `INSERT INTO messages (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_type, metadata, status, sent_at)
-       VALUES ($1, $2, $3, 'contact', $4, $5, $6, $7::jsonb, 'delivered', to_timestamp($8::numeric / 1000))`,
-      [request.user!.companyId, conversationId, evolutionMessageId, input.name, content, input.mediaType || null, JSON.stringify({
-        ...(input.mediaType || input.location ? { providerKey } : {}),
+      `INSERT INTO messages (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_url, media_type, metadata, status, sent_at)
+       VALUES ($1, $2, $3, 'contact', $4, $5, $6, $7, $8::jsonb, 'delivered', to_timestamp($9::numeric / 1000))`,
+      [request.user!.companyId, conversationId, evolutionMessageId, input.name, content, input.mediaUrl || null, input.mediaType || null, JSON.stringify({
+        ...(input.includeProviderKey && (input.mediaType || input.location) ? { providerKey } : {}),
+        ...(input.document ? { document: input.document } : {}),
         ...(input.location !== undefined ? { location: input.location } : {}),
       }), timestampMs],
     );
-    if (input.mediaType === 'image') {
-      qaMediaFixtures.set(evolutionMessageId, { base64: qaImageBase64, mimetype: 'image/png', available: input.mediaAvailable });
+    if (input.mediaType === 'image' || input.mediaType === 'document') {
+      qaMediaFixtures.set(evolutionMessageId, {
+        base64: input.mediaType === 'document' ? qaDocumentBase64 : qaImageBase64,
+        mimetype: input.document?.mimeType || 'image/png',
+        available: input.mediaAvailable,
+      });
     }
     publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
       remoteJid: input.remoteJid, phone, messageId: evolutionMessageId, timestampMs, fromMe: false,
@@ -369,9 +398,10 @@ export async function registerQaRoutes(app: FastifyInstance) {
         senderName: input.name,
         content,
         ...(input.mediaType ? { mediaType: input.mediaType } : {}),
-        ...((input.mediaType || input.location) ? {
+        ...((input.includeProviderKey && (input.mediaType || input.location)) ? {
           metadata: {
-            ...(input.mediaType || input.location ? { providerKey } : {}),
+            ...(input.includeProviderKey && (input.mediaType || input.location) ? { providerKey } : {}),
+            ...(input.document ? { document: input.document } : {}),
             ...(input.location !== undefined ? { location: input.location } : {}),
           },
           rawKey: providerKey,

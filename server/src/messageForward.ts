@@ -1,4 +1,5 @@
 import { formatHubOutboundText } from './outboundMessage.js';
+import { MAX_MEDIA_BASE64_CHARS } from './mediaLimits.js';
 
 export type ForwardSourceMessage = {
   id: string;
@@ -20,6 +21,84 @@ export type ForwardableLocation = {
   name?: string;
   address?: string;
 };
+
+export type ForwardableDocument = {
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+  caption?: string;
+};
+
+const DOCUMENT_MIME_BY_EXTENSION: Record<string, string> = {
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  csv: 'text/csv',
+  txt: 'text/plain',
+  md: 'text/markdown',
+  log: 'text/plain',
+  zip: 'application/zip',
+  rar: 'application/vnd.rar',
+  '7z': 'application/x-7z-compressed',
+  tar: 'application/x-tar',
+  gz: 'application/gzip',
+};
+
+const DOCUMENT_EXTENSION_BY_MIME = Object.entries(DOCUMENT_MIME_BY_EXTENSION).reduce<Record<string, string>>(
+  (extensions, [extension, mimeType]) => {
+    if (!extensions[mimeType]) extensions[mimeType] = extension;
+    return extensions;
+  },
+  {},
+);
+
+const documentFileName = (value: unknown) => {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 180 || /[\u0000-\u001f\u007f]/.test(trimmed)) return undefined;
+  return trimmed;
+};
+
+export const trustedDocumentMimeType = (value: unknown) => {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i.test(trimmed) && trimmed.length <= 100
+    ? trimmed
+    : undefined;
+};
+
+const documentExtension = (value: unknown) => {
+  const fileName = documentFileName(value);
+  const match = fileName?.match(/\.([a-z0-9]{1,10})$/i);
+  return match?.[1]?.toLowerCase();
+};
+
+export const documentMimeTypeForForward = (...values: unknown[]) => {
+  for (const value of values) {
+    const mimeType = trustedDocumentMimeType(value);
+    if (mimeType) return mimeType;
+  }
+  for (const value of values) {
+    const mimeType = DOCUMENT_MIME_BY_EXTENSION[documentExtension(value) || ''];
+    if (mimeType) return mimeType;
+  }
+  return 'application/octet-stream';
+};
+
+export const documentFileNameForForward = (value: unknown, mimeType: unknown) => {
+  const existing = documentFileName(value);
+  if (existing) return existing;
+  const extension = DOCUMENT_EXTENSION_BY_MIME[String(trustedDocumentMimeType(mimeType) || '').toLowerCase()];
+  return extension ? `document.${extension}` : 'document';
+};
+
+export const isForwardableMediaSizeAllowed = (media: unknown) => (
+  typeof media === 'string'
+  && media.trim().length > 0
+  && media.trim().length <= MAX_MEDIA_BASE64_CHARS
+);
 
 export function hasPersistedLocation(source: ForwardSourceMessage | undefined) {
   return Boolean(source?.metadata
@@ -84,6 +163,36 @@ export function forwardableImageFromSource(source: ForwardSourceMessage | undefi
     || source.metadata?.deletedForEveryone === 'true') return undefined;
   const content = typeof source.content === 'string' ? source.content.trim() : '';
   return { caption: content && !imagePlaceholder.test(content) ? content : undefined };
+}
+
+const documentPlaceholder = /^\[\s*(?:documento|document)\s*\]$/iu;
+
+/** Only a persisted, ordinary document can enter document forwarding. */
+export function forwardableDocumentFromSource(source: ForwardSourceMessage | undefined): ForwardableDocument | undefined {
+  if (!source
+    || (source.sender !== 'contact' && source.sender !== 'attendant')
+    || source.is_internal_note
+    || source.media_type !== 'document'
+    || hasPersistedLocation(source)
+    || source.status === 'pending'
+    || source.status === 'failed'
+    || source.metadata?.deletedForEveryone === true
+    || source.metadata?.deletedForEveryone === 'true') return undefined;
+
+  const persisted = source.metadata?.document;
+  const document = persisted && typeof persisted === 'object' && !Array.isArray(persisted) ? persisted : {};
+  const content = typeof source.content === 'string' ? source.content.trim() : '';
+  const fileSize = typeof document.fileSize === 'number'
+    && Number.isFinite(document.fileSize)
+    && document.fileSize >= 0
+    ? Math.floor(document.fileSize)
+    : undefined;
+  return {
+    ...(documentFileName(document.fileName) ? { fileName: documentFileName(document.fileName) } : {}),
+    ...(trustedDocumentMimeType(document.mimeType) ? { mimeType: trustedDocumentMimeType(document.mimeType) } : {}),
+    ...(fileSize !== undefined ? { fileSize } : {}),
+    ...(content && !documentPlaceholder.test(content) ? { caption: content } : {}),
+  };
 }
 
 export function evolutionTextPayload(input: {
