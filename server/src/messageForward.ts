@@ -144,8 +144,8 @@ export function forwardableTextFromSource(source: ForwardSourceMessage | undefin
     || hasPersistedLocation(source)
     || source.metadata?.deletedForEveryone === true
     || source.metadata?.deletedForEveryone === 'true') return undefined;
-  const content = typeof source.content === 'string' ? source.content.trim() : '';
-  return content || undefined;
+  const content = typeof source.content === 'string' ? source.content : '';
+  return content.trim() ? content : undefined;
 }
 
 const imagePlaceholder = /^(?:🖼️\s*)?\[(?:imagem|image)\]$/iu;
@@ -207,5 +207,17 @@ export function evolutionTextPayload(input: {
     delay: 1200,
     linkPreview: true,
     ...(input.quoted ? { quoted: input.quoted } : {}),
+  };
+}
+
+export function evolutionForwardTextPayload(input: {
+  recipient: string;
+  text: string;
+}) {
+  return {
+    number: input.recipient,
+    text: input.text,
+    delay: 1200,
+    linkPreview: true,
   };
 }

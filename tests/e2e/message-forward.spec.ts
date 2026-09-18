@@ -464,12 +464,14 @@ test('forward text uses existing PN, LID and group identities and is idempotent'
   test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
   await login(page);
 
-  const source = await createInbound(page, `552199100${Date.now().toString().slice(-6)}@s.whatsapp.net`, 'Texto original para encaminhar');
+  const sourceText = 'Mensagem original\nlinha 2 😀 https://example.test/original';
+  const source = await createInbound(page, `552199100${Date.now().toString().slice(-6)}@s.whatsapp.net`, sourceText);
   const destinations = [
     '5521990000001@s.whatsapp.net',
     '164700000001@lid',
     '120363000000@g.us',
   ];
+  const beforeState = await getEvolutionSendState(page);
 
   for (const [index, destinationRemoteJid] of destinations.entries()) {
     const clientMessageId = `qa-forward-${Date.now()}-${index}`;
@@ -493,6 +495,15 @@ test('forward text uses existing PN, LID and group identities and is idempotent'
     });
     expect(retry.status()).toBe(200);
     expect((await retry.json()).deduplicated).toBe(true);
+  }
+
+  const stateAfter = await getEvolutionSendState(page);
+  const newSends = stateAfter.sends.slice(beforeState.sends.length);
+  expect(newSends).toHaveLength(destinations.length);
+  expect(newSends.map((send) => send.number)).toEqual(destinations);
+  expect(newSends.map((send) => send.text)).toEqual([sourceText, sourceText, sourceText]);
+  for (const send of newSends) {
+    expect(send.text).not.toContain('QA Admin A');
   }
 });
 

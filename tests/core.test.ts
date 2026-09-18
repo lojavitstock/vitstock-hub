@@ -41,6 +41,7 @@ import { isValidEvolutionTextRecipient, resolveEvolutionRecipient, resolveEvolut
 import {
   documentFileNameForForward,
   documentMimeTypeForForward,
+  evolutionForwardTextPayload,
   evolutionTextPayload,
   forwardableDocumentFromSource,
   forwardableImageFromSource,
@@ -3275,6 +3276,7 @@ const forwardSource = (overrides: Partial<ForwardSourceMessage> = {}): ForwardSo
 
 test('forward text accepts only ordinary textual source messages', () => {
   assert.equal(forwardableTextFromSource(forwardSource()), 'Texto original');
+  assert.equal(forwardableTextFromSource(forwardSource({ content: '  linha 1\nlinha 2  ' })), '  linha 1\nlinha 2  ');
   assert.equal(forwardableTextFromSource(forwardSource({ sender: 'system' })), undefined);
   assert.equal(forwardableTextFromSource(forwardSource({ is_internal_note: true })), undefined);
   assert.equal(forwardableTextFromSource(forwardSource({ media_type: 'image' })), undefined);
@@ -3318,12 +3320,14 @@ test('forward text payload preserves PN, LID and group transport identities', ()
     '903612345678901@lid',
     '120363000000@g.us',
   ];
+  const sourceText = 'Bom dia\nlinha 2 😀 https://example.test/original';
   for (const destination of destinations) {
-    const payload = evolutionTextPayload({ recipient: destination, text: 'Texto original', userName: 'Atendente QA' });
+    const payload = evolutionForwardTextPayload({ recipient: destination, text: sourceText });
     assert.equal(payload.number, destination);
-    assert.equal(payload.quoted, undefined);
-    assert.match(payload.text, /Texto original/);
+    assert.equal('quoted' in payload, false);
+    assert.equal(payload.text, sourceText);
   }
+  assert.equal(evolutionTextPayload({ recipient: destinations[0], text: 'Bom dia', userName: 'Atendente QA' }).text, '*Atendente QA:*\nBom dia');
 });
 
 test('forward image accepts captions but never treats the media placeholder as a caption', () => {

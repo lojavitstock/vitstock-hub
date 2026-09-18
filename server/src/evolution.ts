@@ -69,6 +69,7 @@ import { filterConversationalProviderChats, isConversationalProviderJid } from '
 import {
   documentFileNameForForward,
   documentMimeTypeForForward,
+  evolutionForwardTextPayload,
   evolutionTextPayload,
   forwardableDocumentFromSource,
   forwardableImageFromSource,
@@ -3897,6 +3898,7 @@ async function dispatchOutboundText(input: {
   normalizedQuote?: QuotedMessage;
   evolutionQuote?: unknown;
   evolutionRecipient?: ReturnType<typeof resolveEvolutionTextRecipient>;
+  preserveOriginalText?: boolean;
   leaseAcquisition: Awaited<ReturnType<typeof acquireOutboundLease>>;
   outboundStartedAt: number;
 }) {
@@ -3963,12 +3965,14 @@ async function dispatchOutboundText(input: {
           `/message/sendText/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
           {
             method: 'POST',
-            body: JSON.stringify(evolutionTextPayload({
-              recipient: evolutionRecipient.number,
-              text,
-              userName: request.user!.name,
-              quoted: evolutionQuote,
-            })),
+            body: JSON.stringify(input.preserveOriginalText
+              ? evolutionForwardTextPayload({ recipient: evolutionRecipient.number, text })
+              : evolutionTextPayload({
+                recipient: evolutionRecipient.number,
+                text,
+                userName: request.user!.name,
+                quoted: evolutionQuote,
+              })),
           },
         );
         const rawBody = await response.text();
@@ -5273,6 +5277,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       number: '',
       remoteJid: destinationRemoteJid,
       text,
+      preserveOriginalText: true,
       clientMessageId: parsed.data.clientMessageId,
       leaseAcquisition,
       outboundStartedAt,

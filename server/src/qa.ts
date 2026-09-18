@@ -234,6 +234,14 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
       ...(typeof requestBody?.caption === 'string' ? { caption: requestBody.caption } : {}),
     });
   }
+  if (path.includes('/message/sendText/')) {
+    qaEvolutionSends.push({
+      number: requestBody?.number,
+      text: requestBody?.text,
+      ...(typeof requestBody?.delay === 'number' ? { delay: requestBody.delay } : {}),
+      ...(typeof requestBody?.linkPreview === 'boolean' ? { linkPreview: requestBody.linkPreview } : {}),
+    });
+  }
   if (path.includes('/message/sendLocation/')) {
     if (typeof requestBody?.name !== 'string' || typeof requestBody?.address !== 'string') {
       return Promise.resolve(new Response(JSON.stringify({ error: 'INVALID_LOCATION_PAYLOAD' }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
