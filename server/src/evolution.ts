@@ -63,7 +63,7 @@ import { hasQaProviderOnlyChat, qaEvolutionResponse } from './qa.js';
 import { loadConversationTags } from './conversationTags.js';
 import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.js';
 import { buildEvolutionSendLocationErrorDiagnostic, buildEvolutionSendLocationTransportDiagnostic, evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
-import { buildReplyFailureTrace } from './replyFailureTrace.js';
+import { buildReplyFailureTrace, buildReplyTraceDetails } from './replyFailureTrace.js';
 import { resolveConversationForOperation, resolveConversationWithClient } from './conversationResolver.js';
 import { filterConversationalProviderChats, isConversationalProviderJid } from './providerJidPolicy.js';
 import {
@@ -136,7 +136,9 @@ const sendTextSchema = z.object({
   replyTraceId: replyTraceIdSchema.optional(),
   quotedMessage: z.object({
     messageId: z.string().trim().min(1).max(256),
-    providerKeySource: z.enum(['providerKey', 'legacyFallback']).optional(),
+    providerKeySource: z.enum(['raw', 'metadata', 'legacy', 'none', 'providerKey', 'legacyFallback']).optional(),
+    sourceAge: z.enum(['RECENT', 'OLDER', 'LEGACY', 'UNKNOWN']).optional(),
+    sourceMediaType: z.enum(['text', 'image', 'video', 'document', 'audio', 'sticker', 'location', 'other']).optional(),
     authorName: z.string().trim().min(1).max(200).optional(),
     sender: z.enum(['contact', 'attendant', 'system']).optional(),
     content: z.string().max(4096).optional(),
@@ -694,6 +696,11 @@ function traceOutbound(request: any, stage: string, input: {
   idempotencyLockMs?: number;
   persistenceMs?: number;
   evolutionRequestMs?: number;
+  quote?: unknown;
+  messageType?: string;
+  evolutionEndpoint?: string;
+  evolutionStatus?: number;
+  evolutionStatusText?: string;
 }) {
   if (!outboundTraceEnabled) return;
   // This opt-in trace intentionally omits text, media, headers and secrets.
@@ -714,6 +721,18 @@ function traceOutbound(request: any, stage: string, input: {
     idempotencyLockMs: input.idempotencyLockMs,
     persistenceMs: input.persistenceMs,
     evolutionRequestMs: input.evolutionRequestMs,
+    reply: input.replyTraceId || input.quote
+      ? buildReplyTraceDetails(input.quote, input.messageType)
+      : undefined,
+    evolution: input.evolutionEndpoint || input.evolutionStatus !== undefined || input.evolutionStatusText
+      ? {
+        endpoint: input.evolutionEndpoint,
+        httpStatus: input.evolutionStatus,
+        statusText: input.evolutionStatusText
+          ? sanitizeEvolutionProviderError(input.evolutionStatusText)
+          : undefined,
+      }
+      : undefined,
     timestampMs: Date.now(),
   }));
 }
@@ -1562,6 +1581,8 @@ function normalizedQuotedMessage(quoted: QuotedMessage | undefined, fallbackRemo
   return {
     messageId,
     ...(quoted.providerKeySource ? { providerKeySource: quoted.providerKeySource } : {}),
+    ...(quoted.sourceAge ? { sourceAge: quoted.sourceAge } : {}),
+    ...(quoted.sourceMediaType ? { sourceMediaType: quoted.sourceMediaType } : {}),
     ...(quoted.authorName ? { authorName: quoted.authorName } : {}),
     ...(quoted.sender ? { sender: quoted.sender } : {}),
     ...(quoted.content ? { content: quoted.content } : {}),
@@ -3911,6 +3932,7 @@ async function dispatchOutboundText(input: {
 }) {
   const { request, reply, number, remoteJid, text, clientMessageId, replyTraceId, normalizedQuote, evolutionQuote } = input;
   const evolutionRecipient = input.evolutionRecipient || resolveEvolutionTextRecipient({ remoteJid, number });
+  const evolutionEndpoint = `/message/sendText/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`;
   let localMessage: Awaited<ReturnType<typeof ensureOutboundMessage>>;
   try {
     localMessage = await ensureOutboundMessage({
@@ -3942,6 +3964,8 @@ async function dispatchOutboundText(input: {
     clientMessageId,
     replyTraceId,
     remoteJid,
+    quote: normalizedQuote,
+    messageType: normalizedQuote?.mediaType || 'text',
     evolutionMessageId: localMessage.evolutionMessageId || undefined,
     deduplicated: localMessage.deduplicated,
     elapsedMs: Date.now() - input.outboundStartedAt,
@@ -3967,9 +3991,17 @@ async function dispatchOutboundText(input: {
     dispatch = await outboundEvolutionRequests.run(
       `${request.user!.companyId}:${clientMessageId}`,
       async () => {
-        traceOutbound(request, 'evolution.request', { clientMessageId, replyTraceId, remoteJid, elapsedMs: Date.now() - input.outboundStartedAt });
+        traceOutbound(request, 'evolution.request', {
+          clientMessageId,
+          replyTraceId,
+          remoteJid,
+          quote: normalizedQuote,
+          messageType: normalizedQuote?.mediaType || 'text',
+          evolutionEndpoint,
+          elapsedMs: Date.now() - input.outboundStartedAt,
+        });
         const response = await evolutionRequest(
-          `/message/sendText/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+          evolutionEndpoint,
           {
             method: 'POST',
             body: JSON.stringify(input.preserveOriginalText
@@ -4049,6 +4081,11 @@ async function dispatchOutboundText(input: {
     clientMessageId,
     replyTraceId,
     remoteJid,
+    quote: normalizedQuote,
+    messageType: normalizedQuote?.mediaType || 'text',
+    evolutionEndpoint,
+    evolutionStatus: dispatch.status,
+    evolutionStatusText: dispatch.statusText,
     evolutionMessageId,
     evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
     ok: dispatch.ok,
@@ -4060,6 +4097,8 @@ async function dispatchOutboundText(input: {
     clientMessageId,
     replyTraceId,
     remoteJid,
+    quote: normalizedQuote,
+    messageType: normalizedQuote?.mediaType || 'text',
     evolutionMessageId,
     evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
     elapsedMs: Date.now() - input.outboundStartedAt,
@@ -4097,6 +4136,8 @@ async function dispatchOutboundText(input: {
     clientMessageId,
     replyTraceId,
     remoteJid,
+    quote: normalizedQuote,
+    messageType: normalizedQuote?.mediaType || 'text',
     evolutionMessageId: realtimeMessageId,
     elapsedMs: Date.now() - input.outboundStartedAt,
   });
@@ -5035,7 +5076,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
-    traceOutbound(request, 'received', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
+    traceOutbound(request, 'received', {
+      clientMessageId,
+      replyTraceId,
+      remoteJid: canonicalRemoteJid,
+      quote: normalizedQuote,
+      messageType: normalizedQuote?.mediaType || 'text',
+      elapsedMs: Date.now() - outboundStartedAt,
+    });
     const leaseAcquisition = await acquireOutboundLease({
       companyId: request.user!.companyId,
       user: request.user!,
@@ -5394,9 +5442,17 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'Destinatário não conversacional', code: 'unsupported_provider_entity' });
     }
     const evolutionRecipient = resolveEvolutionRecipient({ remoteJid: canonicalRemoteJid, canonicalPhone: number });
+    const evolutionEndpoint = `/message/sendMedia/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`;
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
-    traceOutbound(request, 'received', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
+    traceOutbound(request, 'received', {
+      clientMessageId,
+      replyTraceId,
+      remoteJid: canonicalRemoteJid,
+      quote: normalizedQuote,
+      messageType: normalizedQuote?.mediaType || parsed.data.mediatype,
+      elapsedMs: Date.now() - outboundStartedAt,
+    });
     const leaseAcquisition = await acquireOutboundLease({
       companyId: request.user!.companyId,
       user: request.user!,
@@ -5504,9 +5560,17 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       dispatch = await outboundMediaEvolutionRequests.run(
         `${request.user!.companyId}:${clientMessageId}`,
         async () => {
-          traceOutbound(request, 'evolution.request', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
+          traceOutbound(request, 'evolution.request', {
+            clientMessageId,
+            replyTraceId,
+            remoteJid: canonicalRemoteJid,
+            quote: normalizedQuote,
+            messageType: normalizedQuote?.mediaType || parsed.data.mediatype,
+            evolutionEndpoint,
+            elapsedMs: Date.now() - outboundStartedAt,
+          });
           const response = await evolutionRequest(
-            `/message/sendMedia/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+            evolutionEndpoint,
             {
               method: 'POST',
               body: JSON.stringify({
@@ -5624,6 +5688,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       clientMessageId,
       replyTraceId,
       remoteJid: canonicalRemoteJid,
+      quote: normalizedQuote,
+      messageType: normalizedQuote?.mediaType || parsed.data.mediatype,
+      evolutionEndpoint,
+      evolutionStatus: dispatch.status,
+      evolutionStatusText: dispatch.statusText,
       evolutionMessageId,
       evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
       ok: dispatch.ok,
@@ -5635,6 +5704,8 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       clientMessageId,
       replyTraceId,
       remoteJid: canonicalRemoteJid,
+      quote: normalizedQuote,
+      messageType: normalizedQuote?.mediaType || parsed.data.mediatype,
       evolutionMessageId,
       evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
       elapsedMs: Date.now() - outboundStartedAt,
@@ -5678,6 +5749,8 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       clientMessageId,
       replyTraceId,
       remoteJid: canonicalRemoteJid,
+      quote: normalizedQuote,
+      messageType: normalizedQuote?.mediaType || parsed.data.mediatype,
       evolutionMessageId: realtimeMessageId,
       elapsedMs: Date.now() - outboundStartedAt,
     });

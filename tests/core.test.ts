@@ -54,7 +54,7 @@ import {
 } from '../server/src/messageForward';
 import { qaEvolutionResponse } from '../server/src/qa';
 import { buildEvolutionSendLocationErrorDiagnostic, buildEvolutionSendLocationTransportDiagnostic, evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
-import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
+import { buildReplyFailureTrace, buildReplyTraceDetails } from '../server/src/replyFailureTrace';
 import {
   resetAvatarDebugDedupe as resetServerAvatarDebugDedupe,
   traceAvatarProfileFetch,
@@ -80,7 +80,7 @@ import {
   normalizeProviderConversationIdentity,
   projectCanonicalInboxChats,
 } from '../server/src/inboxProjection';
-import { toQuotedMessage } from '../src/utils/quotedMessage';
+import { quotedProviderKeySource, quotedSourceAge, quotedSourceMediaType, toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
 import { canDownloadMessageMedia, canForwardMessage, messageCopyText, messageMenuActionsFor } from '../src/utils/messageActions';
@@ -2072,6 +2072,37 @@ test('resposta de atendente mantém referência explícita no estado otimista e 
   assert.equal(merged[1]?.senderName, 'Henrique');
 });
 
+test('reply trace classifica origem da provider key e idade sem registrar timestamp', () => {
+  const now = 1_800_000_000_000;
+  const raw = message('raw-source', now - 1_000, 'Imagem', 'read', {
+    timestampMs: now - 1_000,
+    rawKey: { id: 'provider-raw', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+  });
+  const metadata = message('metadata-source', now - 8 * 24 * 60 * 60 * 1000, 'Imagem', 'read', {
+    timestampMs: now - 8 * 24 * 60 * 60 * 1000,
+    metadata: { providerKey: { id: 'provider-metadata', remoteJid: 'opaque-123@lid', fromMe: true } },
+  });
+  const legacy = message('legacy-source', now - 91 * 24 * 60 * 60 * 1000, 'Texto', 'read', { timestampMs: now - 91 * 24 * 60 * 60 * 1000 });
+  const location = message('location-source', now - 1_000, '[Localização compartilhada]', 'read', {
+    timestampMs: now - 1_000,
+    metadata: { location: { latitude: 0, longitude: 0 } },
+  });
+
+  assert.equal(quotedProviderKeySource(raw), 'raw');
+  assert.equal(quotedProviderKeySource(metadata), 'metadata');
+  assert.equal(quotedProviderKeySource(legacy), 'legacy');
+  assert.equal(quotedSourceAge(raw.timestampMs, now), 'RECENT');
+  assert.equal(quotedSourceAge(metadata.timestampMs, now), 'OLDER');
+  assert.equal(quotedSourceAge(legacy.timestampMs, now), 'LEGACY');
+  assert.equal(quotedSourceMediaType(raw), 'text');
+  assert.equal(quotedSourceMediaType({ ...raw, mediaType: 'image' }), 'image');
+  assert.equal(quotedSourceMediaType(location), 'location');
+  assert.equal(toQuotedMessage(raw).providerKeySource, 'raw');
+  assert.equal(toQuotedMessage(metadata).providerKeySource, 'metadata');
+  assert.equal(toQuotedMessage(legacy).providerKeySource, 'legacy');
+  assert.equal(toQuotedMessage(location).sourceMediaType, 'location');
+});
+
 test('reply failure trace is sanitized and distinguishes provider keys from legacy fallback', () => {
   const providerTrace = buildReplyFailureTrace({
     replyTraceId: 'reply-test-123',
@@ -2082,7 +2113,9 @@ test('reply failure trace is sanitized and distinguishes provider keys from lega
     requestId: 'request-123',
     quote: {
       messageId: 'hub-message-123',
-      providerKeySource: 'providerKey',
+      providerKeySource: 'metadata',
+      sourceAge: 'OLDER',
+      sourceMediaType: 'audio',
       mediaType: 'audio',
       key: {
         id: 'evolution-message-123',
@@ -2105,7 +2138,24 @@ test('reply failure trace is sanitized and distinguishes provider keys from lega
   assert.equal(providerTrace.replyTraceId, 'reply-test-123');
   assert.equal(providerTrace.replyTarget.providerKeyPresent, true);
   assert.equal(providerTrace.replyTarget.providerKeyRemoteJidType, 'LID');
-  assert.equal(providerTrace.outbound.quoteSource, 'providerKey');
+  assert.equal(providerTrace.outbound.quoteSource, 'metadata');
+  assert.equal(providerTrace.replyTarget.providerKeySource, 'metadata');
+  assert.equal(providerTrace.replyTarget.sourceAge, 'OLDER');
+  assert.equal(providerTrace.replyTarget.sourceMediaType, 'audio');
+  assert.equal(providerTrace.replyTarget.sourceDirection, 'INBOUND');
+  assert.equal(providerTrace.replyTarget.providerMessageIdPresent, true);
+  const successDetails = buildReplyTraceDetails({
+    providerKeySource: 'metadata',
+    sourceAge: 'OLDER',
+    mediaType: 'audio',
+    content: 'conteúdo privado',
+    key: { id: 'provider-raw', remoteJid: 'opaque-123@lid', fromMe: false, participant: 'participant-123@lid' },
+  });
+  assert.equal(successDetails.sourceDirection, 'INBOUND');
+  assert.equal(successDetails.providerKeySource, 'metadata');
+  assert.equal(successDetails.sourceAge, 'OLDER');
+  assert.equal(successDetails.sourceMediaType, 'audio');
+  assert.doesNotMatch(JSON.stringify(successDetails), /provider-raw|opaque-123@lid|conteúdo privado/);
   assert.equal(providerTrace.outbound.payloadQuoteStructurallyValid, true);
   assert.equal(providerTrace.evolution.providerError?.message, 'invalid jid [redacted-jid] [redacted-jid]');
   assert.doesNotMatch(JSON.stringify(providerTrace), /opaque-123@lid|5521999999999|do-not-log/);
@@ -2114,14 +2164,17 @@ test('reply failure trace is sanitized and distinguishes provider keys from lega
     replyTraceId: 'reply-legacy-123',
     quote: {
       messageId: 'legacy-message-123',
-      providerKeySource: 'legacyFallback',
+      providerKeySource: 'legacy',
+      sourceMediaType: 'text',
       key: { id: 'legacy-message-123', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
     },
     recipient: { number: '5521999999999', remoteJid: '5521999999999@s.whatsapp.net' },
     messageType: 'text',
     failureOrigin: 'evolution_network',
   });
-  assert.equal(legacyTrace.outbound.quoteSource, 'legacyFallback');
+  assert.equal(legacyTrace.outbound.quoteSource, 'legacy');
+  assert.equal(legacyTrace.replyTarget.providerKeySource, 'legacy');
+  assert.equal(legacyTrace.replyTarget.sourceDirection, 'FROM_ME');
   assert.equal(legacyTrace.replyTarget.evolutionMessageIdPresent, false);
 });
 
