@@ -75,11 +75,14 @@ import {
   forwardableImageFromSource,
   forwardableLocationFromSource,
   forwardableTextFromSource,
+  forwardableVideoFromSource,
   hasPersistedLocation,
+  isForwardableMediaPayloadAllowed,
   isForwardableMediaSizeAllowed,
   trustedDocumentMimeType,
   type ForwardableDocument,
   type ForwardableLocation,
+  type ForwardableVideo,
   type ForwardSourceMessage,
 } from './messageForward.js';
 import {
@@ -3425,17 +3428,19 @@ async function dispatchForwardedMedia(input: {
   reply: FastifyReply;
   number: string;
   remoteJid: string;
-  mediatype: 'image' | 'document';
+  mediatype: 'image' | 'video' | 'document';
   mimetype: string;
   media: string;
   document?: ForwardableDocument;
+  fileName?: string;
   caption?: string;
   clientMessageId: string;
   leaseAcquisition: Awaited<ReturnType<typeof acquireOutboundLease>>;
   outboundStartedAt: number;
 }) {
-  const { request, reply, number, remoteJid, mediatype, mimetype, media, document, caption, clientMessageId } = input;
-  const text = caption?.trim() || (mediatype === 'document' ? '[document]' : '[Imagem]');
+  const { request, reply, number, remoteJid, mediatype, mimetype, media, document, fileName, caption, clientMessageId } = input;
+  const mediaLabel = mediatype === 'document' ? 'documento' : mediatype === 'video' ? 'vídeo' : 'imagem';
+  const text = caption?.trim() || (mediatype === 'document' ? '[document]' : mediatype === 'video' ? '[Vídeo]' : '[Imagem]');
   const evolutionRecipient = resolveEvolutionRecipient({ remoteJid, canonicalPhone: number });
   let localMessage: Awaited<ReturnType<typeof ensureOutboundMessage>>;
   try {
@@ -3503,7 +3508,9 @@ async function dispatchForwardedMedia(input: {
               mediatype,
               mimetype,
               media,
-              ...(mediatype === 'document' ? { fileName: document?.fileName } : {}),
+              ...(mediatype === 'document' || mediatype === 'video'
+                ? { fileName: mediatype === 'document' ? document?.fileName : fileName }
+                : {}),
               caption: evolutionCaption,
             }),
           },
@@ -3537,7 +3544,7 @@ async function dispatchForwardedMedia(input: {
       failureOrigin: 'evolution_network',
       media: { mediatype, mimetype, base64Length: media.length, hasCaption: Boolean(caption?.trim()), captionLength: caption?.trim().length || 0 },
     });
-    request.log.warn({ err: error }, `Falha de comunicação com a Evolution API ao encaminhar ${mediatype === 'document' ? 'documento' : 'imagem'}`);
+    request.log.warn({ err: error }, `Falha de comunicação com a Evolution API ao encaminhar ${mediaLabel}`);
     return reply.code(502).send({ error: 'Evolution API indisponível', messageId: localMessage.messageId });
   }
   if (!dispatch.ok) {
@@ -3573,7 +3580,7 @@ async function dispatchForwardedMedia(input: {
       }, 'Evolution forward-media rejected');
     }
     return reply.code(status).send({
-      error: status === 502 ? 'Evolution API indisponível' : `Evolution API rejeitou o ${mediatype === 'document' ? 'documento' : 'imagem'}`,
+      error: status === 502 ? 'Evolution API indisponível' : `Evolution API rejeitou o ${mediaLabel}`,
       code: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
       providerStatus: dispatch.status,
       messageId: localMessage.messageId,
@@ -5090,10 +5097,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     if (sourceHasLocation && !location) {
       return reply.code(422).send({ error: 'A localização não é válida para encaminhamento', code: 'source_location_invalid' });
     }
-    const document = sourceHasLocation ? undefined : forwardableDocumentFromSource(source);
-    const text = sourceHasLocation || document ? undefined : forwardableTextFromSource(source);
-    const image = sourceHasLocation || document || text ? undefined : forwardableImageFromSource(source);
-    if (!text && !image && !location && !document) {
+    const video = sourceHasLocation ? undefined : forwardableVideoFromSource(source);
+    const document = sourceHasLocation || video ? undefined : forwardableDocumentFromSource(source);
+    const text = sourceHasLocation || video || document ? undefined : forwardableTextFromSource(source);
+    const image = sourceHasLocation || video || document || text ? undefined : forwardableImageFromSource(source);
+    if (!text && !image && !location && !document && !video) {
       return reply.code(422).send({ error: 'A mensagem não pode ser encaminhada', code: 'source_message_unsupported' });
     }
 
@@ -5109,8 +5117,9 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     let sourceMedia: {
       media: string;
       mimetype: string;
-      mediatype: 'image' | 'document';
+      mediatype: 'image' | 'video' | 'document';
       document?: ForwardableDocument;
+      fileName?: string;
       caption?: string;
     } | undefined;
     if (image) {
@@ -5210,6 +5219,66 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         ...(document.caption ? { caption: document.caption } : {}),
       };
     }
+    if (video) {
+      const sourceProviderKey = source.metadata?.providerKey;
+      const keyValidation = validateProviderMessageKey(sourceProviderKey);
+      if (!keyValidation.valid) {
+        return reply.code(422).send({
+          error: 'Não foi possível recuperar o vídeo para encaminhamento',
+          code: 'forward_media_unavailable',
+          temporary: false,
+        });
+      }
+      const recovered = await recoverMediaFromProvider(
+        `/chat/getBase64FromMediaMessage/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+        request,
+        keyValidation.key,
+      );
+      if (!recovered.ok) {
+        const status = recovered.failure.statusCode === 429
+          ? 429
+          : recovered.failure.statusCode >= 500 ? 502 : 422;
+        return reply.code(status).send({
+          error: 'Não foi possível recuperar o vídeo para encaminhamento',
+          code: 'forward_media_unavailable',
+          temporary: recovered.failure.body.temporary,
+        });
+      }
+      const media = typeof recovered.body.base64 === 'string' ? recovered.body.base64.trim() : '';
+      const providerMimetype = trustedDocumentMimeType(recovered.body.mimetype);
+      const providerMediaType = typeof recovered.body.mediaType === 'string' ? recovered.body.mediaType : '';
+      if (!media || !providerMimetype || !/^video\//i.test(providerMimetype)
+        || (providerMediaType !== 'videoMessage' && providerMediaType !== 'video')) {
+        return reply.code(422).send({
+          error: 'Não foi possível recuperar o vídeo para encaminhamento',
+          code: 'forward_media_unavailable',
+          temporary: false,
+        });
+      }
+      if (!isForwardableMediaSizeAllowed(media)) {
+        return reply.code(413).send({
+          error: 'O vídeo excede o limite permitido',
+          code: 'forward_media_too_large',
+          temporary: false,
+        });
+      }
+      if (!isForwardableMediaPayloadAllowed(media)) {
+        return reply.code(422).send({
+          error: 'Não foi possível recuperar o vídeo para encaminhamento',
+          code: 'forward_media_unavailable',
+          temporary: false,
+        });
+      }
+      const recoveredFileName = typeof recovered.body.fileName === 'string' ? recovered.body.fileName : undefined;
+      const fileName = recoveredFileName ? documentFileNameForForward(recoveredFileName, providerMimetype) : undefined;
+      sourceMedia = {
+        media,
+        mimetype: providerMimetype,
+        mediatype: 'video',
+        ...(fileName ? { fileName } : {}),
+        ...(video.caption ? { caption: video.caption } : {}),
+      };
+    }
 
     const outboundStartedAt = Date.now();
     const leaseAcquisition = await acquireOutboundLease({
@@ -5260,6 +5329,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         mimetype: sourceMedia.mimetype,
         media: sourceMedia.media,
         document: sourceMedia.document,
+        fileName: sourceMedia.fileName,
         caption: sourceMedia.caption,
         clientMessageId: parsed.data.clientMessageId,
         leaseAcquisition,

@@ -1,5 +1,5 @@
 import { formatHubOutboundText } from './outboundMessage.js';
-import { MAX_MEDIA_BASE64_CHARS } from './mediaLimits.js';
+import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_FILE_BYTES } from './mediaLimits.js';
 
 export type ForwardSourceMessage = {
   id: string;
@@ -26,6 +26,10 @@ export type ForwardableDocument = {
   fileName?: string;
   mimeType?: string;
   fileSize?: number;
+  caption?: string;
+};
+
+export type ForwardableVideo = {
   caption?: string;
 };
 
@@ -100,6 +104,15 @@ export const isForwardableMediaSizeAllowed = (media: unknown) => (
   && media.trim().length <= MAX_MEDIA_BASE64_CHARS
 );
 
+export const isForwardableMediaPayloadAllowed = (media: unknown) => {
+  if (!isForwardableMediaSizeAllowed(media)) return false;
+  const normalized = (media as string).trim();
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalized) || normalized.length % 4 === 1) return false;
+  const decoded = Buffer.from(normalized, 'base64');
+  if (decoded.length === 0 || decoded.length > MAX_MEDIA_FILE_BYTES) return false;
+  return decoded.toString('base64').replace(/=+$/, '') === normalized.replace(/=+$/, '');
+};
+
 export function hasPersistedLocation(source: ForwardSourceMessage | undefined) {
   return Boolean(source?.metadata
     && Object.prototype.hasOwnProperty.call(source.metadata, 'location'));
@@ -167,6 +180,8 @@ export function forwardableImageFromSource(source: ForwardSourceMessage | undefi
 
 const documentPlaceholder = /^\[\s*(?:documento|document)\s*\]$/iu;
 
+const videoPlaceholder = /^\[\s*v[ií]deo\s*\]$/iu;
+
 /** Only a persisted, ordinary document can enter document forwarding. */
 export function forwardableDocumentFromSource(source: ForwardSourceMessage | undefined): ForwardableDocument | undefined {
   if (!source
@@ -192,6 +207,24 @@ export function forwardableDocumentFromSource(source: ForwardSourceMessage | und
     ...(trustedDocumentMimeType(document.mimeType) ? { mimeType: trustedDocumentMimeType(document.mimeType) } : {}),
     ...(fileSize !== undefined ? { fileSize } : {}),
     ...(content && !documentPlaceholder.test(content) ? { caption: content } : {}),
+  };
+}
+
+/** Only a persisted, ordinary video can enter normal video forwarding. */
+export function forwardableVideoFromSource(source: ForwardSourceMessage | undefined): ForwardableVideo | undefined {
+  if (!source
+    || (source.sender !== 'contact' && source.sender !== 'attendant')
+    || source.is_internal_note
+    || source.media_type !== 'video'
+    || hasPersistedLocation(source)
+    || source.status === 'pending'
+    || source.status === 'failed'
+    || source.metadata?.deletedForEveryone === true
+    || source.metadata?.deletedForEveryone === 'true') return undefined;
+
+  const content = typeof source.content === 'string' ? source.content.trim() : '';
+  return {
+    ...(content && !videoPlaceholder.test(content) ? { caption: content } : {}),
   };
 }
 

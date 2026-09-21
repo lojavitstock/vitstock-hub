@@ -49,7 +49,7 @@ export const canDownloadMessageMedia = (message: Message) => Boolean(
   message.mediaType && (message.rawKey || message.mediaUrl),
 );
 
-/** Only confirmed, ordinary text, image, document or fixed-location messages can be forwarded. */
+/** Only confirmed, ordinary text, image, video, document or fixed-location messages can be forwarded. */
 export const canForwardMessage = (message: Message) => {
   const isFixedLocation = Boolean(message.metadata?.location) && !message.mediaType;
   return Boolean(
@@ -62,7 +62,9 @@ export const canForwardMessage = (message: Message) => {
       && (isFixedLocation
         || (!message.mediaType
           ? Boolean(message.content.trim())
-          : message.mediaType === 'image' || message.mediaType === 'document')),
+          : message.mediaType === 'image'
+            || message.mediaType === 'video'
+            || message.mediaType === 'document')),
   );
 };
 

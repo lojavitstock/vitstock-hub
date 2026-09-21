@@ -13,7 +13,16 @@ let providerOnlyChat: Record<string, any> | null = null;
 let qaWebhookConfig: Record<string, any> | null = null;
 const qaImageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const qaDocumentBase64 = 'ZHVjdW1lbnRvLXFh';
-const qaMediaFixtures = new Map<string, { base64: string; mimetype: string; available: boolean }>();
+const qaVideoBase64 = 'dmlkZW8tcWE=';
+const qaMediaFixtures = new Map<string, {
+  base64: string;
+  mimetype: string;
+  available: boolean;
+  mediaType?: string;
+  fileName?: string;
+  caption?: string;
+  fileSize?: number;
+}>();
 const qaMediaRequests: Array<Record<string, unknown>> = [];
 const qaEvolutionSends: Array<Record<string, unknown>> = [];
 
@@ -205,12 +214,20 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
       id: messageKey?.id,
       remoteJid: messageKey?.remoteJid,
       fromMe: messageKey?.fromMe,
+      convertToMp4: requestBody?.convertToMp4,
     });
     const fixture = qaMediaFixtures.get(String(messageKey?.id || ''));
     if (!fixture || !fixture.available) {
       return Promise.resolve(new Response(JSON.stringify({ error: 'MEDIA_NOT_FOUND' }), { status: 404, headers: { 'Content-Type': 'application/json' } }));
     }
-    return Promise.resolve(new Response(JSON.stringify({ base64: fixture.base64, mimetype: fixture.mimetype }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    return Promise.resolve(new Response(JSON.stringify({
+      base64: fixture.base64,
+      mimetype: fixture.mimetype,
+      ...(fixture.mediaType ? { mediaType: fixture.mediaType } : {}),
+      ...(fixture.fileName ? { fileName: fixture.fileName } : {}),
+      ...(fixture.caption ? { caption: fixture.caption } : {}),
+      ...(fixture.fileSize !== undefined ? { size: { fileLength: fixture.fileSize } } : {}),
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
   }
   if (path.includes('/message/sendMedia/')) {
     if (requestBody?.mediatype === 'document' && (
@@ -224,6 +241,16 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
       || !requestBody.fileName.trim()
     )) {
       return Promise.resolve(new Response(JSON.stringify({ error: 'INVALID_DOCUMENT_FILENAME' }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+    }
+    if (requestBody?.mediatype === 'video' && (
+      typeof requestBody?.number !== 'string'
+      || !requestBody.number.trim()
+      || typeof requestBody?.media !== 'string'
+      || !requestBody.media.trim()
+      || typeof requestBody?.mimetype !== 'string'
+      || !/^video\//i.test(requestBody.mimetype)
+    )) {
+      return Promise.resolve(new Response(JSON.stringify({ error: 'INVALID_VIDEO_PAYLOAD' }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
     }
     qaEvolutionSends.push({
       number: requestBody?.number,
@@ -293,8 +320,13 @@ const qaInboundSchema = z.object({
   phone: z.string().min(8).max(32).optional(),
   name: z.string().min(2).max(160).default('Contato QA'),
   content: z.string().max(4096).optional().default(''),
-  mediaType: z.enum(['image', 'document']).optional(),
+  mediaType: z.enum(['image', 'video', 'document']).optional(),
   document: z.object({
+    fileName: z.string().trim().max(180).optional(),
+    mimeType: z.string().trim().min(3).max(100).optional(),
+    fileSize: z.number().finite().nonnegative().optional(),
+  }).optional(),
+  video: z.object({
     fileName: z.string().trim().max(180).optional(),
     mimeType: z.string().trim().min(3).max(100).optional(),
     fileSize: z.number().finite().nonnegative().optional(),
@@ -316,6 +348,9 @@ const qaInboundSchema = z.object({
   }
   if (value.mediaType === 'document' && !value.document) {
     context.addIssue({ code: 'custom', path: ['document'], message: 'metadados documentais obrigatórios' });
+  }
+  if (value.mediaType === 'video' && value.video && value.video.mimeType && !/^video\//i.test(value.video.mimeType)) {
+    context.addIssue({ code: 'custom', path: ['video', 'mimeType'], message: 'MIME de vídeo inválido' });
   }
 });
 
@@ -366,7 +401,13 @@ export async function registerQaRoutes(app: FastifyInstance) {
     const phone = input.phone?.replace(/\D/g, '') || input.remoteJid.split('@')[0];
     const evolutionMessageId = `qa-inbound-${randomUUID()}`;
     const providerKey = { id: evolutionMessageId, remoteJid: input.remoteJid, fromMe: false };
-    const content = input.content || (input.mediaType === 'image' ? '[Imagem]' : input.mediaType === 'document' ? '[Documento]' : input.location ? '[Localização compartilhada]' : '');
+    const content = input.content || (input.mediaType === 'image'
+      ? '[Imagem]'
+      : input.mediaType === 'video'
+        ? '[Vídeo]'
+        : input.mediaType === 'document'
+          ? '[Documento]'
+          : input.location ? '[Localização compartilhada]' : '');
     const contact = await db.query<{ id: string }>(
       `INSERT INTO contacts (company_id, name, phone, source)
        VALUES ($1, $2, $3, 'system')
@@ -390,11 +431,18 @@ export async function registerQaRoutes(app: FastifyInstance) {
         ...(input.location !== undefined ? { location: input.location } : {}),
       }), timestampMs],
     );
-    if (input.mediaType === 'image' || input.mediaType === 'document') {
+    if (input.mediaType === 'image' || input.mediaType === 'document' || input.mediaType === 'video') {
+      const videoBase64 = input.mediaType === 'video' ? qaVideoBase64 : undefined;
       qaMediaFixtures.set(evolutionMessageId, {
-        base64: input.mediaType === 'document' ? qaDocumentBase64 : qaImageBase64,
-        mimetype: input.document?.mimeType || 'image/png',
+        base64: input.mediaType === 'document' ? qaDocumentBase64 : input.mediaType === 'video' ? qaVideoBase64 : qaImageBase64,
+        mimetype: input.document?.mimeType || input.video?.mimeType || 'image/png',
         available: input.mediaAvailable,
+        ...(input.mediaType === 'video' ? {
+          mediaType: 'videoMessage',
+          ...(input.video?.fileName ? { fileName: input.video.fileName } : {}),
+          ...(input.content?.trim() ? { caption: input.content.trim() } : {}),
+          fileSize: input.video?.fileSize ?? Buffer.from(videoBase64!, 'base64').length,
+        } : {}),
       });
     }
     publishRealtimeEvent(request.user!.companyId, 'message.upsert', {

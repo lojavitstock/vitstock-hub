@@ -47,7 +47,9 @@ import {
   forwardableImageFromSource,
   forwardableLocationFromSource,
   forwardableTextFromSource,
+  forwardableVideoFromSource,
   type ForwardSourceMessage,
+  isForwardableMediaPayloadAllowed,
   isForwardableMediaSizeAllowed,
 } from '../server/src/messageForward';
 import { qaEvolutionResponse } from '../server/src/qa';
@@ -2652,7 +2654,7 @@ test('posiciona popovers da mensagem dentro da viewport nas duas bordas', () => 
   }
 });
 
-test('menu de mensagem expõe encaminhar para texto/imagem/documento/localização confirmados, com download apenas para mídia', () => {
+test('menu de mensagem expõe encaminhar para texto/imagem/vídeo/documento/localização confirmados, com download apenas para mídia', () => {
   const text = message('menu-text', 1_709, 'Texto do cliente');
   const image = message('menu-image', 1_709.5, '[Imagem]', 'read', {
     mediaType: 'image',
@@ -2662,13 +2664,19 @@ test('menu de mensagem expõe encaminhar para texto/imagem/documento/localizaç�
     mediaType: 'document',
     rawKey: { id: 'menu-document', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
   });
+  const video = message('menu-video', 1_710.5, '[Vídeo]', 'read', {
+    mediaType: 'video',
+    rawKey: { id: 'menu-video', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+  });
 
   assert.deepEqual(messageMenuActionsFor(text), ['reply', 'forward', 'react', 'copy']);
   assert.deepEqual(messageMenuActionsFor(image), ['reply', 'forward', 'react', 'copy', 'download']);
   assert.equal(canForwardMessage(image), true);
   assert.deepEqual(messageMenuActionsFor(document), ['reply', 'forward', 'react', 'copy', 'download']);
+  assert.deepEqual(messageMenuActionsFor(video), ['reply', 'forward', 'react', 'copy', 'download']);
   assert.equal(canForwardMessage(text), true);
   assert.equal(canForwardMessage(document), true);
+  assert.equal(canForwardMessage(video), true);
   assert.equal(canForwardMessage(message('menu-location', 1_715, '[Localização compartilhada]', 'delivered', {
     metadata: { location: { latitude: 0, longitude: 0 } },
   })), true);
@@ -3339,6 +3347,16 @@ test('forward image accepts captions but never treats the media placeholder as a
   assert.equal(forwardableImageFromSource(forwardSource({ media_type: 'image', metadata: { deletedForEveryone: true } })), undefined);
 });
 
+test('forward video accepts real captions and rejects placeholders or ineligible sources', () => {
+  assert.deepEqual(forwardableVideoFromSource(forwardSource({ media_type: 'video', content: 'Legenda original' })), { caption: 'Legenda original' });
+  assert.deepEqual(forwardableVideoFromSource(forwardSource({ media_type: 'video', content: '[Vídeo]' })), {});
+  assert.deepEqual(forwardableVideoFromSource(forwardSource({ media_type: 'video', content: '[Video]' })), {});
+  assert.equal(forwardableVideoFromSource(forwardSource({ media_type: 'image' })), undefined);
+  assert.equal(forwardableVideoFromSource(forwardSource({ media_type: 'video', status: 'pending' })), undefined);
+  assert.equal(forwardableVideoFromSource(forwardSource({ media_type: 'video', metadata: { deletedForEveryone: true } })), undefined);
+  assert.equal(forwardableVideoFromSource(forwardSource({ media_type: 'video', is_internal_note: true })), undefined);
+});
+
 test('forward document preserves metadata, caption and safe filename fallback', () => {
   const pdf = forwardableDocumentFromSource(forwardSource({
     content: 'Legenda do contrato',
@@ -3383,6 +3401,12 @@ test('forward document respects the existing encoded media limit', () => {
   assert.equal(isForwardableMediaSizeAllowed('ZHVjdW1lbnQ='), true);
   assert.equal(isForwardableMediaSizeAllowed('a'.repeat(MAX_MEDIA_BASE64_CHARS + 1)), false);
   assert.equal(isForwardableMediaSizeAllowed(''), false);
+});
+
+test('forward video validates base64 and decoded media size', () => {
+  assert.equal(isForwardableMediaPayloadAllowed('dmlkZW8tcWE='), true);
+  assert.equal(isForwardableMediaPayloadAllowed('not-base64!'), false);
+  assert.equal(isForwardableMediaPayloadAllowed('a'.repeat(MAX_MEDIA_BASE64_CHARS + 1)), false);
 });
 
 const inboxProjectionChat = (remoteJid: string, overrides: Record<string, any> = {}) => ({

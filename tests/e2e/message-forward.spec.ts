@@ -12,13 +12,18 @@ async function login(page: Page, credentials = { email, password }) {
 }
 
 type InboundOptions = {
-  mediaType?: 'image' | 'document';
+  mediaType?: 'image' | 'video' | 'document';
   mediaAvailable?: boolean;
   includeProviderKey?: boolean;
   mediaUrl?: string;
   phone?: string;
   isGroup?: boolean;
   document?: {
+    fileName?: string;
+    mimeType?: string;
+    fileSize?: number;
+  };
+  video?: {
     fileName?: string;
     mimeType?: string;
     fileSize?: number;
@@ -458,6 +463,159 @@ test('forward document rejects unavailable provider media and client media injec
   const stateAfter = await getEvolutionSendState(page);
   expect(stateAfter.mediaRequests.some((request) => request.id === source.evolutionMessageId)).toBe(true);
   expect(stateAfter.mediaRequests.some((request) => request.id === noKeySource.evolutionMessageId)).not.toBe(true);
+});
+
+test('forward video recovers normal provider media, preserves caption and exact destinations', async ({ page }) => {
+  test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
+  await login(page);
+
+  const suffix = Date.now().toString().slice(-7);
+  const sourceRemoteJid = `552178${suffix}@s.whatsapp.net`;
+  const sourceCaption = `Legenda do vídeo ${suffix}`;
+  const source = await createInbound(page, sourceRemoteJid, sourceCaption, `Forward Video Source ${suffix}`, {
+    mediaType: 'video',
+    video: { fileName: `produto-${suffix}.mp4`, mimeType: 'video/mp4', fileSize: 8 },
+  });
+  const noCaption = await createInbound(page, `552177${suffix}@s.whatsapp.net`, '', `Forward Video No Caption ${suffix}`, {
+    mediaType: 'video',
+    video: { mimeType: 'video/mp4' },
+  });
+  const destinations = [
+    `552176${suffix}@s.whatsapp.net`,
+    `16470000000${suffix.slice(-2)}@lid`,
+    `12036300000${suffix.slice(-2)}@g.us`,
+  ];
+  for (const [index, destinationRemoteJid] of destinations.entries()) {
+    await createInbound(page, destinationRemoteJid, `Destino vídeo ${index} ${suffix}`, `Forward Video Destination ${index} ${suffix}`, {
+      isGroup: destinationRemoteJid.endsWith('@g.us'),
+    });
+  }
+
+  const beforeState = await getEvolutionSendState(page);
+  const firstClientMessageId = `qa-forward-video-${Date.now()}`;
+  const forwards = destinations.map((destinationRemoteJid, index) => ({
+    destinationRemoteJid,
+    clientMessageId: `${firstClientMessageId}-${index}`,
+  }));
+  for (const forward of forwards) {
+    const response = await page.request.post(`${apiBase}/api/evolution/messages/forward`, {
+      data: { sourceMessageId: source.evolutionMessageId, ...forward },
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json() as { remoteJid?: string; evolution?: { key?: { remoteJid?: string } } };
+    expect(body.remoteJid).toBe(forward.destinationRemoteJid);
+    expect(body.evolution?.key?.remoteJid).toBe(forward.destinationRemoteJid);
+  }
+  const noCaptionResponse = await page.request.post(`${apiBase}/api/evolution/messages/forward`, {
+    data: {
+      sourceMessageId: noCaption.evolutionMessageId,
+      destinationRemoteJid: destinations[0],
+      clientMessageId: `${firstClientMessageId}-no-caption`,
+    },
+  });
+  expect(noCaptionResponse.status()).toBe(200);
+
+  const stateAfterFirstPass = await getEvolutionSendState(page);
+  const newSends = stateAfterFirstPass.sends.slice(beforeState.sends.length);
+  expect(newSends).toHaveLength(destinations.length + 1);
+  expect(newSends.slice(0, destinations.length).map((send) => send.number)).toEqual(destinations);
+  for (const send of newSends.slice(0, destinations.length)) {
+    expect(send).toEqual(expect.objectContaining({
+      mediatype: 'video',
+      mimetype: 'video/mp4',
+      fileName: `produto-${suffix}.mp4`,
+    }));
+    expect(String(send.media || '')).not.toHaveLength(0);
+    expect(send.caption).toBe(sourceCaption);
+    expect('text' in send).toBe(false);
+    expect('quoted' in send).toBe(false);
+  }
+  expect(newSends.at(-1)).toEqual(expect.objectContaining({
+    number: destinations[0],
+    mediatype: 'video',
+    mimetype: 'video/mp4',
+  }));
+  expect(newSends.at(-1)?.fileName).toBeUndefined();
+  expect(newSends.at(-1)?.caption).toBeUndefined();
+  expect(stateAfterFirstPass.mediaRequests.some((request) => (
+    request.id === source.evolutionMessageId
+      && request.remoteJid === sourceRemoteJid
+      && request.convertToMp4 === false
+  ))).toBe(true);
+  expect(stateAfterFirstPass.mediaRequests.some((request) => request.id === noCaption.evolutionMessageId && request.convertToMp4 === false)).toBe(true);
+
+  const retry = await page.request.post(`${apiBase}/api/evolution/messages/forward`, {
+    data: { sourceMessageId: source.evolutionMessageId, destinationRemoteJid: destinations[0], clientMessageId: forwards[0]!.clientMessageId },
+  });
+  expect(retry.status()).toBe(200);
+  expect((await retry.json()).deduplicated).toBe(true);
+  expect((await getEvolutionSendState(page)).sends).toHaveLength(stateAfterFirstPass.sends.length);
+});
+
+test('forward video separates injection rejection from the no-URL fallback guarantee', async ({ page }) => {
+  test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
+  await login(page);
+
+  const suffix = Date.now().toString().slice(-7);
+  const unavailable = await createInbound(page, `552175${suffix}@s.whatsapp.net`, '', `Forward Video Unavailable ${suffix}`, {
+    mediaType: 'video',
+    video: { mimeType: 'video/mp4' },
+    mediaAvailable: false,
+    mediaUrl: 'http://localhost:3001/api/qa/avatar/valid.svg',
+  });
+  const noKey = await createInbound(page, `552174${suffix}@s.whatsapp.net`, '', `Forward Video No Key ${suffix}`, {
+    mediaType: 'video',
+    video: { mimeType: 'video/mp4' },
+    includeProviderKey: false,
+    mediaUrl: 'https://example.test/video-fallback.mp4',
+  });
+  const destinationRemoteJid = `552173${suffix}@s.whatsapp.net`;
+  await createInbound(page, destinationRemoteJid, `Destino vídeo indisponível ${suffix}`, `Forward Video Error Destination ${suffix}`);
+  const beforeState = await getEvolutionSendState(page);
+  const beforeDestinationRecords = await getConversationRecords(page, destinationRemoteJid);
+
+  const injected = await page.request.post(`${apiBase}/api/evolution/messages/forward`, {
+    data: {
+      sourceMessageId: unavailable.evolutionMessageId,
+      destinationRemoteJid,
+      clientMessageId: `qa-forward-video-injected-${Date.now()}`,
+      media: 'client-injected',
+      base64: 'client-injected',
+      mediaUrl: 'http://localhost:3001/api/qa/avatar/valid.svg',
+      providerKey: { id: 'client-injected', remoteJid: destinationRemoteJid },
+      mimetype: 'video/mp4',
+      fileName: 'client-injected.mp4',
+      caption: 'não usar como caption',
+    },
+  });
+  expect(injected.status()).toBe(400);
+  const afterInjectionState = await getEvolutionSendState(page);
+  expect(afterInjectionState.sends).toHaveLength(beforeState.sends.length);
+  expect(afterInjectionState.mediaRequests).toHaveLength(beforeState.mediaRequests.length);
+  expect(await getConversationRecords(page, destinationRemoteJid)).toHaveLength(beforeDestinationRecords.length);
+
+  // The valid forward request carries only the public contract. The source
+  // has media_url, but provider recovery is deliberately unavailable.
+  const unavailableResponse = await page.request.post(`${apiBase}/api/evolution/messages/forward`, {
+    data: { sourceMessageId: unavailable.evolutionMessageId, destinationRemoteJid, clientMessageId: `qa-forward-video-unavailable-${Date.now()}` },
+  });
+  expect(unavailableResponse.status()).toBe(422);
+  expect((await unavailableResponse.json()).code).toBe('forward_media_unavailable');
+
+  const noKeyResponse = await page.request.post(`${apiBase}/api/evolution/messages/forward`, {
+    data: {
+      sourceMessageId: noKey.evolutionMessageId,
+      destinationRemoteJid,
+      clientMessageId: `qa-forward-video-no-key-${Date.now()}`,
+    },
+  });
+  expect(noKeyResponse.status()).toBe(422);
+  expect((await noKeyResponse.json()).code).toBe('forward_media_unavailable');
+
+  const afterState = await getEvolutionSendState(page);
+  expect(afterState.sends).toHaveLength(beforeState.sends.length);
+  expect(afterState.mediaRequests.some((request) => request.id === unavailable.evolutionMessageId)).toBe(true);
+  expect(afterState.mediaRequests.some((request) => request.id === noKey.evolutionMessageId)).not.toBe(true);
 });
 
 test('forward text uses existing PN, LID and group identities and is idempotent', async ({ page }) => {
