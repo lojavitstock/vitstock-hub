@@ -1,6 +1,6 @@
 # Vitstock Hub — Estratégia Prática de Testes
 
-> **Baseline atual:** esta documentação foi verificada na branch `codex/perf-atendimento-inbox`. Se a tarefa estiver em outra branch, não a troque automaticamente: informe a divergência e use o código atual daquela branch como evidência.
+> **Fluxo de integração:** use a branch explicitamente indicada pela tarefa como baseline. No fluxo compartilhado, `preview` é a branch de integração e validação antes da promoção, sob aprovação humana, para `main`.
 
 Este documento define o menor processo de validação que protege o Vitstock Hub sem transformar um projeto pequeno em uma operação corporativa de QA. Ele complementa o procedimento operacional em `RUNBOOK.md` e os invariantes técnicos em `ARCHITECTURE.md`.
 
@@ -22,11 +22,19 @@ O projeto usa a API nativa `node:test`, executada em arquivos TypeScript pelo bo
 | --- | --- |
 | `tests/run-tests.mjs` | Bootstrap comum para executar um arquivo de teste TypeScript. |
 | `tests/core.test.ts` | Regressões de Inbox, mensagens, reconciliação, SSE, autoria, replies, reações, lease, cache, mídia, popovers e Composer. |
+| `tests/server.test.ts` | Contratos básicos do Fastify, health, CORS, autenticação e webhook. |
+| `tests/evolutionWebhook.test.ts` | Reconciliação e monitoramento do webhook da Evolution. |
+| `tests/messageEditDelete.test.ts` | Regras e payloads de edição, exclusão e ações de mensagem. |
+| `tests/qaServer.test.ts` | Rotas e fixtures exclusivas do modo QA. |
 | `tests/groupConversations.test.ts` | Regressões específicas de conversas em grupo. |
+| `tests/contactDomain.test.ts` | Normalização, deduplicação e domínio de contatos. |
+| `tests/contactChatNavigation.test.ts` | Resolução de conversa a partir da navegação de contatos. |
+| `tests/qaEnvironment.test.ts` | Guards de ambiente QA e contratos das integrações simuladas. |
+| `tests/whatsappMetadata.test.ts` | Identidade e metadata específicas do WhatsApp. |
 | `tests/os-userinfo.cjs` | Helper carregado pelo bootstrap; não é uma suíte independente. |
 | `tests/e2e/*.spec.ts` | Smoke e Atendimento no Chromium via Playwright; executados contra QA local por padrão. |
 
-O comando `npm test` executa as duas suítes atuais, nesta ordem: `core.test.ts` e `groupConversations.test.ts`.
+O comando `npm test` executa a suíte principal definida no `package.json`, usando o bootstrap `tests/run-tests.mjs` para os arquivos TypeScript listados pelo runner. Para uma suíte específica, execute diretamente o bootstrap com o arquivo desejado.
 
 Não existe métrica de cobertura ou um comando de lint. **No dedicated lint command currently exists.** A suíte E2E/browser usa Playwright e deve rodar contra o QA local por padrão.
 

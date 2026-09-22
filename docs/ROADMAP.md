@@ -90,7 +90,7 @@ Assistência ao atendente, resumo de conversas, classificação, recuperação d
 ## 10. Deferred Areas
 
 - **Campanhas:** não são prioridade. A implementação atual é visual/mock e não deve ser apresentada como operacional enquanto não tiver backend real.
-- **Respostas rápidas:** podem evoluir futuramente, com escopo inicial preferencial por empresa. As duas respostas fixas atuais não representam o recurso final.
+- **Respostas rápidas:** **PARTIALLY IMPLEMENTED**. Há persistência, CRUD por empresa, picker no Composer e seleção por `/atalho`; o backend também possui escopo por usuário, mas a tela atual grava e gerencia respostas como `COMPANY`. Permanecem possíveis evoluções de escopo, experiência e governança.
 - **Setores e filas:** não são prioridade imediata. O lease atual permanece a base operacional; classificação, distribuição, ownership e impacto no lease exigem decisão própria quando houver necessidade real.
 - **Grupos:** fazem parte da implementação atual e, por enquanto, seguem a mesma lógica operacional de ownership das conversas privadas.
 - **Notificações:** o som atual é suficiente neste horizonte. Preferências individuais e notificações do navegador ficam para avaliação futura conforme necessidade.
@@ -98,7 +98,7 @@ Assistência ao atendente, resumo de conversas, classificação, recuperação d
 
 ## 11. Technical Debt vs Product Roadmap
 
-Dívida técnica e bugs não entram automaticamente no roadmap estratégico. Exemplos já identificados incluem limite divergente de anexos entre frontend e backend, texto técnico de WebSocket, SSE process-local, listas sem virtualização, responsabilidades concentradas em `evolution.ts`, payloads Evolution flexíveis e ausência de testes E2E/browser.
+Dívida técnica e bugs não entram automaticamente no roadmap estratégico. Exemplos já identificados incluem limite divergente de anexos entre frontend e backend, texto técnico de WebSocket, SSE process-local, listas sem virtualização, responsabilidades concentradas em `evolution.ts` e payloads Evolution flexíveis.
 
 Cada item deve ser avaliado individualmente e, quando relevante, transformado em GitHub Issue. Este roadmap não aprova automaticamente Redis, virtualização, E2E, refactors ou novas dependências.
 

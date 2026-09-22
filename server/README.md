@@ -5,14 +5,15 @@ Backend privado do Vitstock Hub. Todas as credenciais da Evolution API e do Post
 ## Desenvolvimento
 
 1. Configure as variáveis no `.env.local` da raiz.
-2. Instale as dependências com `npm install` nesta pasta.
-3. Execute `npm run migrate`.
-4. Execute `npm run seed:admin` uma única vez.
+2. Instale as dependências reproduzivelmente com `npm ci` nesta pasta.
+3. Em um banco local explicitamente autorizado, execute `npm run migrate`. Esse comando modifica o banco; nunca o aponte para Production ou Preview.
+4. Em um ambiente local autorizado, execute `npm run seed:admin` uma única vez.
 5. Inicie com `npm run dev`.
 
 ## Produção no Railway
 
 - Start command: `npm run start`
-- Build command: `npm install && npm run build`
-- Antes do primeiro deploy, execute as migrações e crie o administrador inicial.
+- Build command: `npm ci && npm run build`
+- O Railway executa `node dist/scripts/migrate.js` como `preDeployCommand` antes de iniciar o serviço.
+- Não execute migrations manualmente em Production como passo normal do deploy; qualquer operação manual exige tarefa autorizada e confirmação explícita do ambiente.
 - Nunca use prefixo `VITE_` em segredos do backend.

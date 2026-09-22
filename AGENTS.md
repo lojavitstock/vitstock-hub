@@ -49,7 +49,6 @@ Use as fontes de informação nesta ordem:
 6. `docs/TESTING.md`
 7. `docs/PROJECT.md`
 8. `docs/ROADMAP.md`
-9. `docs/CHANGELOG.md`
 
 Se documentação e implementação atual divergirem, não assuma automaticamente que uma delas está correta. Investigue a divergência e registre-a.
 
@@ -358,7 +357,6 @@ Utilize:
 * `ROADMAP.md` → direção futura;
 * `RUNBOOK.md` → procedimentos operacionais de desenvolvimento;
 * `TESTING.md` → estratégia e procedimentos de teste;
-* `CHANGELOG.md` → mudanças relevantes.
 
 GitHub Issues e Pull Requests devem registrar o estado operacional das tarefas. Não use arquivos permanentes de documentação como substituto para o estado de uma Issue.
 

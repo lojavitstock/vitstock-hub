@@ -1,8 +1,8 @@
 # Vitstock Hub — Architecture
 
-> **Implementation baseline:** this document describes the active development branch `codex/perf-atendimento-inbox`.
+> **Integration flow:** `preview` is the current integration and validation branch. After review and human functional validation, changes may be promoted to `main`. For an isolated task, use the branch explicitly indicated by that task as the implementation baseline.
 >
-> This branch contains work that may not exist in `main`. When investigating implementation details, use this branch as the baseline, then confirm behavior in the source code, migrations and tests.
+> When investigating implementation details, confirm behavior in the source code, migrations and tests.
 
 ## 1. Purpose
 
@@ -150,6 +150,12 @@ The migration runner:
 4. rolls back that migration if it fails.
 
 `server/railway.json` runs `node dist/scripts/migrate.js` as `preDeployCommand`. The script's source is compiled because the server TypeScript configuration emits `dist/scripts/migrate.js`.
+
+The current migration sequence also includes:
+
+- `018_conversation_tags.sql` — conversation-scoped tags and their links, including tenant-scoped uniqueness and indexes;
+- `019_evolution_message_staging.sql` — tenant-scoped staging for provider messages awaiting processing, with expiry and attempt tracking;
+- `020_quick_replies.sql` — company/user quick replies, shortcuts, ordering, usage counts and active-state constraints.
 
 ### Main entities
 
@@ -517,7 +523,7 @@ For browser automation, `npm run dev:e2e` uses the isolated QA Compose database 
 
 ## 20. Testing
 
-The repository uses Node's built-in test runner through `npm test`, which runs `tests/core.test.ts` and `tests/groupConversations.test.ts` via `tests/run-tests.mjs`. The suites cover many core regressions around:
+The repository uses Node's built-in test runner through the main `npm test` suite defined in `package.json`, with each TypeScript file delegated through `tests/run-tests.mjs`. The suite covers regressions around:
 
 - conversation and message reconciliation;
 - optimistic sends and explicit client-message identity;
@@ -577,5 +583,5 @@ The main sources used for this document were:
 - `src/utils/conversationReconciliation.ts`, `messageMerge.ts`, `realtimeUpdates.ts`, `requestCoordinator.ts`, `conversationMessagesCache.ts`, `scrollTrace.ts` and related media/reply/reaction helpers;
 - `src/components/conversations/*`;
 - `server/src/app.ts`, `index.ts`, `config.ts`, `db.ts`, `auth.ts`, `evolution.ts`, `realtime.ts`, `google-contacts.ts`, `contacts.ts`, `contactDomain.ts` and migration scripts;
-- `server/migrations/001_initial.sql` through `017_google_integration_status.sql`;
+- `server/migrations/001_initial.sql` through `020_quick_replies.sql`;
 - `server/railway.json`, `vercel.json`, package scripts, local-development script and `tests/core.test.ts`.
