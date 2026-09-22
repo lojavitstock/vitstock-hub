@@ -178,6 +178,8 @@ export interface Message {
 
 export interface Conversation {
   id: string;
+  /** Frontend-only destination prepared before the first outbound message. */
+  isPending?: boolean;
   /** Provider snapshot timestamp kept only for diagnostics/reconciliation. */
   updatedAt?: string;
   avatarSource?: 'whatsapp' | 'google' | 'none';
