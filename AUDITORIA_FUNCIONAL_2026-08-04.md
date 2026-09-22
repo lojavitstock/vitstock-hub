@@ -1,5 +1,7 @@
 # Auditoria funcional e técnica — Vitstock Hub
 
+> **Documento histórico:** este arquivo representa o estado observado em 04/08/2026 e não é fonte normativa do estado atual. Para comportamento vigente, consulte o código, os testes e a documentação atual.
+
 Data: 04/08/2026  
 Escopo: frontend React/Vite, backend Fastify/PostgreSQL, Evolution API, Google Contacts e experiência em navegador local.
 

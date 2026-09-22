@@ -33,6 +33,7 @@ import { ConversationList } from '../components/conversations/ConversationList';
 import { ContactPhoto } from '../components/conversations/ContactPhoto';
 import { MessageTimeline } from '../components/conversations/MessageTimeline';
 import { MessageComposer, MessageComposerHandle } from '../components/conversations/MessageComposer';
+import { ForwardMessageDialog } from '../components/conversations/ForwardMessageDialog';
 import { formatPhoneForDisplay } from '../utils/phone';
 import { formatMessageTimestamp } from '../components/conversations/conversationFormatters';
 import { useConversationMessages } from '../hooks/useConversationMessages';
@@ -62,7 +63,7 @@ import {
   withOptimisticHubReaction,
   type CommonReactionEmoji,
 } from '../utils/messageReactionActions';
-import { canDeleteMessageForEveryone, canEditMessage } from '../utils/messageActions';
+import { canDeleteMessageForEveryone, canEditMessage, canForwardMessage } from '../utils/messageActions';
 import { applyOutboundSendConfirmation } from '../utils/outboundMessageConfirmation';
 
 export const AtendimentoPage: React.FC = () => {
@@ -101,6 +102,7 @@ export const AtendimentoPage: React.FC = () => {
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [deletingMessage, setDeletingMessage] = useState<Message | null>(null);
+  const [forwardingMessage, setForwardingMessage] = useState<Message | null>(null);
   const [messageActionBusyId, setMessageActionBusyId] = useState<string | null>(null);
   // Estado para Nova Conversa por Telefone
   const [showNewChatModal, setShowNewChatModal] = useState(false);
@@ -195,6 +197,7 @@ export const AtendimentoPage: React.FC = () => {
     setReplyTo(null);
     setEditingMessage(null);
     setDeletingMessage(null);
+    setForwardingMessage(null);
     setQuickReplyOpen(false);
     setShowConversationTagMenu(false);
     clearAttachmentDrafts();
@@ -754,6 +757,16 @@ export const AtendimentoPage: React.FC = () => {
     setQuickReplyOpen(false);
     scheduleComposerFocus(() => composerRef.current?.focus());
   }, []);
+
+  const handleForwardMessage = useCallback((message: Message) => {
+    if (!canForwardMessage(message)) return;
+    setForwardingMessage(message);
+  }, []);
+
+  const handleForwardSuccess = useCallback(() => {
+    setForwardingMessage(null);
+    setAssignmentFeedback('Mensagem encaminhada.');
+  }, [setAssignmentFeedback]);
 
   const applyMessageMutationToConversation = useCallback((message: Message) => {
     setConversations((previous) => previous.map((conversation) => {
@@ -1988,6 +2001,7 @@ export const AtendimentoPage: React.FC = () => {
               onLayoutChange={traceTimelineLayoutChange}
               onRetryMessage={handleRetryMessage}
               onReplyMessage={handleReplyMessage}
+              onForwardMessage={handleForwardMessage}
               onReactMessage={handleReactMessage}
               onEditMessage={handleEditMessage}
               onDeleteMessage={handleDeleteMessage}
@@ -2041,6 +2055,15 @@ export const AtendimentoPage: React.FC = () => {
                   </div>
                 </div>
               </div>
+            )}
+            {forwardingMessage && (
+              <ForwardMessageDialog
+                message={forwardingMessage}
+                conversations={conversations}
+                currentConversationId={activeConv.id}
+                onCancel={() => setForwardingMessage(null)}
+                onSuccess={handleForwardSuccess}
+              />
             )}
           </>
         ) : !whatsappConnected ? (

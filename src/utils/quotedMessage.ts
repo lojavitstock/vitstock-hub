@@ -1,4 +1,4 @@
-import { Message } from '../types';
+import { Message, type QuotedProviderKeySource, type QuotedSourceAge, type QuotedSourceMediaType } from '../types';
 
 export type QuotedMessage = NonNullable<NonNullable<Message['metadata']>['quotedMessage']>;
 
@@ -17,6 +17,28 @@ export const quotedMessageExcerpt = (quoted: QuotedMessage) => (
   quoted.content?.trim() || quotedMediaLabel(quoted.mediaType) || 'Mensagem'
 );
 
+export const quotedProviderKeySource = (message: Message): QuotedProviderKeySource => {
+  if (message.rawKey && typeof message.rawKey === 'object') return 'raw';
+  if (message.metadata?.providerKey && typeof message.metadata.providerKey === 'object') return 'metadata';
+  if (typeof message.id === 'string' && message.id.trim()) return 'legacy';
+  return 'none';
+};
+
+export const quotedSourceAge = (timestampMs?: number, nowMs = Date.now()): QuotedSourceAge => {
+  if (!Number.isFinite(timestampMs) || !timestampMs || !Number.isFinite(nowMs)) return 'UNKNOWN';
+  const ageMs = Math.max(0, nowMs - Number(timestampMs));
+  if (ageMs <= 7 * 24 * 60 * 60 * 1000) return 'RECENT';
+  if (ageMs <= 90 * 24 * 60 * 60 * 1000) return 'OLDER';
+  return 'LEGACY';
+};
+
+export const quotedSourceMediaType = (message: Message): QuotedSourceMediaType => {
+  if (message.metadata?.location) return 'location';
+  if (message.mediaType) return message.mediaType;
+  if (message.content.trim()) return 'text';
+  return 'other';
+};
+
 export const messageAuthorLabel = (message: Message) => {
   if (message.sender === 'contact') return message.senderName || 'Contato';
   if (message.metadata?.sentOutsideHub) return 'Enviado fora do Vitstock Hub';
@@ -31,7 +53,9 @@ export const toQuotedMessage = (message: Message): QuotedMessage => {
 
   return {
     messageId: id,
-    providerKeySource: message.metadata?.providerKey ? 'providerKey' : 'legacyFallback',
+    providerKeySource: quotedProviderKeySource(message),
+    sourceAge: quotedSourceAge(message.timestampMs),
+    sourceMediaType: quotedSourceMediaType(message),
     authorName: messageAuthorLabel(message),
     sender: message.sender,
     content: message.content,

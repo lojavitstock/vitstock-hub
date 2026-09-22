@@ -1,6 +1,6 @@
 # Vitstock Hub — Runbook de Desenvolvimento
 
-> **Baseline atual:** use a branch de desenvolvimento explicitamente indicada pela tarefa como baseline de implementação. No ciclo documentado no momento, a branch é `codex/perf-atendimento-inbox`; ela pode conter mudanças que ainda não existem em `main`.
+> **Fluxo de integração:** use a branch explicitamente indicada pela tarefa como baseline de implementação. No fluxo compartilhado, `preview` é a branch de integração e validação antes da promoção, sob aprovação humana, para `main`.
 >
 > Este runbook descreve procedimentos do repositório atual. Ele não autoriza deploy, merge, migrations de produção, alteração de infraestrutura ou uso de credenciais.
 
@@ -97,7 +97,7 @@ O objetivo é preservar trabalho preexistente, mesmo quando ele parecer incomple
 - Nunca reescreva histórico compartilhado ou exclua branch remota sem autorização explícita.
 - O merge depende de aprovação humana após Preview e validação funcional.
 
-`codex/perf-atendimento-inbox` é a baseline deste ciclo atual, não uma regra permanente de nomenclatura ou fluxo.
+O fluxo compartilhado é `preview` → validação e testes → `main`; a promoção depende de aprovação humana.
 
 ## 5. Dependências
 
@@ -135,7 +135,8 @@ Antes de uma ação capaz de enviar WhatsApp, modificar dados, criar usuários, 
 | Comando | O que inicia / executa |
 | --- | --- |
 | `npm run dev:local` | Backend e Vite juntos pelo `scripts/dev-local.mjs`. |
-| `npm run dev` | Apenas Vite. |
+| `npm run dev` | Backend e Vite juntos pelo `scripts/dev-local.mjs`. |
+| `npm run dev:frontend` | Apenas Vite. |
 | `npm run server:dev` | Apenas backend, delegando para `server` com `tsx watch`. |
 | `npm run preview` | Servidor de preview do build Vite. |
 | `npm run dev:e2e` | Prepara PostgreSQL QA local, executa migrations/seed QA e inicia backend QA + Vite com mocks externos. Requer Docker acessível. |
@@ -144,7 +145,7 @@ Antes de uma ação capaz de enviar WhatsApp, modificar dados, criar usuários, 
 
 `npm run dev:local` configura interface em `http://localhost:3000` e API em `http://localhost:3001`. Ele injeta `VITE_API_URL=http://localhost:3001`, `FRONTEND_URL=http://localhost:3000`, `NODE_ENV=development` e `PORT=3001` para os processos que inicia.
 
-Para trabalho separado, inicie backend com `npm run server:dev` e Vite com `npm run dev`, garantindo ambiente coerente. O Fastify escuta em `0.0.0.0` e recebe a porta por `PORT` (padrão 3001).
+Para trabalho separado, inicie backend com `npm run server:dev` e Vite com `npm run dev:frontend`, garantindo ambiente coerente. O Fastify escuta em `0.0.0.0` e recebe a porta por `PORT` (padrão 3001).
 
 Não inicie servidores apenas por rotina em tarefa que não exige execução local.
 
@@ -203,10 +204,7 @@ Agentes nunca executam migrations manualmente em produção. Merge e deploy cont
 npm test
 ```
 
-O comando usa Node test runner por `tests/run-tests.mjs` e atualmente executa:
-
-- `tests/core.test.ts`;
-- `tests/groupConversations.test.ts`.
+O comando usa o Node test runner por `tests/run-tests.mjs` e executa a suíte principal definida no `package.json`, cobrindo regressões de núcleo, backend, webhook, QA, grupos, contatos e metadata. O conjunto exato acompanha o script e o runner versionados, em vez de ser duplicado neste procedimento.
 
 Não existe script de lint no `package.json` atual. Não invente um comando de lint; registre essa limitação se uma tarefa exigir validação equivalente.
 

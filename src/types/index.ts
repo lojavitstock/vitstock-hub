@@ -61,6 +61,10 @@ export interface Contact {
   createdAt: string;
 }
 
+export type QuotedProviderKeySource = 'raw' | 'metadata' | 'legacy' | 'none';
+export type QuotedSourceAge = 'RECENT' | 'OLDER' | 'LEGACY' | 'UNKNOWN';
+export type QuotedSourceMediaType = 'text' | 'image' | 'video' | 'document' | 'audio' | 'sticker' | 'location' | 'other';
+
 export interface Message {
   id: string;
   conversationId: string;
@@ -108,7 +112,11 @@ export interface Message {
     quotedMessage?: {
       messageId: string;
       /** How the sender obtained the provider identity used for quoting. */
-      providerKeySource?: 'providerKey' | 'legacyFallback';
+      providerKeySource?: QuotedProviderKeySource;
+      /** Coarse source-age bucket for opt-in reply diagnostics. */
+      sourceAge?: QuotedSourceAge;
+      /** Coarse source type for opt-in reply diagnostics. */
+      sourceMediaType?: QuotedSourceMediaType;
       authorName?: string;
       sender?: 'contact' | 'attendant' | 'system';
       content?: string;

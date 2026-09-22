@@ -23,6 +23,26 @@ const jidKind = (value: unknown) => {
   return 'PN';
 };
 
+const quoteSource = (quote: any): 'raw' | 'metadata' | 'legacy' | 'none' => {
+  switch (quote?.providerKeySource) {
+    case 'raw': return 'raw';
+    case 'metadata':
+    case 'providerKey': return 'metadata';
+    case 'none': return 'none';
+    case 'legacy':
+    case 'legacyFallback': return 'legacy';
+    default: return quote?.key ? 'legacy' : 'none';
+  }
+};
+
+const quoteSourceAge = (quote: any) => (
+  quote?.sourceAge === 'RECENT'
+    || quote?.sourceAge === 'OLDER'
+    || quote?.sourceAge === 'LEGACY'
+    ? quote.sourceAge
+    : 'UNKNOWN'
+);
+
 const isOutboundTraceEnabled = () => import.meta.env.VITE_OUTBOUND_TRACE === 'true';
 
 const now = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -63,7 +83,8 @@ export const traceReplySendFailure = (input: {
 }) => {
   if (!isOutboundTraceEnabled()) return;
   const quoteKey = input.quote?.key;
-  const quoteSource = input.quote?.providerKeySource === 'providerKey' ? 'providerKey' : 'legacyFallback';
+  const providerKeySource = quoteSource(input.quote);
+  const fromMe = typeof quoteKey?.fromMe === 'boolean' ? quoteKey.fromMe : undefined;
   console.warn('[REPLY_FAILURE_TRACE]', JSON.stringify({
     runtime: 'frontend',
     event: 'reply_send_failure',
@@ -73,17 +94,21 @@ export const traceReplySendFailure = (input: {
     localMessageId: diagnosticId(input.localMessageId),
     replyTarget: {
       hubMessageId: diagnosticId(input.quote?.messageId),
-      evolutionMessageIdPresent: quoteSource === 'providerKey' && Boolean(quoteKey?.id),
-      providerKeyPresent: quoteSource === 'providerKey',
+      evolutionMessageIdPresent: (providerKeySource === 'raw' || providerKeySource === 'metadata') && Boolean(quoteKey?.id),
+      providerKeyPresent: providerKeySource === 'raw' || providerKeySource === 'metadata',
+      providerKeySource,
+      providerMessageIdPresent: (providerKeySource === 'raw' || providerKeySource === 'metadata') && Boolean(quoteKey?.id),
       providerKeyRemoteJidType: jidKind(quoteKey?.remoteJid),
       participantPresent: Boolean(quoteKey?.participant || quoteKey?.participantAlt || quoteKey?.participantPn),
-      fromMe: typeof quoteKey?.fromMe === 'boolean' ? quoteKey.fromMe : undefined,
-      messageType: input.quote?.mediaType || input.kind,
+      sourceDirection: fromMe === true ? 'FROM_ME' : fromMe === false ? 'INBOUND' : 'UNKNOWN',
+      sourceAge: quoteSourceAge(input.quote),
+      fromMe,
+      messageType: input.quote?.sourceMediaType || input.quote?.mediaType || input.kind,
     },
     outbound: {
       recipientType: jidKind(input.conversationId),
       quotePresent: true,
-      quoteSource,
+      quoteSource: providerKeySource,
       payloadQuoteStructurallyValid: Boolean(quoteKey?.id && quoteKey?.remoteJid && typeof quoteKey?.fromMe === 'boolean'),
     },
     backend: { status: input.status, errorCode: input.errorCode },

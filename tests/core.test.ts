@@ -38,9 +38,23 @@ import {
 } from '../server/src/messageReactions';
 import { providerIdentityCandidates, resolveProviderMessageTarget, selectNewReconciledMessageActivity } from '../server/src/evolution';
 import { isValidEvolutionTextRecipient, resolveEvolutionRecipient, resolveEvolutionTextRecipient } from '../server/src/evolutionRecipient';
+import {
+  documentFileNameForForward,
+  documentMimeTypeForForward,
+  evolutionForwardTextPayload,
+  evolutionTextPayload,
+  forwardableDocumentFromSource,
+  forwardableImageFromSource,
+  forwardableLocationFromSource,
+  forwardableTextFromSource,
+  forwardableVideoFromSource,
+  type ForwardSourceMessage,
+  isForwardableMediaPayloadAllowed,
+  isForwardableMediaSizeAllowed,
+} from '../server/src/messageForward';
 import { qaEvolutionResponse } from '../server/src/qa';
-import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
-import { buildReplyFailureTrace } from '../server/src/replyFailureTrace';
+import { buildEvolutionSendLocationErrorDiagnostic, buildEvolutionSendLocationTransportDiagnostic, evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
+import { buildReplyFailureTrace, buildReplyTraceDetails } from '../server/src/replyFailureTrace';
 import {
   resetAvatarDebugDedupe as resetServerAvatarDebugDedupe,
   traceAvatarProfileFetch,
@@ -66,10 +80,10 @@ import {
   normalizeProviderConversationIdentity,
   projectCanonicalInboxChats,
 } from '../server/src/inboxProjection';
-import { toQuotedMessage } from '../src/utils/quotedMessage';
+import { quotedProviderKeySource, quotedSourceAge, quotedSourceMediaType, toQuotedMessage } from '../src/utils/quotedMessage';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
-import { canDownloadMessageMedia, messageCopyText, messageMenuActionsFor } from '../src/utils/messageActions';
+import { canDownloadMessageMedia, canForwardMessage, messageCopyText, messageMenuActionsFor } from '../src/utils/messageActions';
 import { parseWhatsAppFormatting, stripWhatsAppFormatting } from '../src/utils/whatsappFormatting';
 import { collectBrokenImages, installBrowserDiagnostics } from './e2e/support/diagnostics';
 import { resetAvatarDebugDedupe as resetFrontendAvatarDebugDedupe, traceAvatarImageError } from '../src/utils/avatarDiagnostics';
@@ -2058,6 +2072,37 @@ test('resposta de atendente mantém referência explícita no estado otimista e 
   assert.equal(merged[1]?.senderName, 'Henrique');
 });
 
+test('reply trace classifica origem da provider key e idade sem registrar timestamp', () => {
+  const now = 1_800_000_000_000;
+  const raw = message('raw-source', now - 1_000, 'Imagem', 'read', {
+    timestampMs: now - 1_000,
+    rawKey: { id: 'provider-raw', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+  });
+  const metadata = message('metadata-source', now - 8 * 24 * 60 * 60 * 1000, 'Imagem', 'read', {
+    timestampMs: now - 8 * 24 * 60 * 60 * 1000,
+    metadata: { providerKey: { id: 'provider-metadata', remoteJid: 'opaque-123@lid', fromMe: true } },
+  });
+  const legacy = message('legacy-source', now - 91 * 24 * 60 * 60 * 1000, 'Texto', 'read', { timestampMs: now - 91 * 24 * 60 * 60 * 1000 });
+  const location = message('location-source', now - 1_000, '[Localização compartilhada]', 'read', {
+    timestampMs: now - 1_000,
+    metadata: { location: { latitude: 0, longitude: 0 } },
+  });
+
+  assert.equal(quotedProviderKeySource(raw), 'raw');
+  assert.equal(quotedProviderKeySource(metadata), 'metadata');
+  assert.equal(quotedProviderKeySource(legacy), 'legacy');
+  assert.equal(quotedSourceAge(raw.timestampMs, now), 'RECENT');
+  assert.equal(quotedSourceAge(metadata.timestampMs, now), 'OLDER');
+  assert.equal(quotedSourceAge(legacy.timestampMs, now), 'LEGACY');
+  assert.equal(quotedSourceMediaType(raw), 'text');
+  assert.equal(quotedSourceMediaType({ ...raw, mediaType: 'image' }), 'image');
+  assert.equal(quotedSourceMediaType(location), 'location');
+  assert.equal(toQuotedMessage(raw).providerKeySource, 'raw');
+  assert.equal(toQuotedMessage(metadata).providerKeySource, 'metadata');
+  assert.equal(toQuotedMessage(legacy).providerKeySource, 'legacy');
+  assert.equal(toQuotedMessage(location).sourceMediaType, 'location');
+});
+
 test('reply failure trace is sanitized and distinguishes provider keys from legacy fallback', () => {
   const providerTrace = buildReplyFailureTrace({
     replyTraceId: 'reply-test-123',
@@ -2068,7 +2113,9 @@ test('reply failure trace is sanitized and distinguishes provider keys from lega
     requestId: 'request-123',
     quote: {
       messageId: 'hub-message-123',
-      providerKeySource: 'providerKey',
+      providerKeySource: 'metadata',
+      sourceAge: 'OLDER',
+      sourceMediaType: 'audio',
       mediaType: 'audio',
       key: {
         id: 'evolution-message-123',
@@ -2091,7 +2138,24 @@ test('reply failure trace is sanitized and distinguishes provider keys from lega
   assert.equal(providerTrace.replyTraceId, 'reply-test-123');
   assert.equal(providerTrace.replyTarget.providerKeyPresent, true);
   assert.equal(providerTrace.replyTarget.providerKeyRemoteJidType, 'LID');
-  assert.equal(providerTrace.outbound.quoteSource, 'providerKey');
+  assert.equal(providerTrace.outbound.quoteSource, 'metadata');
+  assert.equal(providerTrace.replyTarget.providerKeySource, 'metadata');
+  assert.equal(providerTrace.replyTarget.sourceAge, 'OLDER');
+  assert.equal(providerTrace.replyTarget.sourceMediaType, 'audio');
+  assert.equal(providerTrace.replyTarget.sourceDirection, 'INBOUND');
+  assert.equal(providerTrace.replyTarget.providerMessageIdPresent, true);
+  const successDetails = buildReplyTraceDetails({
+    providerKeySource: 'metadata',
+    sourceAge: 'OLDER',
+    mediaType: 'audio',
+    content: 'conteúdo privado',
+    key: { id: 'provider-raw', remoteJid: 'opaque-123@lid', fromMe: false, participant: 'participant-123@lid' },
+  });
+  assert.equal(successDetails.sourceDirection, 'INBOUND');
+  assert.equal(successDetails.providerKeySource, 'metadata');
+  assert.equal(successDetails.sourceAge, 'OLDER');
+  assert.equal(successDetails.sourceMediaType, 'audio');
+  assert.doesNotMatch(JSON.stringify(successDetails), /provider-raw|opaque-123@lid|conteúdo privado/);
   assert.equal(providerTrace.outbound.payloadQuoteStructurallyValid, true);
   assert.equal(providerTrace.evolution.providerError?.message, 'invalid jid [redacted-jid] [redacted-jid]');
   assert.doesNotMatch(JSON.stringify(providerTrace), /opaque-123@lid|5521999999999|do-not-log/);
@@ -2100,14 +2164,17 @@ test('reply failure trace is sanitized and distinguishes provider keys from lega
     replyTraceId: 'reply-legacy-123',
     quote: {
       messageId: 'legacy-message-123',
-      providerKeySource: 'legacyFallback',
+      providerKeySource: 'legacy',
+      sourceMediaType: 'text',
       key: { id: 'legacy-message-123', remoteJid: '5521999999999@s.whatsapp.net', fromMe: true },
     },
     recipient: { number: '5521999999999', remoteJid: '5521999999999@s.whatsapp.net' },
     messageType: 'text',
     failureOrigin: 'evolution_network',
   });
-  assert.equal(legacyTrace.outbound.quoteSource, 'legacyFallback');
+  assert.equal(legacyTrace.outbound.quoteSource, 'legacy');
+  assert.equal(legacyTrace.replyTarget.providerKeySource, 'legacy');
+  assert.equal(legacyTrace.replyTarget.sourceDirection, 'FROM_ME');
   assert.equal(legacyTrace.replyTarget.evolutionMessageIdPresent, false);
 });
 
@@ -2640,15 +2707,36 @@ test('posiciona popovers da mensagem dentro da viewport nas duas bordas', () => 
   }
 });
 
-test('menu de mensagem expõe reagir, responder e copiar, com download apenas para mídia', () => {
+test('menu de mensagem expõe encaminhar para texto/imagem/vídeo/documento/localização confirmados, com download apenas para mídia', () => {
   const text = message('menu-text', 1_709, 'Texto do cliente');
+  const image = message('menu-image', 1_709.5, '[Imagem]', 'read', {
+    mediaType: 'image',
+    rawKey: { id: 'menu-image', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+  });
   const document = message('menu-document', 1_710, '[Documento]', 'read', {
     mediaType: 'document',
     rawKey: { id: 'menu-document', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
   });
+  const video = message('menu-video', 1_710.5, '[Vídeo]', 'read', {
+    mediaType: 'video',
+    rawKey: { id: 'menu-video', remoteJid: '5521999999999@s.whatsapp.net', fromMe: false },
+  });
 
-  assert.deepEqual(messageMenuActionsFor(text), ['reply', 'react', 'copy']);
-  assert.deepEqual(messageMenuActionsFor(document), ['reply', 'react', 'copy', 'download']);
+  assert.deepEqual(messageMenuActionsFor(text), ['reply', 'forward', 'react', 'copy']);
+  assert.deepEqual(messageMenuActionsFor(image), ['reply', 'forward', 'react', 'copy', 'download']);
+  assert.equal(canForwardMessage(image), true);
+  assert.deepEqual(messageMenuActionsFor(document), ['reply', 'forward', 'react', 'copy', 'download']);
+  assert.deepEqual(messageMenuActionsFor(video), ['reply', 'forward', 'react', 'copy', 'download']);
+  assert.equal(canForwardMessage(text), true);
+  assert.equal(canForwardMessage(document), true);
+  assert.equal(canForwardMessage(video), true);
+  assert.equal(canForwardMessage(message('menu-location', 1_715, '[Localização compartilhada]', 'delivered', {
+    metadata: { location: { latitude: 0, longitude: 0 } },
+  })), true);
+  assert.equal(canForwardMessage(message('menu-empty', 1_711, '   ')), false);
+  assert.equal(canForwardMessage(message('menu-note', 1_712, 'Nota', 'sent', { isInternalNote: true })), false);
+  assert.equal(canForwardMessage(message('menu-deleted', 1_713, 'Texto', 'sent', { metadata: { deletedForEveryone: true } })), false);
+  assert.equal(canForwardMessage(message('menu-pending', 1_714, 'Texto', 'pending')), false);
   assert.equal(canDownloadMessageMedia(text), false);
   assert.equal(canDownloadMessageMedia(document), true);
   assert.equal(messageCopyText(text), 'Texto do cliente');
@@ -3235,6 +3323,145 @@ test('envio textual preserva o destinatário efetivo do mock Evolution', async (
   assert.equal(await sendToMock({ remoteJid: pn, number: '5521888888888' }), pn);
 });
 
+const forwardSource = (overrides: Partial<ForwardSourceMessage> = {}): ForwardSourceMessage => ({
+  id: 'source-message',
+  conversation_id: 'source-conversation',
+  sender: 'contact',
+  content: 'Texto original',
+  media_url: null,
+  media_type: null,
+  metadata: {},
+  is_internal_note: false,
+  ...overrides,
+});
+
+test('forward text accepts only ordinary textual source messages', () => {
+  assert.equal(forwardableTextFromSource(forwardSource()), 'Texto original');
+  assert.equal(forwardableTextFromSource(forwardSource({ content: '  linha 1\nlinha 2  ' })), '  linha 1\nlinha 2  ');
+  assert.equal(forwardableTextFromSource(forwardSource({ sender: 'system' })), undefined);
+  assert.equal(forwardableTextFromSource(forwardSource({ is_internal_note: true })), undefined);
+  assert.equal(forwardableTextFromSource(forwardSource({ media_type: 'image' })), undefined);
+  assert.equal(forwardableTextFromSource(forwardSource({ media_url: 'https://example.test/media' })), undefined);
+  assert.equal(forwardableTextFromSource(forwardSource({ metadata: { deletedForEveryone: true } })), undefined);
+  assert.equal(forwardableTextFromSource(forwardSource({ content: '   ' })), undefined);
+  assert.equal(forwardableTextFromSource(forwardSource({ content: '[Localização compartilhada]', metadata: { location: { latitude: 0, longitude: 0 } } })), undefined);
+});
+
+test('forward location accepts fixed coordinates and rejects invalid source metadata', () => {
+  assert.deepEqual(forwardableLocationFromSource(forwardSource({
+    content: '[Localização compartilhada]',
+    metadata: { location: { latitude: 0, longitude: 0, name: 'Ponto QA', address: 'Rua QA' } },
+  })), {
+    latitude: 0,
+    longitude: 0,
+    name: 'Ponto QA',
+    address: 'Rua QA',
+  });
+  assert.deepEqual(forwardableLocationFromSource(forwardSource({
+    metadata: { location: { latitude: -90, longitude: 180 } },
+  })), { latitude: -90, longitude: 180 });
+  for (const location of [
+    { latitude: -90.1, longitude: 0 },
+    { latitude: 90.1, longitude: 0 },
+    { latitude: 0, longitude: -180.1 },
+    { latitude: 0, longitude: 180.1 },
+    { latitude: '0', longitude: 0 },
+    { latitude: 0, longitude: Number.NaN },
+    {},
+  ]) {
+    assert.equal(forwardableLocationFromSource(forwardSource({ metadata: { location } })), undefined);
+  }
+  assert.equal(forwardableLocationFromSource(forwardSource({ media_type: 'image', metadata: { location: { latitude: 1, longitude: 2 } } })), undefined);
+  assert.equal(forwardableLocationFromSource(forwardSource({ status: 'failed', metadata: { location: { latitude: 1, longitude: 2 } } })), undefined);
+});
+
+test('forward text payload preserves PN, LID and group transport identities', () => {
+  const destinations = [
+    '5521999999999@s.whatsapp.net',
+    '903612345678901@lid',
+    '120363000000@g.us',
+  ];
+  const sourceText = 'Bom dia\nlinha 2 😀 https://example.test/original';
+  for (const destination of destinations) {
+    const payload = evolutionForwardTextPayload({ recipient: destination, text: sourceText });
+    assert.equal(payload.number, destination);
+    assert.equal('quoted' in payload, false);
+    assert.equal(payload.text, sourceText);
+  }
+  assert.equal(evolutionTextPayload({ recipient: destinations[0], text: 'Bom dia', userName: 'Atendente QA' }).text, '*Atendente QA:*\nBom dia');
+});
+
+test('forward image accepts captions but never treats the media placeholder as a caption', () => {
+  const image = forwardSource({ media_type: 'image', content: 'Legenda original' });
+  assert.deepEqual(forwardableImageFromSource(image), { caption: 'Legenda original' });
+  assert.deepEqual(forwardableImageFromSource(forwardSource({ media_type: 'image', content: '[Imagem]' })), { caption: undefined });
+  assert.equal(forwardableImageFromSource(forwardSource({ media_type: 'video' })), undefined);
+  assert.equal(forwardableImageFromSource(forwardSource({ media_type: 'image', status: 'pending' })), undefined);
+  assert.equal(forwardableImageFromSource(forwardSource({ media_type: 'image', metadata: { deletedForEveryone: true } })), undefined);
+});
+
+test('forward video accepts real captions and rejects placeholders or ineligible sources', () => {
+  assert.deepEqual(forwardableVideoFromSource(forwardSource({ media_type: 'video', content: 'Legenda original' })), { caption: 'Legenda original' });
+  assert.deepEqual(forwardableVideoFromSource(forwardSource({ media_type: 'video', content: '[Vídeo]' })), {});
+  assert.deepEqual(forwardableVideoFromSource(forwardSource({ media_type: 'video', content: '[Video]' })), {});
+  assert.equal(forwardableVideoFromSource(forwardSource({ media_type: 'image' })), undefined);
+  assert.equal(forwardableVideoFromSource(forwardSource({ media_type: 'video', status: 'pending' })), undefined);
+  assert.equal(forwardableVideoFromSource(forwardSource({ media_type: 'video', metadata: { deletedForEveryone: true } })), undefined);
+  assert.equal(forwardableVideoFromSource(forwardSource({ media_type: 'video', is_internal_note: true })), undefined);
+});
+
+test('forward document preserves metadata, caption and safe filename fallback', () => {
+  const pdf = forwardableDocumentFromSource(forwardSource({
+    content: 'Legenda do contrato',
+    media_type: 'document',
+    metadata: { document: { fileName: 'contrato.pdf', mimeType: 'application/pdf', fileSize: 2048 } },
+  }));
+  assert.deepEqual(pdf, {
+    fileName: 'contrato.pdf',
+    mimeType: 'application/pdf',
+    fileSize: 2048,
+    caption: 'Legenda do contrato',
+  });
+
+  const generic = forwardableDocumentFromSource(forwardSource({
+    content: '[Documento]',
+    media_type: 'document',
+    metadata: { document: { mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' } },
+  }));
+  assert.deepEqual(generic, {
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  });
+  assert.equal(documentMimeTypeForForward(generic?.mimeType), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  assert.equal(documentFileNameForForward(generic?.fileName, generic?.mimeType), 'document.docx');
+  assert.equal(documentFileNameForForward(undefined, 'text/plain'), 'document.txt');
+});
+
+test('forward document never turns placeholder or unsafe metadata into caption/filename', () => {
+  const document = forwardableDocumentFromSource(forwardSource({
+    content: '[documento]',
+    media_type: 'document',
+    metadata: { document: { fileName: '  ', mimeType: 'not-a-mime' } },
+  }));
+  assert.deepEqual(document, {});
+  assert.equal(documentMimeTypeForForward(document?.mimeType, document?.fileName), 'application/octet-stream');
+  assert.equal(documentFileNameForForward(document?.fileName, documentMimeTypeForForward()), 'document');
+  assert.equal(forwardableDocumentFromSource(forwardSource({ media_type: 'image' })), undefined);
+  assert.equal(forwardableDocumentFromSource(forwardSource({ media_type: 'document', status: 'failed' })), undefined);
+  assert.equal(forwardableDocumentFromSource(forwardSource({ media_type: 'document', is_internal_note: true })), undefined);
+});
+
+test('forward document respects the existing encoded media limit', () => {
+  assert.equal(isForwardableMediaSizeAllowed('ZHVjdW1lbnQ='), true);
+  assert.equal(isForwardableMediaSizeAllowed('a'.repeat(MAX_MEDIA_BASE64_CHARS + 1)), false);
+  assert.equal(isForwardableMediaSizeAllowed(''), false);
+});
+
+test('forward video validates base64 and decoded media size', () => {
+  assert.equal(isForwardableMediaPayloadAllowed('dmlkZW8tcWE='), true);
+  assert.equal(isForwardableMediaPayloadAllowed('not-base64!'), false);
+  assert.equal(isForwardableMediaPayloadAllowed('a'.repeat(MAX_MEDIA_BASE64_CHARS + 1)), false);
+});
+
 const inboxProjectionChat = (remoteJid: string, overrides: Record<string, any> = {}) => ({
   id: remoteJid,
   remoteJid,
@@ -3518,6 +3745,57 @@ test('send-media provider diagnostics keep only safe fields and redact identifie
   assert.equal('base64' in sanitized, false);
   assert.equal('authorization' in sanitized, false);
   assert.equal(String(sanitizeEvolutionProviderError('Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789')).includes('abcdefghijklmnopqrstuvwxyz'), false);
+});
+
+test('send-location diagnostics keep provider rejection useful without sensitive request data', () => {
+  const diagnostic = buildEvolutionSendLocationErrorDiagnostic({
+    providerStatus: 422,
+    providerStatusText: 'Unprocessable Entity',
+    providerResponse: {
+      status: 422,
+      code: 'invalid_location',
+      message: 'location rejected at -23.55052,-46.63331 for 5521999999999@s.whatsapp.net',
+      details: { latitude: -23.55052, longitude: -46.63331 },
+      apikey: 'super-secret-key',
+    },
+    number: '5521999999999@s.whatsapp.net',
+    remoteJid: '5521999999999@s.whatsapp.net',
+    latitude: -23.55052,
+    longitude: -46.63331,
+    name: 'Loja Vitstock',
+    address: 'Rua sensível, 123',
+    instanceName: 'preview-instance',
+  });
+  const serialized = JSON.stringify(diagnostic);
+  assert.equal(diagnostic.event, 'evolution.send_location.error');
+  assert.equal(diagnostic.providerStatus, 422);
+  assert.equal(diagnostic.recipientClass, 'pn');
+  assert.equal(diagnostic.latitudeValid, true);
+  assert.equal(diagnostic.longitudeValid, true);
+  assert.equal(diagnostic.instancePresent, true);
+  assert.equal(serialized.includes('5521999999999'), false);
+  assert.equal(serialized.includes('23.55052'), false);
+  assert.equal(serialized.includes('46.63331'), false);
+  assert.equal(serialized.includes('Loja Vitstock'), false);
+  assert.equal(serialized.includes('Rua sensível'), false);
+  assert.equal(serialized.includes('super-secret-key'), false);
+  assert.match(serialized, /invalid_location/);
+});
+
+test('send-location transport diagnostics expose only safe classification', () => {
+  const diagnostic = buildEvolutionSendLocationTransportDiagnostic({
+    error: new Error('request failed with apikey=super-secret-key for 5521999999999@s.whatsapp.net'),
+    number: '5521999999999@s.whatsapp.net',
+    remoteJid: '5521999999999@s.whatsapp.net',
+    instanceName: 'preview-instance',
+  });
+  assert.deepEqual(diagnostic, {
+    event: 'evolution.send_location.transport_error',
+    errorClass: 'Error',
+    safeMessage: 'provider_request_failed_before_http_response',
+    recipientClass: 'pn',
+    instancePresent: true,
+  });
 });
 
 test('emoji insertion preserves the current cursor and Unicode sequence', () => {

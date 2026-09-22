@@ -49,12 +49,32 @@ export const canDownloadMessageMedia = (message: Message) => Boolean(
   message.mediaType && (message.rawKey || message.mediaUrl),
 );
 
+/** Only confirmed, ordinary text, image, video, document or fixed-location messages can be forwarded. */
+export const canForwardMessage = (message: Message) => {
+  const isFixedLocation = Boolean(message.metadata?.location) && !message.mediaType;
+  return Boolean(
+    message.id.trim()
+      && (message.sender === 'contact' || message.sender === 'attendant')
+      && message.status !== 'pending'
+      && message.status !== 'failed'
+      && !message.isInternalNote
+      && message.metadata?.deletedForEveryone !== true
+      && (isFixedLocation
+        || (!message.mediaType
+          ? Boolean(message.content.trim())
+          : message.mediaType === 'image'
+            || message.mediaType === 'video'
+            || message.mediaType === 'document')),
+  );
+};
+
 export const messageCopyText = (message: Message) => message.metadata?.deletedForEveryone === true
   ? 'Mensagem apagada'
   : message.content;
 
 export const messageMenuActionsFor = (message: Message) => [
   'reply',
+  ...(canForwardMessage(message) ? ['forward'] : []),
   'react',
   'copy',
   ...(canEditMessage(message) ? ['edit'] : []),

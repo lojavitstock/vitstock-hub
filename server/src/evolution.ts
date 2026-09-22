@@ -62,10 +62,29 @@ import {
 import { hasQaProviderOnlyChat, qaEvolutionResponse } from './qa.js';
 import { loadConversationTags } from './conversationTags.js';
 import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.js';
-import { evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
-import { buildReplyFailureTrace } from './replyFailureTrace.js';
+import { buildEvolutionSendLocationErrorDiagnostic, buildEvolutionSendLocationTransportDiagnostic, evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
+import { buildReplyFailureTrace, buildReplyTraceDetails } from './replyFailureTrace.js';
 import { resolveConversationForOperation, resolveConversationWithClient } from './conversationResolver.js';
 import { filterConversationalProviderChats, isConversationalProviderJid } from './providerJidPolicy.js';
+import {
+  documentFileNameForForward,
+  documentMimeTypeForForward,
+  evolutionForwardTextPayload,
+  evolutionTextPayload,
+  forwardableDocumentFromSource,
+  forwardableImageFromSource,
+  forwardableLocationFromSource,
+  forwardableTextFromSource,
+  forwardableVideoFromSource,
+  hasPersistedLocation,
+  isForwardableMediaPayloadAllowed,
+  isForwardableMediaSizeAllowed,
+  trustedDocumentMimeType,
+  type ForwardableDocument,
+  type ForwardableLocation,
+  type ForwardableVideo,
+  type ForwardSourceMessage,
+} from './messageForward.js';
 import {
   deletedMessageMetadata,
   editedMessageMetadata,
@@ -117,7 +136,9 @@ const sendTextSchema = z.object({
   replyTraceId: replyTraceIdSchema.optional(),
   quotedMessage: z.object({
     messageId: z.string().trim().min(1).max(256),
-    providerKeySource: z.enum(['providerKey', 'legacyFallback']).optional(),
+    providerKeySource: z.enum(['raw', 'metadata', 'legacy', 'none', 'providerKey', 'legacyFallback']).optional(),
+    sourceAge: z.enum(['RECENT', 'OLDER', 'LEGACY', 'UNKNOWN']).optional(),
+    sourceMediaType: z.enum(['text', 'image', 'video', 'document', 'audio', 'sticker', 'location', 'other']).optional(),
     authorName: z.string().trim().min(1).max(200).optional(),
     sender: z.enum(['contact', 'attendant', 'system']).optional(),
     content: z.string().max(4096).optional(),
@@ -154,6 +175,19 @@ const sendMediaSchema = z.object({
   clientMessageId: z.string().trim().min(1).max(128).optional(),
   replyTraceId: replyTraceIdSchema.optional(),
   quotedMessage: sendTextSchema.shape.quotedMessage,
+});
+const forwardTextSchema = z.object({
+  sourceMessageId: z.string().trim().min(1).max(256),
+  destinationRemoteJid: z.string().trim().min(3).max(128),
+  clientMessageId: z.string().trim().min(1).max(128),
+}).strict().superRefine((value, context) => {
+  if (!isConversationalProviderJid(value.destinationRemoteJid)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['destinationRemoteJid'],
+      message: 'destinatário Evolution inválido',
+    });
+  }
 });
 const sendReactionSchema = z.object({
   number: evolutionRecipientSchema,
@@ -662,6 +696,11 @@ function traceOutbound(request: any, stage: string, input: {
   idempotencyLockMs?: number;
   persistenceMs?: number;
   evolutionRequestMs?: number;
+  quote?: unknown;
+  messageType?: string;
+  evolutionEndpoint?: string;
+  evolutionStatus?: number;
+  evolutionStatusText?: string;
 }) {
   if (!outboundTraceEnabled) return;
   // This opt-in trace intentionally omits text, media, headers and secrets.
@@ -682,6 +721,18 @@ function traceOutbound(request: any, stage: string, input: {
     idempotencyLockMs: input.idempotencyLockMs,
     persistenceMs: input.persistenceMs,
     evolutionRequestMs: input.evolutionRequestMs,
+    reply: input.replyTraceId || input.quote
+      ? buildReplyTraceDetails(input.quote, input.messageType)
+      : undefined,
+    evolution: input.evolutionEndpoint || input.evolutionStatus !== undefined || input.evolutionStatusText
+      ? {
+        endpoint: input.evolutionEndpoint,
+        httpStatus: input.evolutionStatus,
+        statusText: input.evolutionStatusText
+          ? sanitizeEvolutionProviderError(input.evolutionStatusText)
+          : undefined,
+      }
+      : undefined,
     timestampMs: Date.now(),
   }));
 }
@@ -1120,12 +1171,15 @@ function isEvolutionTimeout(error: unknown) {
     || /timed? ?out|timeout/i.test(String(candidate.message || ''));
 }
 
-async function forwardMediaRequest(
+type MediaRecoveryResult =
+  | { ok: true; body: Record<string, unknown> }
+  | { ok: false; failure: ReturnType<typeof mediaFailureForTransport> };
+
+async function recoverMediaFromProvider(
   path: string,
   request: FastifyRequest,
-  reply: FastifyReply,
   messageKey: Record<string, unknown>,
-) {
+): Promise<MediaRecoveryResult> {
   const key = providerMessageKeyDiagnostics(messageKey);
   let response: Response;
   try {
@@ -1139,7 +1193,7 @@ async function forwardMediaRequest(
       failure: failure.body.error,
       reason: failure.body.reason,
     }, '[EVOLUTION_MEDIA] provider_rejected');
-    return reply.code(failure.statusCode).send(failure.body);
+    return { ok: false, failure };
   }
 
   let rawBody: string;
@@ -1154,7 +1208,7 @@ async function forwardMediaRequest(
       failure: failure.body.error,
       reason: failure.body.reason,
     }, '[EVOLUTION_MEDIA] provider_rejected');
-    return reply.code(failure.statusCode).send(failure.body);
+    return { ok: false, failure };
   }
   if (!response.ok) {
     const failure = mediaFailureForUpstreamStatus(response.status);
@@ -1170,7 +1224,7 @@ async function forwardMediaRequest(
       reason: failure.body.reason,
       ...diagnostics,
     }, '[EVOLUTION_MEDIA] provider_rejected');
-    return reply.code(failure.statusCode).send(failure.body);
+    return { ok: false, failure };
   }
 
   const body = parseMediaProviderJson(rawBody);
@@ -1184,9 +1238,20 @@ async function forwardMediaRequest(
       failure: failure.body.error,
       reason: failure.body.reason,
     }, '[EVOLUTION_MEDIA] provider_rejected');
-    return reply.code(failure.statusCode).send(failure.body);
+    return { ok: false, failure };
   }
-  return body;
+  return { ok: true, body };
+}
+
+async function forwardMediaRequest(
+  path: string,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  messageKey: Record<string, unknown>,
+) {
+  const result = await recoverMediaFromProvider(path, request, messageKey);
+  if (!result.ok) return reply.code(result.failure.statusCode).send(result.failure.body);
+  return result.body;
 }
 
 function assignmentJids(input: { remoteJid: string; phone?: string }) {
@@ -1516,6 +1581,8 @@ function normalizedQuotedMessage(quoted: QuotedMessage | undefined, fallbackRemo
   return {
     messageId,
     ...(quoted.providerKeySource ? { providerKeySource: quoted.providerKeySource } : {}),
+    ...(quoted.sourceAge ? { sourceAge: quoted.sourceAge } : {}),
+    ...(quoted.sourceMediaType ? { sourceMediaType: quoted.sourceMediaType } : {}),
     ...(quoted.authorName ? { authorName: quoted.authorName } : {}),
     ...(quoted.sender ? { sender: quoted.sender } : {}),
     ...(quoted.content ? { content: quoted.content } : {}),
@@ -2250,6 +2317,22 @@ const messageMutationTargetQuery = `
 
 async function findMessageMutationTarget(companyId: string, messageId: string) {
   const result = await db.query<MessageMutationDbRow>(messageMutationTargetQuery, [companyId, messageId]);
+  return result.rows[0];
+}
+
+const forwardSourceMessageQuery = `
+  SELECT m.id, m.conversation_id, m.evolution_message_id, m.sender, m.content, m.media_url,
+         m.media_type, m.metadata, m.status, m.is_internal_note,
+         c.evolution_remote_jid
+  FROM messages m
+  INNER JOIN conversations c ON c.id = m.conversation_id
+  WHERE m.company_id = $1::uuid
+    AND (m.evolution_message_id = $2::text OR m.id::text = $2::text)
+  ORDER BY m.sent_at DESC
+  LIMIT 1`;
+
+async function findForwardSourceMessage(companyId: string, sourceMessageId: string) {
+  const result = await db.query<ForwardSourceMessage>(forwardSourceMessageQuery, [companyId, sourceMessageId]);
   return result.rows[0];
 }
 
@@ -3119,6 +3202,7 @@ async function ensureOutboundMessage(input: {
   content: string;
   mediaType?: 'image' | 'video' | 'document';
   document?: { fileName?: string; mimeType?: string; fileSize?: number };
+  location?: ForwardableLocation;
   clientMessageId?: string;
   quotedMessage?: QuotedMessage;
 }) {
@@ -3273,6 +3357,7 @@ async function ensureOutboundMessage(input: {
         sentByUserId: input.userId,
         sentByUserName: input.userName,
         ...(input.document ? { document: input.document } : {}),
+        ...(input.location ? { location: input.location } : {}),
         ...(quotedMessage
           ? { quotedMessage }
           : {}),
@@ -3357,6 +3442,727 @@ async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed
       [messageId],
     );
   }
+}
+
+async function dispatchForwardedMedia(input: {
+  request: FastifyRequest;
+  reply: FastifyReply;
+  number: string;
+  remoteJid: string;
+  mediatype: 'image' | 'video' | 'document';
+  mimetype: string;
+  media: string;
+  document?: ForwardableDocument;
+  fileName?: string;
+  caption?: string;
+  clientMessageId: string;
+  leaseAcquisition: Awaited<ReturnType<typeof acquireOutboundLease>>;
+  outboundStartedAt: number;
+}) {
+  const { request, reply, number, remoteJid, mediatype, mimetype, media, document, fileName, caption, clientMessageId } = input;
+  const mediaLabel = mediatype === 'document' ? 'documento' : mediatype === 'video' ? 'vídeo' : 'imagem';
+  const text = caption?.trim() || (mediatype === 'document' ? '[document]' : mediatype === 'video' ? '[Vídeo]' : '[Imagem]');
+  const evolutionRecipient = resolveEvolutionRecipient({ remoteJid, canonicalPhone: number });
+  let localMessage: Awaited<ReturnType<typeof ensureOutboundMessage>>;
+  try {
+    localMessage = await ensureOutboundMessage({
+      companyId: request.user!.companyId,
+      userId: request.user!.id,
+      userName: request.user!.name,
+      number,
+      remoteJid,
+      content: text,
+      mediaType: mediatype,
+      document: mediatype === 'document' ? document : undefined,
+      clientMessageId,
+    });
+  } catch (error) {
+    traceReplyFailure(request, {
+      conversationId: remoteJid,
+      localMessageId: clientMessageId,
+      clientMessageId,
+      recipient: { number: evolutionRecipient.number, remoteJid },
+      messageType: mediatype,
+      backendStatus: 500,
+      errorCode: 'persistence_failed',
+      failureOrigin: 'backend_rejected',
+      media: { mediatype, mimetype, base64Length: media.length, hasCaption: Boolean(caption?.trim()), captionLength: caption?.trim().length || 0 },
+    });
+    throw error;
+  }
+  traceOutbound(request, 'outbox.prepared', {
+    clientMessageId,
+    remoteJid,
+    evolutionMessageId: localMessage.evolutionMessageId || undefined,
+    deduplicated: localMessage.deduplicated,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+    idempotencyLockMs: localMessage.idempotencyLockMs,
+    persistenceMs: localMessage.persistenceMs,
+  });
+  if (localMessage.deduplicated) {
+    return {
+      remoteJid,
+      message: {
+        id: localMessage.messageId,
+        evolutionMessageId: localMessage.evolutionMessageId || undefined,
+        status: localMessage.status,
+        senderName: request.user!.name,
+      },
+      deduplicated: true,
+    };
+  }
+
+  let dispatch: { ok: boolean; status: number; statusText: string; body: any; providerError?: unknown };
+  const evolutionRequestStartedAt = Date.now();
+  try {
+    const evolutionCaption = caption?.trim() || undefined;
+    dispatch = await outboundMediaEvolutionRequests.run(
+      `${request.user!.companyId}:${clientMessageId}`,
+      async () => {
+        traceOutbound(request, 'evolution.request', { clientMessageId, remoteJid, elapsedMs: Date.now() - input.outboundStartedAt });
+        const response = await evolutionRequest(
+          `/message/sendMedia/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              number: evolutionRecipient.number,
+              mediatype,
+              mimetype,
+              media,
+              ...(mediatype === 'document' || mediatype === 'video'
+                ? { fileName: mediatype === 'document' ? document?.fileName : fileName }
+                : {}),
+              caption: evolutionCaption,
+            }),
+          },
+        );
+        const rawBody = await response.text();
+        let body: unknown;
+        try {
+          body = rawBody ? JSON.parse(rawBody) : undefined;
+        } catch {
+          body = rawBody;
+        }
+        return {
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+          body,
+          providerError: response.ok ? undefined : sanitizeEvolutionProviderError(rawBody, [caption || '', evolutionCaption || '']),
+        };
+      },
+    );
+  } catch (error) {
+    await updateOutboundMessage(localMessage.messageId, 'failed');
+    traceReplyFailure(request, {
+      conversationId: remoteJid,
+      localMessageId: localMessage.messageId,
+      clientMessageId,
+      recipient: { number: evolutionRecipient.number, remoteJid },
+      messageType: mediatype,
+      backendStatus: 502,
+      errorCode: 'evolution_unavailable',
+      failureOrigin: 'evolution_network',
+      media: { mediatype, mimetype, base64Length: media.length, hasCaption: Boolean(caption?.trim()), captionLength: caption?.trim().length || 0 },
+    });
+    request.log.warn({ err: error }, `Falha de comunicação com a Evolution API ao encaminhar ${mediaLabel}`);
+    return reply.code(502).send({ error: 'Evolution API indisponível', messageId: localMessage.messageId });
+  }
+  if (!dispatch.ok) {
+    await updateOutboundMessage(localMessage.messageId, 'failed');
+    const recipientDiagnostics = evolutionRecipientDiagnostics({ number: evolutionRecipient.number, remoteJid });
+    const status = [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(dispatch.status) ? dispatch.status : 502;
+    traceReplyFailure(request, {
+      conversationId: remoteJid,
+      localMessageId: localMessage.messageId,
+      clientMessageId,
+      recipient: { number: evolutionRecipient.number, remoteJid },
+      messageType: mediatype,
+      backendStatus: status,
+      errorCode: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
+      failureOrigin: 'evolution_rejected',
+      evolutionStatus: dispatch.status,
+      evolutionStatusText: dispatch.statusText,
+      providerError: dispatch.providerError,
+      media: { mediatype, mimetype, base64Length: media.length, hasCaption: Boolean(caption?.trim()), captionLength: caption?.trim().length || 0 },
+    });
+    if (outboundTraceEnabled) {
+      request.log.warn({
+        operation: 'evolution.forwardMedia',
+        httpStatus: dispatch.status,
+        statusText: dispatch.statusText,
+        ...recipientDiagnostics,
+        mediatype,
+        mimetype,
+        base64Length: media.length,
+        hasCaption: Boolean(caption?.trim()),
+        captionLength: caption?.trim().length || 0,
+        providerError: dispatch.providerError,
+      }, 'Evolution forward-media rejected');
+    }
+    return reply.code(status).send({
+      error: status === 502 ? 'Evolution API indisponível' : `Evolution API rejeitou o ${mediaLabel}`,
+      code: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
+      providerStatus: dispatch.status,
+      messageId: localMessage.messageId,
+    });
+  }
+
+  const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
+  const evolutionMessageId = evolutionMessageReference?.messageId;
+  const outboundProviderKey = providerKeyForOutboundResponse(dispatch.body, evolutionMessageId);
+  traceOutbound(request, 'evolution.response', {
+    clientMessageId,
+    remoteJid,
+    evolutionMessageId,
+    evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
+    ok: dispatch.ok,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+    evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
+  });
+  await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined, outboundProviderKey);
+  const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
+  const realtimeTimestampMs = Date.now();
+  publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
+    remoteJid,
+    phone: number,
+    messageId: realtimeMessageId,
+    timestampMs: realtimeTimestampMs,
+    fromMe: true,
+    message: {
+      id: realtimeMessageId,
+      conversationId: remoteJid,
+      sender: 'attendant',
+      senderName: request.user!.name,
+      content: text,
+      mediaType: mediatype,
+      metadata: {
+        sentByHub: true,
+        sentByUserId: request.user!.id,
+        sentByUserName: request.user!.name,
+        ...(mediatype === 'document' && document ? { document } : {}),
+        ...(clientMessageId ? { clientMessageId } : {}),
+        ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+      },
+      rawKey: outboundProviderKey || { id: realtimeMessageId, remoteJid, fromMe: true },
+      timestampMs: realtimeTimestampMs,
+      timestamp: new Date(realtimeTimestampMs).toISOString(),
+      status: 'sent',
+      isInternalNote: false,
+    },
+  });
+  traceOutbound(request, 'sse.published', {
+    clientMessageId,
+    remoteJid,
+    evolutionMessageId: realtimeMessageId,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+  });
+  let dailyResponder: { id: string; name: string; date: string } | undefined;
+  if (number) {
+    try {
+      dailyResponder = await recordDailyResponder(request.user!.companyId, number, request.user!);
+    } catch (error) {
+      request.log.warn({ err: error }, 'Não foi possível registrar o primeiro atendente do dia');
+    }
+  }
+  return {
+    evolution: dispatch.body,
+    dailyResponder,
+    lease: input.leaseAcquisition.lease,
+    remoteJid,
+    message: {
+      id: localMessage.messageId,
+      evolutionMessageId,
+      status: 'sent',
+      senderName: request.user!.name,
+      ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+    },
+  };
+}
+
+async function dispatchForwardedLocation(input: {
+  request: FastifyRequest;
+  reply: FastifyReply;
+  number: string;
+  remoteJid: string;
+  location: ForwardableLocation;
+  clientMessageId: string;
+  leaseAcquisition: Awaited<ReturnType<typeof acquireOutboundLease>>;
+  outboundStartedAt: number;
+}) {
+  const { request, reply, number, remoteJid, location, clientMessageId } = input;
+  const text = '[Localização compartilhada]';
+  const evolutionRecipient = resolveEvolutionRecipient({ remoteJid, canonicalPhone: number });
+  let localMessage: Awaited<ReturnType<typeof ensureOutboundMessage>>;
+  try {
+    localMessage = await ensureOutboundMessage({
+      companyId: request.user!.companyId,
+      userId: request.user!.id,
+      userName: request.user!.name,
+      number,
+      remoteJid,
+      content: text,
+      location,
+      clientMessageId,
+    });
+  } catch (error) {
+    traceReplyFailure(request, {
+      conversationId: remoteJid,
+      localMessageId: clientMessageId,
+      clientMessageId,
+      recipient: { number: evolutionRecipient.number, remoteJid },
+      messageType: 'location',
+      backendStatus: 500,
+      errorCode: 'persistence_failed',
+      failureOrigin: 'backend_rejected',
+    });
+    throw error;
+  }
+  traceOutbound(request, 'outbox.prepared', {
+    clientMessageId,
+    remoteJid,
+    evolutionMessageId: localMessage.evolutionMessageId || undefined,
+    deduplicated: localMessage.deduplicated,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+    idempotencyLockMs: localMessage.idempotencyLockMs,
+    persistenceMs: localMessage.persistenceMs,
+  });
+  if (localMessage.deduplicated) {
+    return {
+      remoteJid,
+      message: {
+        id: localMessage.messageId,
+        evolutionMessageId: localMessage.evolutionMessageId || undefined,
+        status: localMessage.status,
+        senderName: request.user!.name,
+      },
+      deduplicated: true,
+    };
+  }
+
+  let dispatch: { ok: boolean; status: number; statusText: string; body: any; providerError?: unknown };
+  const evolutionRequestStartedAt = Date.now();
+  try {
+    dispatch = await outboundEvolutionRequests.run(
+      `${request.user!.companyId}:${clientMessageId}`,
+      async () => {
+        traceOutbound(request, 'evolution.request', { clientMessageId, remoteJid, elapsedMs: Date.now() - input.outboundStartedAt });
+        const response = await evolutionRequest(
+          `/message/sendLocation/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              number: evolutionRecipient.number,
+              latitude: location.latitude,
+              longitude: location.longitude,
+              name: location.name ?? '',
+              address: location.address ?? '',
+            }),
+          },
+        );
+        const rawBody = await response.text();
+        let body: unknown;
+        try {
+          body = rawBody ? JSON.parse(rawBody) : undefined;
+        } catch {
+          body = rawBody;
+        }
+        return {
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+          body,
+          providerError: response.ok ? undefined : sanitizeEvolutionProviderError(rawBody, [
+            String(location.latitude),
+            String(location.longitude),
+            location.name || '',
+            location.address || '',
+          ]),
+        };
+      },
+    );
+  } catch (error) {
+    await updateOutboundMessage(localMessage.messageId, 'failed');
+    traceReplyFailure(request, {
+      conversationId: remoteJid,
+      localMessageId: localMessage.messageId,
+      clientMessageId,
+      recipient: { number: evolutionRecipient.number, remoteJid },
+      messageType: 'location',
+      backendStatus: 502,
+      errorCode: 'evolution_unavailable',
+      failureOrigin: 'evolution_network',
+    });
+    request.log.warn(
+      buildEvolutionSendLocationTransportDiagnostic({
+        error,
+        number: evolutionRecipient.number,
+        remoteJid,
+        instanceName: config.EVOLUTION_INSTANCE_NAME,
+      }),
+      '[EVOLUTION_SEND_LOCATION_TRANSPORT_ERROR]',
+    );
+    return reply.code(502).send({ error: 'Evolution API indisponível', messageId: localMessage.messageId });
+  }
+  if (!dispatch.ok) {
+    await updateOutboundMessage(localMessage.messageId, 'failed');
+    const recipientDiagnostics = evolutionRecipientDiagnostics({ number: evolutionRecipient.number, remoteJid });
+    const status = [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(dispatch.status) ? dispatch.status : 502;
+    traceReplyFailure(request, {
+      conversationId: remoteJid,
+      localMessageId: localMessage.messageId,
+      clientMessageId,
+      recipient: { number: evolutionRecipient.number, remoteJid },
+      messageType: 'location',
+      backendStatus: status,
+      errorCode: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
+      failureOrigin: 'evolution_rejected',
+      evolutionStatus: dispatch.status,
+      evolutionStatusText: dispatch.statusText,
+      providerError: dispatch.providerError,
+    });
+    request.log.warn(
+      buildEvolutionSendLocationErrorDiagnostic({
+        providerStatus: dispatch.status,
+        providerStatusText: dispatch.statusText,
+        providerResponse: dispatch.providerError,
+        number: evolutionRecipient.number,
+        remoteJid,
+        latitude: location.latitude,
+        longitude: location.longitude,
+        name: location.name,
+        address: location.address,
+        instanceName: config.EVOLUTION_INSTANCE_NAME,
+      }),
+      '[EVOLUTION_SEND_LOCATION_ERROR]',
+    );
+    return reply.code(status).send({
+      error: status === 502 ? 'Evolution API indisponível' : 'Evolution API rejeitou a localização',
+      code: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
+      providerStatus: dispatch.status,
+      messageId: localMessage.messageId,
+    });
+  }
+
+  const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
+  const evolutionMessageId = evolutionMessageReference?.messageId;
+  const outboundProviderKey = providerKeyForOutboundResponse(dispatch.body, evolutionMessageId);
+  traceOutbound(request, 'evolution.response', {
+    clientMessageId,
+    remoteJid,
+    evolutionMessageId,
+    evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
+    ok: dispatch.ok,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+    evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
+  });
+  await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined, outboundProviderKey);
+  const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
+  const realtimeTimestampMs = Date.now();
+  publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
+    remoteJid,
+    phone: number,
+    messageId: realtimeMessageId,
+    timestampMs: realtimeTimestampMs,
+    fromMe: true,
+    message: {
+      id: realtimeMessageId,
+      conversationId: remoteJid,
+      sender: 'attendant',
+      senderName: request.user!.name,
+      content: text,
+      metadata: {
+        sentByHub: true,
+        sentByUserId: request.user!.id,
+        sentByUserName: request.user!.name,
+        location,
+        ...(clientMessageId ? { clientMessageId } : {}),
+        ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+      },
+      rawKey: outboundProviderKey || { id: realtimeMessageId, remoteJid, fromMe: true },
+      timestampMs: realtimeTimestampMs,
+      timestamp: new Date(realtimeTimestampMs).toISOString(),
+      status: 'sent',
+      isInternalNote: false,
+    },
+  });
+  traceOutbound(request, 'sse.published', {
+    clientMessageId,
+    remoteJid,
+    evolutionMessageId: realtimeMessageId,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+  });
+  let dailyResponder: { id: string; name: string; date: string } | undefined;
+  if (number) {
+    try {
+      dailyResponder = await recordDailyResponder(request.user!.companyId, number, request.user!);
+    } catch (error) {
+      request.log.warn({ err: error }, 'Não foi possível registrar o primeiro atendente do dia');
+    }
+  }
+  return {
+    evolution: dispatch.body,
+    dailyResponder,
+    lease: input.leaseAcquisition.lease,
+    remoteJid,
+    message: {
+      id: localMessage.messageId,
+      evolutionMessageId,
+      status: 'sent',
+      senderName: request.user!.name,
+      ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+    },
+  };
+}
+
+async function dispatchOutboundText(input: {
+  request: FastifyRequest;
+  reply: FastifyReply;
+  number: string;
+  remoteJid: string;
+  text: string;
+  clientMessageId: string;
+  replyTraceId?: string;
+  normalizedQuote?: QuotedMessage;
+  evolutionQuote?: unknown;
+  evolutionRecipient?: ReturnType<typeof resolveEvolutionTextRecipient>;
+  preserveOriginalText?: boolean;
+  leaseAcquisition: Awaited<ReturnType<typeof acquireOutboundLease>>;
+  outboundStartedAt: number;
+}) {
+  const { request, reply, number, remoteJid, text, clientMessageId, replyTraceId, normalizedQuote, evolutionQuote } = input;
+  const evolutionRecipient = input.evolutionRecipient || resolveEvolutionTextRecipient({ remoteJid, number });
+  const evolutionEndpoint = `/message/sendText/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`;
+  let localMessage: Awaited<ReturnType<typeof ensureOutboundMessage>>;
+  try {
+    localMessage = await ensureOutboundMessage({
+      companyId: request.user!.companyId,
+      userId: request.user!.id,
+      userName: request.user!.name,
+      number,
+      remoteJid,
+      content: text,
+      clientMessageId,
+      quotedMessage: normalizedQuote,
+    });
+  } catch (error) {
+    traceReplyFailure(request, {
+      replyTraceId,
+      conversationId: remoteJid,
+      localMessageId: clientMessageId,
+      clientMessageId,
+      quote: normalizedQuote,
+      recipient: { number, remoteJid },
+      messageType: normalizedQuote?.mediaType || 'text',
+      backendStatus: 500,
+      errorCode: 'persistence_failed',
+      failureOrigin: 'backend_rejected',
+    });
+    throw error;
+  }
+  traceOutbound(request, 'outbox.prepared', {
+    clientMessageId,
+    replyTraceId,
+    remoteJid,
+    quote: normalizedQuote,
+    messageType: normalizedQuote?.mediaType || 'text',
+    evolutionMessageId: localMessage.evolutionMessageId || undefined,
+    deduplicated: localMessage.deduplicated,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+    idempotencyLockMs: localMessage.idempotencyLockMs,
+    persistenceMs: localMessage.persistenceMs,
+  });
+  if (localMessage.deduplicated) {
+    return {
+      remoteJid,
+      message: {
+        id: localMessage.messageId,
+        evolutionMessageId: localMessage.evolutionMessageId || undefined,
+        status: localMessage.status,
+        senderName: request.user!.name,
+      },
+      deduplicated: true,
+    };
+  }
+
+  let dispatch: { ok: boolean; status: number; statusText: string; body: any; providerError?: unknown };
+  const evolutionRequestStartedAt = Date.now();
+  try {
+    dispatch = await outboundEvolutionRequests.run(
+      `${request.user!.companyId}:${clientMessageId}`,
+      async () => {
+        traceOutbound(request, 'evolution.request', {
+          clientMessageId,
+          replyTraceId,
+          remoteJid,
+          quote: normalizedQuote,
+          messageType: normalizedQuote?.mediaType || 'text',
+          evolutionEndpoint,
+          elapsedMs: Date.now() - input.outboundStartedAt,
+        });
+        const response = await evolutionRequest(
+          evolutionEndpoint,
+          {
+            method: 'POST',
+            body: JSON.stringify(input.preserveOriginalText
+              ? evolutionForwardTextPayload({ recipient: evolutionRecipient.number, text })
+              : evolutionTextPayload({
+                recipient: evolutionRecipient.number,
+                text,
+                userName: request.user!.name,
+                quoted: evolutionQuote,
+              })),
+          },
+        );
+        const rawBody = await response.text();
+        let body: unknown;
+        try {
+          body = rawBody ? JSON.parse(rawBody) : undefined;
+        } catch {
+          body = rawBody;
+        }
+        return {
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+          body,
+          providerError: response.ok ? undefined : sanitizeEvolutionProviderError(rawBody, [text]),
+        };
+      },
+    );
+  } catch (error) {
+    await updateOutboundMessage(localMessage.messageId, 'failed');
+    traceReplyFailure(request, {
+      replyTraceId,
+      conversationId: remoteJid,
+      localMessageId: localMessage.messageId,
+      clientMessageId,
+      quote: normalizedQuote,
+      recipient: { number, remoteJid },
+      messageType: normalizedQuote?.mediaType || 'text',
+      backendStatus: 502,
+      errorCode: 'evolution_unavailable',
+      failureOrigin: 'evolution_network',
+    });
+    request.log.warn({ err: error }, 'Falha de comunicação com a Evolution API');
+    return reply.code(502).send({ error: 'Evolution API unavailable', messageId: localMessage.messageId, ...(replyTraceId ? { replyTraceId } : {}) });
+  }
+  if (!dispatch.ok) {
+    await updateOutboundMessage(localMessage.messageId, 'failed');
+    const status = [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(dispatch.status) ? dispatch.status : 502;
+    traceReplyFailure(request, {
+      replyTraceId,
+      conversationId: remoteJid,
+      localMessageId: localMessage.messageId,
+      clientMessageId,
+      quote: normalizedQuote,
+      recipient: { number, remoteJid },
+      messageType: normalizedQuote?.mediaType || 'text',
+      backendStatus: status,
+      errorCode: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
+      failureOrigin: 'evolution_rejected',
+      evolutionStatus: dispatch.status,
+      evolutionStatusText: dispatch.statusText,
+      providerError: dispatch.providerError,
+    });
+    return reply.code(status).send({
+      error: status === 502 ? 'Evolution API unavailable' : 'Evolution API rejected the message',
+      code: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
+      providerStatus: dispatch.status,
+      messageId: localMessage.messageId,
+      ...(replyTraceId ? { replyTraceId } : {}),
+    });
+  }
+
+  const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
+  const evolutionMessageId = evolutionMessageReference?.messageId;
+  const outboundProviderKey = providerKeyForOutboundResponse(dispatch.body, evolutionMessageId);
+  traceOutbound(request, 'evolution.response', {
+    clientMessageId,
+    replyTraceId,
+    remoteJid,
+    quote: normalizedQuote,
+    messageType: normalizedQuote?.mediaType || 'text',
+    evolutionEndpoint,
+    evolutionStatus: dispatch.status,
+    evolutionStatusText: dispatch.statusText,
+    evolutionMessageId,
+    evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
+    ok: dispatch.ok,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+    evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
+  });
+  await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined, outboundProviderKey);
+  traceOutbound(request, 'persistence.confirmed', {
+    clientMessageId,
+    replyTraceId,
+    remoteJid,
+    quote: normalizedQuote,
+    messageType: normalizedQuote?.mediaType || 'text',
+    evolutionMessageId,
+    evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+  });
+  const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
+  const realtimeTimestampMs = Date.now();
+  publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
+    remoteJid,
+    phone: number,
+    messageId: realtimeMessageId,
+    timestampMs: realtimeTimestampMs,
+    fromMe: true,
+    message: {
+      id: realtimeMessageId,
+      conversationId: remoteJid,
+      sender: 'attendant',
+      senderName: request.user!.name,
+      content: text,
+      metadata: {
+        sentByHub: true,
+        sentByUserId: request.user!.id,
+        sentByUserName: request.user!.name,
+        ...(clientMessageId ? { clientMessageId } : {}),
+        ...(normalizedQuote ? { quotedMessage: normalizedQuote } : {}),
+        ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+      },
+      rawKey: outboundProviderKey || { id: realtimeMessageId, remoteJid, fromMe: true },
+      timestampMs: realtimeTimestampMs,
+      timestamp: new Date(realtimeTimestampMs).toISOString(),
+      status: 'sent',
+      isInternalNote: false,
+    },
+  });
+  traceOutbound(request, 'sse.published', {
+    clientMessageId,
+    replyTraceId,
+    remoteJid,
+    quote: normalizedQuote,
+    messageType: normalizedQuote?.mediaType || 'text',
+    evolutionMessageId: realtimeMessageId,
+    elapsedMs: Date.now() - input.outboundStartedAt,
+  });
+
+  let dailyResponder: { id: string; name: string; date: string } | undefined;
+  if (number) {
+    try {
+      dailyResponder = await recordDailyResponder(request.user!.companyId, number, request.user!);
+    } catch (error) {
+      request.log.warn({ err: error }, 'Não foi possível registrar o primeiro atendente do dia');
+    }
+  }
+  return {
+    evolution: dispatch.body,
+    dailyResponder,
+    lease: input.leaseAcquisition.lease,
+    remoteJid,
+    message: {
+      id: localMessage.messageId,
+      evolutionMessageId,
+      status: 'sent',
+      senderName: request.user!.name,
+      ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+    },
+  };
 }
 
 export async function registerEvolutionRoutes(app: FastifyInstance) {
@@ -4270,7 +5076,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
-    traceOutbound(request, 'received', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
+    traceOutbound(request, 'received', {
+      clientMessageId,
+      replyTraceId,
+      remoteJid: canonicalRemoteJid,
+      quote: normalizedQuote,
+      messageType: normalizedQuote?.mediaType || 'text',
+      elapsedMs: Date.now() - outboundStartedAt,
+    });
     const leaseAcquisition = await acquireOutboundLease({
       companyId: request.user!.companyId,
       user: request.user!,
@@ -4301,214 +5114,292 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       phone: number,
       lease: leaseAcquisition.lease,
     }));
-    let localMessage: Awaited<ReturnType<typeof ensureOutboundMessage>>;
-    try {
-      localMessage = await ensureOutboundMessage({
-        companyId: request.user!.companyId,
-        userId: request.user!.id,
-        userName: request.user!.name,
-        number,
-        remoteJid: canonicalRemoteJid,
-        content: text,
-        clientMessageId,
-        quotedMessage: normalizedQuote,
-      });
-    } catch (error) {
-      traceReplyFailure(request, {
-        replyTraceId,
-        conversationId: canonicalRemoteJid,
-        localMessageId: clientMessageId,
-        clientMessageId,
-        quote: normalizedQuote,
-        recipient: { number, remoteJid: canonicalRemoteJid },
-        messageType: normalizedQuote?.mediaType || 'text',
-        backendStatus: 500,
-        errorCode: 'persistence_failed',
-        failureOrigin: 'backend_rejected',
-      });
-      throw error;
-    }
-    traceOutbound(request, 'outbox.prepared', {
+    return dispatchOutboundText({
+      request,
+      reply,
+      number,
+      remoteJid: canonicalRemoteJid,
+      text,
       clientMessageId,
       replyTraceId,
-      remoteJid: canonicalRemoteJid,
-      evolutionMessageId: localMessage.evolutionMessageId || undefined,
-      deduplicated: localMessage.deduplicated,
-      elapsedMs: Date.now() - outboundStartedAt,
-      idempotencyLockMs: localMessage.idempotencyLockMs,
-      persistenceMs: localMessage.persistenceMs,
+      normalizedQuote,
+      evolutionQuote,
+      evolutionRecipient,
+      leaseAcquisition,
+      outboundStartedAt,
     });
-    if (localMessage.deduplicated) {
-      return {
-        remoteJid: canonicalRemoteJid,
-        message: {
-          id: localMessage.messageId,
-          evolutionMessageId: localMessage.evolutionMessageId || undefined,
-          status: localMessage.status,
-          senderName: request.user!.name,
-        },
-        deduplicated: true,
+  });
+
+  app.post('/api/evolution/messages/forward', { preHandler: requireUser }, async (request, reply) => {
+    const parsed = forwardTextSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Encaminhamento inválido', code: 'invalid_forward_payload' });
+    }
+
+    const source = await findForwardSourceMessage(request.user!.companyId, parsed.data.sourceMessageId);
+    if (!source) {
+      return reply.code(404).send({ error: 'Mensagem não encontrada', code: 'source_message_not_found' });
+    }
+    const sourceHasLocation = hasPersistedLocation(source);
+    const location = sourceHasLocation ? forwardableLocationFromSource(source) : undefined;
+    if (sourceHasLocation && !location) {
+      return reply.code(422).send({ error: 'A localização não é válida para encaminhamento', code: 'source_location_invalid' });
+    }
+    const video = sourceHasLocation ? undefined : forwardableVideoFromSource(source);
+    const document = sourceHasLocation || video ? undefined : forwardableDocumentFromSource(source);
+    const text = sourceHasLocation || video || document ? undefined : forwardableTextFromSource(source);
+    const image = sourceHasLocation || video || document || text ? undefined : forwardableImageFromSource(source);
+    if (!text && !image && !location && !document && !video) {
+      return reply.code(422).send({ error: 'A mensagem não pode ser encaminhada', code: 'source_message_unsupported' });
+    }
+
+    const destinationRemoteJid = parsed.data.destinationRemoteJid.trim();
+    const destination = await resolveConversationForOperation({
+      companyId: request.user!.companyId,
+      remoteJid: destinationRemoteJid,
+    }, { createIfMissing: false });
+    if (!destination) {
+      return reply.code(404).send({ error: 'Conversa de destino não encontrada', code: 'destination_conversation_not_found' });
+    }
+
+    let sourceMedia: {
+      media: string;
+      mimetype: string;
+      mediatype: 'image' | 'video' | 'document';
+      document?: ForwardableDocument;
+      fileName?: string;
+      caption?: string;
+    } | undefined;
+    if (image) {
+      const sourceProviderKey = source.metadata?.providerKey;
+      const keyValidation = validateProviderMessageKey(sourceProviderKey);
+      if (!keyValidation.valid) {
+        return reply.code(422).send({
+          error: 'Não foi possível recuperar a imagem para encaminhamento',
+          code: 'forward_media_unavailable',
+          temporary: false,
+        });
+      }
+      const recovered = await recoverMediaFromProvider(
+        `/chat/getBase64FromMediaMessage/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+        request,
+        keyValidation.key,
+      );
+      if (!recovered.ok) {
+        const status = recovered.failure.statusCode === 429
+          ? 429
+          : recovered.failure.statusCode >= 500 ? 502 : 422;
+        return reply.code(status).send({
+          error: 'Não foi possível recuperar a imagem para encaminhamento',
+          code: 'forward_media_unavailable',
+          temporary: recovered.failure.body.temporary,
+        });
+      }
+      const media = typeof recovered.body.base64 === 'string' ? recovered.body.base64.trim() : '';
+      const providerMimetype = typeof recovered.body.mimetype === 'string' ? recovered.body.mimetype.trim() : '';
+      if (!media || (providerMimetype && !/^image\//i.test(providerMimetype))) {
+        return reply.code(422).send({
+          error: 'Não foi possível recuperar a imagem para encaminhamento',
+          code: 'forward_media_unavailable',
+          temporary: false,
+        });
+      }
+      sourceMedia = {
+        media,
+        mimetype: providerMimetype || 'image/jpeg',
+        mediatype: 'image',
+        ...(image.caption ? { caption: image.caption } : {}),
       };
     }
-    let dispatch: { ok: boolean; status: number; statusText: string; body: any; providerError?: unknown };
-    const evolutionRequestStartedAt = Date.now();
-    try {
-      dispatch = await outboundEvolutionRequests.run(
-        `${request.user!.companyId}:${clientMessageId}`,
-        async () => {
-          traceOutbound(request, 'evolution.request', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
-          const response = await evolutionRequest(
-            `/message/sendText/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
-            {
-              method: 'POST',
-              body: JSON.stringify({
-                number: evolutionRecipient.number,
-                text: formatHubOutboundText(request.user!.name, text),
-                delay: 1200,
-                linkPreview: true,
-                ...(evolutionQuote ? { quoted: evolutionQuote } : {}),
-              }),
-            },
-          );
-          const rawBody = await response.text();
-          let body: unknown;
-          try {
-            body = rawBody ? JSON.parse(rawBody) : undefined;
-          } catch {
-            body = rawBody;
-          }
-          return {
-            ok: response.ok,
-            status: response.status,
-            statusText: response.statusText,
-            body,
-            providerError: response.ok ? undefined : sanitizeEvolutionProviderError(rawBody, [text]),
-          };
-        },
+    if (document) {
+      const sourceProviderKey = source.metadata?.providerKey;
+      const keyValidation = validateProviderMessageKey(sourceProviderKey);
+      if (!keyValidation.valid) {
+        return reply.code(422).send({
+          error: 'Não foi possível recuperar o documento para encaminhamento',
+          code: 'forward_media_unavailable',
+          temporary: false,
+        });
+      }
+      const recovered = await recoverMediaFromProvider(
+        `/chat/getBase64FromMediaMessage/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+        request,
+        keyValidation.key,
       );
-    } catch (error) {
-      await updateOutboundMessage(localMessage.messageId, 'failed');
-      traceReplyFailure(request, {
-        replyTraceId,
-        conversationId: canonicalRemoteJid,
-        localMessageId: localMessage.messageId,
-        clientMessageId,
-        quote: normalizedQuote,
-        recipient: { number, remoteJid: canonicalRemoteJid },
-        messageType: normalizedQuote?.mediaType || 'text',
-        backendStatus: 502,
-        errorCode: 'evolution_unavailable',
-        failureOrigin: 'evolution_network',
-      });
-      request.log.warn({ err: error }, 'Falha de comunicação com a Evolution API');
-      return reply.code(502).send({ error: 'Evolution API unavailable', messageId: localMessage.messageId, ...(replyTraceId ? { replyTraceId } : {}) });
-    }
-    if (!dispatch.ok) {
-      await updateOutboundMessage(localMessage.messageId, 'failed');
-      const status = [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(dispatch.status) ? dispatch.status : 502;
-      traceReplyFailure(request, {
-        replyTraceId,
-        conversationId: canonicalRemoteJid,
-        localMessageId: localMessage.messageId,
-        clientMessageId,
-        quote: normalizedQuote,
-        recipient: { number, remoteJid: canonicalRemoteJid },
-        messageType: normalizedQuote?.mediaType || 'text',
-        backendStatus: status,
-        errorCode: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
-        failureOrigin: 'evolution_rejected',
-        evolutionStatus: dispatch.status,
-        evolutionStatusText: dispatch.statusText,
-        providerError: dispatch.providerError,
-      });
-      return reply.code(status).send({
-        error: status === 502 ? 'Evolution API unavailable' : 'Evolution API rejected the message',
-        code: status === 502 ? 'evolution_unavailable' : 'evolution_provider_error',
-        providerStatus: dispatch.status,
-        messageId: localMessage.messageId,
-        ...(replyTraceId ? { replyTraceId } : {}),
-      });
-    }
-    const evolutionMessageReference = evolutionMessageReferenceFromResponse(dispatch.body);
-    const evolutionMessageId = evolutionMessageReference?.messageId;
-    const outboundProviderKey = providerKeyForOutboundResponse(dispatch.body, evolutionMessageId);
-    traceOutbound(request, 'evolution.response', {
-      clientMessageId,
-      replyTraceId,
-      remoteJid: canonicalRemoteJid,
-      evolutionMessageId,
-      evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
-      ok: dispatch.ok,
-      elapsedMs: Date.now() - outboundStartedAt,
-      evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
-    });
-    await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined, outboundProviderKey);
-    traceOutbound(request, 'persistence.confirmed', {
-      clientMessageId,
-      replyTraceId,
-      remoteJid: canonicalRemoteJid,
-      evolutionMessageId,
-      evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
-      elapsedMs: Date.now() - outboundStartedAt,
-    });
-    const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
-    const realtimeTimestampMs = Date.now();
-    publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
-      remoteJid: canonicalRemoteJid,
-      phone: number,
-      messageId: realtimeMessageId,
-      timestampMs: realtimeTimestampMs,
-      fromMe: true,
-      message: {
-        id: realtimeMessageId,
-        conversationId: canonicalRemoteJid,
-        sender: 'attendant',
-        senderName: request.user!.name,
-        content: text,
-        metadata: {
-          sentByHub: true,
-          sentByUserId: request.user!.id,
-          sentByUserName: request.user!.name,
-          ...(clientMessageId ? { clientMessageId } : {}),
-          ...(normalizedQuote
-            ? { quotedMessage: normalizedQuote }
-            : {}),
-          ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
+      if (!recovered.ok) {
+        const status = recovered.failure.statusCode === 429
+          ? 429
+          : recovered.failure.statusCode >= 500 ? 502 : 422;
+        return reply.code(status).send({
+          error: 'Não foi possível recuperar o documento para encaminhamento',
+          code: 'forward_media_unavailable',
+          temporary: recovered.failure.body.temporary,
+        });
+      }
+      const media = typeof recovered.body.base64 === 'string' ? recovered.body.base64.trim() : '';
+      if (!media) {
+        return reply.code(422).send({
+          error: 'Não foi possível recuperar o documento para encaminhamento',
+          code: 'forward_media_unavailable',
+          temporary: false,
+        });
+      }
+      if (!isForwardableMediaSizeAllowed(media)) {
+        return reply.code(413).send({
+          error: 'O documento excede o limite permitido',
+          code: 'forward_media_too_large',
+          temporary: false,
+        });
+      }
+      const recoveredMimeType = trustedDocumentMimeType(recovered.body.mimetype);
+      const mimeType = documentMimeTypeForForward(document.mimeType, recoveredMimeType, document.fileName);
+      const recoveredFileName = typeof recovered.body.fileName === 'string' ? recovered.body.fileName : undefined;
+      const fileName = documentFileNameForForward(document.fileName || recoveredFileName, mimeType);
+      sourceMedia = {
+        media,
+        mimetype: mimeType,
+        mediatype: 'document',
+        document: {
+          fileName,
+          mimeType,
+          ...(document.fileSize !== undefined ? { fileSize: document.fileSize } : {}),
         },
-        rawKey: outboundProviderKey || { id: realtimeMessageId, remoteJid: canonicalRemoteJid, fromMe: true },
-        timestampMs: realtimeTimestampMs,
-        timestamp: new Date(realtimeTimestampMs).toISOString(),
-        status: 'sent',
-        isInternalNote: false,
-      },
+        ...(document.caption ? { caption: document.caption } : {}),
+      };
+    }
+    if (video) {
+      const sourceProviderKey = source.metadata?.providerKey;
+      const keyValidation = validateProviderMessageKey(sourceProviderKey);
+      if (!keyValidation.valid) {
+        return reply.code(422).send({
+          error: 'Não foi possível recuperar o vídeo para encaminhamento',
+          code: 'forward_media_unavailable',
+          temporary: false,
+        });
+      }
+      const recovered = await recoverMediaFromProvider(
+        `/chat/getBase64FromMediaMessage/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+        request,
+        keyValidation.key,
+      );
+      if (!recovered.ok) {
+        const status = recovered.failure.statusCode === 429
+          ? 429
+          : recovered.failure.statusCode >= 500 ? 502 : 422;
+        return reply.code(status).send({
+          error: 'Não foi possível recuperar o vídeo para encaminhamento',
+          code: 'forward_media_unavailable',
+          temporary: recovered.failure.body.temporary,
+        });
+      }
+      const media = typeof recovered.body.base64 === 'string' ? recovered.body.base64.trim() : '';
+      const providerMimetype = trustedDocumentMimeType(recovered.body.mimetype);
+      const providerMediaType = typeof recovered.body.mediaType === 'string' ? recovered.body.mediaType : '';
+      if (!media || !providerMimetype || !/^video\//i.test(providerMimetype)
+        || (providerMediaType !== 'videoMessage' && providerMediaType !== 'video')) {
+        return reply.code(422).send({
+          error: 'Não foi possível recuperar o vídeo para encaminhamento',
+          code: 'forward_media_unavailable',
+          temporary: false,
+        });
+      }
+      if (!isForwardableMediaSizeAllowed(media)) {
+        return reply.code(413).send({
+          error: 'O vídeo excede o limite permitido',
+          code: 'forward_media_too_large',
+          temporary: false,
+        });
+      }
+      if (!isForwardableMediaPayloadAllowed(media)) {
+        return reply.code(422).send({
+          error: 'Não foi possível recuperar o vídeo para encaminhamento',
+          code: 'forward_media_unavailable',
+          temporary: false,
+        });
+      }
+      const recoveredFileName = typeof recovered.body.fileName === 'string' ? recovered.body.fileName : undefined;
+      const fileName = recoveredFileName ? documentFileNameForForward(recoveredFileName, providerMimetype) : undefined;
+      sourceMedia = {
+        media,
+        mimetype: providerMimetype,
+        mediatype: 'video',
+        ...(fileName ? { fileName } : {}),
+        ...(video.caption ? { caption: video.caption } : {}),
+      };
+    }
+
+    const outboundStartedAt = Date.now();
+    const leaseAcquisition = await acquireOutboundLease({
+      companyId: request.user!.companyId,
+      user: request.user!,
+      number: '',
+      remoteJid: destinationRemoteJid,
+      conversationId: destination.id,
     });
-    traceOutbound(request, 'sse.published', {
-      clientMessageId,
-      replyTraceId,
-      remoteJid: canonicalRemoteJid,
-      evolutionMessageId: realtimeMessageId,
+    if (!leaseAcquisition.acquired) {
+      return reply.code(409).send({
+        error: `Atendimento em andamento por ${leaseAcquisition.lease.ownerName}`,
+        code: 'conversation_lease_active',
+        lease: leaseAcquisition.lease,
+      });
+    }
+    publishRealtimeEvent(request.user!.companyId, 'conversation.updated', leaseRealtimePayload({
+      remoteJid: destinationRemoteJid,
+      phone: '',
+      lease: leaseAcquisition.lease,
+    }));
+    traceOutbound(request, 'received', {
+      clientMessageId: parsed.data.clientMessageId,
+      remoteJid: destinationRemoteJid,
       elapsedMs: Date.now() - outboundStartedAt,
     });
 
-    let dailyResponder: { id: string; name: string; date: string } | undefined;
-    try {
-      dailyResponder = await recordDailyResponder(request.user!.companyId, number, request.user!);
-    } catch (error) {
-      request.log.warn({ err: error }, 'NÃ£o foi possÃ­vel registrar o primeiro atendente do dia');
+    if (location) {
+      return dispatchForwardedLocation({
+        request,
+        reply,
+        number: '',
+        remoteJid: destinationRemoteJid,
+        location,
+        clientMessageId: parsed.data.clientMessageId,
+        leaseAcquisition,
+        outboundStartedAt,
+      });
     }
-    return {
-      evolution: dispatch.body,
-      dailyResponder,
-      lease: leaseAcquisition.lease,
-      remoteJid: canonicalRemoteJid,
-      message: {
-        id: localMessage.messageId,
-        evolutionMessageId,
-        status: 'sent',
-        senderName: request.user!.name,
-        ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
-      },
-    };
+
+    if (sourceMedia) {
+      return dispatchForwardedMedia({
+        request,
+        reply,
+        number: '',
+        remoteJid: destinationRemoteJid,
+        mediatype: sourceMedia.mediatype,
+        mimetype: sourceMedia.mimetype,
+        media: sourceMedia.media,
+        document: sourceMedia.document,
+        fileName: sourceMedia.fileName,
+        caption: sourceMedia.caption,
+        clientMessageId: parsed.data.clientMessageId,
+        leaseAcquisition,
+        outboundStartedAt,
+      });
+    }
+
+    if (!text) {
+      return reply.code(422).send({ error: 'A mensagem não pode ser encaminhada', code: 'source_message_unsupported' });
+    }
+
+    return dispatchOutboundText({
+      request,
+      reply,
+      number: '',
+      remoteJid: destinationRemoteJid,
+      text,
+      preserveOriginalText: true,
+      clientMessageId: parsed.data.clientMessageId,
+      leaseAcquisition,
+      outboundStartedAt,
+    });
   });
 
   app.post('/api/evolution/messages/send-media', { preHandler: requireUser, bodyLimit: MAX_MEDIA_REQUEST_BYTES }, async (request, reply) => {
@@ -4551,9 +5442,17 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'Destinatário não conversacional', code: 'unsupported_provider_entity' });
     }
     const evolutionRecipient = resolveEvolutionRecipient({ remoteJid: canonicalRemoteJid, canonicalPhone: number });
+    const evolutionEndpoint = `/message/sendMedia/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`;
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
-    traceOutbound(request, 'received', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
+    traceOutbound(request, 'received', {
+      clientMessageId,
+      replyTraceId,
+      remoteJid: canonicalRemoteJid,
+      quote: normalizedQuote,
+      messageType: normalizedQuote?.mediaType || parsed.data.mediatype,
+      elapsedMs: Date.now() - outboundStartedAt,
+    });
     const leaseAcquisition = await acquireOutboundLease({
       companyId: request.user!.companyId,
       user: request.user!,
@@ -4661,9 +5560,17 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       dispatch = await outboundMediaEvolutionRequests.run(
         `${request.user!.companyId}:${clientMessageId}`,
         async () => {
-          traceOutbound(request, 'evolution.request', { clientMessageId, replyTraceId, remoteJid: canonicalRemoteJid, elapsedMs: Date.now() - outboundStartedAt });
+          traceOutbound(request, 'evolution.request', {
+            clientMessageId,
+            replyTraceId,
+            remoteJid: canonicalRemoteJid,
+            quote: normalizedQuote,
+            messageType: normalizedQuote?.mediaType || parsed.data.mediatype,
+            evolutionEndpoint,
+            elapsedMs: Date.now() - outboundStartedAt,
+          });
           const response = await evolutionRequest(
-            `/message/sendMedia/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`,
+            evolutionEndpoint,
             {
               method: 'POST',
               body: JSON.stringify({
@@ -4781,6 +5688,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       clientMessageId,
       replyTraceId,
       remoteJid: canonicalRemoteJid,
+      quote: normalizedQuote,
+      messageType: normalizedQuote?.mediaType || parsed.data.mediatype,
+      evolutionEndpoint,
+      evolutionStatus: dispatch.status,
+      evolutionStatusText: dispatch.statusText,
       evolutionMessageId,
       evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
       ok: dispatch.ok,
@@ -4792,6 +5704,8 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       clientMessageId,
       replyTraceId,
       remoteJid: canonicalRemoteJid,
+      quote: normalizedQuote,
+      messageType: normalizedQuote?.mediaType || parsed.data.mediatype,
       evolutionMessageId,
       evolutionMessageIdSourcePath: evolutionMessageReference?.sourcePath,
       elapsedMs: Date.now() - outboundStartedAt,
@@ -4835,6 +5749,8 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       clientMessageId,
       replyTraceId,
       remoteJid: canonicalRemoteJid,
+      quote: normalizedQuote,
+      messageType: normalizedQuote?.mediaType || parsed.data.mediatype,
       evolutionMessageId: realtimeMessageId,
       elapsedMs: Date.now() - outboundStartedAt,
     });

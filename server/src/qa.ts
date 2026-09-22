@@ -11,6 +11,20 @@ export type QaGoogleScenario = 'success' | 'conflict' | 'rate-limit' | 'timeout'
 let googleScenario: QaGoogleScenario = 'success';
 let providerOnlyChat: Record<string, any> | null = null;
 let qaWebhookConfig: Record<string, any> | null = null;
+const qaImageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+const qaDocumentBase64 = 'ZHVjdW1lbnRvLXFh';
+const qaVideoBase64 = 'dmlkZW8tcWE=';
+const qaMediaFixtures = new Map<string, {
+  base64: string;
+  mimetype: string;
+  available: boolean;
+  mediaType?: string;
+  fileName?: string;
+  caption?: string;
+  fileSize?: number;
+}>();
+const qaMediaRequests: Array<Record<string, unknown>> = [];
+const qaEvolutionSends: Array<Record<string, unknown>> = [];
 
 export function currentQaGoogleScenario() {
   return googleScenario;
@@ -55,6 +69,13 @@ export function qaGooglePeople() {
     },
   ];
   return googleScenario === 'external-delete' ? people.slice(1) : people;
+}
+
+export function qaEvolutionSendState() {
+  return {
+    sends: qaEvolutionSends.map((send) => ({ ...send })),
+    mediaRequests: qaMediaRequests.map((request) => ({ ...request })),
+  };
 }
 
 /** Deterministic group fixture used by local QA to exercise PN, LID and retroactive identity. */
@@ -187,7 +208,80 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
   const providerRemoteJid = participantNumber.includes('@')
     ? participantNumber
     : `${participantNumber.replace(/\D/g, '')}@s.whatsapp.net`;
-  const body = path.includes('/message/sendText/') || path.includes('/message/sendMedia/')
+  if (path.includes('/chat/getBase64FromMediaMessage')) {
+    const messageKey = requestBody?.message?.key;
+    qaMediaRequests.push({
+      id: messageKey?.id,
+      remoteJid: messageKey?.remoteJid,
+      fromMe: messageKey?.fromMe,
+      convertToMp4: requestBody?.convertToMp4,
+    });
+    const fixture = qaMediaFixtures.get(String(messageKey?.id || ''));
+    if (!fixture || !fixture.available) {
+      return Promise.resolve(new Response(JSON.stringify({ error: 'MEDIA_NOT_FOUND' }), { status: 404, headers: { 'Content-Type': 'application/json' } }));
+    }
+    return Promise.resolve(new Response(JSON.stringify({
+      base64: fixture.base64,
+      mimetype: fixture.mimetype,
+      ...(fixture.mediaType ? { mediaType: fixture.mediaType } : {}),
+      ...(fixture.fileName ? { fileName: fixture.fileName } : {}),
+      ...(fixture.caption ? { caption: fixture.caption } : {}),
+      ...(fixture.fileSize !== undefined ? { size: { fileLength: fixture.fileSize } } : {}),
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+  }
+  if (path.includes('/message/sendMedia/')) {
+    if (requestBody?.mediatype === 'document' && (
+      typeof requestBody?.number !== 'string'
+      || !requestBody.number.trim()
+      || typeof requestBody?.media !== 'string'
+      || !requestBody.media.trim()
+      || typeof requestBody?.mimetype !== 'string'
+      || !requestBody.mimetype.includes('/')
+      || typeof requestBody?.fileName !== 'string'
+      || !requestBody.fileName.trim()
+    )) {
+      return Promise.resolve(new Response(JSON.stringify({ error: 'INVALID_DOCUMENT_FILENAME' }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+    }
+    if (requestBody?.mediatype === 'video' && (
+      typeof requestBody?.number !== 'string'
+      || !requestBody.number.trim()
+      || typeof requestBody?.media !== 'string'
+      || !requestBody.media.trim()
+      || typeof requestBody?.mimetype !== 'string'
+      || !/^video\//i.test(requestBody.mimetype)
+    )) {
+      return Promise.resolve(new Response(JSON.stringify({ error: 'INVALID_VIDEO_PAYLOAD' }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+    }
+    qaEvolutionSends.push({
+      number: requestBody?.number,
+      mediatype: requestBody?.mediatype,
+      mimetype: requestBody?.mimetype,
+      media: requestBody?.media,
+      ...(typeof requestBody?.fileName === 'string' ? { fileName: requestBody.fileName } : {}),
+      ...(typeof requestBody?.caption === 'string' ? { caption: requestBody.caption } : {}),
+    });
+  }
+  if (path.includes('/message/sendText/')) {
+    qaEvolutionSends.push({
+      number: requestBody?.number,
+      text: requestBody?.text,
+      ...(typeof requestBody?.delay === 'number' ? { delay: requestBody.delay } : {}),
+      ...(typeof requestBody?.linkPreview === 'boolean' ? { linkPreview: requestBody.linkPreview } : {}),
+    });
+  }
+  if (path.includes('/message/sendLocation/')) {
+    if (typeof requestBody?.name !== 'string' || typeof requestBody?.address !== 'string') {
+      return Promise.resolve(new Response(JSON.stringify({ error: 'INVALID_LOCATION_PAYLOAD' }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+    }
+    qaEvolutionSends.push({
+      number: requestBody?.number,
+      latitude: requestBody?.latitude,
+      longitude: requestBody?.longitude,
+      name: requestBody.name,
+      address: requestBody.address,
+    });
+  }
+  const body = path.includes('/message/sendText/') || path.includes('/message/sendMedia/') || path.includes('/message/sendLocation/')
     ? { key: { id: `qa-evolution-${randomUUID()}`, remoteJid: providerRemoteJid, fromMe: true } }
       : path.includes('/message/sendReaction/') ? { status: 'ok' }
         : path.includes('/chat/updateMessage/') || path.includes('/chat/deleteMessageForEveryone/') ? { status: 'ok' }
@@ -225,9 +319,39 @@ const qaInboundSchema = z.object({
   remoteJid: z.string().min(3).max(128),
   phone: z.string().min(8).max(32).optional(),
   name: z.string().min(2).max(160).default('Contato QA'),
-  content: z.string().min(1).max(4096),
+  content: z.string().max(4096).optional().default(''),
+  mediaType: z.enum(['image', 'video', 'document']).optional(),
+  document: z.object({
+    fileName: z.string().trim().max(180).optional(),
+    mimeType: z.string().trim().min(3).max(100).optional(),
+    fileSize: z.number().finite().nonnegative().optional(),
+  }).optional(),
+  video: z.object({
+    fileName: z.string().trim().max(180).optional(),
+    mimeType: z.string().trim().min(3).max(100).optional(),
+    fileSize: z.number().finite().nonnegative().optional(),
+  }).optional(),
+  location: z.object({
+    latitude: z.number().optional(),
+    longitude: z.number().optional(),
+    name: z.string().max(200).optional(),
+    address: z.string().max(500).optional(),
+  }).optional(),
+  mediaAvailable: z.boolean().optional().default(true),
+  includeProviderKey: z.boolean().optional().default(true),
+  mediaUrl: z.string().url().max(2048).optional(),
   isGroup: z.boolean().optional().default(false),
   timestampMs: z.number().int().positive().optional(),
+}).superRefine((value, context) => {
+  if (!value.mediaType && !value.location && !value.content.trim()) {
+    context.addIssue({ code: 'custom', path: ['content'], message: 'conteúdo obrigatório' });
+  }
+  if (value.mediaType === 'document' && !value.document) {
+    context.addIssue({ code: 'custom', path: ['document'], message: 'metadados documentais obrigatórios' });
+  }
+  if (value.mediaType === 'video' && value.video && value.video.mimeType && !/^video\//i.test(value.video.mimeType)) {
+    context.addIssue({ code: 'custom', path: ['video', 'mimeType'], message: 'MIME de vídeo inválido' });
+  }
 });
 
 export async function registerQaRoutes(app: FastifyInstance) {
@@ -275,6 +399,15 @@ export async function registerQaRoutes(app: FastifyInstance) {
     const input = parsed.data;
     const timestampMs = input.timestampMs ?? Date.now();
     const phone = input.phone?.replace(/\D/g, '') || input.remoteJid.split('@')[0];
+    const evolutionMessageId = `qa-inbound-${randomUUID()}`;
+    const providerKey = { id: evolutionMessageId, remoteJid: input.remoteJid, fromMe: false };
+    const content = input.content || (input.mediaType === 'image'
+      ? '[Imagem]'
+      : input.mediaType === 'video'
+        ? '[Vídeo]'
+        : input.mediaType === 'document'
+          ? '[Documento]'
+          : input.location ? '[Localização compartilhada]' : '');
     const contact = await db.query<{ id: string }>(
       `INSERT INTO contacts (company_id, name, phone, source)
        VALUES ($1, $2, $3, 'system')
@@ -286,21 +419,58 @@ export async function registerQaRoutes(app: FastifyInstance) {
       `INSERT INTO conversations (company_id, contact_id, evolution_remote_jid, is_group, group_name, last_message, last_message_at, unread_count)
        VALUES ($1, $2, $3, $4, $5, $6, now(), 1)
        ON CONFLICT (company_id, evolution_remote_jid) DO UPDATE SET last_message = EXCLUDED.last_message, last_message_at = EXCLUDED.last_message_at, unread_count = conversations.unread_count + 1, updated_at = now()
-       RETURNING id`, [request.user!.companyId, contactId, input.remoteJid, input.isGroup, input.isGroup ? input.name : null, input.content],
+       RETURNING id`, [request.user!.companyId, contactId, input.remoteJid, input.isGroup, input.isGroup ? input.name : null, content],
     );
     const conversationId = conversation.rows[0]!.id;
-    const evolutionMessageId = `qa-inbound-${randomUUID()}`;
     await db.query(
-      `INSERT INTO messages (company_id, conversation_id, evolution_message_id, sender, sender_name, content, status, sent_at)
-       VALUES ($1, $2, $3, 'contact', $4, $5, 'delivered', to_timestamp($6::numeric / 1000))`,
-      [request.user!.companyId, conversationId, evolutionMessageId, input.name, input.content, timestampMs],
+      `INSERT INTO messages (company_id, conversation_id, evolution_message_id, sender, sender_name, content, media_url, media_type, metadata, status, sent_at)
+       VALUES ($1, $2, $3, 'contact', $4, $5, $6, $7, $8::jsonb, 'delivered', to_timestamp($9::numeric / 1000))`,
+      [request.user!.companyId, conversationId, evolutionMessageId, input.name, content, input.mediaUrl || null, input.mediaType || null, JSON.stringify({
+        ...(input.includeProviderKey && (input.mediaType || input.location) ? { providerKey } : {}),
+        ...(input.document ? { document: input.document } : {}),
+        ...(input.location !== undefined ? { location: input.location } : {}),
+      }), timestampMs],
     );
+    if (input.mediaType === 'image' || input.mediaType === 'document' || input.mediaType === 'video') {
+      const videoBase64 = input.mediaType === 'video' ? qaVideoBase64 : undefined;
+      qaMediaFixtures.set(evolutionMessageId, {
+        base64: input.mediaType === 'document' ? qaDocumentBase64 : input.mediaType === 'video' ? qaVideoBase64 : qaImageBase64,
+        mimetype: input.document?.mimeType || input.video?.mimeType || 'image/png',
+        available: input.mediaAvailable,
+        ...(input.mediaType === 'video' ? {
+          mediaType: 'videoMessage',
+          ...(input.video?.fileName ? { fileName: input.video.fileName } : {}),
+          ...(input.content?.trim() ? { caption: input.content.trim() } : {}),
+          fileSize: input.video?.fileSize ?? Buffer.from(videoBase64!, 'base64').length,
+        } : {}),
+      });
+    }
     publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
       remoteJid: input.remoteJid, phone, messageId: evolutionMessageId, timestampMs, fromMe: false,
-      message: { id: evolutionMessageId, conversationId: input.remoteJid, sender: 'contact', senderName: input.name, content: input.content, status: 'delivered', isInternalNote: false, timestampMs },
+      message: {
+        id: evolutionMessageId,
+        conversationId: input.remoteJid,
+        sender: 'contact',
+        senderName: input.name,
+        content,
+        ...(input.mediaType ? { mediaType: input.mediaType } : {}),
+        ...((input.includeProviderKey && (input.mediaType || input.location)) ? {
+          metadata: {
+            ...(input.includeProviderKey && (input.mediaType || input.location) ? { providerKey } : {}),
+            ...(input.document ? { document: input.document } : {}),
+            ...(input.location !== undefined ? { location: input.location } : {}),
+          },
+          rawKey: providerKey,
+        } : {}),
+        status: 'delivered',
+        isInternalNote: false,
+        timestampMs,
+      },
     });
     return { injected: true, remoteJid: input.remoteJid, evolutionMessageId };
   });
+
+  app.get('/api/qa/evolution/sends', { preHandler: requireAdmin }, async () => qaEvolutionSendState());
 
   app.post('/api/qa/provider-only', { preHandler: requireAdmin }, async () => {
     const fixtureSuffix = `${Date.now()}${Math.floor(Math.random() * 10_000).toString().padStart(4, '0')}`.slice(-13);

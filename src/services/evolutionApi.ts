@@ -1009,6 +1009,24 @@ export class EvolutionApiService {
     }
   }
 
+  static async forwardTextMessage(input: {
+    sourceMessageId: string;
+    destinationRemoteJid: string;
+    clientMessageId: string;
+  }) {
+    if (USE_MOCK) {
+      return { status: 'SUCCESS', deduplicated: false };
+    }
+
+    const response = await apiFetch('/api/evolution/messages/forward', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw errorFromResponse(response, body, 'Não foi possível encaminhar a mensagem');
+    return body;
+  }
+
   static async editMessage(messageId: string, text: string): Promise<{ message: Message; reason?: string }> {
     if (USE_MOCK) {
       return { message: {} as Message, reason: 'edited' };
