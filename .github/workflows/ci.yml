@@ -36,6 +36,15 @@ jobs:
         run: npm --prefix server ci
 
       - name: Run Test Suite
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://ci-test:ci-test@127.0.0.1:65432/vitstock_ci
+          SESSION_SECRET: ci-test-session-secret-012345678901234567890123456789
+          WEBHOOK_SECRET: ci-test-webhook-secret-012345678901234567890123456789
+          FRONTEND_URL: http://localhost:3000
+          EVOLUTION_API_URL: http://127.0.0.1:3999
+          EVOLUTION_API_KEY: ci-test-evolution-key-123456
+          EVOLUTION_INSTANCE_NAME: vitstock-ci
         run: npm test
 
       - name: Build Frontend
