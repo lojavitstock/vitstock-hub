@@ -25,6 +25,22 @@ async function getSends(page: Page) {
   };
 }
 
+async function findContact(page: Page, name: string) {
+  const response = await page.request.get(`${apiBase}/api/contacts?q=${encodeURIComponent(name)}&limit=20`);
+  expect(response.status()).toBe(200);
+  const body = await response.json() as { contacts?: Array<{ id: string; name: string; phone?: string }> };
+  const contact = body.contacts?.find((item) => item.name === name);
+  expect(contact, `contato QA ${name} deve existir`).toBeTruthy();
+  return contact!;
+}
+
+async function getConversationCount(page: Page, remoteJid: string) {
+  const response = await page.request.get(`${apiBase}/api/evolution/chats`);
+  expect(response.status()).toBe(200);
+  const body = await response.json() as { chats?: Array<{ id?: string; remoteJid?: string }> };
+  return body.chats?.filter((chat) => (chat.remoteJid || chat.id) === remoteJid).length || 0;
+}
+
 test('Nova mensagem busca, mantém destino pendente e materializa uma única conversa no primeiro envio', async ({ page }) => {
   test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
   await login(page);
@@ -97,6 +113,94 @@ test('Nova mensagem busca, mantém destino pendente e materializa uma única con
   expect(sendRequests.at(-1)).toEqual(expect.objectContaining({ remoteJid: manualRemoteJid }));
   await expect(pendingAttachmentButton).toBeEnabled();
   await expect(page.getByRole('button', { name: `Abrir conversa com +${manualDigits}` })).toHaveCount(1);
+});
+
+test('Nova mensagem resolve alias provider explícito tenant-wide e falha fechada quando ambíguo', async ({ page }) => {
+  test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
+  await login(page);
+
+  const resolve = async (body: Record<string, unknown>) => {
+    const response = await page.request.post(`${apiBase}/api/evolution/conversations/resolve-destination`, { data: body });
+    return { response, body: await response.json().catch(() => ({})) as Record<string, any> };
+  };
+
+  const ana = await findContact(page, 'Ana QA');
+  const henrique = await findContact(page, 'Henrique Irmão QA');
+  const crossTenant = await findContact(page, 'Alias Tenant Local QA');
+  const ambiguous = await findContact(page, 'Alias Ambíguo QA');
+
+  const directPn = await resolve({ contactId: ana.id, phone: '5521990000001' });
+  expect(directPn.response.status()).toBe(200);
+  expect(directPn.body.kind).toBe('existing');
+  expect(directPn.body.remoteJid).toBe('5521990000001@s.whatsapp.net');
+
+  const crossContactAlias = await resolve({ contactId: henrique.id, phone: '76504441' });
+  expect(crossContactAlias.response.status()).toBe(200);
+  expect(crossContactAlias.body).toEqual(expect.objectContaining({
+    kind: 'existing',
+    remoteJid: '903644441@lid',
+    name: 'Henrique de F. Gonçalves QA',
+  }));
+  expect(crossContactAlias.body.contactId).not.toBe(henrique.id);
+  expect(crossContactAlias.body.name).not.toBe(henrique.name);
+
+  const manualAlias = await resolve({ phone: '76504441' });
+  expect(manualAlias.response.status()).toBe(200);
+  expect(manualAlias.body.kind).toBe('existing');
+  expect(manualAlias.body.remoteJid).toBe('903644441@lid');
+
+  const opaqueLid = await resolve({ contactId: ana.id, phone: '5521990000099' });
+  expect(opaqueLid.response.status()).toBe(200);
+  expect(opaqueLid.body.kind).toBe('new_phone');
+  expect(opaqueLid.body.remoteJid).toBe('5521990000099@s.whatsapp.net');
+
+  const otherTenantAlias = await resolve({ contactId: crossTenant.id, phone: '76504449' });
+  expect(otherTenantAlias.response.status()).toBe(200);
+  expect(otherTenantAlias.body.kind).toBe('new_phone');
+  expect(otherTenantAlias.body.remoteJid).toBe('76504449@s.whatsapp.net');
+
+  const invalidContactPhone = await resolve({ contactId: henrique.id, phone: '76504442' });
+  expect(invalidContactPhone.response.status()).toBe(404);
+  expect(invalidContactPhone.body.code).toBe('contact_phone_not_found');
+
+  const zeroMatch = await resolve({ phone: '76504498' });
+  expect(zeroMatch.response.status()).toBe(200);
+  expect(zeroMatch.body.kind).toBe('new_phone');
+  expect(zeroMatch.body.remoteJid).toBe('76504498@s.whatsapp.net');
+
+  const ambiguousResolution = await resolve({ contactId: ambiguous.id });
+  expect(ambiguousResolution.response.status()).toBe(409);
+  expect(ambiguousResolution.body.code).toBe('ambiguous_destination');
+  expect(ambiguousResolution.body.error).toBe('Não foi possível determinar uma única conversa para este número.');
+
+  const existingCountBefore = await getConversationCount(page, '903644441@lid');
+  expect(existingCountBefore).toBe(1);
+
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Atendimento' })).toBeVisible();
+  await page.getByRole('button', { name: 'Nova mensagem' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Nova mensagem' });
+  await dialog.getByRole('textbox', { name: 'Buscar nome ou digitar número' }).fill(henrique.name);
+  const contactsSection = dialog.getByRole('heading', { name: 'Contatos' }).locator('..');
+  const contactOption = contactsSection.getByRole('button', { name: new RegExp(henrique.name) });
+  await expect(contactOption).toBeVisible();
+  await contactOption.click();
+  await expect(dialog).toHaveCount(0);
+
+  const existingConversation = page.getByRole('button', { name: 'Abrir conversa com Henrique Irmão QA' });
+  await expect(existingConversation).toHaveCount(1);
+  await expect(existingConversation).toHaveAttribute('aria-current', 'true');
+  await expect(page.getByRole('button', { name: /Abrir conversa com \+76504441/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Anexar arquivo' })).toBeEnabled();
+  expect(await getConversationCount(page, '903644441@lid')).toBe(existingCountBefore);
+
+  await page.getByRole('button', { name: 'Nova mensagem' }).click();
+  const ambiguousDialog = page.getByRole('dialog', { name: 'Nova mensagem' });
+  await ambiguousDialog.getByRole('textbox', { name: 'Buscar nome ou digitar número' }).fill(ambiguous.name);
+  const ambiguousContactsSection = ambiguousDialog.getByRole('heading', { name: 'Contatos' }).locator('..');
+  await ambiguousContactsSection.getByRole('button', { name: new RegExp(ambiguous.name) }).click();
+  await expect(ambiguousDialog.getByRole('alert')).toHaveText('Não foi possível determinar uma única conversa para este número.');
+  await expect(page.getByRole('button', { name: /Abrir conversa com \+76504442/ })).toHaveCount(0);
 });
 
 test('send-media e resolver exigem destino autorizado e preservam a identidade provider', async ({ page }) => {

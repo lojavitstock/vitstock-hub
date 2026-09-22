@@ -1,6 +1,10 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { normalizeManualNewMessagePhone } from '../server/src/newMessageDestination';
+import {
+  buildExplicitConversationLookup,
+  classifyExplicitConversationMatches,
+  normalizeManualNewMessagePhone,
+} from '../server/src/newMessageDestination';
 import { normalizeManualPhone, recentPrivateConversations } from '../src/utils/newMessage';
 import { Conversation } from '../src/types';
 
@@ -25,6 +29,26 @@ test('manual phone keeps the existing 8-20 digit outbound boundary without ident
   assert.deepEqual(normalizeManualPhone('+1 202 555 0123'), '12025550123');
   assert.equal(normalizeManualPhone('1234567'), '');
   assert.equal(normalizeManualPhone('opaque-123@lid'), '');
+});
+
+test('new-message identity lookup is exact, tenant-scoped, alias-aware, and does not choose among candidates', () => {
+  const lookup = buildExplicitConversationLookup('company-a', '76504441@s.whatsapp.net');
+  assert.deepEqual(lookup.values, ['company-a', '76504441@s.whatsapp.net']);
+  assert.match(lookup.text, /c\.company_id = \$1::uuid/);
+  assert.match(lookup.text, /c\.evolution_remote_jid = \$2::text/);
+  assert.match(lookup.text, /explicit_identity\.identity = c\.evolution_remote_jid/);
+  assert.match(lookup.text, /explicit_identity\.aliases @> ARRAY\[\$2::text\]/);
+  assert.match(lookup.text, /c\.is_group = false/);
+  assert.doesNotMatch(lookup.text, /contact\.name|pushName|avatar|created_at|updated_at|LIMIT 1/i);
+
+  const first = { id: 'conversation-a', contact_id: 'contact-b', evolution_remote_jid: '903644441@lid' };
+  assert.deepEqual(classifyExplicitConversationMatches([]), { kind: 'none' });
+  assert.deepEqual(classifyExplicitConversationMatches([first]), { kind: 'existing', conversation: first });
+  assert.deepEqual(classifyExplicitConversationMatches([first, first]), { kind: 'existing', conversation: first });
+  assert.deepEqual(classifyExplicitConversationMatches([
+    first,
+    { id: 'conversation-c', contact_id: 'contact-d', evolution_remote_jid: '903644442@lid' },
+  ]), { kind: 'ambiguous' });
 });
 
 test('recent private conversations use real activity and explicit ids without collapsing PN/LID', () => {

@@ -65,7 +65,11 @@ import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.j
 import { buildEvolutionSendLocationErrorDiagnostic, buildEvolutionSendLocationTransportDiagnostic, evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
 import { buildReplyFailureTrace, buildReplyTraceDetails } from './replyFailureTrace.js';
 import { resolveConversationForOperation, resolveConversationWithClient } from './conversationResolver.js';
-import { normalizeManualNewMessagePhone } from './newMessageDestination.js';
+import {
+  buildExplicitConversationLookup,
+  classifyExplicitConversationMatches,
+  normalizeManualNewMessagePhone,
+} from './newMessageDestination.js';
 import { filterConversationalProviderChats, isConversationalProviderJid } from './providerJidPolicy.js';
 import {
   documentFileNameForForward,
@@ -4750,6 +4754,19 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     if (!parsed.success) return reply.code(400).send({ error: 'Destino inválido', code: 'invalid_destination' });
 
     const companyId = request.user!.companyId;
+    const findExplicitConversation = async (candidateRemoteJid: string) => {
+      const lookup = buildExplicitConversationLookup(companyId, candidateRemoteJid);
+      const result = await db.query<{
+        id: string;
+        contact_id: string;
+        evolution_remote_jid: string;
+      }>(lookup.text, [...lookup.values]);
+      return classifyExplicitConversationMatches(result.rows);
+    };
+    const ambiguousDestination = () => reply.code(409).send({
+      error: 'Não foi possível determinar uma única conversa para este número.',
+      code: 'ambiguous_destination',
+    });
     const destinationFromConversation = async (remoteJid: string) => {
       const result = await db.query<{
         contact_id: string;
@@ -4824,9 +4841,10 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
           return reply.code(404).send({ error: 'Número não pertence ao contato selecionado', code: 'contact_phone_not_found' });
         }
       }
-      const existing = await resolveConversationForOperation({ companyId, remoteJid, phone: digits }, { createIfMissing: false });
-      if (existing) {
-        const destination = await destinationFromConversation(existing.remoteJid);
+      const existing = await findExplicitConversation(remoteJid);
+      if (existing.kind === 'ambiguous') return ambiguousDestination();
+      if (existing.kind === 'existing') {
+        const destination = await destinationFromConversation(existing.conversation.evolution_remote_jid);
         if (destination) return destination;
       }
       return {
@@ -4850,26 +4868,41 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
        ORDER BY last_message_at DESC NULLS LAST, id`,
       [companyId, parsed.data.contactId],
     );
-    const existingOptions = conversations.rows.map((row) => ({
+    const options: Array<
+      | { kind: 'existing'; conversationId: string; phone: string; label: string }
+      | { kind: 'phone'; phone: string; label: string }
+    > = conversations.rows.map((row) => ({
       kind: 'existing' as const,
       conversationId: row.evolution_remote_jid,
       phone: contactRow.phone || '',
       label: 'WhatsApp conhecido',
     }));
-    const existingPhoneDigits = new Set(conversations.rows
-      .map((row) => (row.evolution_remote_jid.split('@')[0] || '').replace(/\D/g, ''))
-      .filter(Boolean));
-    const phoneOptions = availablePhones
-      .filter((phone) => !existingPhoneDigits.has(phone.replace(/\D/g, '')))
-      .map((phone) => {
-        const channel = channelPhones.rows.find((row) => row.phone === phone);
-        return {
-          kind: 'phone' as const,
-          phone,
-          label: channel?.label ? `${channel.label} (novo destino)` : 'Novo destino pelo número',
-        };
+    const existingConversationIds = new Set(conversations.rows.map((row) => row.evolution_remote_jid));
+    for (const phone of availablePhones) {
+      const candidate = normalizeManualNewMessagePhone(phone);
+      if (!candidate) continue;
+      const match = await findExplicitConversation(candidate.remoteJid);
+      if (match.kind === 'ambiguous') return ambiguousDestination();
+      if (match.kind === 'existing') {
+        const conversationId = match.conversation.evolution_remote_jid;
+        if (!existingConversationIds.has(conversationId)) {
+          options.push({
+            kind: 'existing',
+            conversationId,
+            phone,
+            label: 'WhatsApp conhecido',
+          });
+          existingConversationIds.add(conversationId);
+        }
+        continue;
+      }
+      const channel = channelPhones.rows.find((row) => row.phone === phone);
+      options.push({
+        kind: 'phone',
+        phone,
+        label: channel?.label ? `${channel.label} (novo destino)` : 'Novo destino pelo número',
       });
-    const options = [...existingOptions, ...phoneOptions];
+    }
     if (options.length === 0) return reply.code(422).send({ error: 'O contato não possui um destino utilizável', code: 'invalid_destination' });
     if (options.length === 1) {
       const only = options[0];

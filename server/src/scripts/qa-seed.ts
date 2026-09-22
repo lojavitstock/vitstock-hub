@@ -39,11 +39,13 @@ async function seed() {
       return id;
     };
     const addPhone = async (companyId: string, contactId: string, phone: string, primary = false) => client.query(`INSERT INTO contact_phones (company_id, contact_id, phone, normalized_phone, is_primary, source) VALUES ($1, $2, $3, $4, $5, 'system')`, [companyId, contactId, phone, phone.replace(/\D/g, ''), primary]);
-    const addConversation = async (companyId: string, contactId: string, remoteJid: string, content: string, isGroup = false) => {
+    const addConversation = async (companyId: string, contactId: string, remoteJid: string, content: string, isGroup = false, persistIdentity = true) => {
       const row = await client.query<{ id: string }>(`INSERT INTO conversations (company_id, contact_id, evolution_remote_jid, is_group, group_name, last_message, last_message_at, unread_count) VALUES ($1, $2, $3, $4, $5, $6, now(), 1) RETURNING id`, [companyId, contactId, remoteJid, isGroup, isGroup ? 'Grupo QA' : null, content]);
       const conversationId = row.rows[0]!.id;
       await client.query(`INSERT INTO messages (company_id, conversation_id, evolution_message_id, sender, sender_name, content, status, sent_at) VALUES ($1, $2, $3, 'contact', 'Cliente QA', $4, 'delivered', now() - interval '2 minutes')`, [companyId, conversationId, `qa-seed-${remoteJid}`.replace(/[^a-zA-Z0-9_-]/g, '_'), content]);
-      await client.query(`INSERT INTO contact_channel_identities (company_id, contact_id, channel, identity, identity_type) VALUES ($1, $2, 'whatsapp', $3, $4)`, [companyId, contactId, remoteJid, remoteJid.endsWith('@lid') ? 'lid' : remoteJid.endsWith('@g.us') ? 'group' : 'remote_jid']);
+      if (persistIdentity) {
+        await client.query(`INSERT INTO contact_channel_identities (company_id, contact_id, channel, identity, identity_type) VALUES ($1, $2, 'whatsapp', $3, $4)`, [companyId, contactId, remoteJid, remoteJid.endsWith('@lid') ? 'lid' : remoteJid.endsWith('@g.us') ? 'group' : 'remote_jid']);
+      }
       return conversationId;
     };
 
@@ -56,6 +58,42 @@ async function seed() {
     await addPhone(companyA, multi, '55219900000022');
     await addConversation(companyA, multi, '5521990000002@s.whatsapp.net', 'Thread do telefone principal.');
     await addConversation(companyA, multi, '5521990000022@s.whatsapp.net', 'Thread do telefone secundário.');
+
+    const explicitAliasPhone = '76504441';
+    const explicitAliasLid = '903644441@lid';
+    const explicitAliasContact = await addContact(companyA, 'Henrique Irmão QA', explicitAliasPhone);
+    const explicitAliasConversationContact = await addContact(companyA, 'Henrique de F. Gonçalves QA', '903644441');
+    await addConversation(companyA, explicitAliasConversationContact, explicitAliasLid, 'Conversa LID com alias provider explícito.', false, false);
+    await client.query(
+      `INSERT INTO contact_channel_identities (company_id, contact_id, channel, identity, identity_type, aliases)
+       VALUES ($1, $2, 'whatsapp', $3, 'remote_jid', ARRAY[$4::text])`,
+      [companyA, explicitAliasContact, `${explicitAliasPhone}@s.whatsapp.net`, explicitAliasLid],
+    );
+
+    const ambiguousAliasPhone = '76504442';
+    const ambiguousAliasContact = await addContact(companyA, 'Alias Ambíguo QA', ambiguousAliasPhone);
+    const ambiguousLids = ['903644442@lid', '903644443@lid'];
+    for (const [index, remoteJid] of ambiguousLids.entries()) {
+      const conversationContact = await addContact(companyA, `Conversa Ambígua QA ${index + 1}`, `90364444${index + 2}`);
+      await addConversation(companyA, conversationContact, remoteJid, `Conversa ambígua de teste ${index + 1}.`, false, false);
+    }
+    await client.query(
+      `INSERT INTO contact_channel_identities (company_id, contact_id, channel, identity, identity_type, aliases)
+       VALUES ($1, $2, 'whatsapp', $3, 'remote_jid', $4::text[])`,
+      [companyA, ambiguousAliasContact, `${ambiguousAliasPhone}@s.whatsapp.net`, ambiguousLids],
+    );
+
+    const crossTenantAliasPhone = '76504449';
+    await addContact(companyA, 'Alias Tenant Local QA', crossTenantAliasPhone);
+    const otherTenantAliasContact = await addContact(companyB, 'Alias Tenant B QA', crossTenantAliasPhone);
+    const otherTenantConversationContact = await addContact(companyB, 'Conversa Tenant B QA', '903644449');
+    const otherTenantLid = '903644449@lid';
+    await addConversation(companyB, otherTenantConversationContact, otherTenantLid, 'Alias isolado ao tenant B.', false, false);
+    await client.query(
+      `INSERT INTO contact_channel_identities (company_id, contact_id, channel, identity, identity_type, aliases)
+       VALUES ($1, $2, 'whatsapp', $3, 'remote_jid', ARRAY[$4::text])`,
+      [companyB, otherTenantAliasContact, `${crossTenantAliasPhone}@s.whatsapp.net`, otherTenantLid],
+    );
 
     const duplicate = await addContact(companyA, 'Contato QA Duplicado', '5521990000003');
     await addPhone(companyA, duplicate, '5521990000001');
