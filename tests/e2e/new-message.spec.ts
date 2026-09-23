@@ -128,11 +128,19 @@ test('Nova mensagem resolve alias provider explícito tenant-wide e falha fechad
   const henrique = await findContact(page, 'Henrique Irmão QA');
   const crossTenant = await findContact(page, 'Alias Tenant Local QA');
   const ambiguous = await findContact(page, 'Alias Ambíguo QA');
+  const legacyContact = await findContact(page, 'Contato QA Telefone Legado');
+  const mixedContact = await findContact(page, 'Contato QA Legado e Válido');
+  const localBrazilPhone = await findContact(page, 'Contato QA DDI Brasileiro');
 
   const directPn = await resolve({ contactId: ana.id, phone: '5521990000001' });
   expect(directPn.response.status()).toBe(200);
   expect(directPn.body.kind).toBe('existing');
   expect(directPn.body.remoteJid).toBe('5521990000001@s.whatsapp.net');
+
+  const localBrazilExisting = await resolve({ contactId: localBrazilPhone.id });
+  expect(localBrazilExisting.response.status()).toBe(200);
+  expect(localBrazilExisting.body.kind).toBe('existing');
+  expect(localBrazilExisting.body.remoteJid).toBe('5521999000055@s.whatsapp.net');
 
   const crossContactAlias = await resolve({ contactId: henrique.id, phone: '76504441' });
   expect(crossContactAlias.response.status()).toBe(200);
@@ -145,9 +153,9 @@ test('Nova mensagem resolve alias provider explícito tenant-wide e falha fechad
   expect(crossContactAlias.body.name).not.toBe(henrique.name);
 
   const manualAlias = await resolve({ phone: '76504441' });
-  expect(manualAlias.response.status()).toBe(200);
-  expect(manualAlias.body.kind).toBe('existing');
-  expect(manualAlias.body.remoteJid).toBe('903644441@lid');
+  expect(manualAlias.response.status()).toBe(400);
+  expect(manualAlias.body.code).toBe('legacy_phone');
+  expect(manualAlias.body.error).toBe('Número incompleto ou inválido para iniciar uma conversa.');
 
   const opaqueLid = await resolve({ contactId: ana.id, phone: '5521990000099' });
   expect(opaqueLid.response.status()).toBe(200);
@@ -155,18 +163,56 @@ test('Nova mensagem resolve alias provider explícito tenant-wide e falha fechad
   expect(opaqueLid.body.remoteJid).toBe('5521990000099@s.whatsapp.net');
 
   const otherTenantAlias = await resolve({ contactId: crossTenant.id, phone: '76504449' });
-  expect(otherTenantAlias.response.status()).toBe(200);
-  expect(otherTenantAlias.body.kind).toBe('new_phone');
-  expect(otherTenantAlias.body.remoteJid).toBe('76504449@s.whatsapp.net');
+  expect(otherTenantAlias.response.status()).toBe(400);
+  expect(otherTenantAlias.body.code).toBe('legacy_phone');
 
   const invalidContactPhone = await resolve({ contactId: henrique.id, phone: '76504442' });
   expect(invalidContactPhone.response.status()).toBe(404);
   expect(invalidContactPhone.body.code).toBe('contact_phone_not_found');
 
-  const zeroMatch = await resolve({ phone: '76504498' });
+  const zeroMatch = await resolve({ phone: '5521990000098' });
   expect(zeroMatch.response.status()).toBe(200);
   expect(zeroMatch.body.kind).toBe('new_phone');
-  expect(zeroMatch.body.remoteJid).toBe('76504498@s.whatsapp.net');
+  expect(zeroMatch.body.remoteJid).toBe('5521990000098@s.whatsapp.net');
+
+  const international = await resolve({ phone: '+1 202 555 0123' });
+  expect(international.response.status()).toBe(200);
+  expect(international.body.kind).toBe('new_phone');
+  expect(international.body.remoteJid).toBe('12025550123@s.whatsapp.net');
+
+  const legacyOnly = await resolve({ contactId: legacyContact.id });
+  expect(legacyOnly.response.status()).toBe(422);
+  expect(legacyOnly.body.code).toBe('legacy_phone');
+  expect(legacyOnly.body.error).toBe('Número incompleto ou inválido para iniciar uma conversa.');
+  expect(await getConversationCount(page, '76900441@s.whatsapp.net')).toBe(0);
+  const legacySearch = await page.request.get(`${apiBase}/api/contacts?q=${encodeURIComponent(legacyContact.name)}&limit=20`);
+  expect(legacySearch.status()).toBe(200);
+  const legacySearchBody = await legacySearch.json() as { contacts?: Array<{ id: string; phones?: Array<{ phone: string; new_outbound_eligible?: boolean }> }> };
+  expect(legacySearchBody.contacts).toHaveLength(1);
+  expect(legacySearchBody.contacts?.[0]?.phones?.[0]).toEqual(expect.objectContaining({ phone: '76900441', new_outbound_eligible: false }));
+
+  const legacyAndValid = await resolve({ contactId: mixedContact.id });
+  expect(legacyAndValid.response.status()).toBe(200);
+  expect(legacyAndValid.body).toEqual(expect.objectContaining({
+    kind: 'new_phone',
+    remoteJid: '5521990000044@s.whatsapp.net',
+    phone: '+5521990000044',
+  }));
+  expect(await getConversationCount(page, '76900442@s.whatsapp.net')).toBe(0);
+  const mixedSearch = await page.request.get(`${apiBase}/api/contacts?q=${encodeURIComponent(mixedContact.name)}&limit=20`);
+  const mixedSearchBody = await mixedSearch.json() as { contacts?: Array<{ phones?: Array<{ phone: string; new_outbound_eligible?: boolean }> }> };
+  expect(mixedSearchBody.contacts?.[0]?.phones).toEqual(expect.arrayContaining([
+    expect.objectContaining({ phone: '76900442', new_outbound_eligible: false }),
+    expect.objectContaining({ phone: '5521990000044', new_outbound_eligible: true }),
+  ]));
+
+  const sendsBeforeForgedJid = (await getSends(page)).sends.length;
+  const forgedJid = await page.request.post(`${apiBase}/api/evolution/messages/send`, {
+    data: { number: '76900499', remoteJid: '76900499@s.whatsapp.net', text: 'QA forged destination' },
+  });
+  expect(forgedJid.status()).toBe(400);
+  expect((await forgedJid.json()).code).toBe('legacy_phone');
+  expect((await getSends(page)).sends).toHaveLength(sendsBeforeForgedJid);
 
   const ambiguousResolution = await resolve({ contactId: ambiguous.id });
   expect(ambiguousResolution.response.status()).toBe(409);
@@ -193,6 +239,27 @@ test('Nova mensagem resolve alias provider explícito tenant-wide e falha fechad
   await expect(page.getByRole('button', { name: /Abrir conversa com \+76504441/ })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Anexar arquivo' })).toBeEnabled();
   expect(await getConversationCount(page, '903644441@lid')).toBe(existingCountBefore);
+
+  const legacyUiCount = await getConversationCount(page, '76900441@s.whatsapp.net');
+  await page.getByRole('button', { name: 'Nova mensagem' }).click();
+  const legacyDialog = page.getByRole('dialog', { name: 'Nova mensagem' });
+  await legacyDialog.getByRole('textbox', { name: 'Buscar nome ou digitar número' }).fill(legacyContact.name);
+  const legacyContactOption = legacyDialog.getByRole('button', { name: new RegExp(legacyContact.name) });
+  await expect(legacyContactOption).toBeVisible();
+  await expect(legacyContactOption).not.toContainText('76900441');
+  await legacyContactOption.click();
+  await expect(legacyDialog.getByRole('alert')).toHaveText('Número incompleto ou inválido para iniciar uma conversa.');
+  await expect.poll(() => getConversationCount(page, '76900441@s.whatsapp.net')).toBe(legacyUiCount);
+  await legacyDialog.getByRole('button', { name: 'Fechar nova mensagem' }).click();
+
+  await page.getByRole('button', { name: 'Nova mensagem' }).click();
+  const mixedDialog = page.getByRole('dialog', { name: 'Nova mensagem' });
+  await mixedDialog.getByRole('textbox', { name: 'Buscar nome ou digitar número' }).fill(mixedContact.name);
+  const mixedContactOption = mixedDialog.getByRole('button', { name: new RegExp(mixedContact.name) });
+  await expect(mixedContactOption).toBeVisible();
+  await expect(mixedContactOption).toContainText('(21) 99000-0044');
+  await expect(mixedContactOption).not.toContainText('76900442');
+  await mixedDialog.getByRole('button', { name: 'Fechar nova mensagem' }).click();
 
   await page.getByRole('button', { name: 'Nova mensagem' }).click();
   const ambiguousDialog = page.getByRole('dialog', { name: 'Nova mensagem' });
@@ -222,6 +289,7 @@ test('send-media e resolver exigem destino autorizado e preservam a identidade p
   const multiContactsResponse = await page.request.get(`${apiBase}/api/contacts?q=${encodeURIComponent('Contato QA com dois números')}&limit=20`);
   expect(multiContactsResponse.status()).toBe(200);
   const multiContacts = await multiContactsResponse.json() as { contacts?: Array<{ id: string; name: string }> };
+  expect(multiContacts.contacts).toHaveLength(1);
   const multiContact = multiContacts.contacts?.find((contact) => contact.name === 'Contato QA com dois números');
   expect(multiContact).toBeTruthy();
   const multi = await resolve({ contactId: multiContact!.id });
@@ -231,8 +299,31 @@ test('send-media e resolver exigem destino autorizado e preservam a identidade p
   expect(multi.body.options).toEqual(expect.arrayContaining([
     expect.objectContaining({ kind: 'existing', conversationId: '5521990000002@s.whatsapp.net' }),
     expect.objectContaining({ kind: 'existing', conversationId: '5521990000022@s.whatsapp.net' }),
-    expect.objectContaining({ kind: 'phone', phone: '55219900000022' }),
+    expect.objectContaining({ kind: 'phone', phone: '5521990000033' }),
   ]));
+
+  const sharedNameResponse = await page.request.get(`${apiBase}/api/contacts?q=${encodeURIComponent('Contato QA Nome Compartilhado')}&limit=20`);
+  expect(sharedNameResponse.status()).toBe(200);
+  const sharedNameBody = await sharedNameResponse.json() as { contacts?: Array<{ id: string; name: string }> };
+  expect(sharedNameBody.contacts).toHaveLength(2);
+  expect(new Set(sharedNameBody.contacts?.map((contact) => contact.id)).size).toBe(2);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Nova mensagem' }).click();
+  const sharedNameDialog = page.getByRole('dialog', { name: 'Nova mensagem' });
+  await sharedNameDialog.getByRole('textbox', { name: 'Buscar nome ou digitar número' }).fill('Contato QA Nome Compartilhado');
+  const sharedNameSection = sharedNameDialog.getByRole('heading', { name: 'Contatos' }).locator('..');
+  await expect(sharedNameSection.getByRole('button', { name: /Contato QA Nome Compartilhado/ })).toHaveCount(2);
+  await sharedNameDialog.getByRole('button', { name: 'Fechar nova mensagem' }).click();
+
+  await page.getByRole('button', { name: 'Nova mensagem' }).click();
+  const manualShortDialog = page.getByRole('dialog', { name: 'Nova mensagem' });
+  const manualShortSearch = manualShortDialog.getByRole('textbox', { name: 'Buscar nome ou digitar número' });
+  await manualShortSearch.fill('76900499');
+  await expect(manualShortDialog.getByRole('alert')).toHaveText('Número incompleto ou inválido para iniciar uma conversa.');
+  await expect(manualShortDialog.getByRole('button', { name: /Conversar com/ })).toHaveCount(0);
+  const manualShortResponse = await page.request.post(`${apiBase}/api/evolution/conversations/resolve-destination`, { data: { phone: '76900499' } });
+  expect(manualShortResponse.status()).toBe(400);
+  expect((await manualShortResponse.json()).code).toBe('legacy_phone');
 
   const syncGoogle = await page.request.post(`${apiBase}/api/google/sync`, { data: {} });
   expect(syncGoogle.status()).toBe(200);

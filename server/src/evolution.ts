@@ -68,6 +68,8 @@ import { resolveConversationForOperation, resolveConversationWithClient } from '
 import {
   buildExplicitConversationLookup,
   classifyExplicitConversationMatches,
+  explicitPhoneAliasRemoteJid,
+  explicitPhoneAliasRemoteJids,
   normalizeManualNewMessagePhone,
 } from './newMessageDestination.js';
 import { filterConversationalProviderChats, isConversationalProviderJid } from './providerJidPolicy.js';
@@ -4763,6 +4765,15 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       }>(lookup.text, [...lookup.values]);
       return classifyExplicitConversationMatches(result.rows);
     };
+    const findExplicitPhoneConversation = async (phone: string) => {
+      const matches = [] as Array<{ id: string; contact_id: string; evolution_remote_jid: string }>;
+      for (const candidateRemoteJid of explicitPhoneAliasRemoteJids(phone)) {
+        const result = await findExplicitConversation(candidateRemoteJid);
+        if (result.kind === 'ambiguous') return result;
+        if (result.kind === 'existing') matches.push(result.conversation);
+      }
+      return classifyExplicitConversationMatches(matches);
+    };
     const ambiguousDestination = () => reply.code(409).send({
       error: 'Não foi possível determinar uma única conversa para este número.',
       code: 'ambiguous_destination',
@@ -4825,27 +4836,38 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       : { rows: [] as Array<{ phone: string; label: string | null }> };
     const availablePhones = Array.from(new Map(
       [contactRow?.phone || '', ...channelPhones.rows.map((row) => row.phone)]
-        .map((phone) => [phone.replace(/\D/g, ''), phone] as const)
-        .filter(([digits]) => /^\d{8,20}$/.test(digits)),
+        .map((phone) => [explicitPhoneAliasRemoteJid(phone) || '', phone] as const)
+        .filter(([remoteJid]) => Boolean(remoteJid)),
     ).values());
 
     if (parsed.data.phone) {
-      const manualPhone = normalizeManualNewMessagePhone(parsed.data.phone);
-      if (!manualPhone) {
-        return reply.code(400).send({ error: 'Informe um número válido.', code: 'invalid_phone' });
-      }
-      const { digits, remoteJid } = manualPhone;
+      const aliasRemoteJid = explicitPhoneAliasRemoteJid(parsed.data.phone);
       if (parsed.data.contactId) {
         const allowedPhoneKeys = new Set(availablePhones.flatMap((phone) => phoneLookupKeys(phone)));
-        if (!phoneLookupKeys(digits).some((key) => allowedPhoneKeys.has(key))) {
+        if (!phoneLookupKeys(parsed.data.phone).some((key) => allowedPhoneKeys.has(key))) {
           return reply.code(404).send({ error: 'Número não pertence ao contato selecionado', code: 'contact_phone_not_found' });
         }
       }
-      const existing = await findExplicitConversation(remoteJid);
-      if (existing.kind === 'ambiguous') return ambiguousDestination();
-      if (existing.kind === 'existing') {
-        const destination = await destinationFromConversation(existing.conversation.evolution_remote_jid);
-        if (destination) return destination;
+      if (parsed.data.contactId && aliasRemoteJid) {
+        const existing = await findExplicitPhoneConversation(parsed.data.phone);
+        if (existing.kind === 'ambiguous') return ambiguousDestination();
+        if (existing.kind === 'existing') {
+          const destination = await destinationFromConversation(existing.conversation.evolution_remote_jid);
+          if (destination) return destination;
+        }
+      }
+      const manualPhone = normalizeManualNewMessagePhone(parsed.data.phone);
+      if (!manualPhone) {
+        return reply.code(400).send({ error: 'Número incompleto ou inválido para iniciar uma conversa.', code: 'legacy_phone' });
+      }
+      const { digits, remoteJid } = manualPhone;
+      if (!parsed.data.contactId) {
+        const existing = await findExplicitPhoneConversation(parsed.data.phone);
+        if (existing.kind === 'ambiguous') return ambiguousDestination();
+        if (existing.kind === 'existing') {
+          const destination = await destinationFromConversation(existing.conversation.evolution_remote_jid);
+          if (destination) return destination;
+        }
       }
       return {
         kind: 'new_phone' as const,
@@ -4879,23 +4901,26 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     }));
     const existingConversationIds = new Set(conversations.rows.map((row) => row.evolution_remote_jid));
     for (const phone of availablePhones) {
+      const aliasRemoteJid = explicitPhoneAliasRemoteJid(phone);
+      if (aliasRemoteJid) {
+        const match = await findExplicitPhoneConversation(phone);
+        if (match.kind === 'ambiguous') return ambiguousDestination();
+        if (match.kind === 'existing') {
+          const conversationId = match.conversation.evolution_remote_jid;
+          if (!existingConversationIds.has(conversationId)) {
+            options.push({
+              kind: 'existing',
+              conversationId,
+              phone,
+              label: 'WhatsApp conhecido',
+            });
+            existingConversationIds.add(conversationId);
+          }
+          continue;
+        }
+      }
       const candidate = normalizeManualNewMessagePhone(phone);
       if (!candidate) continue;
-      const match = await findExplicitConversation(candidate.remoteJid);
-      if (match.kind === 'ambiguous') return ambiguousDestination();
-      if (match.kind === 'existing') {
-        const conversationId = match.conversation.evolution_remote_jid;
-        if (!existingConversationIds.has(conversationId)) {
-          options.push({
-            kind: 'existing',
-            conversationId,
-            phone,
-            label: 'WhatsApp conhecido',
-          });
-          existingConversationIds.add(conversationId);
-        }
-        continue;
-      }
       const channel = channelPhones.rows.find((row) => row.phone === phone);
       options.push({
         kind: 'phone',
@@ -4903,7 +4928,10 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         label: channel?.label ? `${channel.label} (novo destino)` : 'Novo destino pelo número',
       });
     }
-    if (options.length === 0) return reply.code(422).send({ error: 'O contato não possui um destino utilizável', code: 'invalid_destination' });
+    if (options.length === 0) {
+      if (availablePhones.length > 0) return reply.code(422).send({ error: 'Número incompleto ou inválido para iniciar uma conversa.', code: 'legacy_phone' });
+      return reply.code(422).send({ error: 'O contato não possui um destino utilizável', code: 'invalid_destination' });
+    }
     if (options.length === 1) {
       const only = options[0];
       if (!only) return reply.code(422).send({ error: 'O contato não possui um destino utilizável', code: 'invalid_destination' });
@@ -4912,13 +4940,14 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
         if (!destination) return reply.code(404).send({ error: 'Conversa não encontrada', code: 'conversation_not_found' });
         return destination;
       }
-      const digits = only.phone.replace(/\D/g, '');
+      const candidate = normalizeManualNewMessagePhone(only.phone);
+      if (!candidate) return reply.code(422).send({ error: 'Número incompleto ou inválido para iniciar uma conversa.', code: 'legacy_phone' });
       return {
         kind: 'new_phone' as const,
-        remoteJid: `${digits}@s.whatsapp.net`,
+        remoteJid: candidate.remoteJid,
         contactId: contactRow.id,
-        name: contactRow.name || `+${digits}`,
-        phone: normalizeManualNewMessagePhone(only.phone)?.phone || `+${only.phone.replace(/\D/g, '')}`,
+        name: contactRow.name || candidate.phone,
+        phone: candidate.phone,
         avatar: contactRow.avatar_url || null,
       };
     }
@@ -5260,12 +5289,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const { number, text, remoteJid, quotedMessage } = parsed.data;
     const clientMessageId = parsed.data.clientMessageId || `hub-${randomUUID()}`;
     const replyTraceId = quotedMessage ? (parsed.data.replyTraceId || `reply-${randomUUID()}`) : undefined;
-    const canonicalRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : canonicalPhoneJid(number));
+    let canonicalRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : canonicalPhoneJid(number));
     if (!isConversationalProviderJid(canonicalRemoteJid)) {
       return reply.code(400).send({ error: 'Destinatário não conversacional', code: 'unsupported_provider_entity' });
     }
     const explicitRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : undefined);
-    const evolutionRecipient = resolveEvolutionTextRecipient({ remoteJid: explicitRemoteJid, number });
     const existingConversation = explicitRemoteJid
       ? await resolveConversationForOperation({
         companyId: request.user!.companyId,
@@ -5275,12 +5303,17 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     if (explicitRemoteJid && !number && !existingConversation) {
       return reply.code(404).send({ error: 'Conversa não encontrada', code: 'conversation_not_found' });
     }
-    if (explicitRemoteJid && number && !existingConversation && !isWhatsAppGroupJid(number)) {
-      const numberJid = canonicalPhoneJid(number);
-      if (canonicalRemoteJid.toLowerCase() !== numberJid.toLowerCase()) {
+    if (!isWhatsAppGroupJid(canonicalRemoteJid) && !existingConversation) {
+      const outboundPhone = normalizeManualNewMessagePhone(number);
+      if (!outboundPhone) {
+        return reply.code(400).send({ error: 'Número incompleto ou inválido para iniciar uma conversa.', code: 'legacy_phone' });
+      }
+      if (explicitRemoteJid && canonicalRemoteJid.toLowerCase() !== outboundPhone.remoteJid.toLowerCase()) {
         return reply.code(403).send({ error: 'Destino não autorizado', code: 'destination_not_authorized' });
       }
+      canonicalRemoteJid = outboundPhone.remoteJid;
     }
+    const evolutionRecipient = resolveEvolutionTextRecipient({ remoteJid: canonicalRemoteJid, number });
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
     traceOutbound(request, 'received', {

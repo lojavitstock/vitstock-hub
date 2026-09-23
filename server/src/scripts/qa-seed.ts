@@ -55,9 +55,18 @@ async function seed() {
     await addConversation(companyA, ana, '164700000001@lid', 'Mensagem na identidade LID QA.');
 
     const multi = await addContact(companyA, 'Contato QA com dois números', '5521990000002', { email: 'multi.qa@example.test' });
-    await addPhone(companyA, multi, '55219900000022');
+    await addPhone(companyA, multi, '5521990000022');
+    await addPhone(companyA, multi, '5521990000033');
     await addConversation(companyA, multi, '5521990000002@s.whatsapp.net', 'Thread do telefone principal.');
     await addConversation(companyA, multi, '5521990000022@s.whatsapp.net', 'Thread do telefone secundário.');
+
+    await addContact(companyA, 'Contato QA Telefone Legado', '76900441');
+    const legacyAndValid = await addContact(companyA, 'Contato QA Legado e Válido', '76900442');
+    await addPhone(companyA, legacyAndValid, '5521990000044');
+    const localBrazilPhone = await addContact(companyA, 'Contato QA DDI Brasileiro', '21999000055');
+    await addConversation(companyA, localBrazilPhone, '5521999000055@s.whatsapp.net', 'Conversa PN em formato E.164.');
+    await addContact(companyA, 'Contato QA Nome Compartilhado', '5521990000051');
+    await addContact(companyA, 'Contato QA Nome Compartilhado', '5521990000052');
 
     const explicitAliasPhone = '76504441';
     const explicitAliasLid = '903644441@lid';

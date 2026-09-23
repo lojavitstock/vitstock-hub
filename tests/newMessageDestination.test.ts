@@ -3,6 +3,8 @@ import test from 'node:test';
 import {
   buildExplicitConversationLookup,
   classifyExplicitConversationMatches,
+  explicitPhoneAliasRemoteJid,
+  explicitPhoneAliasRemoteJids,
   normalizeManualNewMessagePhone,
 } from '../server/src/newMessageDestination';
 import { normalizeManualPhone, recentPrivateConversations } from '../src/utils/newMessage';
@@ -20,13 +22,38 @@ const conversation = (id: string, phone: string, lastMessageAt: number, options:
   ...options,
 });
 
-test('manual phone keeps the existing 8-20 digit outbound boundary without identity heuristics', () => {
+test('new outbound phone requires a valid complete phone while explicit provider aliases remain lookup candidates', () => {
   assert.deepEqual(normalizeManualNewMessagePhone('+55 (21) 99888-7766'), {
     digits: '5521998887766',
     remoteJid: '5521998887766@s.whatsapp.net',
     phone: '+5521998887766',
   });
-  assert.deepEqual(normalizeManualPhone('+1 202 555 0123'), '12025550123');
+  assert.deepEqual(normalizeManualNewMessagePhone('(21) 99999-9999'), {
+    digits: '5521999999999',
+    remoteJid: '5521999999999@s.whatsapp.net',
+    phone: '+5521999999999',
+  });
+  assert.deepEqual(normalizeManualNewMessagePhone('+1 202 555 0123'), {
+    digits: '12025550123',
+    remoteJid: '12025550123@s.whatsapp.net',
+    phone: '+12025550123',
+  });
+  assert.deepEqual(normalizeManualNewMessagePhone('00 1 202 555 0123'), {
+    digits: '12025550123',
+    remoteJid: '12025550123@s.whatsapp.net',
+    phone: '+12025550123',
+  });
+  assert.equal(normalizeManualNewMessagePhone('76900441'), undefined);
+  assert.equal(normalizeManualNewMessagePhone('+76900441'), undefined);
+  assert.equal(explicitPhoneAliasRemoteJid('76900441'), '76900441@s.whatsapp.net');
+  assert.equal(explicitPhoneAliasRemoteJid('76900441@lid'), undefined);
+  assert.deepEqual(explicitPhoneAliasRemoteJids('21999000055'), [
+    '21999000055@s.whatsapp.net',
+    '5521999000055@s.whatsapp.net',
+  ]);
+  assert.equal(normalizeManualPhone('+1 202 555 0123'), '12025550123');
+  assert.equal(normalizeManualPhone('21 99900-0055'), '5521999000055');
+  assert.equal(normalizeManualPhone('76900441'), '');
   assert.equal(normalizeManualPhone('1234567'), '');
   assert.equal(normalizeManualPhone('opaque-123@lid'), '');
 });

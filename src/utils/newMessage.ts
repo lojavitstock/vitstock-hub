@@ -6,8 +6,14 @@ export const isPhoneSearchQuery = (value: string) => {
 };
 
 export const normalizeManualPhone = (value: string) => {
-  const digits = value.replace(/\D/g, '');
-  return /^\d{8,20}$/.test(digits) ? digits : '';
+  const raw = String(value || '').trim();
+  if (!raw || !/^(?:\+|00)?[\d\s().-]+$/.test(raw)) return '';
+  let digits = raw.replace(/\D/g, '');
+  if (raw.startsWith('00')) digits = digits.slice(2);
+  if (digits.length > 15) return '';
+  if (raw.startsWith('+') || raw.startsWith('00')) return digits.length >= 9 ? digits : '';
+  if (digits.length === 10 || digits.length === 11) return `55${digits}`;
+  return digits.startsWith('55') && (digits.length === 12 || digits.length === 13) ? digits : '';
 };
 
 export const recentPrivateConversations = (conversations: Conversation[], limit = 8) => {

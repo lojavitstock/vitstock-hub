@@ -7,7 +7,7 @@ import { formatPhoneForDisplay } from '../../utils/phone';
 import { isPhoneSearchQuery, normalizeManualPhone, recentPrivateConversations } from '../../utils/newMessage';
 import { ContactPhoto } from './ContactPhoto';
 
-type ContactPhone = { phone?: string; label?: string | null; is_primary?: boolean };
+type ContactPhone = { phone?: string; label?: string | null; is_primary?: boolean; new_outbound_eligible?: boolean };
 
 type ContactSearchResult = {
   id: string;
@@ -58,6 +58,9 @@ export const NewMessageDialog: React.FC<NewMessageDialogProps> = ({
   const [contacts, setContacts] = useState<ContactSearchResult[]>([]);
   const [loadingContacts, setLoadingContacts] = useState(false);
   const [resolving, setResolving] = useState(false);
+  const [checkingManual, setCheckingManual] = useState(false);
+  const [manualDestination, setManualDestination] = useState<NewMessageDestination | null>(null);
+  const [manualResolutionError, setManualResolutionError] = useState('');
   const [error, setError] = useState('');
   const [multipleSelection, setMultipleSelection] = useState<{
     contactId: string;
@@ -76,6 +79,9 @@ export const NewMessageDialog: React.FC<NewMessageDialogProps> = ({
       setSearch('');
       setContacts([]);
       setError('');
+      setManualDestination(null);
+      setManualResolutionError('');
+      setCheckingManual(false);
       setMultipleSelection(null);
       return undefined;
     }
@@ -105,6 +111,43 @@ export const NewMessageDialog: React.FC<NewMessageDialogProps> = ({
           if (!disposed) setLoadingContacts(false);
         });
     }, 250);
+
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [isMock, open, search]);
+
+  useEffect(() => {
+    setManualDestination(null);
+    setManualResolutionError('');
+    if (!open || isMock || !isPhoneSearchQuery(search.trim()) || phoneDigits(search).length < 8) {
+      setCheckingManual(false);
+      return undefined;
+    }
+
+    let disposed = false;
+    const timer = window.setTimeout(() => {
+      setCheckingManual(true);
+      void EvolutionApiService.resolveNewMessageDestination({ phone: search.trim() })
+        .then((destination) => {
+          if (!disposed) {
+            if (destination.kind === 'multiple') {
+              setManualResolutionError('Não foi possível determinar uma única conversa para este número.');
+            } else {
+              setManualDestination(destination);
+            }
+          }
+        })
+        .catch((requestError) => {
+          if (!disposed) setManualResolutionError(requestError instanceof Error
+            ? requestError.message
+            : 'Número incompleto ou inválido para iniciar uma conversa.');
+        })
+        .finally(() => {
+          if (!disposed) setCheckingManual(false);
+        });
+    }, 300);
 
     return () => {
       disposed = true;
@@ -149,6 +192,10 @@ export const NewMessageDialog: React.FC<NewMessageDialogProps> = ({
           });
         } else {
           const digits = normalizeManualPhone(intent.phone || '');
+          if (!digits) {
+            setError('Número incompleto ou inválido para iniciar uma conversa.');
+            return;
+          }
           onResolved({
             kind: 'new_phone',
             remoteJid: `${digits}@s.whatsapp.net`,
@@ -194,7 +241,7 @@ export const NewMessageDialog: React.FC<NewMessageDialogProps> = ({
   );
 
   const renderContact = (contact: ContactSearchResult) => {
-    const phone = contact.phone || contact.phones?.find((item) => item.phone)?.phone || '';
+    const phone = contact.phones?.find((item) => item.phone && item.new_outbound_eligible)?.phone || '';
     return (
       <button
         key={contact.id}
@@ -206,7 +253,9 @@ export const NewMessageDialog: React.FC<NewMessageDialogProps> = ({
         <ContactPhoto name={contact.name} avatar={contact.avatar_url || ''} size="small" lazy />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-bold text-slate-100">{contact.name}</span>
-          {phone && <span className="mt-0.5 block truncate font-mono text-xs text-slate-400">{formatPhoneForDisplay(phone)}</span>}
+          {phone
+            ? <span className="mt-0.5 block truncate font-mono text-xs text-slate-400">{formatPhoneForDisplay(phone)}</span>
+            : <span className="mt-0.5 block truncate text-xs text-slate-500">Número incompleto; vínculo existente ainda pode ser resolvido</span>}
         </span>
         {resolving && <LoaderCircle className="h-4 w-4 animate-spin text-amber-300" />}
       </button>
@@ -278,7 +327,10 @@ export const NewMessageDialog: React.FC<NewMessageDialogProps> = ({
               {!query && recents.length > 0 && <section><h3 className="px-3 pb-2 text-[10px] font-extrabold uppercase tracking-widest text-slate-500">Recentes</h3>{recents.map(renderConversation)}</section>}
               {query && localConversationMatches.length > 0 && <section><h3 className="px-3 pb-2 text-[10px] font-extrabold uppercase tracking-widest text-slate-500">Conversas existentes</h3>{localConversationMatches.map(renderConversation)}</section>}
               {query && <section className="mt-3"><h3 className="px-3 pb-2 text-[10px] font-extrabold uppercase tracking-widest text-slate-500">Contatos</h3>{loadingContacts ? <div className="flex justify-center py-5"><LoaderCircle className="h-5 w-5 animate-spin text-amber-300" /></div> : contacts.filter((contact) => Boolean(contact.phone || contact.phones?.some((item) => item.phone))).length > 0 ? contacts.filter((contact) => Boolean(contact.phone || contact.phones?.some((item) => item.phone))).map(renderContact) : <p className="px-3 py-4 text-xs text-slate-500">Nenhum contato encontrado.</p>}</section>}
-              {queryIsNumeric && normalizeManualPhone(query) && <section className="mt-3"><h3 className="px-3 pb-2 text-[10px] font-extrabold uppercase tracking-widest text-slate-500">Novo destino</h3><button type="button" disabled={resolving} onClick={() => void resolve({ phone: normalizeManualPhone(query) })} className="flex w-full items-center gap-3 rounded-xl border border-amber-300/30 bg-amber-300/10 px-3 py-3 text-left transition-colors hover:border-amber-300/70 disabled:opacity-60"><UserRound className="h-5 w-5 text-amber-300" /><span className="min-w-0 flex-1"><span className="block text-sm font-bold text-slate-100">Conversar com</span><span className="mt-1 block font-mono text-xs text-amber-200">{formatPhoneForDisplay(normalizeManualPhone(query))}</span></span>{resolving && <LoaderCircle className="h-4 w-4 animate-spin text-amber-300" />}</button></section>}
+              {queryIsNumeric && queryDigits.length >= 8 && <section className="mt-3"><h3 className="px-3 pb-2 text-[10px] font-extrabold uppercase tracking-widest text-slate-500">Novo destino</h3>{checkingManual ? <div className="flex justify-center py-4"><LoaderCircle className="h-5 w-5 animate-spin text-amber-300" /></div> : manualDestination ? <button type="button" disabled={resolving} onClick={() => {
+                if (isMock) void resolve({ phone: normalizeManualPhone(query) });
+                else onResolved(manualDestination);
+              }} className="flex w-full items-center gap-3 rounded-xl border border-amber-300/30 bg-amber-300/10 px-3 py-3 text-left transition-colors hover:border-amber-300/70 disabled:opacity-60"><UserRound className="h-5 w-5 text-amber-300" /><span className="min-w-0 flex-1"><span className="block text-sm font-bold text-slate-100">{manualDestination.kind === 'existing' ? 'Abrir conversa existente' : 'Conversar com'}</span><span className="mt-1 block font-mono text-xs text-amber-200">{formatPhoneForDisplay(manualDestination.kind === 'new_phone' ? manualDestination.phone : query)}</span></span>{resolving && <LoaderCircle className="h-4 w-4 animate-spin text-amber-300" />}</button> : isMock && normalizeManualPhone(query) ? <button type="button" disabled={resolving} onClick={() => void resolve({ phone: normalizeManualPhone(query) })} className="flex w-full items-center gap-3 rounded-xl border border-amber-300/30 bg-amber-300/10 px-3 py-3 text-left transition-colors hover:border-amber-300/70 disabled:opacity-60"><UserRound className="h-5 w-5 text-amber-300" /><span className="min-w-0 flex-1"><span className="block text-sm font-bold text-slate-100">Conversar com</span><span className="mt-1 block font-mono text-xs text-amber-200">{formatPhoneForDisplay(normalizeManualPhone(query))}</span></span></button> : manualResolutionError || (isMock ? 'Número incompleto ou inválido para iniciar uma conversa.' : '') ? <p role="alert" className="px-3 py-2 text-xs font-semibold text-red-200">{manualResolutionError || 'Número incompleto ou inválido para iniciar uma conversa.'}</p> : null}</section>}
               {!query && recents.length === 0 && <div className="flex flex-col items-center justify-center px-5 py-10 text-center text-slate-500"><UserRound className="mb-2 h-7 w-7" /><p className="text-sm font-semibold text-slate-300">Nenhuma conversa recente</p><p className="mt-1 text-xs">Busque um contato ou digite um número.</p></div>}
               {query && localConversationMatches.length === 0 && !queryIsNumeric && !loadingContacts && contacts.length === 0 && <div className="flex flex-col items-center justify-center px-5 py-6 text-center text-slate-500"><UserRound className="mb-2 h-7 w-7" /><p className="text-sm font-semibold text-slate-300">Nenhum destino encontrado</p></div>}
             </>
