@@ -244,6 +244,14 @@ export class EvolutionApiError extends Error {
   }
 }
 
+export type NewMessageDestinationOption =
+  | { kind: 'existing'; conversationId: string; phone: string; label: string }
+  | { kind: 'phone'; phone: string; label: string };
+
+export type NewMessageDestination =
+  | { kind: 'existing' | 'new_phone'; remoteJid: string; contactId?: string; name: string; phone: string; avatar?: string | null }
+  | { kind: 'multiple'; contactId: string; name: string; options: NewMessageDestinationOption[] };
+
 const errorFromResponse = (response: Response, body: any, fallback: string) => (
   new EvolutionApiError(
     typeof body?.error === 'string' && body.error.trim()
@@ -1025,6 +1033,20 @@ export class EvolutionApiService {
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw errorFromResponse(response, body, 'Não foi possível encaminhar a mensagem');
     return body;
+  }
+
+  static async resolveNewMessageDestination(input: {
+    conversationId?: string;
+    contactId?: string;
+    phone?: string;
+  }): Promise<NewMessageDestination> {
+    const response = await apiFetch('/api/evolution/conversations/resolve-destination', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw errorFromResponse(response, body, 'Não foi possível preparar a conversa');
+    return body as NewMessageDestination;
   }
 
   static async editMessage(messageId: string, text: string): Promise<{ message: Message; reason?: string }> {

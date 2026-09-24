@@ -16,7 +16,6 @@ import {
   WifiOff,
   MessageSquare,
   Plus,
-  Phone,
   UserPlus,
   Pencil,
   Save,
@@ -26,7 +25,7 @@ import {
   Archive,
 } from 'lucide-react';
 import { Conversation, Message, QuickReply, Tag, WhatsappInstance } from '../types';
-import { EvolutionApiService } from '../services/evolutionApi';
+import { EvolutionApiService, type NewMessageDestination } from '../services/evolutionApi';
 import { useAuth } from '../auth/AuthContext';
 import { ConversationTagRail } from '../components/conversations/ConversationTagRail';
 import { ConversationList } from '../components/conversations/ConversationList';
@@ -34,6 +33,7 @@ import { ContactPhoto } from '../components/conversations/ContactPhoto';
 import { MessageTimeline } from '../components/conversations/MessageTimeline';
 import { MessageComposer, MessageComposerHandle } from '../components/conversations/MessageComposer';
 import { ForwardMessageDialog } from '../components/conversations/ForwardMessageDialog';
+import { NewMessageDialog } from '../components/conversations/NewMessageDialog';
 import { formatPhoneForDisplay } from '../utils/phone';
 import { formatMessageTimestamp } from '../components/conversations/conversationFormatters';
 import { useConversationMessages } from '../hooks/useConversationMessages';
@@ -104,12 +104,8 @@ export const AtendimentoPage: React.FC = () => {
   const [deletingMessage, setDeletingMessage] = useState<Message | null>(null);
   const [forwardingMessage, setForwardingMessage] = useState<Message | null>(null);
   const [messageActionBusyId, setMessageActionBusyId] = useState<string | null>(null);
-  // Estado para Nova Conversa por Telefone
+  // Estado para Nova mensagem; novos destinos permanecem somente no frontend até o primeiro envio.
   const [showNewChatModal, setShowNewChatModal] = useState(false);
-  const [newChatNumber, setNewChatNumber] = useState('');
-  const [newChatName, setNewChatName] = useState('');
-  const [newChatMessage, setNewChatMessage] = useState('');
-  const [startingNewChat, setStartingNewChat] = useState(false);
   const [pendingContactChatId, setPendingContactChatId] = useState<string | null>(null);
   const pendingContactChatRef = useRef<Conversation | null>(null);
   const [conversationTags, setConversationTags] = useState<Tag[]>([]);
@@ -187,6 +183,44 @@ export const AtendimentoPage: React.FC = () => {
     () => normalizeConversationTags(activeConv, conversationTags),
     [activeConv, conversationTags],
   );
+
+  const openResolvedDestination = useCallback((destination: NewMessageDestination) => {
+    if (destination.kind === 'multiple') return;
+    const existing = conversations.find((conversation) => conversation.id === destination.remoteJid);
+    const conversation: Conversation = existing ? {
+      ...existing,
+      isPending: destination.kind === 'new_phone' ? existing.isPending : false,
+    } : {
+      id: destination.remoteJid,
+      isPending: destination.kind === 'new_phone',
+      contact: {
+        id: destination.contactId || destination.remoteJid,
+        name: destination.name || destination.phone || 'Contato',
+        phone: destination.phone || '',
+        avatar: destination.avatar || '',
+        tags: [],
+        createdAt: new Date().toISOString().split('T')[0],
+      },
+      lastMessage: 'Nenhuma mensagem ainda',
+      lastMessageTimestamp: '',
+      lastMessageAt: 0,
+      lastMessageFromMe: false,
+      unreadCount: 0,
+      needsResponse: false,
+      status: 'open',
+      department: 'Atendimento Geral',
+    };
+    pendingContactChatRef.current = conversation.isPending ? conversation : null;
+    setPendingContactChatId(conversation.isPending ? conversation.id : null);
+    setConversations((previous) => previous.some((item) => item.id === conversation.id)
+      ? previous.map((item) => item.id === conversation.id ? { ...item, isPending: conversation.isPending } : item)
+      : [conversation, ...previous]);
+    setActiveConvId(conversation.id);
+    setShowNewChatModal(false);
+    setAssignmentFeedback(conversation.isPending
+      ? 'Nova conversa pronta. Digite uma mensagem para iniciar o atendimento.'
+      : 'Conversa aberta.');
+  }, [conversations, setActiveConvId, setAssignmentFeedback, setConversations]);
 
   useEffect(() => {
     const previousConversationId = activeConversationIdRef.current;
@@ -382,53 +416,36 @@ export const AtendimentoPage: React.FC = () => {
   useEffect(() => {
     const startChat = (location.state as { startChat?: { phone?: string; name?: string; remoteJid?: string; contactId?: string } } | null)?.startChat;
     if ((!startChat?.phone && !startChat?.remoteJid) || whatsappStatus !== 'connected' || loadingChats) return;
-    const existing = findConversationForContactChat(conversations, startChat);
-    if (existing) {
-      pendingContactChatRef.current = null;
-      setPendingContactChatId(null);
-      setActiveConvId(existing.id);
-      void markConversationAsRead(existing);
-      navigate(location.pathname, { replace: true, state: null });
-      return;
-    }
-    if (!startChat.phone) return;
-    const cleanPhone = normalizeContactChatPhone(startChat.phone);
-    if (cleanPhone.length < 8) {
-      pendingContactChatRef.current = null;
-      setPendingContactChatId(null);
-      setAssignmentFeedback('O contato não possui um número de WhatsApp válido.');
-      navigate(location.pathname, { replace: true, state: null });
-      return;
-    }
-    const jid = startChat.remoteJid || `${cleanPhone}@s.whatsapp.net`;
-    const pendingConversation: Conversation = {
-      id: jid,
-      contact: {
-        id: startChat.contactId || jid,
-        name: startChat.name?.trim() || `+${cleanPhone}`,
-        phone: `+${cleanPhone}`,
-        avatar: '',
-        tags: [],
-        createdAt: new Date().toISOString().split('T')[0],
-      },
-      lastMessage: 'Nenhuma mensagem ainda',
-      lastMessageTimestamp: '',
-      lastMessageAt: 0,
-      lastMessageFromMe: false,
-      unreadCount: 0,
-      needsResponse: false,
-      status: 'open',
-      department: '',
+    let cancelled = false;
+    const resolveStartChat = async () => {
+      try {
+        const destination = isMock
+          ? (() => {
+              const existing = findConversationForContactChat(conversations, startChat);
+              if (existing) return { kind: 'existing' as const, remoteJid: existing.id, contactId: existing.contact.id, name: existing.contact.name, phone: existing.contact.phone, avatar: existing.contact.avatar || null };
+              const cleanPhone = normalizeContactChatPhone(startChat.phone || '');
+              return { kind: 'new_phone' as const, remoteJid: `${cleanPhone}@s.whatsapp.net`, contactId: startChat.contactId, name: startChat.name?.trim() || `+${cleanPhone}`, phone: `+${cleanPhone}`, avatar: null };
+            })()
+          : await EvolutionApiService.resolveNewMessageDestination(startChat.remoteJid
+            ? { conversationId: startChat.remoteJid }
+            : startChat.contactId
+              ? { contactId: startChat.contactId }
+              : { phone: startChat.phone });
+        if (cancelled) return;
+        if (destination.kind === 'multiple') {
+          setAssignmentFeedback('Escolha um canal para iniciar a conversa.');
+        } else {
+          openResolvedDestination(destination);
+        }
+      } catch (error) {
+        if (!cancelled) setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível abrir a conversa.');
+      } finally {
+        if (!cancelled) navigate(location.pathname, { replace: true, state: null });
+      }
     };
-    pendingContactChatRef.current = pendingConversation;
-    setConversations((previous) => previous.some((conversation) => conversation.id === jid)
-      ? previous
-      : [pendingConversation, ...previous]);
-    setPendingContactChatId(jid);
-    setActiveConvId(jid);
-    setAssignmentFeedback('Nova conversa pronta. Digite uma mensagem para iniciar o atendimento.');
-    navigate(location.pathname, { replace: true, state: null });
-  }, [conversations, loadingChats, location.pathname, location.state, markConversationAsRead, navigate, setActiveConvId, setAssignmentFeedback, setConversations, whatsappStatus]);
+    void resolveStartChat();
+    return () => { cancelled = true; };
+  }, [conversations, isMock, loadingChats, location.pathname, location.state, navigate, openResolvedDestination, setAssignmentFeedback, whatsappStatus]);
 
   useEffect(() => {
     if (!pendingContactChatId || conversations.some((conversation) => conversation.id === pendingContactChatId)) return;
@@ -1211,6 +1228,9 @@ export const AtendimentoPage: React.FC = () => {
     if (!isInternalNoteToSend && pendingContactChatId === activeConv.id) {
       pendingContactChatRef.current = null;
       setPendingContactChatId(null);
+      setConversations((previous) => previous.map((conversation) => conversation.id === activeConv.id
+        ? { ...conversation, isPending: false }
+        : conversation));
     }
 
     // Atualiza última mensagem na lista lateral
@@ -1419,6 +1439,10 @@ export const AtendimentoPage: React.FC = () => {
 
   const handleAttachmentSelected = (files: File[]) => {
     if (files.length === 0 || !activeConv || isInternalNote || sendingMedia) return;
+    if (activeConv.isPending) {
+      setAssignmentFeedback('Envie uma mensagem de texto para iniciar a conversa antes de anexar arquivos.');
+      return;
+    }
     if (activeChatLocked) {
       setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
       return;
@@ -1460,6 +1484,10 @@ export const AtendimentoPage: React.FC = () => {
 
   const handleInputPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     if (!activeConv || isInternalNote || sendingMedia) return;
+    if (activeConv.isPending) {
+      setAssignmentFeedback('Envie uma mensagem de texto para iniciar a conversa antes de anexar arquivos.');
+      return;
+    }
     if (activeChatLocked) {
       setAssignmentFeedback(`Atendimento em andamento por ${activeLease?.ownerName || 'outro atendente'}.`);
       return;
@@ -1587,147 +1615,16 @@ export const AtendimentoPage: React.FC = () => {
     void retryFailedMessage(message);
   }, [retryFailedMessage]);
 
-  const handleStartNewChat = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newChatNumber.trim() || !newChatMessage.trim() || startingNewChat) return;
-    if (!isMock && whatsappStatus !== 'connected') {
-      setAssignmentFeedback('WhatsApp desconectado. Reconecte o WhatsApp antes de iniciar uma conversa.');
-      return;
-    }
-
-    const cleanNum = newChatNumber.replace(/\D/g, '');
-    if (cleanNum.length < 8) {
-      setAssignmentFeedback('Informe um número válido com DDD.');
-      return;
-    }
-    const jid = `${cleanNum}@s.whatsapp.net`;
-    const contactName = newChatName.trim() || `+${cleanNum}`;
-    const messageText = newChatMessage.trim();
-    const clientMessageId = `new-chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-    setStartingNewChat(true);
-    setAssignmentFeedback('');
-    let result: any = null;
-    if (!isMock) {
-      try {
-        result = await EvolutionApiService.sendTextMessage(instanceName, cleanNum, messageText, jid, clientMessageId);
-      } catch (error) {
-        setAssignmentFeedback(outboundErrorMessage(error, 'Não foi possível iniciar a conversa.'));
-        setStartingNewChat(false);
-        return;
-      }
-    }
-
-    const newConv: Conversation = {
-      id: jid,
-      contact: {
-        id: jid,
-        name: contactName,
-        phone: `+${cleanNum}`,
-        avatar: '',
-        tags: [],
-        createdAt: new Date().toISOString().split('T')[0]
-      },
-      lastMessage: messageText,
-      lastMessageTimestamp: 'Agora',
-      unreadCount: 0,
-      lastMessageFromMe: true,
-      needsResponse: false,
-      status: 'open',
-      department: 'Atendimento Geral'
-    };
-
-    setConversations(prev => [newConv, ...prev]);
-    captureScrollState(activeConvId);
-    setActiveConvId(jid);
-    const optimisticNewChatMessage: Message = {
-      id: result?.message?.evolutionMessageId || result?.message?.id || clientMessageId,
-      conversationId: jid,
-      sender: 'attendant',
-      senderName: attendantName,
-      content: messageText,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      timestampMs: Date.now(),
-      status: result?.message?.status || result?.status || 'sent',
-      metadata: {
-        sentByHub: true,
-        sentByUserId: user?.id,
-        sentByUserName: attendantName,
-        clientMessageId,
-      },
-    };
-    setMessages([applyOutboundSendConfirmation(optimisticNewChatMessage, result, jid)]);
-    setShowNewChatModal(false);
-    setNewChatNumber('');
-    setNewChatName('');
-    setNewChatMessage('');
-    setStartingNewChat(false);
-  };
-
   return (
     <div className="flex h-full w-full bg-[#11181d] overflow-hidden text-slate-100 font-overpass relative">
       
-      {/* Modal para Nova Conversa Directa */}
-      {whatsappConnected && showNewChatModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
-          <div className="bg-[#121215] border border-zinc-800 rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl">
-            <h2 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
-              <Phone className="w-5 h-5 text-amber-400" /> Nova Conversa WhatsApp
-            </h2>
-            <form onSubmit={handleStartNewChat} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-zinc-400 mb-1">Número do WhatsApp (com DDD)</label>
-                <input 
-                  type="text" 
-                  placeholder="Ex: 5521999998888"
-                  value={newChatNumber}
-                  onChange={e => setNewChatNumber(e.target.value)}
-                  className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-amber-400"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-zinc-400 mb-1">Nome do Contato (Opcional)</label>
-                <input 
-                  type="text" 
-                  placeholder="Ex: João da Silva"
-                  value={newChatName}
-                  onChange={e => setNewChatName(e.target.value)}
-                  className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-amber-400"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-zinc-400 mb-1">Primeira mensagem</label>
-                <textarea
-                  value={newChatMessage}
-                  onChange={e => setNewChatMessage(e.target.value)}
-                  placeholder="Escreva a mensagem que será enviada agora..."
-                  rows={3}
-                  className="w-full resize-none bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-amber-400"
-                  required
-                />
-              </div>
-              {assignmentFeedback && <p className="text-xs font-semibold text-red-300">{assignmentFeedback}</p>}
-              <div className="flex items-center justify-end gap-2 pt-2">
-                <button 
-                  type="button" 
-                  onClick={() => setShowNewChatModal(false)}
-                  className="px-4 py-2 rounded-xl bg-zinc-800 text-xs font-bold text-zinc-400 hover:text-zinc-200"
-                >
-                  Cancelar
-                </button>
-                <button 
-                  type="submit"
-                  disabled={startingNewChat}
-                  className="px-4 py-2 rounded-xl bg-amber-400 text-zinc-950 text-xs font-extrabold hover:bg-amber-300 disabled:cursor-wait disabled:opacity-60"
-                >
-                  {startingNewChat ? 'Enviando...' : 'Enviar e iniciar'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <NewMessageDialog
+        open={whatsappConnected && showNewChatModal}
+        conversations={conversations}
+        isMock={isMock}
+        onClose={() => setShowNewChatModal(false)}
+        onResolved={openResolvedDestination}
+      />
 
       {/* Coluna 1: Lista de Conversas (Inbox) */}
       <div className="w-[360px] border-r border-[#344047] flex flex-col bg-[#182126] flex-shrink-0">
@@ -1742,8 +1639,9 @@ export const AtendimentoPage: React.FC = () => {
               <button 
                 onClick={() => setShowNewChatModal(true)}
                 disabled={!whatsappConnected}
+                aria-label="Nova mensagem"
                 className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-400 text-zinc-950 shadow-[0_4px_12px_rgba(238,187,44,0.2)] transition-colors hover:bg-amber-300"
-                title="Nova Conversa"
+                title="Nova mensagem"
               >
                 <Plus className="w-3.5 h-3.5" />
               </button>
@@ -2039,6 +1937,7 @@ export const AtendimentoPage: React.FC = () => {
               onRemoveAllAttachments={clearAttachmentDrafts}
               mediaSendProgress={mediaSendProgress}
               activeConversationId={activeConvId}
+              isPending={Boolean(activeConv?.isPending)}
               replyTo={replyTo}
               onCancelReply={() => setReplyTo(null)}
               editingMessage={editingMessage}

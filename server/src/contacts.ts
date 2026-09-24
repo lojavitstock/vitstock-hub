@@ -14,6 +14,7 @@ import {
 } from './contactDomain.js';
 import { phoneLookupKeys, upsertContactPhone } from './contactPhones.js';
 import { contactArchiveWhereClause } from './contactList.js';
+import { normalizeManualNewMessagePhone } from './newMessageDestination.js';
 
 const contactInput = z.object({
   name: z.string().trim().min(2).max(160),
@@ -89,14 +90,23 @@ async function loadPhonesAndEmails(companyId: string, contactIds: string[]) {
 }
 
 function enrichRows(rows: any[], tags: Map<string, any[]>, channels: Map<string, { phones: any[]; emails: any[] }>) {
-  return rows.map((row) => ({
-    ...row,
-    phones: channels.get(row.id)?.phones || [{ id: null, phone: row.phone, is_primary: true, source: row.source }],
-    emails: channels.get(row.id)?.emails || (row.email ? [{ id: null, email: row.email, is_primary: true, source: row.source }] : []),
-    tags: tags.get(row.id) || [],
-    google_saved: Boolean(row.google_resource_name),
-    archived: Boolean(row.archived_at),
-  }));
+  return rows.map((row) => {
+    const storedPhones = channels.get(row.id)?.phones || [];
+    const phones = storedPhones.length > 0
+      ? storedPhones
+      : row.phone ? [{ id: null, phone: row.phone, is_primary: true, source: row.source }] : [];
+    return {
+      ...row,
+      phones: phones.map((phone: any) => ({
+        ...phone,
+        new_outbound_eligible: Boolean(normalizeManualNewMessagePhone(String(phone.phone || ''))),
+      })),
+      emails: channels.get(row.id)?.emails || (row.email ? [{ id: null, email: row.email, is_primary: true, source: row.source }] : []),
+      tags: tags.get(row.id) || [],
+      google_saved: Boolean(row.google_resource_name),
+      archived: Boolean(row.archived_at),
+    };
+  });
 }
 
 async function insertContactChannels(companyId: string, contactId: string, values: { phones: string[]; emails: string[] }, source: string) {

@@ -32,6 +32,7 @@ type MessageComposerProps = {
   onRemoveAllAttachments?: () => void;
   mediaSendProgress?: { current: number; total: number } | null;
   activeConversationId?: string | null;
+  isPending?: boolean;
   replyTo?: Message | null;
   onCancelReply?: () => void;
   editingMessage?: Message | null;
@@ -104,6 +105,7 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   onRemoveAllAttachments,
   mediaSendProgress,
   activeConversationId,
+  isPending = false,
   replyTo,
   onCancelReply,
   editingMessage,
@@ -442,8 +444,8 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
             <Smile className="h-4 w-4" />
           </button>
         )}
-        <input ref={attachmentInputRef} type="file" multiple accept="image/*,video/*,application/pdf,.doc,.docx" className="hidden" onChange={onAttachmentChange} />
-        <button type="button" onClick={() => attachmentInputRef.current?.click()} disabled={activeChatLocked || isInternalNote || sendingMedia || !whatsappConnected || Boolean(editingMessage)} aria-label="Anexar arquivo" title="Anexar arquivo" className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40">
+        <input ref={attachmentInputRef} type="file" multiple accept="image/*,video/*,application/pdf,.doc,.docx" className="hidden" disabled={isPending} onChange={onAttachmentChange} />
+        <button type="button" onClick={() => attachmentInputRef.current?.click()} disabled={activeChatLocked || isInternalNote || sendingMedia || !whatsappConnected || Boolean(editingMessage) || isPending} aria-label="Anexar arquivo" title={isPending ? 'Envie uma mensagem de texto para iniciar a conversa antes de anexar arquivos.' : 'Anexar arquivo'} className="rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40">
           <Paperclip className="h-4 w-4" />
         </button>
         {!isInternalNote && !editingMessage && <button ref={quickReplyButtonRef} type="button" disabled={activeChatLocked || sendingMedia} onMouseDown={(event) => event.preventDefault()} onClick={() => { setEmojiOpen(false); setQuickReplySearch(''); setSlashOpen(false); onToggleQuickReply(); }} aria-label="Mensagens rápidas" title="Mensagens rápidas" className={`shrink-0 rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40 ${quickReplyOpen ? 'text-amber-300' : ''}`}>

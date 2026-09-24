@@ -65,6 +65,13 @@ import { MAX_MEDIA_BASE64_CHARS, MAX_MEDIA_REQUEST_BYTES } from './mediaLimits.j
 import { buildEvolutionSendLocationErrorDiagnostic, buildEvolutionSendLocationTransportDiagnostic, evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from './evolutionProviderDiagnostics.js';
 import { buildReplyFailureTrace, buildReplyTraceDetails } from './replyFailureTrace.js';
 import { resolveConversationForOperation, resolveConversationWithClient } from './conversationResolver.js';
+import {
+  buildExplicitConversationLookup,
+  classifyExplicitConversationMatches,
+  explicitPhoneAliasRemoteJid,
+  explicitPhoneAliasRemoteJids,
+  normalizeManualNewMessagePhone,
+} from './newMessageDestination.js';
 import { filterConversationalProviderChats, isConversationalProviderJid } from './providerJidPolicy.js';
 import {
   documentFileNameForForward,
@@ -165,8 +172,8 @@ const sendTextSchema = z.object({
   }
 });
 const sendMediaSchema = z.object({
-  number: evolutionRecipientSchema,
-  remoteJid: z.string().min(3).max(128).optional(),
+  number: z.string().trim().max(128).optional().default(''),
+  remoteJid: z.string().trim().min(3).max(128).optional(),
   mediatype: z.enum(['image', 'video', 'document']),
   mimetype: z.string().min(3).max(100),
   media: z.string().min(1).max(MAX_MEDIA_BASE64_CHARS),
@@ -175,6 +182,14 @@ const sendMediaSchema = z.object({
   clientMessageId: z.string().trim().min(1).max(128).optional(),
   replyTraceId: replyTraceIdSchema.optional(),
   quotedMessage: sendTextSchema.shape.quotedMessage,
+}).superRefine((value, context) => {
+  if (!isValidEvolutionTextRecipient(value)) {
+    context.addIssue({
+      code: 'custom',
+      path: [value.remoteJid !== undefined ? 'remoteJid' : 'number'],
+      message: 'destinatário Evolution inválido',
+    });
+  }
 });
 const forwardTextSchema = z.object({
   sourceMessageId: z.string().trim().min(1).max(256),
@@ -187,6 +202,18 @@ const forwardTextSchema = z.object({
       path: ['destinationRemoteJid'],
       message: 'destinatário Evolution inválido',
     });
+  }
+});
+const newMessageDestinationSchema = z.object({
+  conversationId: z.string().trim().min(3).max(256).optional(),
+  contactId: z.string().uuid().optional(),
+  phone: z.string().trim().min(1).max(40).optional(),
+}).strict().superRefine((value, context) => {
+  if (value.conversationId && (value.contactId || value.phone)) {
+    context.addIssue({ code: 'custom', path: ['conversationId'], message: 'Escolha uma única origem de destino' });
+  }
+  if (!value.conversationId && !value.contactId && !value.phone) {
+    context.addIssue({ code: 'custom', path: ['phone'], message: 'Destino obrigatório' });
   }
 });
 const sendReactionSchema = z.object({
@@ -4724,6 +4751,209 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     return { remoteJid: parsed.data.remoteJid, messageTimestamp: parsed.data.messageTimestamp, providerMarked };
   });
 
+  app.post('/api/evolution/conversations/resolve-destination', { preHandler: requireUser }, async (request, reply) => {
+    const parsed = newMessageDestinationSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Destino inválido', code: 'invalid_destination' });
+
+    const companyId = request.user!.companyId;
+    const findExplicitConversation = async (candidateRemoteJid: string) => {
+      const lookup = buildExplicitConversationLookup(companyId, candidateRemoteJid);
+      const result = await db.query<{
+        id: string;
+        contact_id: string;
+        evolution_remote_jid: string;
+      }>(lookup.text, [...lookup.values]);
+      return classifyExplicitConversationMatches(result.rows);
+    };
+    const findExplicitPhoneConversation = async (phone: string) => {
+      const matches = [] as Array<{ id: string; contact_id: string; evolution_remote_jid: string }>;
+      for (const candidateRemoteJid of explicitPhoneAliasRemoteJids(phone)) {
+        const result = await findExplicitConversation(candidateRemoteJid);
+        if (result.kind === 'ambiguous') return result;
+        if (result.kind === 'existing') matches.push(result.conversation);
+      }
+      return classifyExplicitConversationMatches(matches);
+    };
+    const ambiguousDestination = () => reply.code(409).send({
+      error: 'Não foi possível determinar uma única conversa para este número.',
+      code: 'ambiguous_destination',
+    });
+    const destinationFromConversation = async (remoteJid: string) => {
+      const result = await db.query<{
+        contact_id: string;
+        evolution_remote_jid: string;
+        name: string;
+        phone: string | null;
+        avatar_url: string | null;
+      }>(
+        `SELECT c.contact_id, c.evolution_remote_jid, contact.name, contact.phone, contact.avatar_url
+         FROM conversations c
+         JOIN contacts contact ON contact.id = c.contact_id
+         WHERE c.company_id = $1 AND c.evolution_remote_jid = $2 AND c.is_group = false
+         LIMIT 1`,
+        [companyId, remoteJid],
+      );
+      const row = result.rows[0];
+      if (!row) return undefined;
+      return {
+        kind: 'existing' as const,
+        remoteJid: row.evolution_remote_jid,
+        contactId: row.contact_id,
+        name: row.name || row.phone || 'Contato',
+        phone: row.phone || '',
+        avatar: row.avatar_url || null,
+      };
+    };
+
+    if (parsed.data.conversationId) {
+      const destination = await destinationFromConversation(parsed.data.conversationId);
+      if (!destination) return reply.code(404).send({ error: 'Conversa não encontrada', code: 'conversation_not_found' });
+      return destination;
+    }
+
+    const contact = parsed.data.contactId
+      ? await db.query<{ id: string; name: string; phone: string | null; avatar_url: string | null }>(
+        `SELECT id, name, phone, avatar_url
+         FROM contacts
+         WHERE company_id = $1 AND id = $2
+         LIMIT 1`,
+        [companyId, parsed.data.contactId],
+      )
+      : undefined;
+    if (parsed.data.contactId && !contact?.rows[0]) {
+      return reply.code(404).send({ error: 'Contato não encontrado', code: 'contact_not_found' });
+    }
+
+    const contactRow = contact?.rows[0];
+    const channelPhones = parsed.data.contactId
+      ? await db.query<{ phone: string; label: string | null }>(
+        `SELECT phone, label
+         FROM contact_phones
+         WHERE company_id = $1 AND contact_id = $2
+         ORDER BY is_primary DESC, id`,
+        [companyId, parsed.data.contactId],
+      )
+      : { rows: [] as Array<{ phone: string; label: string | null }> };
+    const availablePhones = Array.from(new Map(
+      [contactRow?.phone || '', ...channelPhones.rows.map((row) => row.phone)]
+        .map((phone) => [explicitPhoneAliasRemoteJid(phone) || '', phone] as const)
+        .filter(([remoteJid]) => Boolean(remoteJid)),
+    ).values());
+
+    if (parsed.data.phone) {
+      const aliasRemoteJid = explicitPhoneAliasRemoteJid(parsed.data.phone);
+      if (parsed.data.contactId) {
+        const allowedPhoneKeys = new Set(availablePhones.flatMap((phone) => phoneLookupKeys(phone)));
+        if (!phoneLookupKeys(parsed.data.phone).some((key) => allowedPhoneKeys.has(key))) {
+          return reply.code(404).send({ error: 'Número não pertence ao contato selecionado', code: 'contact_phone_not_found' });
+        }
+      }
+      if (parsed.data.contactId && aliasRemoteJid) {
+        const existing = await findExplicitPhoneConversation(parsed.data.phone);
+        if (existing.kind === 'ambiguous') return ambiguousDestination();
+        if (existing.kind === 'existing') {
+          const destination = await destinationFromConversation(existing.conversation.evolution_remote_jid);
+          if (destination) return destination;
+        }
+      }
+      const manualPhone = normalizeManualNewMessagePhone(parsed.data.phone);
+      if (!manualPhone) {
+        return reply.code(400).send({ error: 'Número incompleto ou inválido para iniciar uma conversa.', code: 'legacy_phone' });
+      }
+      const { digits, remoteJid } = manualPhone;
+      if (!parsed.data.contactId) {
+        const existing = await findExplicitPhoneConversation(parsed.data.phone);
+        if (existing.kind === 'ambiguous') return ambiguousDestination();
+        if (existing.kind === 'existing') {
+          const destination = await destinationFromConversation(existing.conversation.evolution_remote_jid);
+          if (destination) return destination;
+        }
+      }
+      return {
+        kind: 'new_phone' as const,
+        remoteJid,
+        contactId: parsed.data.contactId,
+        name: contactRow?.name || `+${digits}`,
+        phone: manualPhone.phone,
+        avatar: contactRow?.avatar_url || null,
+      };
+    }
+
+    if (!contactRow || !parsed.data.contactId) {
+      return reply.code(400).send({ error: 'Informe um número válido.', code: 'invalid_phone' });
+    }
+
+    const conversations = await db.query<{ evolution_remote_jid: string }>(
+      `SELECT evolution_remote_jid
+       FROM conversations
+       WHERE company_id = $1 AND contact_id = $2 AND is_group = false
+       ORDER BY last_message_at DESC NULLS LAST, id`,
+      [companyId, parsed.data.contactId],
+    );
+    const options: Array<
+      | { kind: 'existing'; conversationId: string; phone: string; label: string }
+      | { kind: 'phone'; phone: string; label: string }
+    > = conversations.rows.map((row) => ({
+      kind: 'existing' as const,
+      conversationId: row.evolution_remote_jid,
+      phone: contactRow.phone || '',
+      label: 'WhatsApp conhecido',
+    }));
+    const existingConversationIds = new Set(conversations.rows.map((row) => row.evolution_remote_jid));
+    for (const phone of availablePhones) {
+      const aliasRemoteJid = explicitPhoneAliasRemoteJid(phone);
+      if (aliasRemoteJid) {
+        const match = await findExplicitPhoneConversation(phone);
+        if (match.kind === 'ambiguous') return ambiguousDestination();
+        if (match.kind === 'existing') {
+          const conversationId = match.conversation.evolution_remote_jid;
+          if (!existingConversationIds.has(conversationId)) {
+            options.push({
+              kind: 'existing',
+              conversationId,
+              phone,
+              label: 'WhatsApp conhecido',
+            });
+            existingConversationIds.add(conversationId);
+          }
+          continue;
+        }
+      }
+      const candidate = normalizeManualNewMessagePhone(phone);
+      if (!candidate) continue;
+      const channel = channelPhones.rows.find((row) => row.phone === phone);
+      options.push({
+        kind: 'phone',
+        phone,
+        label: channel?.label ? `${channel.label} (novo destino)` : 'Novo destino pelo número',
+      });
+    }
+    if (options.length === 0) {
+      if (availablePhones.length > 0) return reply.code(422).send({ error: 'Número incompleto ou inválido para iniciar uma conversa.', code: 'legacy_phone' });
+      return reply.code(422).send({ error: 'O contato não possui um destino utilizável', code: 'invalid_destination' });
+    }
+    if (options.length === 1) {
+      const only = options[0];
+      if (!only) return reply.code(422).send({ error: 'O contato não possui um destino utilizável', code: 'invalid_destination' });
+      if (only.kind === 'existing') {
+        const destination = await destinationFromConversation(only.conversationId);
+        if (!destination) return reply.code(404).send({ error: 'Conversa não encontrada', code: 'conversation_not_found' });
+        return destination;
+      }
+      const candidate = normalizeManualNewMessagePhone(only.phone);
+      if (!candidate) return reply.code(422).send({ error: 'Número incompleto ou inválido para iniciar uma conversa.', code: 'legacy_phone' });
+      return {
+        kind: 'new_phone' as const,
+        remoteJid: candidate.remoteJid,
+        contactId: contactRow.id,
+        name: contactRow.name || candidate.phone,
+        phone: candidate.phone,
+        avatar: contactRow.avatar_url || null,
+      };
+    }
+    return { kind: 'multiple' as const, contactId: contactRow.id, name: contactRow.name, options };
+  });
+
   app.post('/api/evolution/notes', { preHandler: requireUser }, async (request, reply) => {
     const parsed = noteSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Nota interna invÃ¡lida' });
@@ -5059,12 +5289,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     const { number, text, remoteJid, quotedMessage } = parsed.data;
     const clientMessageId = parsed.data.clientMessageId || `hub-${randomUUID()}`;
     const replyTraceId = quotedMessage ? (parsed.data.replyTraceId || `reply-${randomUUID()}`) : undefined;
-    const canonicalRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : canonicalPhoneJid(number));
+    let canonicalRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : canonicalPhoneJid(number));
     if (!isConversationalProviderJid(canonicalRemoteJid)) {
       return reply.code(400).send({ error: 'Destinatário não conversacional', code: 'unsupported_provider_entity' });
     }
     const explicitRemoteJid = remoteJid || (isWhatsAppGroupJid(number) ? number : undefined);
-    const evolutionRecipient = resolveEvolutionTextRecipient({ remoteJid: explicitRemoteJid, number });
     const existingConversation = explicitRemoteJid
       ? await resolveConversationForOperation({
         companyId: request.user!.companyId,
@@ -5074,6 +5303,17 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     if (explicitRemoteJid && !number && !existingConversation) {
       return reply.code(404).send({ error: 'Conversa não encontrada', code: 'conversation_not_found' });
     }
+    if (!isWhatsAppGroupJid(canonicalRemoteJid) && !existingConversation) {
+      const outboundPhone = normalizeManualNewMessagePhone(number);
+      if (!outboundPhone) {
+        return reply.code(400).send({ error: 'Número incompleto ou inválido para iniciar uma conversa.', code: 'legacy_phone' });
+      }
+      if (explicitRemoteJid && canonicalRemoteJid.toLowerCase() !== outboundPhone.remoteJid.toLowerCase()) {
+        return reply.code(403).send({ error: 'Destino não autorizado', code: 'destination_not_authorized' });
+      }
+      canonicalRemoteJid = outboundPhone.remoteJid;
+    }
+    const evolutionRecipient = resolveEvolutionTextRecipient({ remoteJid: canonicalRemoteJid, number });
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
     traceOutbound(request, 'received', {
@@ -5441,7 +5681,16 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
     if (!isConversationalProviderJid(canonicalRemoteJid)) {
       return reply.code(400).send({ error: 'Destinatário não conversacional', code: 'unsupported_provider_entity' });
     }
-    const evolutionRecipient = resolveEvolutionRecipient({ remoteJid: canonicalRemoteJid, canonicalPhone: number });
+    const existingConversation = remoteJid
+      ? await resolveConversationForOperation({
+        companyId: request.user!.companyId,
+        remoteJid: canonicalRemoteJid,
+      }, { createIfMissing: false })
+      : undefined;
+    if (remoteJid && !existingConversation) {
+      return reply.code(404).send({ error: 'Conversa não encontrada', code: 'conversation_not_found' });
+    }
+    const evolutionRecipient = resolveEvolutionTextRecipient({ remoteJid: canonicalRemoteJid, number });
     const evolutionEndpoint = `/message/sendMedia/${encodeURIComponent(config.EVOLUTION_INSTANCE_NAME)}`;
     const normalizedQuote = normalizedQuotedMessage(quotedMessage, canonicalRemoteJid);
     const evolutionQuote = evolutionQuotedPayload(normalizedQuote, canonicalRemoteJid);
@@ -5458,6 +5707,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       user: request.user!,
       number,
       remoteJid: canonicalRemoteJid,
+      conversationId: existingConversation?.id,
     });
     if (!leaseAcquisition.acquired) {
       traceReplyFailure(request, {
