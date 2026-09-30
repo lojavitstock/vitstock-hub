@@ -36,7 +36,7 @@ import {
   isProviderReactionEvent,
   providerReactionUpdate,
 } from '../server/src/messageReactions';
-import { providerIdentityCandidates, resolveProviderMessageTarget, selectNewReconciledMessageActivity } from '../server/src/evolution';
+import { providerIdentityCandidates, resolveProviderMessageTarget, selectNewReconciledMessageActivity, sendTextSchema } from '../server/src/evolution';
 import { isValidEvolutionTextRecipient, resolveEvolutionRecipient, resolveEvolutionTextRecipient } from '../server/src/evolutionRecipient';
 import {
   documentFileNameForForward,
@@ -54,7 +54,15 @@ import {
 } from '../server/src/messageForward';
 import { qaEvolutionResponse } from '../server/src/qa';
 import { buildEvolutionSendLocationErrorDiagnostic, buildEvolutionSendLocationTransportDiagnostic, evolutionRecipientDiagnostics, sanitizeEvolutionProviderError } from '../server/src/evolutionProviderDiagnostics';
-import { buildReplyFailureTrace, buildReplyTraceDetails } from '../server/src/replyFailureTrace';
+import {
+  buildReplyFailureTrace,
+  buildReplyProviderTrace,
+  buildReplySuccessTrace,
+  buildReplyTraceDetails,
+  buildReplyValidationTrace,
+  fingerprintReplyTraceValue,
+  replySourceAgeBucket,
+} from '../server/src/replyFailureTrace';
 import {
   resetAvatarDebugDedupe as resetServerAvatarDebugDedupe,
   traceAvatarProfileFetch,
@@ -81,6 +89,7 @@ import {
   projectCanonicalInboxChats,
 } from '../server/src/inboxProjection';
 import { quotedProviderKeySource, quotedSourceAge, quotedSourceMediaType, toQuotedMessage } from '../src/utils/quotedMessage';
+import { buildFrontendReplyTraceSummary, createOutboundTrace, createReplyTraceId } from '../src/utils/outboundTrace';
 import { getDocumentPresentation } from '../src/utils/documentMedia';
 import { isMediaViewerCloseKey, mediaViewerItemFrom } from '../src/utils/mediaViewer';
 import { canDownloadMessageMedia, canForwardMessage, messageCopyText, messageMenuActionsFor } from '../src/utils/messageActions';
@@ -2135,14 +2144,16 @@ test('reply failure trace is sanitized and distinguishes provider keys from lega
   });
 
   assert.equal(providerTrace.event, 'reply_send_failure');
-  assert.equal(providerTrace.replyTraceId, 'reply-test-123');
+  assert.equal(providerTrace.replyTraceIdPresent, true);
+  assert.equal(providerTrace.replyTraceFingerprint, fingerprintReplyTraceValue('reply-test-123'));
+  assert.equal('replyTraceId' in providerTrace, false);
   assert.equal(providerTrace.replyTarget.providerKeyPresent, true);
-  assert.equal(providerTrace.replyTarget.providerKeyRemoteJidType, 'LID');
+  assert.equal(providerTrace.replyTarget.quotedRemoteJid.jidType, 'LID');
   assert.equal(providerTrace.outbound.quoteSource, 'metadata');
   assert.equal(providerTrace.replyTarget.providerKeySource, 'metadata');
   assert.equal(providerTrace.replyTarget.sourceAge, 'OLDER');
   assert.equal(providerTrace.replyTarget.sourceMediaType, 'audio');
-  assert.equal(providerTrace.replyTarget.sourceDirection, 'INBOUND');
+  assert.equal(providerTrace.replyTarget.sourceDirection, 'inbound');
   assert.equal(providerTrace.replyTarget.providerMessageIdPresent, true);
   const successDetails = buildReplyTraceDetails({
     providerKeySource: 'metadata',
@@ -2151,17 +2162,18 @@ test('reply failure trace is sanitized and distinguishes provider keys from lega
     content: 'conteúdo privado',
     key: { id: 'provider-raw', remoteJid: 'opaque-123@lid', fromMe: false, participant: 'participant-123@lid' },
   });
-  assert.equal(successDetails.sourceDirection, 'INBOUND');
+  assert.equal(successDetails.sourceDirection, 'inbound');
   assert.equal(successDetails.providerKeySource, 'metadata');
   assert.equal(successDetails.sourceAge, 'OLDER');
   assert.equal(successDetails.sourceMediaType, 'audio');
   assert.doesNotMatch(JSON.stringify(successDetails), /provider-raw|opaque-123@lid|conteúdo privado/);
   assert.equal(providerTrace.outbound.payloadQuoteStructurallyValid, true);
-  assert.equal(providerTrace.evolution.providerError?.message, 'invalid jid [redacted-jid] [redacted-jid]');
-  assert.doesNotMatch(JSON.stringify(providerTrace), /opaque-123@lid|5521999999999|do-not-log/);
+  assert.equal(providerTrace.evolution.sanitizedProviderErrorCode, 'bad_request');
+  assert.equal(providerTrace.evolution.sanitizedProviderErrorClass, 'http_rejected');
+  assert.doesNotMatch(JSON.stringify(providerTrace), /opaque-123@lid|5521999999999|do-not-log|reply-test-123/);
 
   const legacyTrace = buildReplyFailureTrace({
-    replyTraceId: 'reply-legacy-123',
+    replyTraceId: 'reply-11234567-89ab-4cde-8fab-0123456789ab',
     quote: {
       messageId: 'legacy-message-123',
       providerKeySource: 'legacy',
@@ -2174,8 +2186,323 @@ test('reply failure trace is sanitized and distinguishes provider keys from lega
   });
   assert.equal(legacyTrace.outbound.quoteSource, 'legacy');
   assert.equal(legacyTrace.replyTarget.providerKeySource, 'legacy');
-  assert.equal(legacyTrace.replyTarget.sourceDirection, 'FROM_ME');
+  assert.equal(legacyTrace.replyTarget.sourceDirection, 'outbound');
   assert.equal(legacyTrace.replyTarget.evolutionMessageIdPresent, false);
+});
+
+test('accepted replyTraceId formats remain unchanged in business data and are fingerprinted only in traces', () => {
+  const replyTraceId = 'reply-test-123';
+  const parsed = sendTextSchema.safeParse({
+    number: '5511999988776',
+    remoteJid: '5511999988776@s.whatsapp.net',
+    text: 'reply body',
+    replyTraceId,
+    quotedMessage: {
+      messageId: 'source-message-id',
+      key: { id: 'source-message-id', remoteJid: '5511999988776@s.whatsapp.net', fromMe: false },
+    },
+  });
+
+  assert.equal(parsed.success, true);
+  if (!parsed.success) throw new Error('The existing replyTraceId schema must accept this fixture');
+  assert.equal(parsed.data.replyTraceId, replyTraceId);
+
+  const trace = buildReplyValidationTrace({
+    outcome: 'accepted',
+    replyTraceId: parsed.data.replyTraceId,
+    quote: parsed.data.quotedMessage,
+    conversationRemoteJid: parsed.data.remoteJid,
+  });
+  assert.equal(trace.replyTraceIdPresent, true);
+  assert.equal(trace.replyTraceFingerprint, fingerprintReplyTraceValue(replyTraceId));
+  assert.equal('replyTraceId' in trace, false);
+  assert.doesNotMatch(JSON.stringify(trace), /reply-test-123/);
+});
+
+test('reply trace fingerprints identifiers and separates rawKey from providerKey provenance', async () => {
+  const jid = '5511999988776@s.whatsapp.net';
+  const lid = 'opaque-lid-diagnostic-9036@lid';
+  const first = fingerprintReplyTraceValue(jid);
+  assert.equal(first, fingerprintReplyTraceValue(jid));
+  assert.notEqual(first, fingerprintReplyTraceValue(lid));
+  assert.match(first || '', /^[a-f0-9]{20}$/);
+
+  const rawKeyDetails = buildReplyTraceDetails({
+    messageId: 'message-id-secret',
+    providerKeySource: 'raw',
+    content: 'texto privado',
+    key: { id: 'raw-key-secret', remoteJid: lid, remoteJidAlt: jid, fromMe: false, participant: 'participant-secret@lid' },
+  }, 'text', { conversationRemoteJid: lid });
+  assert.equal(rawKeyDetails.messageIdSource, 'rawKey');
+  assert.equal(rawKeyDetails.providerMessageIdPresent, false);
+  assert.equal(rawKeyDetails.quotedRemoteJid.jidType, 'LID');
+  assert.equal(rawKeyDetails.quotedRemoteJidAlt.jidType, 'PN');
+  assert.equal(rawKeyDetails.quotedRemoteJidMatchesConversationExactly, true);
+  assert.equal(rawKeyDetails.sourceRemoteJidAltSameAsConversation, false);
+  assert.equal(rawKeyDetails.fromMe, false);
+  assert.equal(rawKeyDetails.fromMePresent, true);
+  assert.equal(rawKeyDetails.fromMeValue, false);
+  assert.equal(rawKeyDetails.quotedKey.idSource, 'rawKey');
+  assert.equal(rawKeyDetails.quotedKey.remoteJidType, 'LID');
+  assert.equal(rawKeyDetails.quotedKey.remoteJidAltType, 'PN');
+  assert.equal(rawKeyDetails.participant.present, true);
+  assert.equal(rawKeyDetails.sourcePersistenceOrigin, 'unknown');
+  assert.doesNotMatch(JSON.stringify(rawKeyDetails), /opaque-lid-diagnostic-9036|5511999988776|raw-key-secret|message-id-secret|participant-secret|texto privado/);
+
+  assert.equal(buildReplyTraceDetails({ providerKeySource: 'metadata', key: { id: 'provider-key-secret' } }).messageIdSource, 'providerKey');
+  assert.equal(buildReplyTraceDetails({ providerKeySource: 'legacy', key: { id: 'fallback-id' } }).messageIdSource, 'messageIdFallback');
+  assert.equal(buildReplyTraceDetails({ key: { id: 'unclassified-id' } }).messageIdSource, 'unknown');
+  assert.equal(buildReplyTraceDetails({ key: { id: 'id', fromMe: true } }).fromMe, true);
+  assert.equal(buildReplyTraceDetails({ key: { id: 'id', fromMe: false } }).fromMe, false);
+  assert.equal(buildReplyTraceDetails({ key: { id: 'id' } }).fromMe, 'ABSENT');
+  assert.equal(buildReplyTraceDetails({ key: { id: 'id' } }).fromMePresent, false);
+  assert.equal(buildReplyTraceDetails({ key: { id: 'id', remoteJidAlt: jid } }, 'text', { conversationRemoteJid: jid }).sourceRemoteJidAltSameAsConversation, true);
+  const differentConversationJid = buildReplyTraceDetails(
+    { key: { id: 'id', remoteJid: 'opaque@lid' } },
+    'text',
+    { conversationRemoteJid: '5511999988776@s.whatsapp.net' },
+  );
+  assert.equal(differentConversationJid.quotedRemoteJidMatchesConversationExactly, false);
+  assert.equal(differentConversationJid.sourceRemoteJidSameAsConversation, false);
+});
+
+test('reply trace validation and provider events contain only safe diagnostic fields', () => {
+  const sensitive = '5511999988776@s.whatsapp.net';
+  const invalidReply = sendTextSchema.safeParse({
+    number: '5511999988776',
+    remoteJid: sensitive,
+    text: 'SUPER_SECRET_MESSAGE_BODY',
+    quotedMessage: {
+      messageId: 'ABCSECRET123',
+      content: 'SUPER_SECRET_MESSAGE_BODY',
+      key: { id: 'ABCSECRET123', remoteJid: sensitive, fromMe: 'not-a-boolean' },
+    },
+  });
+  assert.equal(invalidReply.success, false);
+  if (invalidReply.success) throw new Error('Fixture must fail sendTextSchema');
+  const rejected = buildReplyValidationTrace({
+    outcome: 'rejected',
+    replyTraceId: 'reply-21234567-89ab-4cde-8fab-0123456789ab',
+    quote: { content: 'mensagem privada', key: { id: 'source-id-secret', remoteJid: sensitive } },
+    conversationRemoteJid: sensitive,
+    issues: invalidReply.error.issues.map((issue) => ({ ...issue, message: sensitive, input: sensitive } as any)),
+  });
+  assert.equal(rejected.event, 'reply_send_validation_failure');
+  assert.equal(rejected.outcome, 'rejected');
+  assert.equal(rejected.stage, 'validation.rejected');
+  assert.equal(rejected.httpStatus, 400);
+  assert.equal(rejected.errorCode, 'invalid_message_payload');
+  assert.deepEqual(rejected.zodIssues, [{ path: 'quotedMessage.key.fromMe', code: 'invalid_type', expected: 'boolean' }]);
+  assert.doesNotMatch(JSON.stringify(rejected), /5511999988776|source-id-secret|mensagem privada|SUPER_SECRET_MESSAGE_BODY|ABCSECRET123|input/);
+
+  const accepted = buildReplyValidationTrace({
+    outcome: 'accepted',
+    replyTraceId: 'reply-21234567-89ab-4cde-8fab-0123456789ab',
+    quote: { providerKeySource: 'metadata', key: { id: 'source-id-secret', remoteJid: sensitive, fromMe: false } },
+    conversationRemoteJid: sensitive,
+  });
+  assert.equal(accepted.outcome, 'accepted');
+  assert.equal(accepted.stage, 'validation.accepted');
+  assert.equal(accepted.replyTarget.messageIdSource, 'providerKey');
+
+  const providerResponse = buildReplyProviderTrace({
+    phase: 'response',
+    endpoint: 'sendMedia',
+    replyTraceId: 'reply-21234567-89ab-4cde-8fab-0123456789ab',
+    quote: { providerKeySource: 'metadata', key: { id: 'source-id-secret', remoteJid: sensitive, fromMe: false } },
+    conversationRemoteJid: sensitive,
+    ok: false,
+    httpStatus: 400,
+    elapsedMs: 32,
+    failureOrigin: 'evolution_rejected',
+    providerErrorClass: 'http_rejected',
+    providerError: { code: 'BAD_REQUEST', message: 'provider error includes 5511999988776@s.whatsapp.net' },
+  });
+  assert.equal(providerResponse.event, 'reply_send_provider_response');
+  assert.equal(providerResponse.httpStatus, 400);
+  assert.equal(providerResponse.success, false);
+  assert.equal(providerResponse.failureOrigin, 'provider');
+  assert.equal(providerResponse.destinationJidType, 'PN');
+  assert.equal(providerResponse.sanitizedProviderErrorCode, 'bad_request');
+  assert.equal(providerResponse.sanitizedProviderErrorClass, 'http_rejected');
+  assert.doesNotMatch(JSON.stringify(providerResponse), /5511999988776|source-id-secret|provider body|token/);
+  const providerRequest = buildReplyProviderTrace({
+    phase: 'request',
+    endpoint: 'sendText',
+    replyTraceId: 'reply-21234567-89ab-4cde-8fab-0123456789ab',
+    quote: { providerKeySource: 'raw', key: { id: 'raw-key-secret', remoteJid: sensitive, fromMe: false } },
+    conversationRemoteJid: sensitive,
+  });
+  assert.equal(providerRequest.event, 'reply_send_provider_request');
+  assert.equal(providerRequest.endpoint, 'sendText');
+  assert.equal(providerRequest.destinationJidType, 'PN');
+  assert.match(providerRequest.destinationFingerprint || '', /^[a-f0-9]{20}$/);
+  assert.equal(providerRequest.replyTarget.messageIdSource, 'rawKey');
+
+  const success = buildReplySuccessTrace({
+    replyTraceId: 'reply-21234567-89ab-4cde-8fab-0123456789ab',
+    companyId: 'company-secret',
+    conversationId: sensitive,
+    localMessageId: 'local-id-secret',
+    clientMessageId: 'client-id-secret',
+    requestId: 'request-id-secret',
+    quote: { providerKeySource: 'metadata', messageId: 'source-id-secret', key: { id: 'provider-id-secret', remoteJid: sensitive, fromMe: true } },
+    conversationRemoteJid: sensitive,
+    httpStatus: 200,
+    recipient: { number: sensitive, remoteJid: sensitive },
+  });
+  assert.equal(success.event, 'reply_send_success');
+  assert.equal(success.replyTraceIdPresent, true);
+  assert.equal(success.replyTraceFingerprint, fingerprintReplyTraceValue('reply-21234567-89ab-4cde-8fab-0123456789ab'));
+  assert.equal(success.replyTarget.providerMessageIdPresent, true);
+  assert.equal(success.outbound.payloadQuoteStructurallyValid, true);
+  assert.equal(success.evolution.httpStatus, 200);
+  assert.equal(success.backend.failureOrigin, 'none');
+  assert.doesNotMatch(JSON.stringify(success), /5511999988776|company-secret|local-id-secret|client-id-secret|request-id-secret|provider-id-secret|source-id-secret|reply-21234567-89ab-4cde-8fab-0123456789ab/);
+});
+
+test('frontend reply trace summarizes precise source context without mutating outbound quote data', async () => {
+  const now = 1_800_000_000_000;
+  const rawJid = 'opaque-lid-diagnostic-9036@lid';
+  const altJid = '5511999988776@s.whatsapp.net';
+  const sourceMessage = {
+    id: 'local-source-id-secret',
+    conversationId: rawJid,
+    timestampMs: now - 2 * 60 * 60_000,
+    sender: 'contact',
+    content: 'private message body',
+    rawKey: {
+      id: 'raw-key-secret',
+      remoteJid: rawJid,
+      remoteJidAlt: altJid,
+      fromMe: false,
+      participant: 'participant-secret@lid',
+      participantAlt: '551188887777@s.whatsapp.net',
+      senderPn: '551177776666@s.whatsapp.net',
+      participantPn: '551166665555@s.whatsapp.net',
+      addressingMode: 'lid',
+    },
+  } as any;
+  const quote = toQuotedMessage(sourceMessage);
+  const before = structuredClone(quote);
+  const payloadBeforeTrace = evolutionTextPayload({ recipient: rawJid, text: 'mensagem de teste', userName: 'Atendente QA', quoted: { key: quote.key } });
+  const summary = await buildFrontendReplyTraceSummary({ quote, sourceMessage, conversationId: rawJid, nowMs: now });
+  const payloadAfterTrace = evolutionTextPayload({ recipient: rawJid, text: 'mensagem de teste', userName: 'Atendente QA', quoted: { key: quote.key } });
+
+  assert.equal(summary.messageIdSource, 'rawKey');
+  assert.equal(summary.sourceAgeBucket, '1H_TO_24H');
+  assert.equal(summary.fromMe, false);
+  assert.equal(summary.sourceDirection, 'inbound');
+  assert.equal(summary.quotedKey.fromMePresent, true);
+  assert.equal(summary.quotedKey.fromMeValue, false);
+  assert.equal(summary.quotedKey.participantType, 'LID');
+  assert.equal(summary.quotedKey.remoteJidAltType, 'PN');
+  assert.equal(summary.quotedRemoteJid.jidType, 'LID');
+  assert.equal(summary.quotedRemoteJidAlt.jidType, 'PN');
+  assert.equal(summary.quotedRemoteJidMatchesConversationExactly, true);
+  assert.equal(summary.sourcePersistenceOrigin, 'unknown');
+  assert.equal(summary.fields.participantPresent, true);
+  assert.equal(summary.fields.participantAltPresent, true);
+  assert.equal(summary.fields.senderPnPresent, true);
+  assert.equal(summary.fields.participantPnPresent, true);
+  assert.equal(summary.fields.fromMePresent, true);
+  assert.equal(summary.sourceRemoteJidAltSameAsConversation, false);
+  assert.equal(summary.conversationJidType, 'LID');
+  assert.match(summary.conversationJidFingerprint || '', /^[a-f0-9]{20}$/);
+  assert.deepEqual(quote, before);
+  assert.deepEqual(payloadAfterTrace, payloadBeforeTrace);
+  assert.doesNotMatch(JSON.stringify(summary), /opaque-lid-diagnostic-9036|5511999988776|raw-key-secret|local-source-id-secret|private message body|participant-secret/);
+
+  const absentFromMe = await buildFrontendReplyTraceSummary({
+    sourceMessage: { id: 'legacy-id', conversationId: rawJid, rawKey: { id: 'legacy-id', remoteJid: rawJid } } as any,
+    conversationId: rawJid,
+    nowMs: now,
+  });
+  assert.equal(absentFromMe.fromMe, 'ABSENT');
+  assert.equal(absentFromMe.sourceDirection, 'unknown');
+  assert.equal(absentFromMe.quotedKey.fromMePresent, false);
+  assert.equal(absentFromMe.sourceAgeBucket, 'UNKNOWN');
+  assert.equal((await buildFrontendReplyTraceSummary({
+    sourceMessage: { id: 'metadata-id', conversationId: rawJid, metadata: { providerKey: { id: 'provider-key', remoteJid: rawJid, fromMe: true } } } as any,
+    conversationId: rawJid,
+    nowMs: now,
+  })).messageIdSource, 'providerKey');
+  assert.equal((await buildFrontendReplyTraceSummary({
+    sourceMessage: { id: 'legacy-id', conversationId: rawJid } as any,
+    conversationId: rawJid,
+    nowMs: now,
+  })).messageIdSource, 'messageIdFallback');
+  assert.deepEqual(
+    ['LT_5M', '5M_TO_1H', '1H_TO_24H', '1D_TO_7D', '7D_TO_30D', 'GT_30D', 'UNKNOWN'],
+    [
+      replySourceAgeBucket(now - 1_000, now),
+      replySourceAgeBucket(now - 6 * 60_000, now),
+      replySourceAgeBucket(now - 2 * 60 * 60_000, now),
+      replySourceAgeBucket(now - 2 * 24 * 60 * 60_000, now),
+      replySourceAgeBucket(now - 10 * 24 * 60 * 60_000, now),
+      replySourceAgeBucket(now - 31 * 24 * 60 * 60_000, now),
+      replySourceAgeBucket(undefined, now),
+    ],
+  );
+  assert.notEqual(createReplyTraceId(), createReplyTraceId());
+});
+
+test('reply failure trace redacts phone, JID, message id, body, and secret-shaped codes', () => {
+  const trace = buildReplyFailureTrace({
+    replyTraceId: 'reply-31234567-89ab-4cde-8fab-0123456789ab',
+    companyId: 'company-safe-fingerprint-only',
+    conversationId: '123456789@lid',
+    localMessageId: 'ABCSECRET123',
+    quote: {
+      messageId: 'ABCSECRET123',
+      providerKeySource: 'raw',
+      sourceMediaType: 'text',
+      content: 'SUPER_SECRET_MESSAGE_BODY',
+      key: { id: 'ABCSECRET123', remoteJid: '123456789@lid', fromMe: false },
+    },
+    messageType: 'text',
+    backendStatus: 400,
+    errorCode: 'SECRET_API_KEY_TEST',
+    failureOrigin: 'request_validation',
+    providerError: { code: 'SECRET_API_KEY_TEST', message: 'SUPER_SECRET_MESSAGE_BODY 5521999999999 123456789@lid' },
+  });
+  const serialized = JSON.stringify(trace);
+  for (const secret of [
+    '5521999999999', '123456789@lid', 'ABCSECRET123',
+    'SUPER_SECRET_MESSAGE_BODY', 'SECRET_API_KEY_TEST',
+  ]) assert.equal(serialized.includes(secret), false, `trace leaked ${secret}`);
+  assert.equal(trace.backend.failureOrigin, 'validation');
+  assert.equal(trace.backend.errorCode, undefined);
+  assert.equal(trace.evolution.sanitizedProviderErrorCode, undefined);
+});
+
+test('frontend reply tracing is silent by default and leaves the outbound payload unchanged', async () => {
+  const quote = toQuotedMessage(message('source-id', Date.now(), 'Texto privado'));
+  const requestBody = {
+    number: '5511999988776',
+    remoteJid: '5511999988776@s.whatsapp.net',
+    text: 'Mensagem de resposta',
+    clientMessageId: 'client-message-123',
+    quotedMessage: quote,
+  };
+  const before = structuredClone(requestBody);
+  const originalInfo = console.info;
+  let traceLogCount = 0;
+  console.info = () => { traceLogCount += 1; };
+  try {
+    createOutboundTrace({
+      clientMessageId: requestBody.clientMessageId,
+      conversationId: requestBody.remoteJid,
+      kind: 'text',
+      replyTraceId: createReplyTraceId(),
+      quote,
+    })('submit');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  } finally {
+    console.info = originalInfo;
+  }
+  assert.equal(traceLogCount, 0);
+  assert.deepEqual(requestBody, before);
 });
 
 test('provider key capture covers every reply-relevant provider message type', () => {

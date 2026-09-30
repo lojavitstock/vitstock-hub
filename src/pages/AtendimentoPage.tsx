@@ -1144,6 +1144,8 @@ export const AtendimentoPage: React.FC = () => {
         conversationId: activeConv.id,
         kind: 'text',
         replyTraceId,
+        quote: quotedMessage,
+        sourceMessage: submission.replyTarget || undefined,
         submitSource: submitter ? 'click' : 'keyboard',
       })
       : null;
@@ -1211,6 +1213,7 @@ export const AtendimentoPage: React.FC = () => {
           conversationId: activeConv.id,
           localMessageId: newMsg.id,
           quote: quotedMessage,
+          sourceMessage: submission.replyTarget || undefined,
           kind: 'text',
           status: typeof error === 'object' && error !== null && 'status' in error ? Number((error as { status?: unknown }).status) : undefined,
           errorCode: typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: unknown }).code || '') : undefined,
@@ -1354,7 +1357,13 @@ export const AtendimentoPage: React.FC = () => {
           },
         };
         firstOptimisticMessageId ||= localMessage.id;
-        const traceOutbound = createOutboundTrace({ clientMessageId: localMessage.id, conversationId: conversation.id, kind: 'media', replyTraceId });
+        const traceOutbound = createOutboundTrace({
+          clientMessageId: localMessage.id,
+          conversationId: conversation.id,
+          kind: 'media',
+          replyTraceId,
+          ...(quoteForAttachment ? { quote: quoteForAttachment, sourceMessage: submission.replyTarget || undefined } : {}),
+        });
         traceOutbound('submit');
         setAssignmentFeedback('');
         setMessages((previous) => previous.some((message) => message.id === localMessage.id)
@@ -1412,6 +1421,7 @@ export const AtendimentoPage: React.FC = () => {
             conversationId: conversation.id,
             localMessageId: localMessage.id,
             quote: quoteForAttachment,
+            sourceMessage: submission.replyTarget || undefined,
             kind: mediatype,
             status: typeof error === 'object' && error !== null && 'status' in error ? Number((error as { status?: unknown }).status) : undefined,
             errorCode: typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: unknown }).code || '') : undefined,
