@@ -200,6 +200,31 @@ test('reply business contract and real Evolution payload are equal with tracing 
     });
     assert.equal(JSON.stringify(successOff.providerCalls).includes('reply-test-123'), false);
     assert.equal(JSON.stringify(successOff.persistence).includes('reply-test-123'), false);
+
+    const blankProviderKeyPayload = {
+      ...validPayload,
+      quotedMessage: {
+        ...validPayload.quotedMessage,
+        key: {
+          ...validPayload.quotedMessage.key,
+          remoteJid: '   ',
+          remoteJidAlt: '',
+          participant: '',
+          participantAlt: '   ',
+          addressingMode: '',
+          senderPn: '',
+          participantPn: '   ',
+        },
+      },
+    };
+    const blankKeyRun = await runRequest(false, 'success', blankProviderKeyPayload);
+    assert.equal(blankKeyRun.status, 200);
+    assert.equal((blankKeyRun.providerCalls as any[]).length, 1);
+    const blankKeyProviderBody = (blankKeyRun.providerCalls as any[])[0].body;
+    assert.deepEqual(blankKeyProviderBody.quoted, {
+      key: { id: 'source-message-id', remoteJid: destination, fromMe: false },
+    });
+    assert.equal('participant' in blankKeyProviderBody.quoted.key, false);
   } finally {
     globalThis.fetch = originalFetch;
     if (previousTraceFlag === undefined) delete process.env.OUTBOUND_TRACE;

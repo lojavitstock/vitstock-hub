@@ -2,6 +2,10 @@ import { Message, type QuotedProviderKeySource, type QuotedSourceAge, type Quote
 
 export type QuotedMessage = NonNullable<NonNullable<Message['metadata']>['quotedMessage']>;
 
+const nonBlankString = (value: unknown): string | undefined => (
+  typeof value === 'string' && value.trim().length > 0 ? value : undefined
+);
+
 export const quotedMediaLabel = (mediaType?: Message['mediaType']) => {
   switch (mediaType) {
     case 'image': return 'Foto';
@@ -50,6 +54,13 @@ export const toQuotedMessage = (message: Message): QuotedMessage => {
     ? message.rawKey
     : message.metadata?.providerKey;
   const id = typeof key?.id === 'string' && key.id.trim() ? key.id : message.id;
+  const remoteJid = nonBlankString(key?.remoteJid) || nonBlankString(message.conversationId);
+  const remoteJidAlt = nonBlankString(key?.remoteJidAlt);
+  const participant = nonBlankString(key?.participant);
+  const participantAlt = nonBlankString(key?.participantAlt);
+  const addressingMode = nonBlankString(key?.addressingMode);
+  const senderPn = nonBlankString(key?.senderPn);
+  const participantPn = nonBlankString(key?.participantPn);
 
   return {
     messageId: id,
@@ -62,14 +73,14 @@ export const toQuotedMessage = (message: Message): QuotedMessage => {
     mediaType: message.mediaType,
     key: {
       id,
-      remoteJid: typeof key?.remoteJid === 'string' ? key.remoteJid : message.conversationId,
-      ...(typeof key?.remoteJidAlt === 'string' ? { remoteJidAlt: key.remoteJidAlt } : {}),
+      ...(remoteJid ? { remoteJid } : {}),
+      ...(remoteJidAlt ? { remoteJidAlt } : {}),
       fromMe: typeof key?.fromMe === 'boolean' ? key.fromMe : message.sender === 'attendant',
-      ...(typeof key?.participant === 'string' ? { participant: key.participant } : {}),
-      ...(typeof key?.participantAlt === 'string' ? { participantAlt: key.participantAlt } : {}),
-      ...(typeof key?.addressingMode === 'string' ? { addressingMode: key.addressingMode } : {}),
-      ...(typeof key?.senderPn === 'string' ? { senderPn: key.senderPn } : {}),
-      ...(typeof key?.participantPn === 'string' ? { participantPn: key.participantPn } : {}),
+      ...(participant ? { participant } : {}),
+      ...(participantAlt ? { participantAlt } : {}),
+      ...(addressingMode ? { addressingMode } : {}),
+      ...(senderPn ? { senderPn } : {}),
+      ...(participantPn ? { participantPn } : {}),
     },
   };
 };

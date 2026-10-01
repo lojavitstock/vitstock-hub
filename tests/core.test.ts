@@ -2081,6 +2081,179 @@ test('resposta de atendente mantém referência explícita no estado otimista e 
   assert.equal(merged[1]?.senderName, 'Henrique');
 });
 
+test('quote omits blank optional provider key fields and keeps the conversation JID fallback', () => {
+  const remoteJid = '5511999988776@s.whatsapp.net';
+  const providerKeyId = 'AABBCCDDEEFF00112233445566778899';
+  const cases = [
+    { mediaType: undefined, participant: '' },
+    { mediaType: 'audio' as const, participant: '   ' },
+    { mediaType: 'image' as const, participant: '' },
+  ];
+
+  for (const [index, item] of cases.entries()) {
+    const source = message(`quote-source-${index}`, 1_700 + index, 'quoted source', 'read', {
+      conversationId: remoteJid,
+      ...(item.mediaType ? { mediaType: item.mediaType } : {}),
+      rawKey: {
+        id: providerKeyId,
+        remoteJid: index === 0 ? remoteJid : '   ',
+        remoteJidAlt: index === 0 ? remoteJid : '',
+        fromMe: false,
+        participant: item.participant,
+        participantAlt: '',
+        addressingMode: index === 0 ? 'lid' : '   ',
+        senderPn: '',
+        participantPn: '',
+      },
+    });
+    const quote = toQuotedMessage(source);
+    const key = quote.key!;
+
+    assert.equal(key.id, providerKeyId);
+    assert.equal(key.remoteJid, remoteJid);
+    assert.equal(key.fromMe, false);
+    assert.equal('participant' in key, false);
+    assert.equal('participantAlt' in key, false);
+    assert.equal('senderPn' in key, false);
+    assert.equal('participantPn' in key, false);
+
+    if (index === 0) {
+      assert.equal(key.remoteJidAlt, remoteJid);
+      assert.equal(key.addressingMode, 'lid');
+    } else {
+      assert.equal('remoteJidAlt' in key, false);
+      assert.equal('addressingMode' in key, false);
+    }
+
+    const parsed = sendTextSchema.safeParse({
+      number: '5511999988776',
+      remoteJid,
+      text: 'reply body',
+      quotedMessage: quote,
+    });
+    assert.equal(parsed.success, true);
+    if (index === 0) {
+      if (!parsed.success) throw new Error('The provider-key fixture must pass sendTextSchema');
+      const trace = buildReplyValidationTrace({
+        outcome: 'accepted',
+        quote: parsed.data.quotedMessage,
+        conversationRemoteJid: remoteJid,
+      });
+      assert.equal(trace.replyTarget.participantPresent, false);
+    }
+  }
+
+  for (const blankRemoteJid of [undefined, null, '', '   ']) {
+    const source = message('blank-remote-jid', 1_700, 'quoted source', 'read', {
+      conversationId: remoteJid,
+      rawKey: { id: providerKeyId, remoteJid: blankRemoteJid, fromMe: false } as any,
+    });
+    assert.equal(toQuotedMessage(source).key?.remoteJid, remoteJid);
+  }
+
+  const withoutConversationFallback = toQuotedMessage(message('blank-fallback', 1_700, 'quoted source', 'read', {
+    conversationId: '',
+    rawKey: { id: providerKeyId, remoteJid: '   ', fromMe: false },
+  }));
+  assert.equal('remoteJid' in withoutConversationFallback.key!, false);
+});
+
+test('quote and send schema preserve explicit provider key values and group participant identity', () => {
+  const groupJid = '120363012345678901@g.us';
+  const participant = '5521999999999@s.whatsapp.net';
+  const participantAlt = 'opaque-participant@lid';
+  const source = message('group-source', 1_700, 'group message', 'read', {
+    conversationId: groupJid,
+    rawKey: {
+      id: 'group-provider-id',
+      remoteJid: groupJid,
+      remoteJidAlt: '120363012345678901@g.us',
+      fromMe: false,
+      participant,
+      participantAlt,
+      addressingMode: 'lid',
+      senderPn: participant,
+      participantPn: participant,
+    },
+  });
+  const quote = toQuotedMessage(source);
+
+  assert.deepEqual(quote.key, {
+    id: 'group-provider-id',
+    remoteJid: groupJid,
+    remoteJidAlt: '120363012345678901@g.us',
+    fromMe: false,
+    participant,
+    participantAlt,
+    addressingMode: 'lid',
+    senderPn: participant,
+    participantPn: participant,
+  });
+
+  const parsed = sendTextSchema.safeParse({
+    number: '5511999988776',
+    remoteJid: '5511999988776@s.whatsapp.net',
+    text: 'reply body',
+    quotedMessage: quote,
+  });
+  assert.equal(parsed.success, true);
+  if (!parsed.success) throw new Error('Valid explicit group participant fields must remain accepted');
+  assert.equal(parsed.data.quotedMessage?.key?.participant, participant);
+  assert.equal(parsed.data.quotedMessage?.key?.participantAlt, participantAlt);
+});
+
+test('sendTextSchema treats blank optional quote key strings as absent without accepting short values', () => {
+  const base = {
+    number: '5511999988776',
+    remoteJid: '5511999988776@s.whatsapp.net',
+    text: 'reply body',
+    quotedMessage: {
+      messageId: 'source-message-id',
+      key: {
+        id: 'source-message-id',
+        remoteJid: '   ',
+        remoteJidAlt: '',
+        fromMe: false,
+        participant: '  ',
+        participantAlt: '',
+        addressingMode: '   ',
+        senderPn: '',
+        participantPn: '   ',
+      },
+    },
+  };
+  const parsed = sendTextSchema.safeParse(base);
+
+  assert.equal(parsed.success, true);
+  if (!parsed.success) throw new Error('Blank optional provider key fields should parse as absent');
+  const key = parsed.data.quotedMessage?.key;
+  assert.equal(key?.remoteJid, undefined);
+  assert.equal(key?.remoteJidAlt, undefined);
+  assert.equal(key?.participant, undefined);
+  assert.equal(key?.participantAlt, undefined);
+  assert.equal(key?.addressingMode, undefined);
+  assert.equal(key?.senderPn, undefined);
+  assert.equal(key?.participantPn, undefined);
+
+  const privateWithoutParticipant = sendTextSchema.safeParse({
+    ...base,
+    quotedMessage: {
+      messageId: 'source-message-id',
+      key: { id: 'source-message-id', remoteJid: '5511999988776@s.whatsapp.net', fromMe: false },
+    },
+  });
+  assert.equal(privateWithoutParticipant.success, true);
+
+  const invalidShortParticipant = sendTextSchema.safeParse({
+    ...base,
+    quotedMessage: {
+      ...base.quotedMessage,
+      key: { ...base.quotedMessage.key, participant: 'x' },
+    },
+  });
+  assert.equal(invalidShortParticipant.success, false);
+});
+
 test('reply trace classifica origem da provider key e idade sem registrar timestamp', () => {
   const now = 1_800_000_000_000;
   const raw = message('raw-source', now - 1_000, 'Imagem', 'read', {

@@ -144,6 +144,10 @@ const evolutionRecipientSchema = z.string().min(3).max(128).refine((value) => (
   /^\d{8,20}$/.test(value) || isWhatsAppGroupJid(value)
 ), 'destinatário Evolution inválido');
 const replyTraceIdSchema = z.string().trim().min(8).max(128).regex(/^[A-Za-z0-9._:-]+$/);
+const blankOptionalString = (schema: z.ZodString) => z.preprocess(
+  (value) => typeof value === 'string' && value.trim().length === 0 ? undefined : value,
+  schema.optional(),
+);
 export const sendTextSchema = z.object({
   number: z.string().trim().max(128).optional().default(''),
   text: z.string().min(1).max(4096),
@@ -161,14 +165,14 @@ export const sendTextSchema = z.object({
     mediaType: z.enum(['image', 'audio', 'video', 'document', 'sticker']).optional(),
     key: z.object({
       id: z.string().trim().min(1).max(256),
-      remoteJid: z.string().trim().min(3).max(128).optional(),
-      remoteJidAlt: z.string().trim().min(3).max(128).optional(),
+      remoteJid: blankOptionalString(z.string().trim().min(3).max(128)),
+      remoteJidAlt: blankOptionalString(z.string().trim().min(3).max(128)),
       fromMe: z.boolean().optional(),
-      participant: z.string().trim().min(3).max(128).optional(),
-      participantAlt: z.string().trim().min(3).max(128).optional(),
-      addressingMode: z.string().trim().min(1).max(64).optional(),
-      senderPn: z.string().trim().min(3).max(128).optional(),
-      participantPn: z.string().trim().min(3).max(128).optional(),
+      participant: blankOptionalString(z.string().trim().min(3).max(128)),
+      participantAlt: blankOptionalString(z.string().trim().min(3).max(128)),
+      addressingMode: blankOptionalString(z.string().trim().min(1).max(64)),
+      senderPn: blankOptionalString(z.string().trim().min(3).max(128)),
+      participantPn: blankOptionalString(z.string().trim().min(3).max(128)),
     }).optional(),
   }).optional(),
 }).superRefine((value, context) => {
