@@ -11,6 +11,9 @@ const login = async (page: import('@playwright/test').Page) => {
   await expect(page).toHaveURL(/\/atendimento(?:\?.*)?$/);
 };
 
+type QaDesktopNotificationCall = { title: string; body?: string; hasConversationId: boolean };
+type QaNotificationWindow = Window & { __qaDesktopNotificationCalls?: QaDesktopNotificationCall[] };
+
 test('manifest PWA responde e o service worker registra no modo QA', async ({ page }) => {
   const manifestResponse = await page.request.get('/manifest.webmanifest');
   expect(manifestResponse.status()).toBe(200);
@@ -126,4 +129,78 @@ test('mensagem inbound mock gera toast que abre a conversa; envio outbound não 
   await sendResponse;
   await expect(page.getByRole('paragraph').filter({ hasText: outboundText })).toBeVisible();
   await expect(page.getByRole('button', { name: /^Abrir conversa:/ })).toHaveCount(0);
+});
+
+test('notificação de teste e mensagem inbound em background usam showNotification do service worker', async ({ page, context }) => {
+  test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
+  await context.grantPermissions(['notifications'], { origin: 'http://localhost:3000' });
+  await page.addInitScript(() => {
+    const calls: QaDesktopNotificationCall[] = [];
+    (window as QaNotificationWindow).__qaDesktopNotificationCalls = calls;
+    // Este Chromium de QA informa "denied" mesmo após grantPermissions;
+    // mantém o teste determinístico sem deixar de exercitar o fluxo real do SW.
+    Object.defineProperty(Notification, 'permission', { configurable: true, value: 'granted' });
+    Object.defineProperty(ServiceWorkerRegistration.prototype, 'showNotification', {
+      configurable: true,
+      value: async function showNotification(title: string, options?: NotificationOptions) {
+        calls.push({
+          title,
+          body: options?.body,
+          hasConversationId: Boolean((options?.data as { conversationId?: string } | undefined)?.conversationId),
+        });
+      },
+    });
+  });
+
+  const realtimeConnected = page.waitForResponse((response) => (
+    response.url().includes('/api/evolution/events') && response.status() === 200
+  ));
+  await login(page);
+  await realtimeConnected;
+  await page.waitForFunction(async () => {
+    if (!('serviceWorker' in navigator)) return false;
+    const registration = await navigator.serviceWorker.getRegistration('/');
+    return Boolean(registration?.active);
+  }, null, { timeout: 15_000 });
+
+  await page.goto('/configuracoes?tab=application');
+  await expect(page.getByRole('status').filter({ hasText: 'Notificações ativadas' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Testar notificação' })).toBeVisible();
+  await page.getByRole('button', { name: 'Testar notificação' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Notificação de teste enviada.' })).toBeVisible();
+  expect(await page.evaluate(() => (window as QaNotificationWindow).__qaDesktopNotificationCalls)).toEqual([{
+    title: 'Vitstock Hub',
+    body: 'Notificações estão funcionando neste dispositivo.',
+    hasConversationId: false,
+  }]);
+
+  await page.getByRole('link', { name: 'Atendimento' }).click();
+  await expect(page).toHaveURL(/\/atendimento$/);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
+  });
+  const fixture = await page.evaluate(async () => {
+    const response = await fetch('http://localhost:3001/api/qa/provider-only', {
+      method: 'POST',
+      credentials: 'include',
+    });
+    return { status: response.status, body: await response.json().catch(() => null) };
+  });
+  expect(fixture.status).toBe(200);
+  const { remoteJid, name } = fixture.body as { remoteJid: string; name: string };
+  const content = `Inbound background QA ${Date.now()}`;
+  const injected = await page.evaluate(async (payload) => {
+    const response = await fetch('http://localhost:3001/api/qa/evolution/inbound', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return { status: response.status };
+  }, { remoteJid, name, content });
+  expect(injected.status).toBe(200);
+  await expect.poll(() => page.evaluate(() => (window as QaNotificationWindow).__qaDesktopNotificationCalls?.length)).toBe(2);
+  const calls = await page.evaluate(() => (window as QaNotificationWindow).__qaDesktopNotificationCalls);
+  expect(calls?.[1]).toMatchObject({ title: name, body: content, hasConversationId: true });
 });

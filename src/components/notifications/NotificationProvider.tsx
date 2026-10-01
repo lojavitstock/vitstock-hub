@@ -4,6 +4,7 @@ import { useAuth } from '../../auth/AuthContext';
 import { ContactPhoto } from '../conversations/ContactPhoto';
 import { EvolutionApiService, type EvolutionRealtimeEvent } from '../../services/evolutionApi';
 import type { Conversation } from '../../types';
+import { showDesktopNotification, type DesktopNotificationResult } from '../../utils/desktopNotification';
 import {
   buildConversationNavigationTarget,
   chooseNotificationPresentation,
@@ -16,10 +17,18 @@ import {
   notificationPermissionAllowsDesktop,
 } from '../../utils/messageNotification';
 import { playNotificationSound } from '../../utils/notificationSound';
-import { createInstallPromptController, type DeferredInstallPrompt } from '../../utils/pwaInstall';
+import { installPromptController } from '../../utils/pwaInstall';
 
 type NotificationPermissionState = NotificationPermission | 'unsupported';
 type InstallState = 'installed' | 'available' | 'unavailable';
+type PwaInstallDiagnostics = {
+  serviceWorkerSupported: boolean;
+  secureContext: boolean;
+  registrationFound: boolean;
+  controllerPresent: boolean;
+  manifestPresent: boolean;
+  beforeInstallPromptCaptured: boolean;
+};
 
 type NewMessageToastData = {
   id: string;
@@ -34,6 +43,8 @@ type NotificationContextValue = {
   requestNotificationPermission: () => Promise<NotificationPermissionState>;
   installState: InstallState;
   installApp: () => Promise<void>;
+  testDesktopNotification: () => Promise<DesktopNotificationResult>;
+  installDiagnostics: PwaInstallDiagnostics;
   setActiveConversationId: (conversationId: string | null) => void;
   registerConversations: (conversations: Conversation[]) => void;
   openConversation: (conversationId: string) => void;
@@ -71,23 +82,44 @@ export const useNotifications = () => {
 export const NotificationProvider: React.FC<React.PropsWithChildren> = ({ children }) => {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const installController = installPromptController;
   const [permissionState, setPermissionState] = useState<NotificationPermissionState>(readPermission);
   const [standalone, setStandalone] = useState(false);
-  const [installRevision, setInstallRevision] = useState(0);
   const [toasts, setToasts] = useState<NewMessageToastData[]>([]);
+  const [installDiagnostics, setInstallDiagnostics] = useState<PwaInstallDiagnostics>(() => ({
+    serviceWorkerSupported: typeof navigator !== 'undefined' && 'serviceWorker' in navigator,
+    secureContext: typeof window !== 'undefined' && window.isSecureContext,
+    registrationFound: false,
+    controllerPresent: typeof navigator !== 'undefined' && 'serviceWorker' in navigator && Boolean(navigator.serviceWorker.controller),
+    manifestPresent: typeof document !== 'undefined' && Boolean(document.querySelector('link[rel="manifest"]')),
+    beforeInstallPromptCaptured: installController.hasCapturedPrompt(),
+  }));
   const permissionStateRef = useRef(permissionState);
   const activeConversationIdRef = useRef<string | null>(null);
   const conversationsRef = useRef(new Map<string, { name: string; avatar?: string; isGroup: boolean }>());
-  const serviceWorkerRef = useRef<ServiceWorkerRegistration | null>(null);
   const messageDeduperRef = useRef(createMessageNotificationDeduper());
   const crossTabDeduperRef = useRef(createCrossTabMessageNotificationDeduper(getNotificationStorage()));
-  const installControllerRef = useRef<ReturnType<typeof createInstallPromptController> | null>(null);
-
-  if (!installControllerRef.current) {
-    installControllerRef.current = createInstallPromptController(() => setInstallRevision((revision) => revision + 1));
-  }
-  const installController = installControllerRef.current;
   permissionStateRef.current = permissionState;
+
+  const refreshInstallDiagnostics = useCallback(async () => {
+    const serviceWorkerSupported = typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
+    let registrationFound = false;
+    if (serviceWorkerSupported) {
+      try {
+        registrationFound = Boolean(await navigator.serviceWorker.getRegistration());
+      } catch {
+        registrationFound = false;
+      }
+    }
+    setInstallDiagnostics({
+      serviceWorkerSupported,
+      secureContext: typeof window !== 'undefined' && window.isSecureContext,
+      registrationFound,
+      controllerPresent: serviceWorkerSupported && Boolean(navigator.serviceWorker.controller),
+      manifestPresent: typeof document !== 'undefined' && Boolean(document.querySelector('link[rel="manifest"]')),
+      beforeInstallPromptCaptured: installController.hasCapturedPrompt(),
+    });
+  }, []);
 
   const openConversation = useCallback((conversationId: string) => {
     if (!conversationId.trim()) return;
@@ -145,6 +177,33 @@ export const NotificationProvider: React.FC<React.PropsWithChildren> = ({ childr
     }
   }, [installController]);
 
+  const dispatchDesktopNotification = useCallback(async (
+    operation: 'incoming-message' | 'test',
+    title: string,
+    options: NotificationOptions,
+  ): Promise<DesktopNotificationResult> => {
+    const result = await showDesktopNotification(title, options);
+    if (!result.ok) {
+      console.warn('[notifications] desktop notification failed', {
+        operation,
+        permission: readPermission(),
+        serviceWorkerReady: result.serviceWorkerReady,
+        ...(result.errorName ? { errorName: result.errorName } : {}),
+      });
+    }
+    return result;
+  }, []);
+
+  const testDesktopNotification = useCallback(() => dispatchDesktopNotification(
+    'test',
+    'Vitstock Hub',
+    {
+      body: 'Notificações estão funcionando neste dispositivo.',
+      icon: '/icons/vitstock-icon-192.png',
+      badge: '/icons/vitstock-icon-192.png',
+    },
+  ), [dispatchDesktopNotification]);
+
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
     const query = window.matchMedia('(display-mode: standalone)');
@@ -163,40 +222,41 @@ export const NotificationProvider: React.FC<React.PropsWithChildren> = ({ childr
   }, [installController]);
 
   useEffect(() => {
-    const onBeforeInstallPrompt = (event: Event) => {
-      event.preventDefault();
-      installController.capture(event as Event & DeferredInstallPrompt);
-    };
-    const onInstalled = () => {
-      setStandalone(true);
-      installController.markInstalled();
-    };
     const syncPermission = () => setPermissionState(readPermission());
-    window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt as EventListener);
-    window.addEventListener('appinstalled', onInstalled);
     window.addEventListener('focus', syncPermission);
     document.addEventListener('visibilitychange', syncPermission);
     return () => {
-      window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt as EventListener);
-      window.removeEventListener('appinstalled', onInstalled);
       window.removeEventListener('focus', syncPermission);
       document.removeEventListener('visibilitychange', syncPermission);
     };
-  }, [installController]);
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => { void refreshInstallDiagnostics(); };
+    const unsubscribe = installController.subscribe(refresh);
+    const serviceWorker = 'serviceWorker' in navigator ? navigator.serviceWorker : undefined;
+    serviceWorker?.addEventListener('controllerchange', refresh);
+    void refreshInstallDiagnostics();
+    return () => {
+      unsubscribe();
+      serviceWorker?.removeEventListener('controllerchange', refresh);
+    };
+  }, [installController, refreshInstallDiagnostics]);
 
   useEffect(() => {
     if (!(import.meta.env.PROD || import.meta.env.MODE === 'qa')) return undefined;
     if (!('serviceWorker' in navigator) || !window.isSecureContext) return undefined;
     let cancelled = false;
     void navigator.serviceWorker.register('/sw.js', { scope: '/' })
-      .then((registration) => {
-        if (!cancelled) serviceWorkerRef.current = registration;
+      .then(() => {
+        if (!cancelled) void refreshInstallDiagnostics();
       })
       .catch(() => {
         // SW failure must never block authentication or ordinary Hub use.
+        if (!cancelled) void refreshInstallDiagnostics();
       });
     return () => { cancelled = true; };
-  }, []);
+  }, [refreshInstallDiagnostics]);
 
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return undefined;
@@ -275,43 +335,29 @@ export const NotificationProvider: React.FC<React.PropsWithChildren> = ({ childr
         tag: fingerprint ? `vitstock-${fingerprint}` : undefined,
         data: { conversationId },
       };
-      try {
-        const registration = serviceWorkerRef.current;
-        if (registration) {
-          await registration.showNotification(toast.title, options);
-        } else {
-          const notification = new window.Notification(toast.title, options);
-          notification.onclick = () => {
-            notification.close();
-            window.focus();
-            openConversation(conversationId);
-          };
-        }
-      } catch {
-        // Permission or OS notification failures do not affect the inbox.
-      }
+      await dispatchDesktopNotification('incoming-message', toast.title, options);
     };
 
     return EvolutionApiService.subscribeToRealtimeEvents((event) => {
       void processInboundMessage(event);
     });
-  }, [openConversation, showToast, user?.id]);
+  }, [dispatchDesktopNotification, openConversation, showToast, user?.id]);
 
   const installState: InstallState = standalone || installController.isInstalled()
     ? 'installed'
     : installController.canInstall() ? 'available' : 'unavailable';
-  // installRevision makes the controller's in-memory event state observable to React.
-  void installRevision;
 
   const value = useMemo<NotificationContextValue>(() => ({
     permissionState,
     requestNotificationPermission,
     installState,
     installApp,
+    testDesktopNotification,
+    installDiagnostics,
     setActiveConversationId,
     registerConversations,
     openConversation,
-  }), [installApp, installState, openConversation, permissionState, registerConversations, requestNotificationPermission, setActiveConversationId]);
+  }), [installApp, installDiagnostics, installState, openConversation, permissionState, registerConversations, requestNotificationPermission, setActiveConversationId, testDesktopNotification]);
 
   return (
     <NotificationContext.Provider value={value}>

@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 import type { Message } from '../src/types';
 import type { RealtimeEventPayload } from '../src/utils/realtimeUpdates';
+import {
+  showDesktopNotification,
+  type DesktopNotificationRegistration,
+  type DesktopNotificationRuntime,
+} from '../src/utils/desktopNotification';
 import {
   buildConversationNavigationTarget,
   chooseNotificationPresentation,
@@ -14,7 +21,12 @@ import {
   isNotifiableInboundMessage,
   notificationPermissionAllowsDesktop,
 } from '../src/utils/messageNotification';
-import { createInstallPromptController, isStandaloneDisplayMode } from '../src/utils/pwaInstall';
+import {
+  attachInstallPromptListeners,
+  createInstallPromptController,
+  isStandaloneDisplayMode,
+  type DeferredInstallPrompt,
+} from '../src/utils/pwaInstall';
 
 const makeMessage = (overrides: Partial<Message> = {}): Message => ({
   id: 'notification-message-1',
@@ -194,4 +206,150 @@ test('install prompt é capturado, consumido uma vez e respeita estado instalado
   assert.ok(changes >= 3);
   assert.equal(isStandaloneDisplayMode(true), true);
   assert.equal(isStandaloneDisplayMode(false), false);
+});
+
+test('captura antecipada de beforeinstallprompt preserva o evento antes do mount React', async () => {
+  const target = new EventTarget();
+  const controller = createInstallPromptController();
+  attachInstallPromptListeners(target, controller);
+  const event = new Event('beforeinstallprompt', { cancelable: true }) as Event & DeferredInstallPrompt;
+  let prompts = 0;
+  event.prompt = async () => { prompts += 1; };
+  event.userChoice = Promise.resolve({ outcome: 'accepted' });
+
+  target.dispatchEvent(event);
+
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(controller.hasCapturedPrompt(), true);
+  assert.equal(controller.canInstall(), true);
+  assert.deepEqual(await controller.promptInstall(), { outcome: 'accepted' });
+  assert.equal(prompts, 1);
+});
+
+const makeDesktopNotificationRuntime = (
+  overrides: Partial<DesktopNotificationRuntime> = {},
+): DesktopNotificationRuntime => ({
+  notificationSupported: true,
+  permission: 'granted',
+  secureContext: true,
+  serviceWorkerSupported: true,
+  getRegistration: async () => ({ active: {} } as DesktopNotificationRegistration),
+  ready: async () => ({ active: {} } as DesktopNotificationRegistration),
+  ...overrides,
+});
+
+test('desktop notification exige worker ready e usa a registration ativa', async () => {
+  const calls: Array<{ title: string; options?: NotificationOptions }> = [];
+  let readyCalls = 0;
+  const runtime = makeDesktopNotificationRuntime({
+    getRegistration: async () => ({ active: {} } as DesktopNotificationRegistration),
+    ready: async () => {
+      readyCalls += 1;
+      return {
+        active: {} as ServiceWorker,
+        showNotification: async (title, options) => { calls.push({ title, options }); },
+      } as DesktopNotificationRegistration;
+    },
+  });
+
+  const result = await showDesktopNotification('Vitstock Hub', { body: 'Teste' }, runtime);
+
+  assert.deepEqual(result, { ok: true, method: 'service-worker', serviceWorkerReady: true });
+  assert.equal(readyCalls, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].title, 'Vitstock Hub');
+});
+
+test('desktop notification retorna falha estruturada e sanitizada se showNotification rejeitar', async () => {
+  const runtime = makeDesktopNotificationRuntime({
+    ready: async () => ({
+      active: {} as ServiceWorker,
+      showNotification: async () => {
+        const error = new Error('Falhou em https://private.example/ 90361234@lid token=abcdefghijklmnopqrstuvwxyz0123456789');
+        error.name = 'NotAllowedError';
+        throw error;
+      },
+    } as DesktopNotificationRegistration),
+  });
+
+  const result = await showDesktopNotification('Vitstock Hub', { body: 'Teste' }, runtime);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.reason, 'show-notification-failed');
+  assert.equal(result.serviceWorkerReady, true);
+  assert.equal(result.errorName, 'NotAllowedError');
+  assert.doesNotMatch(result.errorMessage || '', /private\.example|90361234|abcdefghijklmnopqrstuvwxyz/);
+  assert.match(result.errorMessage || '', /\[url\]/);
+  assert.match(result.errorMessage || '', /\[identity\]/);
+  assert.match(result.errorMessage || '', /\[redacted\]/);
+});
+
+test('sem permission, APIs ou registration ativa não chama showNotification', async () => {
+  let calls = 0;
+  const registration = {
+    active: {} as ServiceWorker,
+    showNotification: async () => { calls += 1; },
+  } as DesktopNotificationRegistration;
+
+  const denied = await showDesktopNotification('Vitstock Hub', {}, makeDesktopNotificationRuntime({ permission: 'denied' }));
+  assert.deepEqual(denied, { ok: false, reason: 'permission', serviceWorkerReady: false });
+
+  const unsupported = await showDesktopNotification('Vitstock Hub', {}, makeDesktopNotificationRuntime({ serviceWorkerSupported: false }));
+  assert.deepEqual(unsupported, { ok: false, reason: 'unsupported', serviceWorkerReady: false });
+
+  const noRegistration = await showDesktopNotification('Vitstock Hub', {}, makeDesktopNotificationRuntime({
+    getRegistration: async () => undefined,
+    ready: async () => registration,
+  }));
+  assert.deepEqual(noRegistration, { ok: false, reason: 'service-worker-not-ready', serviceWorkerReady: false });
+  assert.equal(calls, 0);
+});
+
+test('service worker sem registration ativa pronta retorna service-worker-not-ready', async () => {
+  const result = await showDesktopNotification('Vitstock Hub', {}, makeDesktopNotificationRuntime({
+    ready: async () => new Promise<DesktopNotificationRegistration | undefined>(() => undefined),
+  }), 5);
+
+  assert.deepEqual(result, { ok: false, reason: 'service-worker-not-ready', serviceWorkerReady: false });
+});
+
+test('fetch do service worker só responde navegação com passthrough de rede e não usa cache', async () => {
+  const source = await readFile(new URL('../public/sw.js', import.meta.url), 'utf8');
+  const handlers = new Map<string, (event: { request: Request; respondWith: (response: Promise<unknown>) => void }) => void>();
+  const requests: Request[] = [];
+  const worker = {
+    addEventListener: (type: string, listener: (event: never) => void) => handlers.set(type, listener as (event: never) => void),
+    skipWaiting: async () => undefined,
+    clients: { claim: async () => undefined, matchAll: async () => [], openWindow: async () => undefined },
+    location: { origin: 'https://hub-preview.vitstock.com.br' },
+  };
+  runInNewContext(source, {
+    self: worker,
+    URL,
+    fetch: async (request: Request) => {
+      requests.push(request);
+      return { source: 'network' };
+    },
+  });
+
+  const fetchHandler = handlers.get('fetch');
+  assert.ok(fetchHandler);
+  const navigation = { mode: 'navigate' } as Request;
+  let navigationResponse: Promise<unknown> | undefined;
+  fetchHandler({ request: navigation, respondWith: (response) => { navigationResponse = response; } });
+  assert.equal((await navigationResponse as { source: string }).source, 'network');
+  assert.deepEqual(requests, [navigation]);
+
+  for (const request of [
+    { mode: 'cors', url: '/api/evolution/events' },
+    { mode: 'cors', url: '/api/contacts' },
+    { mode: 'cors', url: 'https://evolution.example.test' },
+  ] as Request[]) {
+    let intercepted = false;
+    fetchHandler({ request, respondWith: () => { intercepted = true; } });
+    assert.equal(intercepted, false);
+  }
+  assert.equal(requests.length, 1);
+  assert.doesNotMatch(source, /\bcaches?\s*\./i);
 });

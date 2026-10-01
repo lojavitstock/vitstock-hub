@@ -31,9 +31,9 @@ O projeto usa a API nativa `node:test`, executada em arquivos TypeScript pelo bo
 | `tests/contactChatNavigation.test.ts` | Resolução de conversa a partir da navegação de contatos. |
 | `tests/qaEnvironment.test.ts` | Guards de ambiente QA e contratos das integrações simuladas. |
 | `tests/whatsappMetadata.test.ts` | Identidade e metadata específicas do WhatsApp. |
-| `tests/notifications.test.ts` | Elegibilidade, dedupe, previews, navegação por ID explícito e lifecycle do prompt PWA. |
+| `tests/notifications.test.ts` | Elegibilidade, dedupe, previews, navegação por ID explícito, captura antecipada do prompt, passthrough restrito do service worker e resultados estruturados de notificações desktop. |
 | `tests/os-userinfo.cjs` | Helper carregado pelo bootstrap; não é uma suíte independente. |
-| `tests/e2e/*.spec.ts` | Smoke, Atendimento e notificações/PWA no Chromium via Playwright; executados contra QA local por padrão. |
+| `tests/e2e/*.spec.ts` | Smoke, Atendimento e notificações/PWA no Chromium via Playwright; inclui o botão de teste desktop e o caminho de mensagem em background, executados contra QA local por padrão. |
 
 O comando `npm test` executa a suíte principal definida no `package.json`, usando o bootstrap `tests/run-tests.mjs` para os arquivos TypeScript listados pelo runner. Para uma suíte específica, execute diretamente o bootstrap com o arquivo desejado.
 
