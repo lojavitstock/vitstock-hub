@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Users, Zap, Layers, Plus, KeyRound, Loader2, QrCode, UserPlus, Power, Save, X, PencilLine, Plug } from 'lucide-react';
+import { Users, Zap, Layers, Plus, KeyRound, Loader2, QrCode, UserPlus, Power, Save, X, PencilLine, Plug, Smartphone } from 'lucide-react';
 import { Attendant, QuickReply } from '../types';
 import { apiRequest } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
@@ -9,8 +9,9 @@ import { ConexoesPage } from './ConexoesPage';
 import { GoogleContactsIntegrationCard } from '../components/settings/GoogleContactsIntegrationCard';
 import { createQuickReply, deleteQuickReply, fetchQuickReplies, updateQuickReply } from '../services/quickRepliesApi';
 import { quickReplyShortcutError } from '../utils/quickReplies';
+import { ApplicationSettings } from '../components/settings/ApplicationSettings';
 
-type SettingsTab = 'attendants' | 'departments' | 'quickReplies' | 'security' | 'connections' | 'integracoes';
+type SettingsTab = 'attendants' | 'departments' | 'quickReplies' | 'security' | 'connections' | 'integracoes' | 'application';
 type AttendantFormState = {
   name: string;
   email: string;
@@ -30,6 +31,7 @@ const isSettingsTab = (value: string | null): value is SettingsTab => (
   || value === 'security'
   || value === 'connections'
   || value === 'integracoes'
+  || value === 'application'
 );
 
 export const ConfiguracoesPage: React.FC = () => {
@@ -357,6 +359,7 @@ export const ConfiguracoesPage: React.FC = () => {
           { id: 'departments', label: 'Setores & Filas', icon: Layers },
           { id: 'quickReplies', label: 'Respostas Rápidas', icon: Zap },
           { id: 'integracoes', label: 'Integrações', icon: Plug },
+          { id: 'application', label: 'Aplicativo', icon: Smartphone },
           { id: 'connections', label: 'Conexão WhatsApp', icon: QrCode },
         ].map(tab => {
           const Icon = tab.icon;
@@ -386,6 +389,8 @@ export const ConfiguracoesPage: React.FC = () => {
       </div>
 
       {/* Conteúdo da Aba */}
+      {activeTab === 'application' && <ApplicationSettings />}
+
       {activeTab === 'security' && (
         <div className="max-w-xl space-y-5">
           <div>

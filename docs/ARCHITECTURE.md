@@ -92,6 +92,12 @@ Current authenticated routes include:
 
 The browser does not store a bearer token. Requests use `credentials: 'include'`; the server session cookie is the authentication credential.
 
+### PWA and in-app notifications
+
+`src/components/notifications/NotificationProvider.tsx` is mounted under `BrowserRouter` and owns browser installation state, explicit notification permission, the single authenticated notification listener, sound/visual decisions, and a small foreground toast queue. It subscribes through `EvolutionApiService.subscribeToRealtimeEvents`, which multiplexes listeners over the existing EventSource singleton; it does not create another SSE connection. Inbound notification targets use only the explicit message conversation ID or event `remoteJid`, never a display phone or inferred alias. A bounded same-origin `localStorage` ledger of SHA-256 message-ID fingerprints deduplicates outputs across browser tabs. The manifest uses an origin-scoped app ID, so Preview and Production remain separate installations even when their labels match.
+
+The explicit `public/manifest.webmanifest` and `public/sw.js` provide install metadata and notification-click focus/navigation only. The service worker does not intercept fetches or cache assets, API responses, authenticated HTML, or SSE. Notification permission is requested only from the Application settings button. This phase has no Web Push, backend delivery, subscription persistence, or guaranteed notification when the Hub is fully closed; realtime notifications require an open or minimized connected Hub window.
+
 ### HTTP communication
 
 `src/services/api.ts` is the general API helper. `src/services/evolutionApi.ts` contains the more specific service methods and adapters for Atendimento.

@@ -1,0 +1,27 @@
+{
+  "id": "/",
+  "name": "Vitstock Hub",
+  "short_name": "Vitstock Hub",
+  "description": "Atendimento e relacionamento com clientes da Vitstock.",
+  "lang": "pt-BR",
+  "start_url": "/atendimento",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "/icons/vitstock-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/vitstock-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
