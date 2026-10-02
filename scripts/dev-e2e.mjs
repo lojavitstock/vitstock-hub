@@ -75,7 +75,7 @@ console.log('Evolution/Google: mock-only; produção bloqueada.\n');
 
 const children = [
   startChild('backend', ['run', 'server:dev']),
-  startChild('frontend', ['run', 'dev:frontend', '--', '--host', '127.0.0.1', '--strictPort']),
+  startChild('frontend', ['run', 'dev:frontend', '--', '--host', '127.0.0.1', '--strictPort', '--mode', 'qa']),
 ];
 
 const stop = () => {

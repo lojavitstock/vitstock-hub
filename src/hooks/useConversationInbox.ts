@@ -8,8 +8,6 @@ import { reconcileConversations, reconcileConversationsMonotonic } from '../util
 import { createInFlightRequestCoordinator } from '../utils/requestCoordinator';
 import { reconcileRealtimeConversation } from '../utils/realtimeUpdates';
 import { REALTIME_RECONNECTED_EVENT, REALTIME_SAFETY_INTERVAL_MS } from '../utils/realtimeConfig';
-import { createMessageNotificationDeduper } from '../utils/messageNotification';
-import { playNotificationSound } from '../utils/notificationSound';
 import { conversationNeedsResponse } from '../utils/conversationState';
 import { traceInboxOrderChanges, traceInboxOrderEvent, type InboxOrderTraceTrigger } from '../utils/inboxOrderDiagnostics';
 
@@ -60,6 +58,7 @@ export const useConversationInbox = ({
   const [filterTab, setFilterTab] = useState<ConversationFilter>('all');
   const [conversationSearch, setConversationSearch] = useState('');
   const [loadingChats, setLoadingChats] = useState(false);
+  const [hasLoadedChats, setHasLoadedChats] = useState(false);
   const [capturingChat, setCapturingChat] = useState(false);
   const [assignmentFeedback, setAssignmentFeedback] = useState('');
   const [now, setNow] = useState(() => Date.now());
@@ -70,7 +69,6 @@ export const useConversationInbox = ({
   const contactNameOverridesRef = useRef(new Map<string, string>());
   const inboxRequestsRef = useRef(createInFlightRequestCoordinator<void>());
   const whatsappStatusRef = useRef<'connected' | 'connecting' | 'disconnected'>('connecting');
-  const messageNotificationDeduperRef = useRef(createMessageNotificationDeduper());
   const avatarResolutionUntilRef = useRef(new Map<string, number>());
 
   useEffect(() => {
@@ -106,10 +104,12 @@ export const useConversationInbox = ({
             ? previousId
             : mockConversations[0]?.id || ''
         ));
+        setHasLoadedChats(true);
         return;
       }
 
       const realChats = await EvolutionApiService.fetchRealChats(instanceName);
+      setHasLoadedChats(true);
       if (realChats.length === 0) {
         // A resposta vazia pode ocorrer enquanto a Evolution reorganiza o chat
         // depois do envio. Mantemos a lista atual para não fechar a conversa.
@@ -189,11 +189,6 @@ export const useConversationInbox = ({
     if (isMock) return undefined;
 
     const unsubscribe = EvolutionApiService.subscribeToRealtimeEvents((event) => {
-      if (event.type === 'message.upsert'
-        && event.reaction !== true
-        && messageNotificationDeduperRef.current.shouldNotify(event.message)) {
-        playNotificationSound();
-      }
       if (event.type === REALTIME_RECONNECTED_EVENT) {
         if (document.visibilityState === 'visible') {
           void EvolutionApiService.getInstanceStatus(instanceName);
@@ -474,6 +469,7 @@ export const useConversationInbox = ({
     setConversationSearch,
     visibleConversations,
     loadingChats,
+    hasLoadedChats,
     loadChats,
     updateConversationActivity,
     markConversationAsRead,

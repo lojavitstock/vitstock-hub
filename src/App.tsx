@@ -7,6 +7,7 @@ import { CampanhasPage } from './pages/CampanhasPage';
 import { ConfiguracoesPage } from './pages/ConfiguracoesPage';
 import { LoginPage } from './pages/LoginPage';
 import { useAuth } from './auth/AuthContext';
+import { NotificationProvider } from './components/notifications/NotificationProvider';
 
 const AuthenticatedApp: React.FC = () => {
   const { user, loading } = useAuth();
@@ -35,7 +36,9 @@ const AuthenticatedApp: React.FC = () => {
 export const App: React.FC = () => {
   return (
     <BrowserRouter>
-      <AuthenticatedApp />
+      <NotificationProvider>
+        <AuthenticatedApp />
+      </NotificationProvider>
     </BrowserRouter>
   );
 };

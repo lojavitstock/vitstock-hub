@@ -65,6 +65,8 @@ import {
 } from '../utils/messageReactionActions';
 import { canDeleteMessageForEveryone, canEditMessage, canForwardMessage } from '../utils/messageActions';
 import { applyOutboundSendConfirmation } from '../utils/outboundMessageConfirmation';
+import { useNotifications } from '../components/notifications/NotificationProvider';
+import { consumeConversationQuery } from '../utils/messageNotification';
 
 export const AtendimentoPage: React.FC = () => {
   const instanceName = 'vitstock_atendimento';
@@ -72,6 +74,10 @@ export const AtendimentoPage: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const {
+    setActiveConversationId: setNotificationActiveConversationId,
+    registerConversations: registerNotificationConversations,
+  } = useNotifications();
   const attendantLabel = user
     ? `${user.name} • ${user.companyName || 'Vitstock'}`
     : 'Atendente • Vitstock';
@@ -85,6 +91,8 @@ export const AtendimentoPage: React.FC = () => {
   const composerDraftRevisionRef = useRef(0);
   const activeConversationIdRef = useRef<string | null>(null);
   const autoReadMarkersRef = useRef(new Map<string, string>());
+  const conversationTargetRefreshRef = useRef<string | null>(null);
+  const [conversationTargetRefreshRevision, setConversationTargetRefreshRevision] = useState(0);
   const handleComposerTextChange = useCallback((value: string) => {
     composerTextRef.current = value;
     composerDraftRevisionRef.current += 1;
@@ -158,6 +166,7 @@ export const AtendimentoPage: React.FC = () => {
     setConversationSearch,
     visibleConversations,
     loadingChats,
+    hasLoadedChats,
     loadChats,
     updateConversationActivity,
     markConversationAsRead,
@@ -178,6 +187,40 @@ export const AtendimentoPage: React.FC = () => {
     userId: user?.id,
     userRole: user?.role,
   });
+
+  useEffect(() => {
+    setNotificationActiveConversationId(activeConvId || null);
+  }, [activeConvId, setNotificationActiveConversationId]);
+
+  useEffect(() => {
+    registerNotificationConversations(conversations);
+  }, [conversations, registerNotificationConversations]);
+
+  useEffect(() => {
+    const requestedConversationId = new URLSearchParams(location.search).get('conversation');
+    if (!requestedConversationId) {
+      conversationTargetRefreshRef.current = null;
+    }
+    const target = consumeConversationQuery({
+      search: location.search,
+      hasLoadedConversations: hasLoadedChats,
+      conversationIds: conversations.map((conversation) => conversation.id),
+      refreshAttempted: requestedConversationId !== null
+        && conversationTargetRefreshRef.current === requestedConversationId,
+    });
+    if (target.shouldRefresh && requestedConversationId && whatsappStatus === 'connected') {
+      conversationTargetRefreshRef.current = requestedConversationId;
+      void loadChats(false).finally(() => setConversationTargetRefreshRevision((revision) => revision + 1));
+      return;
+    }
+    if (!target.ready) return;
+    conversationTargetRefreshRef.current = null;
+    if (target.conversationId) setActiveConvId(target.conversationId);
+    navigate({ pathname: location.pathname, search: target.search, hash: location.hash }, {
+      replace: true,
+      state: location.state,
+    });
+  }, [conversations, conversationTargetRefreshRevision, hasLoadedChats, loadChats, location.hash, location.pathname, location.search, location.state, navigate, setActiveConvId, whatsappStatus]);
 
   const activeConversationTags = useMemo(
     () => normalizeConversationTags(activeConv, conversationTags),
