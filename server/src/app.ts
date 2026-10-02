@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
-import { config, isAllowedFrontendOrigin } from './config.js';
+import { config, isAllowedFrontendOrigin, isLocalHost, isProduction, isQaMode } from './config.js';
 import { db } from './db.js';
 import { loadUser, registerAuthRoutes } from './auth.js';
 import { registerEvolutionRoutes } from './evolution.js';
@@ -10,6 +10,8 @@ import { registerContactRoutes } from './contacts.js';
 import { registerQaRoutes } from './qa.js';
 import { registerConversationTagRoutes } from './conversationTags.js';
 import { registerQuickReplyRoutes } from './quickReplies.js';
+import { registerProductRoutes } from './products.js';
+import { selectProductStorage } from './productStorage.js';
 
 export async function createApp() {
   const app = Fastify({
@@ -69,6 +71,22 @@ export async function createApp() {
   await registerContactRoutes(app);
   await registerConversationTagRoutes(app);
   await registerQuickReplyRoutes(app);
+  const productStorage = selectProductStorage({
+    driver: config.PRODUCT_STORAGE_DRIVER,
+    allowMemory: isQaMode || (!isProduction && isLocalHost(config.DATABASE_URL)),
+    memoryBaseUrl: config.BACKEND_PUBLIC_URL || `http://localhost:${config.PORT}`,
+    r2: {
+      accountId: config.R2_ACCOUNT_ID,
+      accessKeyId: config.R2_ACCESS_KEY_ID,
+      secretAccessKey: config.R2_SECRET_ACCESS_KEY,
+      bucket: config.R2_BUCKET,
+      publicBaseUrl: config.R2_PUBLIC_BASE_URL,
+    },
+  });
+  if (productStorage) {
+    await registerProductRoutes(app, productStorage);
+    app.addHook('onClose', async () => productStorage.close?.());
+  }
   await registerQaRoutes(app);
 
   app.setErrorHandler((error, request, reply) => {

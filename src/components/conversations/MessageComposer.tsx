@@ -1,5 +1,5 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { FileText, Paperclip, Pencil, Plus, Reply, Send, Smile, X, Zap } from 'lucide-react';
+import { FileText, Package, Paperclip, Pencil, Plus, Reply, Send, Smile, X, Zap } from 'lucide-react';
 import { Message, QuickReply } from '../../types';
 import { quotedMediaLabel, toQuotedMessage } from '../../utils/quotedMessage';
 import { insertComposerText } from '../../utils/composerSubmission';
@@ -20,6 +20,7 @@ type MessageComposerProps = {
   onTextChange?: (value: string) => void;
   onToggleInternalNote: (value: boolean) => void;
   onToggleQuickReply: () => void;
+  onOpenProducts?: () => void;
   quickReplies?: QuickReply[];
   quickReplyContext?: QuickReplyContext;
   onUseQuickReply?: (reply: QuickReply) => void;
@@ -93,6 +94,7 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   onTextChange,
   onToggleInternalNote,
   onToggleQuickReply,
+  onOpenProducts,
   quickReplies = [],
   quickReplyContext,
   onUseQuickReply,
@@ -450,6 +452,9 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
         </button>
         {!isInternalNote && !editingMessage && <button ref={quickReplyButtonRef} type="button" disabled={activeChatLocked || sendingMedia} onMouseDown={(event) => event.preventDefault()} onClick={() => { setEmojiOpen(false); setQuickReplySearch(''); setSlashOpen(false); onToggleQuickReply(); }} aria-label="Mensagens rápidas" title="Mensagens rápidas" className={`shrink-0 rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40 ${quickReplyOpen ? 'text-amber-300' : ''}`}>
           <Zap className="h-4 w-4" />
+        </button>}
+        {!isInternalNote && !editingMessage && onOpenProducts && <button type="button" disabled={activeChatLocked || sendingMedia} onMouseDown={(event) => event.preventDefault()} onClick={() => { setEmojiOpen(false); setSlashOpen(false); onOpenProducts(); }} aria-label="Produtos" title="Pré-visualizar produto" className="shrink-0 rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40">
+          <Package className="h-4 w-4" />
         </button>}
         <textarea ref={textareaRef} rows={1} value={inputText} onChange={(event) => { setInputText(event.target.value); setQuickReplyCursor(event.target.selectionStart); onTextChange?.(event.target.value); }} onSelect={(event) => setQuickReplyCursor(event.currentTarget.selectionStart)} onKeyDown={handleKeyDown} onPaste={onInputPaste} disabled={activeChatLocked || sendingMedia} placeholder={editingMessage ? 'Edite sua mensagem...' : isInternalNote ? 'Digite uma nota interna para a equipe...' : 'Digite sua mensagem para o WhatsApp...'} title={!isInternalNote && !editingMessage ? 'Cole uma imagem com Ctrl+V para enviar' : undefined} className={`max-h-32 min-h-12 flex-1 resize-y rounded-2xl border bg-[#2a343a] px-4 py-3 text-base leading-6 text-slate-100 placeholder-slate-400 transition-colors focus:outline-none ${isInternalNote ? 'border-amber-400/50 bg-amber-400/5 focus:border-amber-400' : 'border-transparent focus:border-amber-400/70'}`} />
         <button type="submit" disabled={activeChatLocked || sendingMedia || (!isInternalNote && !whatsappConnected) || (!inputText.trim() && !hasAttachment)} aria-label={editingMessage ? 'Salvar edição' : 'Enviar mensagem'} title={editingMessage ? 'Salvar edição' : 'Enviar mensagem'} className={`flex items-center justify-center rounded-full p-3 font-bold transition-all ${isInternalNote ? 'bg-amber-500 text-zinc-950 hover:bg-amber-400' : 'bg-amber-400 text-zinc-950 shadow-[0_0_12px_rgba(238,187,44,0.3)] hover:bg-amber-300'} disabled:cursor-not-allowed disabled:opacity-40`}>

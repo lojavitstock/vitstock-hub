@@ -35,6 +35,26 @@ export interface QuickReply {
   updatedAt: string;
 }
 
+export interface Product {
+  id: string;
+  name: string;
+  priceCents: number;
+  currency: 'BRL';
+  imageUrl: string;
+  imageMimeType: 'image/jpeg' | 'image/png' | 'image/webp';
+  imageSizeBytes: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductMessageSnapshot {
+  productId: string;
+  name: string;
+  priceCents: number;
+  currency: 'BRL';
+  imageObjectKey: string;
+}
+
 export interface Contact {
   id: string;
   name: string;
@@ -83,6 +103,8 @@ export interface Message {
     value?: string;
   }>;
   metadata?: {
+    /** Explicit product-library snapshot; never inferred from captions, filenames or URLs. */
+    productSnapshot?: ProductMessageSnapshot;
     providerType?: string;
     trafficSource?: string;
     trafficTitle?: string;
