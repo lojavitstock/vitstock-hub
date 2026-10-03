@@ -32,6 +32,8 @@ import { Conversation, Message } from '../../types';
 import { EvolutionApiService } from '../../services/evolutionApi';
 import { ContactPhoto } from './ContactPhoto';
 import { MediaViewer } from './MediaViewer';
+import { ProductMessageCard } from './ProductMessageCard';
+import { isProductMessageSnapshot } from '../../utils/productLibrary';
 import { formatMessageDay, formatMessageTimestamp, formatOperatorLabel } from './conversationFormatters';
 import { quotedMediaLabel, quotedMessageExcerpt } from '../../utils/quotedMessage';
 import { getDocumentPresentation } from '../../utils/documentMedia';
@@ -694,6 +696,7 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
     )}
     {messages.map((message) => {
       const isMe = message.sender === 'attendant';
+      const productSnapshot = isProductMessageSnapshot(message.metadata?.productSnapshot) ? message.metadata.productSnapshot : null;
       const messageDay = formatMessageDay(message.timestampMs);
       const showDay = Boolean(messageDay && messageDay !== previousDay);
       const participantKey = message.metadata?.participantCanonicalId?.trim()
@@ -758,7 +761,9 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
               {message.metadata?.deletedForEveryone === true ? (
                 <p className="italic text-slate-400">Mensagem apagada</p>
               ) : <>
-                <MediaMessageContent message={message} instanceName={instanceName} onOpenViewer={openMediaViewer} onLayoutChange={onLayoutChange} />
+                {productSnapshot
+                  ? <ProductMessageCard snapshot={productSnapshot} />
+                  : <MediaMessageContent message={message} instanceName={instanceName} onOpenViewer={openMediaViewer} onLayoutChange={onLayoutChange} />}
                 <SpecialMessageContent message={message} contactPhone={activeConversation.isGroup ? undefined : activeConversation.contact.phone} />
                 <InteractiveMessageContent message={message} />
                 {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap"><WhatsAppFormattedText text={message.content} /></p>}

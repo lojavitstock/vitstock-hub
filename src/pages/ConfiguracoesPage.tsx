@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Users, Zap, Layers, Plus, KeyRound, Loader2, QrCode, UserPlus, Power, Save, X, PencilLine, Plug, Smartphone } from 'lucide-react';
+import { Users, Zap, Layers, Plus, KeyRound, Loader2, QrCode, UserPlus, Power, Save, X, PencilLine, Plug, Smartphone, Package } from 'lucide-react';
 import { Attendant, QuickReply } from '../types';
 import { apiRequest } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
@@ -10,8 +10,9 @@ import { GoogleContactsIntegrationCard } from '../components/settings/GoogleCont
 import { createQuickReply, deleteQuickReply, fetchQuickReplies, updateQuickReply } from '../services/quickRepliesApi';
 import { quickReplyShortcutError } from '../utils/quickReplies';
 import { ApplicationSettings } from '../components/settings/ApplicationSettings';
+import { ProductsSettings } from '../components/settings/ProductsSettings';
 
-type SettingsTab = 'attendants' | 'departments' | 'quickReplies' | 'security' | 'connections' | 'integracoes' | 'application';
+type SettingsTab = 'attendants' | 'departments' | 'quickReplies' | 'products' | 'security' | 'connections' | 'integracoes' | 'application';
 type AttendantFormState = {
   name: string;
   email: string;
@@ -28,6 +29,7 @@ const isSettingsTab = (value: string | null): value is SettingsTab => (
   value === 'attendants'
   || value === 'departments'
   || value === 'quickReplies'
+  || value === 'products'
   || value === 'security'
   || value === 'connections'
   || value === 'integracoes'
@@ -347,7 +349,7 @@ export const ConfiguracoesPage: React.FC = () => {
             Configurações da Plataforma
           </h1>
           <p className="mt-1 text-sm text-zinc-400">
-            Gerencie equipe, setores, conexões e atalhos de mensagens
+            Gerencie equipe, setores, conexões, atalhos de mensagens e produtos
           </p>
         </div>
       </div>
@@ -358,6 +360,7 @@ export const ConfiguracoesPage: React.FC = () => {
           { id: 'attendants', label: 'Equipe de Atendimentos', icon: Users },
           { id: 'departments', label: 'Setores & Filas', icon: Layers },
           { id: 'quickReplies', label: 'Respostas Rápidas', icon: Zap },
+          { id: 'products', label: 'Produtos', icon: Package },
           { id: 'integracoes', label: 'Integrações', icon: Plug },
           { id: 'application', label: 'Aplicativo', icon: Smartphone },
           { id: 'connections', label: 'Conexão WhatsApp', icon: QrCode },
@@ -390,6 +393,7 @@ export const ConfiguracoesPage: React.FC = () => {
 
       {/* Conteúdo da Aba */}
       {activeTab === 'application' && <ApplicationSettings />}
+      {activeTab === 'products' && <ProductsSettings />}
 
       {activeTab === 'security' && (
         <div className="max-w-xl space-y-5">

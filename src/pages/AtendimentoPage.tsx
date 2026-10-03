@@ -34,6 +34,7 @@ import { MessageTimeline } from '../components/conversations/MessageTimeline';
 import { MessageComposer, MessageComposerHandle } from '../components/conversations/MessageComposer';
 import { ForwardMessageDialog } from '../components/conversations/ForwardMessageDialog';
 import { NewMessageDialog } from '../components/conversations/NewMessageDialog';
+import { ProductPickerDialog } from '../components/conversations/ProductPickerDialog';
 import { formatPhoneForDisplay } from '../utils/phone';
 import { formatMessageTimestamp } from '../components/conversations/conversationFormatters';
 import { useConversationMessages } from '../hooks/useConversationMessages';
@@ -111,6 +112,7 @@ export const AtendimentoPage: React.FC = () => {
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [deletingMessage, setDeletingMessage] = useState<Message | null>(null);
   const [forwardingMessage, setForwardingMessage] = useState<Message | null>(null);
+  const [productPickerOpen, setProductPickerOpen] = useState(false);
   const [messageActionBusyId, setMessageActionBusyId] = useState<string | null>(null);
   // Estado para Nova mensagem; novos destinos permanecem somente no frontend até o primeiro envio.
   const [showNewChatModal, setShowNewChatModal] = useState(false);
@@ -275,6 +277,7 @@ export const AtendimentoPage: React.FC = () => {
     setEditingMessage(null);
     setDeletingMessage(null);
     setForwardingMessage(null);
+    setProductPickerOpen(false);
     setQuickReplyOpen(false);
     setShowConversationTagMenu(false);
     clearAttachmentDrafts();
@@ -1982,6 +1985,7 @@ export const AtendimentoPage: React.FC = () => {
               onTextChange={handleComposerTextChange}
               onToggleInternalNote={handleToggleInternalNote}
               onToggleQuickReply={() => setQuickReplyOpen((open) => !open)}
+              onOpenProducts={() => { setQuickReplyOpen(false); setProductPickerOpen(true); }}
               onUseQuickReply={handleQuickReplyUse}
               onAttachmentChange={handleAttachmentChange}
               onInputPaste={handleInputPaste}
@@ -1996,6 +2000,7 @@ export const AtendimentoPage: React.FC = () => {
               editingMessage={editingMessage}
               onCancelEditing={cancelEditingMessage}
             />
+            {productPickerOpen && <ProductPickerDialog onClose={() => setProductPickerOpen(false)} />}
             {deletingMessage && (
               <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 px-4" role="dialog" aria-modal="true" aria-labelledby="delete-message-title">
                 <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#20292f] p-5 shadow-2xl">
