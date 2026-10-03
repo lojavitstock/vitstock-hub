@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ImagePlus, Loader2, MoreVertical, Package, PencilLine, Plus, Search, Save } from 'lucide-react';
+import { ImagePlus, Link2, Loader2, MoreVertical, Package, PencilLine, Plus, RefreshCw, Search, Save, Unlink } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { useSearchParams } from 'react-router-dom';
 import type { Product } from '../../types';
+import type { BlingProduct, ProductBlingLink } from '../../services/blingApi';
+import { fetchBlingProducts, fetchProductBlingLinks, linkProductToBling, unlinkProductFromBling } from '../../services/blingApi';
 import { archiveProduct, createProduct, fetchProducts, updateProduct } from '../../services/productsApi';
 import { formatBrlPrice, formatBrlPriceInput, parseBrlPriceCents } from '../../utils/productLibrary';
 import { ProductDialog } from '../products/ProductDialog';
@@ -49,6 +51,13 @@ export const ProductsSettings: React.FC = () => {
   const [archiveTarget, setArchiveTarget] = useState<Product | null>(null);
   const [archiving, setArchiving] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [blingLinks, setBlingLinks] = useState<Record<string, ProductBlingLink>>({});
+  const [blingLinkTarget, setBlingLinkTarget] = useState<Product | null>(null);
+  const [blingSearch, setBlingSearch] = useState('');
+  const [blingProducts, setBlingProducts] = useState<BlingProduct[]>([]);
+  const [blingLoading, setBlingLoading] = useState(false);
+  const [blingLinking, setBlingLinking] = useState(false);
+  const [blingError, setBlingError] = useState('');
 
   useEffect(() => {
     if (searchParams.get('action') !== 'new') return;
@@ -57,6 +66,13 @@ export const ProductsSettings: React.FC = () => {
     nextParams.delete('action');
     setSearchParams(nextParams, { replace: true });
   }, [isAdmin, searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    void fetchProductBlingLinks()
+      .then((result) => setBlingLinks(Object.fromEntries((result.links || []).map((link) => [link.productId, link]))))
+      .catch(() => undefined);
+  }, [isAdmin]);
 
   const loadProducts = useCallback(async (query: string, signal?: AbortSignal) => {
     const result = await fetchProducts(query, signal);
@@ -233,6 +249,69 @@ export const ProductsSettings: React.FC = () => {
     }
   };
 
+  const openBlingLink = (product: Product) => {
+    setOpenMenuId(null);
+    setBlingLinkTarget(product);
+    setBlingSearch('');
+    setBlingProducts([]);
+    setBlingError('');
+  };
+
+  useEffect(() => {
+    if (!blingLinkTarget) return;
+    const controller = new AbortController();
+    setBlingLoading(true);
+    setBlingError('');
+    const timer = window.setTimeout(() => {
+      void fetchBlingProducts(blingSearch, controller.signal)
+        .then((result) => setBlingProducts(result.data || []))
+        .catch((reason) => {
+          if (reason?.name !== 'AbortError') setBlingError(reason instanceof Error ? reason.message : 'Não foi possível carregar o catálogo Bling.');
+        })
+        .finally(() => setBlingLoading(false));
+    }, blingSearch.trim() ? 180 : 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [blingLinkTarget, blingSearch]);
+
+  const selectBlingProduct = async (blingProduct: BlingProduct) => {
+    if (!blingLinkTarget || blingLinking) return;
+    setBlingLinking(true);
+    setBlingError('');
+    try {
+      const result = await linkProductToBling(blingLinkTarget.id, blingProduct.id);
+      setBlingLinks((current) => ({ ...current, [blingLinkTarget.id]: result.link }));
+      setFeedback(`Vínculo Bling salvo para “${blingLinkTarget.name}”.`);
+      setBlingLinkTarget(null);
+    } catch (reason) {
+      setBlingError(reason instanceof Error ? reason.message : 'Não foi possível vincular o produto Bling.');
+    } finally {
+      setBlingLinking(false);
+    }
+  };
+
+  const removeBlingLink = async (product: Product) => {
+    if (blingLinking || !window.confirm(`Remover o vínculo Bling de “${product.name}”? O produto local será preservado.`)) return;
+    setBlingLinking(true);
+    setError('');
+    try {
+      await unlinkProductFromBling(product.id);
+      setBlingLinks((current) => {
+        const next = { ...current };
+        delete next[product.id];
+        return next;
+      });
+      setFeedback('Vínculo Bling removido.');
+      setOpenMenuId(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Não foi possível remover o vínculo Bling.');
+    } finally {
+      setBlingLinking(false);
+    }
+  };
+
   return (
     <section className="max-w-5xl space-y-5" aria-labelledby="products-settings-title">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -262,11 +341,16 @@ export const ProductsSettings: React.FC = () => {
               <div className="p-4">
                 <h3 className="truncate text-sm font-bold text-zinc-100" title={product.name}>{product.name}</h3>
                 <p className="mt-1 text-base font-extrabold text-amber-300">{formatBrlPrice(product.priceCents)}</p>
+                {blingLinks[product.id] && <p className="mt-2 flex items-center gap-1.5 text-xs text-sky-300" title={`Produto Bling ${blingLinks[product.id]!.blingProductId}`}><Link2 className="h-3.5 w-3.5" /> Bling #{blingLinks[product.id]!.blingProductId}</p>}
                 {isAdmin && <div className="mt-4 flex items-center justify-between gap-2 border-t border-zinc-800 pt-3">
                   <button type="button" onClick={() => openEditor(product)} className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400/20 px-3 py-2 text-xs font-bold text-amber-300 hover:bg-amber-400/10"><PencilLine className="h-3.5 w-3.5" /> Editar</button>
                   <div className="relative">
                     <button type="button" aria-label={`Ações de ${product.name}`} aria-expanded={openMenuId === product.id} onClick={() => setOpenMenuId((current) => current === product.id ? null : product.id)} className="rounded-lg p-2 text-zinc-400 hover:bg-white/5 hover:text-zinc-100"><MoreVertical className="h-4 w-4" /></button>
-                    {openMenuId === product.id && <div className="absolute right-0 top-full z-10 mt-1 min-w-36 rounded-lg border border-zinc-700 bg-[#20292f] p-1 shadow-xl"><button type="button" onClick={() => { setArchiveTarget(product); setOpenMenuId(null); }} className="w-full rounded-md px-3 py-2 text-left text-xs font-semibold text-red-300 hover:bg-red-500/10">Arquivar</button></div>}
+                     {openMenuId === product.id && <div className="absolute right-0 top-full z-10 mt-1 min-w-48 rounded-lg border border-zinc-700 bg-[#20292f] p-1 shadow-xl">
+                       <button type="button" onClick={() => openBlingLink(product)} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-semibold text-sky-300 hover:bg-sky-500/10"><RefreshCw className="h-3.5 w-3.5" /> {blingLinks[product.id] ? 'Atualizar vínculo Bling' : 'Vincular ao Bling'}</button>
+                       {blingLinks[product.id] && <button type="button" onClick={() => void removeBlingLink(product)} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-semibold text-zinc-300 hover:bg-white/5"><Unlink className="h-3.5 w-3.5" /> Remover vínculo</button>}
+                       <button type="button" onClick={() => { setArchiveTarget(product); setOpenMenuId(null); }} className="w-full rounded-md px-3 py-2 text-left text-xs font-semibold text-red-300 hover:bg-red-500/10">Arquivar</button>
+                     </div>}
                   </div>
                 </div>}
               </div>
@@ -308,6 +392,19 @@ export const ProductsSettings: React.FC = () => {
           <button type="button" disabled={archiving} onClick={() => setArchiveTarget(null)} className="rounded-lg border border-zinc-700 px-4 py-2.5 text-sm font-bold text-zinc-300 hover:bg-white/5 disabled:opacity-50">Cancelar</button>
           <button type="button" disabled={archiving} onClick={() => void confirmArchive()} className="inline-flex items-center justify-center gap-2 rounded-lg bg-red-500 px-4 py-2.5 text-sm font-extrabold text-white hover:bg-red-400 disabled:opacity-50">{archiving && <Loader2 className="h-4 w-4 animate-spin" />} Arquivar</button>
         </div>
+      </ProductDialog>}
+
+      {blingLinkTarget && <ProductDialog title={`Vincular “${blingLinkTarget.name}” ao Bling`} onClose={() => { if (!blingLinking) setBlingLinkTarget(null); }}>
+        <p className="text-sm leading-6 text-zinc-300">Escolha um produto do Bling. O vínculo atualiza apenas a referência externa e os dados de leitura; nome, valor, imagem local e snapshots de mensagens permanecem inalterados.</p>
+        <label className="relative mt-4 block">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden="true" />
+          <input value={blingSearch} onChange={(event) => setBlingSearch(event.target.value)} placeholder="Buscar no catálogo Bling..." aria-label="Buscar produto no Bling" data-dialog-autofocus className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-3 pl-10 pr-3 text-sm text-zinc-100 outline-none focus:border-amber-400" />
+        </label>
+        {blingError && <p role="alert" className="mt-3 rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{blingError}</p>}
+        {blingLoading ? <div className="flex items-center justify-center gap-2 p-8 text-sm text-zinc-400"><Loader2 className="h-5 w-5 animate-spin text-amber-400" /> Consultando Bling...</div>
+          : blingProducts.length > 0 ? <div className="mt-4 max-h-80 space-y-2 overflow-y-auto">{blingProducts.map((blingProduct) => <button key={blingProduct.id} type="button" disabled={blingLinking} onClick={() => void selectBlingProduct(blingProduct)} className="flex w-full items-start justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900/70 p-3 text-left hover:border-sky-400/50 disabled:opacity-50"><span className="min-w-0"><span className="block truncate text-sm font-bold text-zinc-100">{blingProduct.nome}</span><span className="mt-1 block text-xs text-zinc-500">ID {blingProduct.id}{blingProduct.codigo ? ` · ${blingProduct.codigo}` : ''}</span></span><span className="shrink-0 text-xs font-bold text-amber-300">{blingProduct.preco === undefined ? 'Sem preço' : formatBrlPrice(Math.round(blingProduct.preco * 100))}</span></button>)}</div>
+          : <p className="mt-5 rounded-lg border border-dashed border-zinc-800 p-6 text-center text-sm text-zinc-500">Nenhum produto Bling encontrado.</p>}
+        <div className="mt-5 flex justify-end border-t border-zinc-800 pt-4"><button type="button" disabled={blingLinking} onClick={() => setBlingLinkTarget(null)} className="rounded-lg border border-zinc-700 px-4 py-2.5 text-sm font-bold text-zinc-300 hover:bg-white/5">Cancelar</button></div>
       </ProductDialog>}
     </section>
   );

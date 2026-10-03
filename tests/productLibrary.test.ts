@@ -9,6 +9,7 @@ import { decodeProductImage, ProductImageValidationError } from '../server/src/p
 import { InMemoryProductStorage, R2ProductStorage, selectProductStorage } from '../server/src/productStorage.js';
 import { ProductMessageCard } from '../src/components/conversations/ProductMessageCard';
 import { productCaption, productSendSchema } from '../server/src/productSend.js';
+import { blingPriceToCents, toBlingProductLinkSnapshot } from '../server/src/blingProductLink.js';
 import {
   formatBrlPrice,
   formatBrlPriceInput,
@@ -74,6 +75,23 @@ test('migration modela produtos, arquivamento e snapshots tenant-safe para mensa
   assert.match(migration, /product_image_object_key_snapshot TEXT NOT NULL/);
   assert.match(migration, /FOREIGN KEY \(company_id, message_id\) REFERENCES messages\(company_id, id\)/);
   assert.match(migration, /FOREIGN KEY \(company_id, product_id\) REFERENCES products\(company_id, id\)/);
+});
+
+test('vínculo Bling usa identidade externa, preço em centavos e não altera o snapshot local', async () => {
+  const migration = await readFile(new URL('../server/migrations/023_product_bling_links.sql', import.meta.url), 'utf8');
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS product_bling_links/);
+  assert.match(migration, /PRIMARY KEY \(company_id, product_id\)/);
+  assert.match(migration, /UNIQUE \(company_id, bling_product_id\)/);
+  assert.match(migration, /FOREIGN KEY \(company_id, product_id\) REFERENCES products\(company_id, id\)/);
+  assert.equal(blingPriceToCents(180), 18000);
+  assert.equal(blingPriceToCents(undefined), null);
+  assert.throws(() => blingPriceToCents(-1), /fora do contrato/);
+  assert.deepEqual(toBlingProductLinkSnapshot({
+    id: '101', nome: 'Produto Bling QA', codigo: '', preco: 12.5, tipo: 'P', situacao: 'I', formato: 'S',
+  }), {
+    blingProductId: '101', blingName: 'Produto Bling QA', blingCode: '', blingPriceCents: 1250,
+    blingSituacao: 'I', blingFormato: 'S',
+  });
 });
 
 test('produto rejeita base64 vazio, malformado, MIME spoof e payload acima de 1 MB', () => {

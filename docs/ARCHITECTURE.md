@@ -468,7 +468,15 @@ The timeline supports image, audio, video, sticker and document message types. `
 
 ### Product library and image storage
 
-`/configuracoes?tab=products` uses its own product API and UI; it is not coupled to Quick Replies. `server/src/products.ts` derives company scope from the authenticated session, permits product reads to authenticated company users, and restricts create/update/archive to `admin`. Search is name-only and excludes archived products. Products are archived rather than hard-deleted.
+`/configuracoes?tab=products` uses its own product API and UI; it is not coupled to Quick Replies. `server/src/products.ts` derives company scope from the authenticated session, permits product reads to authenticated company users, and restricts create/update/archive and Bling linking to `admin`. Search is name-only and excludes archived products. Products are archived rather than hard-deleted.
+
+`product_bling_links` stores an explicit company-scoped mapping from a local
+product UUID to a Bling product ID, together with the last sanitized catalog
+observation. Creating or refreshing a link reads the Bling detail through the
+backend; it never accepts provider data from the browser and never overwrites
+the local name, price, image or message snapshots. The link can be removed
+without changing the local product. Image import, automatic local catalog
+updates and stock-derived availability remain separate future decisions.
 
 The product image contract accepts JPEG, PNG or WebP up to 1,000,000 decoded bytes, validates base64 plus magic bytes against the declared MIME type, and stores only an immutable object key and metadata in PostgreSQL. `ProductStorage` has two explicit drivers: `memory` for local/QA and `r2` for an explicitly configured S3-compatible Cloudflare R2 bucket. R2 requires `PRODUCT_STORAGE_DRIVER=r2` plus server-side `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` and `R2_PUBLIC_BASE_URL`; these must never be exposed through `VITE_` variables. When no driver is set, only local/QA can receive the in-memory adapter; external databases do not silently receive ephemeral storage. Explicit `r2` configuration is validated at startup and registers the product routes; incomplete configuration fails without printing credential values.
 
@@ -480,7 +488,7 @@ The product preview submits only `productId`, the existing conversation's explic
 
 The normal outbox transaction locks the client ID and catalog row, inserts a pending local message with structured `productSnapshot`, and inserts `message_product_refs` using its local UUID (not the provider ID). Failure rolls back both before transport; provider rejection retains a failed message/ref. Only failed attempts can retry, reusing their original snapshot/ref; accepted or pending attempts are deduplicated without another provider request or message-upsert publication. Reusing a product client ID for another product or transport JID is rejected. If an early webhook creates a provider row, confirmation transfers the reference and Hub metadata to the surviving local UUID transactionally before removing the pending row.
 
-After success the existing message-upsert/SSE path updates the timeline; the UI merges confirmed history as a safety fallback, not a parallel optimistic product message. `ProductMessageCard` recognizes only structured metadata, never captions, URLs, filenames or OCR. Stored name, integer price, BRL currency and immutable image key survive catalog edits, replacement images and archiving. Historical images are served through the authenticated storage route authorized by the tenant's message references. No new migration or Bling integration is involved. A real Preview provider send still requires a separately authorized human gate.
+After success the existing message-upsert/SSE path updates the timeline; the UI merges confirmed history as a safety fallback, not a parallel optimistic product message. `ProductMessageCard` recognizes only structured metadata, never captions, URLs, filenames or OCR. Stored name, integer price, BRL currency and immutable image key survive catalog edits, replacement images, archiving and Bling link refreshes. Historical images are served through the authenticated storage route authorized by the tenant's message references. A Bling link is metadata about the catalog origin, not a replacement for the local product contract. A real Preview provider send still requires a separately authorized human gate.
 
 ### Quoted messages
 
@@ -509,7 +517,7 @@ Reactions belong to the original message, not to an independent timeline row. Re
 | Notes and business data | `/api/evolution/notes`, `/notes/list`, `/business-profile` |
 | Provider ingress | `POST /webhooks/evolution` |
 | Google/contacts | `/api/google/status`, `/api/google/connect`, `/api/google/callback`, `/api/google/sync`, `/api/google/disconnect`, `/api/google/contact*`, `/api/contacts`, `/api/contact-tags` |
-| Product library (memory in local/QA; explicitly configured R2 where enabled) | `/api/products`, `/api/products/:id`, `/api/products/:id/archive`, `/api/products/storage?key=...`, `/api/evolution/messages/send-product` |
+| Product library (memory in local/QA; explicitly configured R2 where enabled) | `/api/products`, `/api/products/:id`, `/api/products/:id/archive`, `/api/products/bling-links`, `/api/products/:id/bling-link`, `/api/products/storage?key=...`, `/api/evolution/messages/send-product` |
 
 Operational routes use the authenticated server boundary. The deliberately public entry points—login, the OAuth callback and the provider webhook—use their own route-specific validation.
 

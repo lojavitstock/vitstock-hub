@@ -3,6 +3,7 @@ import pg from '../../server/node_modules/pg/lib/index.js';
 import { spawnSync } from 'node:child_process';
 
 const api = 'http://localhost:3001';
+const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 
 test('Bling isolated pool keeps Hub healthy with DB_POOL_MAX=1; replica locks serialize refresh and mixed operations', async () => {
   test.setTimeout(60000);
@@ -79,6 +80,8 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     (SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY id),'[]') FROM message_product_refs r) AS refs`)).rows[0];
   const before = await snapshot();
   const errors: string[] = []; const external: string[] = [];
+  let linkedProductId: string | null = null;
+  let createdProductId: string | null = null;
   page.on('pageerror', e => errors.push(e.message));
   page.on('request', r => { if (new URL(r.url()).hostname.endsWith('bling.com.br')) external.push(r.url()); });
   try {
@@ -107,6 +110,22 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
       if (path === 'products/101') expect(body.data.id).toBe('101');
       if (path.startsWith('products/101/stock')) expect(body.data[0]).toMatchObject({ produto: { id: '101' }, saldoFisicoTotal: 8, saldoVirtualTotal: 5 });
     }
+    const localProductResponse = await page.request.post(`${api}/api/products`, {
+      data: { name: `Bling Link QA ${Date.now()}`, priceCents: 2800, imageBase64: png, imageMimeType: 'image/png' },
+    });
+    expect(localProductResponse.status()).toBe(201);
+    linkedProductId = (await localProductResponse.json()).product.id;
+    createdProductId = linkedProductId;
+    const linkResponse = await page.request.post(`${api}/api/products/${linkedProductId}/bling-link`, { data: { blingProductId: '101' } });
+    expect(linkResponse.status()).toBe(200);
+    expect(await linkResponse.json()).toMatchObject({ link: {
+      productId: linkedProductId, blingProductId: '101', blingName: 'Produto Bling QA', blingPriceCents: 1250,
+    } });
+    expect((await (await page.request.get(`${api}/api/products/bling-links`)).json()).links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ productId: linkedProductId, blingProductId: '101' }),
+    ]));
+    expect((await page.request.delete(`${api}/api/products/${linkedProductId}/bling-link`)).status()).toBe(200);
+    linkedProductId = null;
     expect((await page.request.get(`${api}/api/integrations/bling/products?url=https://evil.example`)).status()).toBe(400);
     expect((await page.request.get(`${api}/api/integrations/bling/products?limit=101`)).status()).toBe(400);
     const oauthBefore = Number((await pool.query("SELECT requests FROM bling_request_budgets WHERE budget='oauth'")).rows[0].requests);
@@ -145,9 +164,17 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     page.once('dialog', dialog => dialog.accept());
     await page.getByRole('button', { name: 'Desconectar Bling', exact: true }).click();
     await expect(page.getByTestId('bling-status')).toHaveText('Não conectado');
+    if (createdProductId) {
+      await pool.query('DELETE FROM products WHERE id=$1', [createdProductId]);
+      createdProductId = null;
+    }
     expect(await snapshot()).toEqual(before);
     expect(external).toEqual([]); expect(errors).toEqual([]);
-  } finally { await page.request.post(`${api}/api/integrations/bling/disconnect`); await pool.end(); }
+  } finally {
+    if (linkedProductId) await page.request.delete(`${api}/api/products/${linkedProductId}/bling-link`).catch(() => undefined);
+    if (createdProductId) await pool.query('DELETE FROM products WHERE id=$1', [createdProductId]).catch(() => undefined);
+    await page.request.post(`${api}/api/integrations/bling/disconnect`); await pool.end();
+  }
 });
 
 test('Bling QA migration is additive, constrained and logically reversible without committing removal', async ({ request }) => {

@@ -556,6 +556,12 @@ saldos físicos/virtuais distintos. Não sincroniza Product Library, não import
 imagens/R2, não altera snapshots/envios e não cria pedidos ou webhooks.
 OAuth real no Preview exige revisão e autorização humana em gate separado.
 
+A integração evolui por etapas explícitas. A primeira etapa de Product Library
+permite ao ADMIN vincular um produto local a um ID de produto do Bling e
+atualizar a leitura sanitizada da origem. O vínculo não substitui nome, preço,
+imagem local ou snapshots de mensagens; importação automática de mídia e
+alteração automática do catálogo local permanecem fora deste escopo.
+
 Vitstock Hub deve permanecer uma ferramenta prática.
 
 A pergunta para uma nova funcionalidade não deve ser:
