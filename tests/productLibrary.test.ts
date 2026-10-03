@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { decodeProductImage, ProductImageValidationError } from '../server/src/productImageValidation.js';
 import { InMemoryProductStorage, R2ProductStorage, selectProductStorage } from '../server/src/productStorage.js';
 import { ProductMessageCard } from '../src/components/conversations/ProductMessageCard';
+import { productCaption, productSendSchema } from '../server/src/productSend.js';
 import {
   formatBrlPrice,
   formatBrlPriceInput,
@@ -18,6 +19,17 @@ import {
 } from '../src/utils/productLibrary';
 
 const pngBytes = Buffer.from('89504e470d0a1a0a0000000049454e44', 'hex');
+
+test('product send caption is deterministic and transport requires explicit existing identity', () => {
+  const snapshot = { productId: '10000000-0000-4000-8000-000000000001', name: 'V-Floc 500ml', priceCents: 129900,
+    currency: 'BRL' as const, imageObjectKey: 'products/tenant/product/image.png', imageMimeType: 'image/png' as const };
+  assert.equal(productCaption(snapshot), 'V-Floc 500ml\nR$ 1.299,00');
+  for (const remoteJid of ['5521999000001@s.whatsapp.net', '90360000@lid', '120363000001@g.us']) {
+    assert.equal(productSendSchema.safeParse({ productId: snapshot.productId, remoteJid, clientMessageId: 'product-client-1' }).success, true);
+  }
+  assert.equal(productSendSchema.safeParse({ productId: snapshot.productId, remoteJid: 'status@broadcast', clientMessageId: 'product-client-1' }).success, false);
+  assert.equal(productSendSchema.safeParse({ productId: snapshot.productId, number: '5521999000001', clientMessageId: 'product-client-1' }).success, false);
+});
 
 test('atalho de produto aceita nome com espaços, preserva texto e não muda o token de Quick Replies', () => {
   const value = 'Confira \\Produto amarelo depois';

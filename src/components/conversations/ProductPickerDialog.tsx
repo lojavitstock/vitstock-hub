@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { ArrowLeft, Loader2, Package, Plus, Search } from 'lucide-react';
 import type { Product } from '../../types';
 import { useProductSearch } from '../../hooks/useProductSearch';
@@ -6,16 +6,42 @@ import { useAuth } from '../../auth/AuthContext';
 import { formatBrlPrice } from '../../utils/productLibrary';
 import { ProductDialog } from '../products/ProductDialog';
 
-type ProductPickerDialogProps = { onClose: () => void; initialProduct?: Product | null; onCreateProduct: () => void };
+type ProductPickerDialogProps = {
+  onClose: () => void; initialProduct?: Product | null; onCreateProduct: () => void;
+  canSend: boolean; onSend: (productId: string, clientMessageId: string) => Promise<void>;
+};
 
-export const ProductPickerDialog: React.FC<ProductPickerDialogProps> = ({ onClose, initialProduct, onCreateProduct }) => {
+export const ProductPickerDialog: React.FC<ProductPickerDialogProps> = ({ onClose, initialProduct, onCreateProduct, canSend, onSend }) => {
   const { user } = useAuth();
   const [search, setSearch] = useState('');
   const { products, loading, error } = useProductSearch(search);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(initialProduct || null);
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState('');
+  const inFlight = useRef(false);
+  const submission = useRef<{ productId: string; clientMessageId: string } | null>(null);
+  const close = () => { if (!inFlight.current) onClose(); };
+  const submit = async () => {
+    if (!selectedProduct || !canSend || inFlight.current) return;
+    inFlight.current = true;
+    setSending(true);
+    setSendError('');
+    if (submission.current?.productId !== selectedProduct.id) {
+      submission.current = { productId: selectedProduct.id, clientMessageId: crypto.randomUUID() };
+    }
+    try {
+      await onSend(submission.current.productId, submission.current.clientMessageId);
+      onClose();
+    } catch (failure) {
+      setSendError(failure instanceof Error ? failure.message : 'Não foi possível enviar o produto.');
+    } finally {
+      inFlight.current = false;
+      setSending(false);
+    }
+  };
 
   if (selectedProduct) {
-    return <ProductDialog title="Pré-visualizar produto" onClose={onClose}>
+    return <ProductDialog title="Pré-visualizar produto" onClose={close}>
       <div className="space-y-4">
         <div className="flex aspect-square max-h-[42vh] items-center justify-center overflow-hidden rounded-xl bg-zinc-900 p-4 sm:aspect-[4/3]">
           <img src={selectedProduct.imageUrl} alt={`Imagem do produto ${selectedProduct.name}`} className="h-full w-full object-contain" />
@@ -24,12 +50,12 @@ export const ProductPickerDialog: React.FC<ProductPickerDialogProps> = ({ onClos
           <h3 className="text-base font-extrabold text-zinc-100">{selectedProduct.name}</h3>
           <p className="mt-1 text-lg font-extrabold text-amber-300">{formatBrlPrice(selectedProduct.priceCents)}</p>
         </div>
-        <p role="status" className="rounded-lg border border-amber-400/20 bg-amber-400/5 p-3 text-xs leading-5 text-amber-100">Prévia local. O envio de produtos pelo WhatsApp ainda não está conectado.</p>
+        {sendError && <p role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{sendError}</p>}
         <div className="flex flex-col-reverse gap-2 border-t border-zinc-800 pt-4 sm:flex-row sm:justify-between">
-          <button type="button" onClick={() => setSelectedProduct(null)} className="inline-flex items-center justify-center gap-2 rounded-lg border border-zinc-700 px-4 py-2.5 text-sm font-bold text-zinc-300 hover:bg-white/5"><ArrowLeft className="h-4 w-4" /> Voltar</button>
+          <button type="button" disabled={sending} onClick={() => { setSelectedProduct(null); setSendError(''); submission.current = null; }} className="inline-flex items-center justify-center gap-2 rounded-lg border border-zinc-700 px-4 py-2.5 text-sm font-bold text-zinc-300 hover:bg-white/5"><ArrowLeft className="h-4 w-4" /> Voltar</button>
           <div className="flex flex-col-reverse gap-2 sm:flex-row">
-            <button type="button" onClick={onClose} className="rounded-lg border border-zinc-700 px-4 py-2.5 text-sm font-bold text-zinc-300 hover:bg-white/5">Fechar prévia</button>
-            <button type="button" disabled title="Integração de envio será habilitada após conectar o armazenamento de produção." className="rounded-lg bg-amber-400 px-4 py-2.5 text-sm font-extrabold text-zinc-950 opacity-50">Enviar</button>
+            <button type="button" disabled={sending} onClick={close} className="rounded-lg border border-zinc-700 px-4 py-2.5 text-sm font-bold text-zinc-300 hover:bg-white/5">Fechar prévia</button>
+            <button type="button" disabled={!canSend || sending} onClick={() => void submit()} className="inline-flex items-center justify-center gap-2 rounded-lg bg-amber-400 px-4 py-2.5 text-sm font-extrabold text-zinc-950 disabled:opacity-50">{sending ? <><Loader2 className="h-4 w-4 animate-spin" /> Enviando...</> : 'Enviar'}</button>
           </div>
         </div>
       </div>
