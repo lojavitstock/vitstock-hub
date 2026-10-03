@@ -1,6 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { findProductToken } from '../src/utils/productShortcut';
+import { findQuickReplyToken, insertQuickReplyAtToken } from '../src/utils/quickReplies';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { decodeProductImage, ProductImageValidationError } from '../server/src/productImageValidation.js';
@@ -16,6 +18,20 @@ import {
 } from '../src/utils/productLibrary';
 
 const pngBytes = Buffer.from('89504e470d0a1a0a0000000049454e44', 'hex');
+
+test('atalho de produto aceita nome com espaços, preserva texto e não muda o token de Quick Replies', () => {
+  const value = 'Confira \\Produto amarelo depois';
+  const cursor = value.indexOf(' depois');
+  const token = findProductToken(value, cursor)!;
+  assert.equal(token.value, '\\Produto amarelo');
+  assert.deepEqual(insertQuickReplyAtToken(value, token, ''), { value: 'Confira  depois', cursor: 8 });
+  assert.deepEqual(findProductToken('\\', 1), { start: 0, end: 1, value: '\\' });
+  assert.equal(findProductToken('C:\\arquivo', 10), null);
+  assert.equal(findProductToken('/saudacao', 9), null);
+  assert.equal(findProductToken('\\Produto\nnova linha', 19), null);
+  assert.deepEqual(findQuickReplyToken('Olá /saudacao', 12), { start: 4, end: 12, value: '/saudaca' });
+  assert.equal(findQuickReplyToken('\\produto', 8), null);
+});
 
 test('produto valida imagens JPEG, PNG e WebP por assinatura e MIME real', () => {
   const cases = [

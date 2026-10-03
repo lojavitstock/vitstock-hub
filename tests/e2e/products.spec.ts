@@ -32,6 +32,152 @@ const uploadValidProductImage = async (page: Page) => {
   });
 };
 
+test('+ abre cadastro em nova aba e atalho de produtos preserva atendimento sem enviar', async ({ page }, testInfo) => {
+  test.skip(!email || !password, 'credenciais QA ausentes');
+  const errors: string[] = [];
+  const sends: string[] = [];
+  await login(page);
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+  page.on('request', (event) => {
+    if (event.method() !== 'GET' && /\/api\/evolution\/(?:messages|media)\//.test(event.url())) sends.push(event.url());
+  });
+  await page.getByRole('button', { name: /Abrir conversa com Ana QA/ }).first().click();
+  const composer = page.getByPlaceholder('Digite sua mensagem para o WhatsApp...');
+  await composer.fill('Rascunho preservado');
+  await page.locator('input[type="file"][multiple]').setInputFiles({ name: 'rascunho.png', mimeType: 'image/png', buffer: Buffer.from(tinyPng, 'base64') });
+  await expect(page.getByTestId('attachment-draft')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Produtos', exact: true }).click();
+  const picker = page.getByRole('dialog', { name: 'Produtos', exact: true });
+  const add = picker.getByRole('link', { name: 'Adicionar produto (nova aba)' });
+  const bounds = await add.boundingBox();
+  expect(bounds!.width).toBeGreaterThanOrEqual(44);
+  expect(bounds!.height).toBeGreaterThanOrEqual(44);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(add).toBeInViewport();
+  await picker.screenshot({ path: testInfo.outputPath('picker-mobile.png') });
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const newTabPromise = page.context().waitForEvent('page');
+  await add.click();
+  const settings = await newTabPromise;
+  settings.on('pageerror', (error) => errors.push(error.message));
+  settings.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+  await expect(settings.getByRole('dialog', { name: 'Adicionar produto' })).toBeVisible();
+  await expect(settings).toHaveURL(/\/configuracoes\?tab=products$/);
+  const name = `Atalho Produto QA ${Date.now()}`;
+  let id = '';
+  try {
+    await uploadValidProductImage(settings);
+    await settings.getByLabel('Nome *').fill(name);
+    await settings.getByLabel(/Valor/).fill('3990');
+    const saved = settings.waitForResponse((response) => new URL(response.url()).pathname === '/api/products' && response.request().method() === 'POST');
+    await settings.getByRole('button', { name: 'Salvar produto' }).click();
+    id = (await (await saved).json()).product.id;
+    await expect(settings.getByRole('status')).toContainText('Produto cadastrado.');
+    await settings.close();
+    await page.bringToFront();
+    // Headless browsers do not always emit native focus when closing a tab.
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await picker.getByLabel('Buscar produto para pré-visualizar').fill(name);
+    await expect(picker.getByRole('option', { name: new RegExp(name) })).toBeVisible();
+    await picker.getByRole('button', { name: 'Cancelar' }).click();
+    await expect(composer).toHaveValue('Rascunho preservado');
+    await expect(page.getByTestId('attachment-draft')).toHaveCount(1);
+    await composer.fill(`Confira \\${name}`);
+    const suggestions = page.getByRole('dialog', { name: 'Sugestões de produtos' });
+    const option = suggestions.getByRole('option', { name: new RegExp(name) });
+    await expect(option).toBeVisible();
+    await expect(option).toContainText('R$ 39,90');
+    await expect.poll(() => option.locator('img').evaluate((element: HTMLImageElement) => element.naturalWidth)).toBeGreaterThan(0);
+    await suggestions.screenshot({ path: testInfo.outputPath('product-suggestions.png') });
+    await composer.press('ArrowDown');
+    await composer.press('ArrowUp');
+    await composer.press('Enter');
+    const preview = page.getByRole('dialog', { name: 'Pré-visualizar produto' });
+    await expect(preview).toContainText(name);
+    await expect(preview.getByRole('button', { name: 'Enviar', exact: true })).toBeDisabled();
+    await preview.getByRole('button', { name: 'Fechar prévia' }).click();
+    await expect(composer).toHaveValue('Confira ');
+    await expect(composer).toBeFocused();
+    await composer.fill(`\\${name.toLowerCase()}`);
+    await suggestions.getByRole('option', { name: new RegExp(name) }).click();
+    await expect(preview).toBeVisible();
+    await preview.getByRole('button', { name: 'Fechar prévia' }).click();
+    await composer.fill('\\nenhum-produto-qa-xyz');
+    await expect(suggestions.getByText('Nenhum produto encontrado.')).toBeVisible();
+    await composer.press('Enter');
+    await expect(suggestions).toBeVisible();
+    await composer.press('Escape');
+    await expect(suggestions).toHaveCount(0);
+    await composer.fill('/');
+    const quick = page.getByRole('dialog', { name: 'Mensagens rápidas' });
+    await expect(quick.getByRole('option').first()).toBeVisible();
+    await composer.press('Enter');
+    await expect(quick).toHaveCount(0);
+    await expect(composer).not.toHaveValue('/');
+    await page.getByRole('button', { name: /Nota Interna/ }).click();
+    await page.getByPlaceholder('Digite uma nota interna para a equipe...').fill(`\\${name}`);
+    await expect(suggestions).toHaveCount(0);
+    expect(sends).toEqual([]);
+    expect(errors).toEqual([]);
+  } finally {
+    if (!settings.isClosed()) await settings.close();
+    if (id) await page.request.post(`${apiUrl}/api/products/${id}/archive`);
+  }
+});
+
+test('busca de produtos descarta respostas antigas, mostra erro e não envia ao pressionar Enter', async ({ page }) => {
+  test.skip(!email || !password, 'credenciais QA ausentes');
+  await login(page);
+  await page.getByRole('button', { name: /Abrir conversa com Ana QA/ }).first().click();
+  const composer = page.getByPlaceholder('Digite sua mensagem para o WhatsApp...');
+  const suggestions = page.getByRole('dialog', { name: 'Sugestões de produtos' });
+  const sends: string[] = [];
+  page.on('request', (event) => {
+    if (event.method() !== 'GET' && /\/api\/evolution\/(?:messages|media)\//.test(event.url())) sends.push(event.url());
+  });
+  const product = (name: string) => ({ id: name, name, priceCents: 500, imageUrl: `data:image/png;base64,${tinyPng}` });
+  await page.route('**/api/products?*', async (route) => {
+    const query = new URL(route.request().url()).searchParams.get('search');
+    if (query === 'antigo') await new Promise((resolve) => setTimeout(resolve, 400));
+    await route.fulfill({ status: query === 'erro' ? 503 : 200, contentType: 'application/json', headers: {
+      'access-control-allow-origin': 'http://localhost:3000', 'access-control-allow-credentials': 'true',
+    }, body: JSON.stringify(query === 'erro' ? { error: 'Busca indisponível QA.' } : { products: query === 'antigo' ? [product('Resultado antigo')] : [product('Novo A'), product('Novo B')] }) });
+  });
+  const oldRequest = page.waitForRequest((event) => new URL(event.url()).searchParams.get('search') === 'antigo');
+  await composer.fill('\\antigo');
+  await oldRequest;
+  await composer.fill('\\novo');
+  await expect(suggestions.getByRole('option', { name: /Novo A/ })).toBeVisible();
+  await expect(suggestions.getByRole('option', { name: /Resultado antigo/ })).toHaveCount(0);
+  await composer.press('ArrowDown');
+  await expect(suggestions.getByRole('option', { name: /Novo B/ })).toHaveAttribute('aria-selected', 'true');
+  await composer.press('Enter');
+  const preview = page.getByRole('dialog', { name: 'Pré-visualizar produto' });
+  await expect(preview).toContainText('Novo B');
+  await preview.getByRole('button', { name: 'Fechar prévia' }).click();
+  await composer.fill('\\erro');
+  await expect(suggestions.getByRole('alert')).toHaveText('Busca indisponível QA.');
+  await composer.press('Enter');
+  await expect(suggestions).toBeVisible();
+  await composer.press('Escape');
+  await composer.fill('C:\\arquivo');
+  await expect(suggestions).toHaveCount(0);
+  expect(sends).toEqual([]);
+});
+
+test('atendente não vê + de cadastro e action=new não abre formulário sem permissão', async ({ page }) => {
+  test.skip(!secondEmail || !secondPassword, 'credenciais QA ausentes');
+  await login(page, { email: secondEmail, password: secondPassword });
+  await page.getByRole('button', { name: /Abrir conversa com Ana QA/ }).first().click();
+  await page.getByRole('button', { name: 'Produtos', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Produtos', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Adicionar produto (nova aba)' })).toHaveCount(0);
+  await page.goto('/configuracoes?tab=products&action=new');
+  await expect(page.getByRole('heading', { name: 'Produtos', exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Adicionar produto' })).toHaveCount(0);
+});
+
 test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar e arquivar sem envio real', async ({ page }) => {
   test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
   await login(page);
