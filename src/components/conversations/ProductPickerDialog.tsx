@@ -1,36 +1,18 @@
-import React, { useEffect, useState } from 'react';
-import { ArrowLeft, Loader2, Package, Search } from 'lucide-react';
+import React, { useState } from 'react';
+import { ArrowLeft, Loader2, Package, Plus, Search } from 'lucide-react';
 import type { Product } from '../../types';
-import { fetchProducts } from '../../services/productsApi';
+import { useProductSearch } from '../../hooks/useProductSearch';
+import { useAuth } from '../../auth/AuthContext';
 import { formatBrlPrice } from '../../utils/productLibrary';
 import { ProductDialog } from '../products/ProductDialog';
 
-type ProductPickerDialogProps = { onClose: () => void };
+type ProductPickerDialogProps = { onClose: () => void; initialProduct?: Product | null };
 
-export const ProductPickerDialog: React.FC<ProductPickerDialogProps> = ({ onClose }) => {
+export const ProductPickerDialog: React.FC<ProductPickerDialogProps> = ({ onClose, initialProduct }) => {
+  const { user } = useAuth();
   const [search, setSearch] = useState('');
-  const [products, setProducts] = useState<Product[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-
-  useEffect(() => {
-    let current = true;
-    const controller = new AbortController();
-    setLoading(true);
-    setError('');
-    const timer = window.setTimeout(() => {
-      void fetchProducts(search, controller.signal)
-        .then((result) => { if (current) setProducts(result.products || []); })
-        .catch((reason) => { if (current) setError(reason instanceof Error ? reason.message : 'Não foi possível buscar produtos.'); })
-        .finally(() => { if (current) setLoading(false); });
-    }, search.trim() ? 180 : 0);
-    return () => {
-      current = false;
-      window.clearTimeout(timer);
-      controller.abort();
-    };
-  }, [search]);
+  const { products, loading, error } = useProductSearch(search);
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(initialProduct || null);
 
   if (selectedProduct) {
     return <ProductDialog title="Pré-visualizar produto" onClose={onClose}>
@@ -56,10 +38,13 @@ export const ProductPickerDialog: React.FC<ProductPickerDialogProps> = ({ onClos
 
   return <ProductDialog title="Produtos" onClose={onClose}>
     <div className="space-y-3">
-      <label className="relative block">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden="true" />
-        <input autoFocus data-dialog-autofocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar produto..." aria-label="Buscar produto para pré-visualizar" className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-3 pl-10 pr-3 text-sm text-zinc-100 outline-none focus:border-amber-400" />
-      </label>
+      <div className="flex items-center gap-2">
+        <label className="relative block min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden="true" />
+          <input autoFocus data-dialog-autofocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar produto..." aria-label="Buscar produto para pré-visualizar" className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-3 pl-10 pr-3 text-sm text-zinc-100 outline-none focus:border-amber-400" />
+        </label>
+        {user?.role === 'admin' && <a href="/configuracoes?tab=products&action=new" target="_blank" rel="noopener noreferrer" aria-label="Adicionar produto (nova aba)" title="Adicionar produto em nova aba; volte a esta aba para continuar o atendimento" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-amber-400 text-zinc-950 hover:bg-amber-300 focus:outline-none focus:ring-2 focus:ring-amber-300 focus:ring-offset-2 focus:ring-offset-zinc-900"><Plus className="h-5 w-5" aria-hidden="true" /></a>}
+      </div>
       {error && <p role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{error}</p>}
       {loading ? <div className="flex items-center justify-center gap-2 py-10 text-sm text-zinc-400"><Loader2 className="h-5 w-5 animate-spin text-amber-400" /> Buscando produtos...</div>
         : products.length ? <div role="listbox" aria-label="Produtos disponíveis" className="max-h-[55dvh] space-y-2 overflow-y-auto">

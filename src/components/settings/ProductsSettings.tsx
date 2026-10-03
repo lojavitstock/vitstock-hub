@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ImagePlus, Loader2, MoreVertical, Package, PencilLine, Plus, Search, Save } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
+import { useSearchParams } from 'react-router-dom';
 import type { Product } from '../../types';
 import { archiveProduct, createProduct, fetchProducts, updateProduct } from '../../services/productsApi';
 import { formatBrlPrice, formatBrlPriceInput, parseBrlPriceCents } from '../../utils/productLibrary';
@@ -28,6 +29,7 @@ function fileAsBase64(file: File): Promise<string> {
 export const ProductsSettings: React.FC = () => {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
+  const [searchParams, setSearchParams] = useSearchParams();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const saveInFlightRef = useRef(false);
   const archiveInFlightRef = useRef(false);
@@ -47,6 +49,14 @@ export const ProductsSettings: React.FC = () => {
   const [archiveTarget, setArchiveTarget] = useState<Product | null>(null);
   const [archiving, setArchiving] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (searchParams.get('action') !== 'new') return;
+    if (isAdmin) setShowForm(true);
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('action');
+    setSearchParams(nextParams, { replace: true });
+  }, [isAdmin, searchParams, setSearchParams]);
 
   const loadProducts = useCallback(async (query: string, signal?: AbortSignal) => {
     const result = await fetchProducts(query, signal);

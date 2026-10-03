@@ -24,7 +24,7 @@ import {
   Globe,
   Archive,
 } from 'lucide-react';
-import { Conversation, Message, QuickReply, Tag, WhatsappInstance } from '../types';
+import { Conversation, Message, Product, QuickReply, Tag, WhatsappInstance } from '../types';
 import { EvolutionApiService, type NewMessageDestination } from '../services/evolutionApi';
 import { useAuth } from '../auth/AuthContext';
 import { ConversationTagRail } from '../components/conversations/ConversationTagRail';
@@ -113,6 +113,7 @@ export const AtendimentoPage: React.FC = () => {
   const [deletingMessage, setDeletingMessage] = useState<Message | null>(null);
   const [forwardingMessage, setForwardingMessage] = useState<Message | null>(null);
   const [productPickerOpen, setProductPickerOpen] = useState(false);
+  const [previewProduct, setPreviewProduct] = useState<Product | null>(null);
   const [messageActionBusyId, setMessageActionBusyId] = useState<string | null>(null);
   // Estado para Nova mensagem; novos destinos permanecem somente no frontend até o primeiro envio.
   const [showNewChatModal, setShowNewChatModal] = useState(false);
@@ -278,6 +279,7 @@ export const AtendimentoPage: React.FC = () => {
     setDeletingMessage(null);
     setForwardingMessage(null);
     setProductPickerOpen(false);
+    setPreviewProduct(null);
     setQuickReplyOpen(false);
     setShowConversationTagMenu(false);
     clearAttachmentDrafts();
@@ -1985,7 +1987,8 @@ export const AtendimentoPage: React.FC = () => {
               onTextChange={handleComposerTextChange}
               onToggleInternalNote={handleToggleInternalNote}
               onToggleQuickReply={() => setQuickReplyOpen((open) => !open)}
-              onOpenProducts={() => { setQuickReplyOpen(false); setProductPickerOpen(true); }}
+              onOpenProducts={() => { setQuickReplyOpen(false); setPreviewProduct(null); setProductPickerOpen(true); }}
+              onPreviewProduct={(product) => { setQuickReplyOpen(false); setPreviewProduct(product); setProductPickerOpen(true); }}
               onUseQuickReply={handleQuickReplyUse}
               onAttachmentChange={handleAttachmentChange}
               onInputPaste={handleInputPaste}
@@ -2000,7 +2003,7 @@ export const AtendimentoPage: React.FC = () => {
               editingMessage={editingMessage}
               onCancelEditing={cancelEditingMessage}
             />
-            {productPickerOpen && <ProductPickerDialog onClose={() => setProductPickerOpen(false)} />}
+            {productPickerOpen && <ProductPickerDialog initialProduct={previewProduct} onClose={() => { setProductPickerOpen(false); setPreviewProduct(null); composerRef.current?.focus(); }} />}
             {deletingMessage && (
               <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 px-4" role="dialog" aria-modal="true" aria-labelledby="delete-message-title">
                 <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#20292f] p-5 shadow-2xl">
