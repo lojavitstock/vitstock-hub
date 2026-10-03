@@ -612,7 +612,9 @@ Migration `022_bling_integration.sql` adds only `bling_connections`,
 `bling_oauth_states` and `bling_request_budgets`. There is no catalog, stock or
 image persistence. Access/refresh tokens use AES-256-GCM with a separate backend
 `INTEGRATION_ENCRYPTION_KEY` (32 random bytes in base64). AAD binds ciphertext to
-provider, version, company and token kind. Google encryption was inspected but
+provider, version, company and token kind. The key must remain persistent per
+environment; replacing/losing it requires reconnecting existing companies, with
+no fallback decryption key. Google encryption was inspected but
 not reused because it currently derives its key from `SESSION_SECRET`.
 Request logging omits query strings, including OAuth code/state; integration
 errors never include provider bodies, credentials or authorization headers.
@@ -628,8 +630,16 @@ A conservative shared PostgreSQL budget serializes ALL Hub Bling calls (not
 just per company), including across replicas: at least 340 ms between requests,
 120,000/day using the UTC calendar date, and at least 3,100 ms between
 token requests (below the documented 20/minute/IP). Locks remain held through
-transport to avoid delayed-reservation bursts, using one pool connection. This
-deliberately sacrifices throughput/holds a DB connection for a bounded request.
+transport to avoid delayed-reservation bursts, using one pool connection. Spacing
+is also extended after each HTTP attempt (including failures), so a late database
+acknowledgement cannot compress actual dispatches. This deliberately sacrifices
+throughput/holds a DB connection for a bounded request.
+Bling owns a separate pool capped at one connection and closes it with Fastify.
+The Hub pool remains bounded by DB_POOL_MAX (default four, maximum eight): a
+configured integration adds at most one connection per process, not per tenant.
+This prevents slow provider calls from exhausting session/inbox/health slots,
+including DB_POOL_MAX=1. Bling requests may fail with a bounded pool/lock timeout;
+they do not block unrelated Hub requests. No pool is created if Bling is disabled.
 Other apps/accounts sharing an upstream account or egress IP are outside Hub
 coordination; 429 remains authoritative. Retry-After cooldown is persisted.
 GET retries are limited to two for network/5xx/429 (backoff+jitter); waits over

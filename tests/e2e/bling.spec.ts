@@ -1,7 +1,74 @@
 import { expect, request, test } from '@playwright/test';
 import pg from '../../server/node_modules/pg/lib/index.js';
+import { spawnSync } from 'node:child_process';
 
 const api = 'http://localhost:3001';
+
+test('Bling isolated pool keeps Hub healthy with DB_POOL_MAX=1; replica locks serialize refresh and mixed operations', async () => {
+  test.setTimeout(60000);
+  const child = spawnSync(process.execPath, ['--import', './server/node_modules/tsx/dist/loader.mjs', '--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { createQaEnv } from './scripts/qa-env.mjs';
+    Object.assign(process.env, createQaEnv(), { DB_POOL_MAX:'1', DB_CONNECTION_TIMEOUT_MS:'8000' });
+    const { db } = await import('./server/src/db.ts');
+    const { PgBlingStore, stateHash } = await import('./server/src/blingStore.ts');
+    const { integrationCipher } = await import('./server/src/blingEncryption.ts');
+    const { BlingApiClient } = await import('./server/src/blingClient.ts');
+    const { TOKEN_URL, BlingError } = await import('./server/src/blingContract.ts');
+    const cipher = integrationCipher(process.env.INTEGRATION_ENCRYPTION_KEY);
+    const first = new PgBlingStore(cipher), second = new PgBlingStore(cipher);
+    const users = (await db.query("SELECT DISTINCT ON (company_id) id,company_id FROM users WHERE role='admin' ORDER BY company_id,id")).rows;
+    assert.ok(users.length >= 2); const a=users[0], b=users[1];
+    const token = {access_token:'qa.pool.signature',refresh_token:'qa-local-rotation',token_type:'Bearer',expires_in:21600};
+    let refreshes=0, failGet=false, unauthorized=false; const calls=[];
+    const transport = async (url, init) => {
+      calls.push({url,time:performance.now()});
+      if (url === TOKEN_URL) { refreshes++; return Response.json({...token, refresh_token:'qa-local-rotation-'+refreshes}); }
+      if (unauthorized) { unauthorized=false; return Response.json({}, {status:401}); }
+      return Response.json({data:[]}, {status: failGet ? 403 : 200});
+    };
+    const credentials={clientId:'qa-local-client',clientSecret:'qa-local-secret',redirectUri:'http://localhost:3001/api/integrations/bling/callback'};
+    const clients=[new BlingApiClient(first,credentials,transport),new BlingApiClient(second,credentials,transport)];
+    try {
+      let enter; const entered=new Promise(r=>enter=r);
+      const providerWait=first.locked(a.company_id,async()=>{enter();await new Promise(r=>setTimeout(r,4500));});
+      await entered; const start=performance.now(); await db.query('SELECT 1');
+      assert.ok(performance.now()-start < 3000, 'Hub health slot must remain available during provider wait');
+      await providerWait;
+      await first.locked(a.company_id,s=>s.save(token));
+      await db.query("UPDATE bling_connections SET access_token_expires_at=now()-interval '1 second' WHERE company_id=$1",[a.company_id]);
+      const before=refreshes;
+      await Promise.all(Array.from({length:10},(_,i)=>clients[i%2].read(a.company_id,'products',new URLSearchParams())));
+      assert.equal(refreshes-before,1,'two replicas must refresh exactly once');
+      unauthorized=true; await clients[1].read(a.company_id,'products',new URLSearchParams());
+      await db.query("UPDATE bling_connections SET access_token_expires_at=now()-interval '1 second' WHERE company_id=$1",[a.company_id]);
+      failGet=true; await assert.rejects(clients[0].read(a.company_id,'products',new URLSearchParams()), e=>e instanceof BlingError && e.statusCode===403);
+      const persisted=await second.locked(a.company_id,s=>s.get()); assert.equal(persisted.refresh,'qa-local-rotation-'+refreshes); failGet=false;
+      const state=await second.createState(b.company_id,b.id);
+      assert.equal(await first.consumeState(state,a.company_id,a.id),false);
+      assert.equal(await first.consumeState(state,b.company_id,a.id),false);
+      assert.equal(await first.consumeState(state,b.company_id,b.id),true);
+      assert.equal(await second.consumeState(state,b.company_id,b.id),false);
+      await Promise.all([
+        clients[0].read(a.company_id,'products',new URLSearchParams()),
+        clients[1].connect(b.company_id,'qa-local-code',stateHash(state)),
+      ]);
+      await Promise.all([
+        first.locked(b.company_id,s=>s.remove()),
+        clients[1].read(a.company_id,'products',new URLSearchParams()),
+      ]);
+      const oauth=calls.filter(v=>v.url===TOKEN_URL);
+      for(let i=1;i<oauth.length;i++) assert.ok(oauth[i].time-oauth[i-1].time>=3000,'OAuth window must stay below 20/minute');
+      for(let i=3;i<calls.length;i++) assert.ok(calls[i].time-calls[i-3].time>=1000,'at most three Hub calls in any second');
+      console.log('POOL_ISOLATION_AND_REPLICA_LOCKS_OK');
+    } finally {
+      for(const user of [a,b]) await first.locked(user.company_id,s=>s.remove());
+      await first.close(); await second.close(); await db.end();
+    }
+  `], { encoding:'utf8', timeout:55000 });
+  expect(child.status, 'isolated PostgreSQL concurrency diagnostic must complete without deadlock').toBe(0);
+  expect(child.stdout).toContain('POOL_ISOLATION_AND_REPLICA_LOCKS_OK');
+});
 test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use state and immutable Product Library', async ({ page }, testInfo) => {
   test.setTimeout(90000);
   const marker = await page.request.get(`${api}/api/qa/ready`);

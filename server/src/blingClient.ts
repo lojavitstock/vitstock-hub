@@ -44,13 +44,22 @@ export class BlingApiClient {
     try { return await response.json(); }
     catch { throw new BlingError(502, 'Resposta do Bling inválida'); }
   }
+  private async reservedRequest(session: BlingSession, kind: 'api' | 'oauth', url: string, init: RequestInit) {
+    try { return await this.request(url, init); }
+    finally {
+      // A reservation can be acknowledged late by PostgreSQL. Anchor the next
+      // slot AFTER transport too, while retaining the global row lock, so that
+      // delayed dispatch never compresses the API/OAuth windows.
+      await session.cooldown('api', 340);
+      if (kind === 'oauth') await session.cooldown('oauth', 3100);
+    }
+  }
   private async token(session: BlingSession, grant: 'authorization_code' | 'refresh_token', value: string): Promise<Tokens> {
     await session.budget('oauth');
-    const response = await this.request(TOKEN_URL, { method: 'POST', headers: {
+    const response = await this.reservedRequest(session, 'oauth', TOKEN_URL, { method: 'POST', headers: {
       Authorization: `Basic ${Buffer.from(`${this.credentials.clientId}:${this.credentials.clientSecret}`).toString('base64')}`,
       'Content-Type': 'application/x-www-form-urlencoded', 'enable-jwt': '1', Accept: 'application/json',
-    }, body: new URLSearchParams({ grant_type: grant, [grant === 'authorization_code' ? 'code' : 'refresh_token']: value,
-      ...(grant === 'authorization_code' ? { redirect_uri: this.credentials.redirectUri } : {}) }).toString() });
+    }, body: new URLSearchParams({ grant_type: grant, [grant === 'authorization_code' ? 'code' : 'refresh_token']: value }).toString() });
     // No POST retry: ambiguous token rotation must not replay a refresh/code.
     if (!response.ok) {
       if (response.status === 429) {
@@ -90,10 +99,11 @@ export class BlingApiClient {
       if (connection.expires <= this.now() + 60000) await refresh();
       let retries = 0;
       while (true) {
+        // Budget/lock failures are not provider network failures and are not retried.
         await session.budget('api');
         let response: Response;
         try {
-          response = await this.request(`${API_BASE}${paths[resource]}?${query}`, {
+          response = await this.reservedRequest(session, 'api', `${API_BASE}${paths[resource]}?${query}`, {
             method: 'GET', headers: { Authorization: `Bearer ${access}`, 'enable-jwt': '1', Accept: 'application/json' },
           });
         } catch (error) {

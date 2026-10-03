@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
-import type { PoolClient } from 'pg';
-import { db } from './db.js';
+import type { Pool, PoolClient } from 'pg';
+import { createDatabasePool } from './db.js';
 import { integrationCipher } from './blingEncryption.js';
 import { BlingError, type Tokens } from './blingContract.js';
 
@@ -15,21 +15,26 @@ export interface BlingSession {
   cooldown(kind: 'api' | 'oauth', ms: number): Promise<void>;
 }
 export interface BlingStore {
+  close?(): Promise<void>;
   status(company: string): Promise<{ connected: boolean; connectedAt: string | null }>;
   createState(company: string, user: string): Promise<string>;
   consumeState(state: string, company: string, user: string): Promise<boolean>;
   locked<T>(company: string, action: (session: BlingSession) => Promise<T>): Promise<T>;
 }
 export class PgBlingStore implements BlingStore {
-  constructor(private cipher: ReturnType<typeof integrationCipher>, private sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))) {}
+  // A provider stall must not occupy the Hub pool used by sessions/inbox/health.
+  // One separate connection bounds integration pressure; PostgreSQL locks still
+  // coordinate company refresh and global budgets across every replica.
+  constructor(private cipher: ReturnType<typeof integrationCipher>, private sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms)), private pool: Pool = createDatabasePool(1)) {}
+  async close() { await this.pool.end(); }
   async status(company: string) {
-    const result = await db.query('SELECT connected_at FROM bling_connections WHERE company_id = $1', [company]);
+    const result = await this.pool.query('SELECT connected_at FROM bling_connections WHERE company_id = $1', [company]);
     return { connected: !!result.rows[0], connectedAt: result.rows[0]?.connected_at.toISOString() ?? null };
   }
   async createState(company: string, user: string) {
     const state = randomBytes(32).toString('base64url');
     // INSERT and invalidation are atomic and company-locked below (no nested pool query).
-    const client = await db.connect();
+    const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
       await this.lock(client, company);
@@ -43,7 +48,7 @@ export class PgBlingStore implements BlingStore {
     return state;
   }
   async consumeState(state: string, company: string, user: string) {
-    const result = await db.query(`UPDATE bling_oauth_states SET used_at = now()
+    const result = await this.pool.query(`UPDATE bling_oauth_states SET used_at = now()
       WHERE state_hash = $1 AND company_id = $2 AND user_id = $3 AND used_at IS NULL AND expires_at > now()
       RETURNING state_hash`, [stateHash(state), company, user]);
     return result.rows.length === 1;
@@ -53,7 +58,7 @@ export class PgBlingStore implements BlingStore {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`bling:${company}`]);
   }
   async locked<T>(company: string, action: (session: BlingSession) => Promise<T>): Promise<T> {
-    const client = await db.connect();
+    const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
       await this.lock(client, company);

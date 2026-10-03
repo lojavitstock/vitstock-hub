@@ -50,7 +50,8 @@ const configSchema = z.object({
   GOOGLE_REDIRECT_URI: z.string().url().optional(),
   BLING_CLIENT_ID: z.string().optional(),
   BLING_CLIENT_SECRET: z.string().optional(),
-  BLING_REDIRECT_URI: z.string().url().optional(),
+  // Optional integration validation belongs to runtimeBling(), not app startup.
+  BLING_REDIRECT_URI: z.string().optional(),
   INTEGRATION_ENCRYPTION_KEY: z.string().optional(),
 });
 

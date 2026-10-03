@@ -509,7 +509,14 @@ revisão/autorização separada: `BLING_CLIENT_ID`, `BLING_CLIENT_SECRET`,
 seguro, não no Git. Perder/trocar a chave exige reconectar os tenants existentes.
 Callback cadastrado no app Bling deve corresponder ao env, terminar em
 `/api/integrations/bling/callback` e usar HTTPS fora de QA. Não copiar credenciais
-Production para Preview. Envs incompletos/chave inválida desabilitam a conexão.
+Production para Preview. Envs incompletos/chave inválida/callback inválido
+desabilitam a conexão sem impedir o backend de iniciar. Preserve a mesma chave
+por ambiente durante redeploys; não gere uma nova chave a cada deployment.
+O pool Bling acrescenta no máximo uma conexão por processo ao pool Hub existente
+(default quatro); considerar esse total e deploys sobrepostos no limite Railway.
+Falha da troca de token mantém state consumido: iniciar um novo Conectar.
+Token POST usa apenas grant_type/code ou grant_type/refresh_token; redirect_uri
+é compatível no authorize, mas o Bling usa o callback cadastrado no aplicativo.
 
 Migration `022_bling_integration.sql` é aditiva (três tabelas da integração),
 sem alteração de produtos/contatos/mensagens. Validar somente pelo harness QA

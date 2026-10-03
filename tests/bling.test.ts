@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { integrationCipher } from '../server/src/blingEncryption.js';
 import { API_BASE, TOKEN_URL, AUTHORIZATION_URL, pagination, productListModel, productDetailModel, warehouseModel, stockModel, parseContract, BlingError } from '../server/src/blingContract.js';
 import { BlingApiClient, retryAfterMs, type BlingTransport } from '../server/src/blingClient.js';
@@ -54,6 +55,9 @@ test('Bling encryption: independent key, randomized authenticated ciphertext and
   assert.throws(() => cipher.decrypt(encrypted, 'B', 'access')); assert.throws(() => cipher.decrypt(encrypted, 'A', 'refresh'));
   assert.throws(() => cipher.decrypt(encrypted.slice(0, -4) + 'bad', 'A', 'access'));
   assert.throws(() => integrationCipher('SESSION_SECRET'));
+  assert.throws(() => integrationCipher(randomBytes(31).toString('base64')));
+  assert.throws(() => integrationCipher(randomBytes(32).toString('base64')+'\n'));
+  assert.throws(() => integrationCipher(randomBytes(32).toString('base64')).decrypt(encrypted, 'A', 'access'), /reconecte/);
 });
 test('Bling official destination, JWT headers, GET only and safe parameters', async () => {
   const { read, client } = setup(async (url, init) => {
@@ -88,6 +92,21 @@ test('Bling near-expiry refreshes before GET', async () => {
   const { read, store } = setup(async url => url === TOKEN_URL ? (refreshes++, json(tokens)) : json({ data: [] }));
   store.rows.get('A')!.expires = Date.now() + 59000;
   await read(); assert.equal(refreshes, 1);
+});
+
+test('Bling authorization-code exchange sends only the documented body fields', async () => {
+  const store = new MemoryStore();
+  const state = await store.createState('A', 'user');
+  await store.consumeState(state, 'A', 'user');
+  let calls = 0;
+  const client = new BlingApiClient(store, credentials, async (url, init) => {
+    calls++; assert.equal(url, TOKEN_URL);
+    assert.deepEqual(Object.fromEntries(new URLSearchParams(String(init.body))), { grant_type: 'authorization_code', code: 'fake-code' });
+    assert.equal(new Headers(init.headers).get('enable-jwt'), '1');
+    assert.equal(new Headers(init.headers).get('Authorization'), `Basic ${Buffer.from('fake-client:secret-not-loggable').toString('base64')}`);
+    return json(tokens);
+  });
+  await client.connect('A', 'fake-code', state); assert.equal(calls, 1);
 });
 test('Bling 401 refresh once then retry, repeated 401 fails without loop', async () => {
   for (const always401 of [false, true]) {
@@ -131,6 +150,8 @@ test('Bling timeout, including delayed body, is bounded without leaking response
   await assert.rejects(read(), /tempo/);
   const slow = setup(async () => new Response(new ReadableStream({ start() {} })), false, 5);
   await assert.rejects(slow.read(), /tempo/);
+  const oversized = setup(async () => new Response('x'.repeat(5*1024*1024+1)), false, 1000);
+  await assert.rejects(oversized.read(), /tempo/);
 });
 test('Bling invalid JSON and upstream model errors sanitized without retries', async () => {
   let calls = 0; const { read } = setup(async () => { calls++; return new Response('private-token'); });
@@ -211,7 +232,7 @@ test('Bling PostgreSQL budgets: joint reservations, hard daily limit, cooldown, 
     if (text.includes('requests=CASE')) reservations.push([args[0],args[1]]);
     return { rows: [] };
   } }));
-  const store = new PgBlingStore(cipher, async ms => { sleeps.push(ms); });
+  const store = new PgBlingStore(cipher, async ms => { sleeps.push(ms); }, db);
   await store.locked('A', async session => { await session.budget('oauth'); await session.save(tokens); });
   assert.deepEqual(reservations, [['api',340],['oauth',3100]]); assert.deepEqual(sleeps, [250]);
   assert.ok(!JSON.stringify(row).includes(tokens.refresh_token)); assert.equal(cipher.decrypt(row.refresh_token_encrypted, 'A', 'refresh'), tokens.refresh_token);
@@ -229,4 +250,74 @@ test('Bling callback request logging never includes query code/state or headers'
   const { safeRequestLog } = await import('../server/src/app.js');
   const value = safeRequestLog({ method: 'GET', id: 'test', url: '/api/integrations/bling/callback?code=PRIVATE_CODE&state=PRIVATE_STATE', headers: { authorization: 'PRIVATE_AUTH' } } as any);
   assert.equal(value.url, '/api/integrations/bling/callback'); assert.doesNotMatch(JSON.stringify(value), /PRIVATE/);
+});
+
+test('Bling delayed PostgreSQL budget acknowledgement cannot compress the dispatch window', async () => {
+  const { PgBlingStore } = await import('../server/src/blingStore.js');
+  const cipher = integrationCipher(randomBytes(32).toString('base64'));
+  let nextAt = 0, delayed = false; const starts: number[] = [];
+  const pool = { async connect() { return { release() {}, async query(sql: string, args: any[] = []) {
+    if (sql.startsWith('SELECT * FROM bling_connections')) return { rows: [{
+      access_token_encrypted: cipher.encrypt('qa.access.signature', 'A', 'access'),
+      refresh_token_encrypted: cipher.encrypt('qa-refresh', 'A', 'refresh'),
+      access_token_expires_at: new Date(Date.now()+3600000), connected_at: new Date(),
+    }] };
+    if (sql.startsWith('SELECT *, extract')) return { rows: [{ wait_ms: nextAt-Date.now(), same_day:true, requests:0 }] };
+    if (sql.includes('requests=CASE')) {
+      nextAt=Date.now()+args[1];
+      // PostgreSQL has applied the reservation, but its acknowledgement is late.
+      if (!delayed) { delayed=true; await new Promise(r=>setTimeout(r,700)); }
+    }
+    if (sql.includes('GREATEST(next_at')) nextAt=Math.max(nextAt,Date.now()+args[1]);
+    return { rows:[] };
+  } }; } };
+  const store = new PgBlingStore(cipher, undefined, pool as any);
+  const client = new BlingApiClient(store, credentials, async () => { starts.push(performance.now()); return json({ data:[] }); });
+  for(let i=0;i<4;i++) await client.read('A','products',new URLSearchParams());
+  assert.ok(starts[3]!-starts[0]! >= 1000, 'four dispatches must not fit in one second despite a late DB acknowledgement');
+});
+
+test('Bling optional configuration never prevents full backend startup', () => {
+  const complete = { BLING_CLIENT_ID: 'qa-local-bling-client', BLING_CLIENT_SECRET: 'qa-local-bling-secret',
+    BLING_REDIRECT_URI: 'https://api.example.test/api/integrations/bling/callback', INTEGRATION_ENCRYPTION_KEY: randomBytes(32).toString('base64') };
+  const empty = Object.fromEntries(Object.keys(complete).map(key => [key, '']));
+  const scenarios = [empty, { ...empty, BLING_CLIENT_ID: complete.BLING_CLIENT_ID },
+    { ...empty, BLING_CLIENT_ID: complete.BLING_CLIENT_ID, BLING_CLIENT_SECRET: complete.BLING_CLIENT_SECRET },
+    { ...complete, INTEGRATION_ENCRYPTION_KEY: 'invalid' }, { ...complete, BLING_REDIRECT_URI: 'not-a-url' }, complete];
+  for (const [index, bling] of scenarios.entries()) {
+    const child = spawnSync(process.execPath, ['--import', './server/node_modules/tsx/dist/loader.mjs', '--input-type=module', '-e', `
+      import { createQaEnv } from './scripts/qa-env.mjs';
+      Object.assign(process.env, createQaEnv(), { NODE_ENV:'test', QA_MODE:'false', PRODUCT_STORAGE_DRIVER:'memory' }, ${JSON.stringify(bling)});
+      const { runtimeBling } = await import('./server/src/bling.ts');
+      const dependencies = runtimeBling(); const configured = !!dependencies;
+      await dependencies?.store.close?.();
+      const { createApp } = await import('./server/src/app.ts');
+      const app = await createApp(); await app.ready(); await app.close();
+      const { db } = await import('./server/src/db.ts'); await db.end();
+      console.log(JSON.stringify({ started:true, configured }));
+    `], { encoding:'utf8', timeout:20000 });
+    assert.equal(child.status, 0, `configuration scenario ${index} must start`);
+    assert.match(child.stdout, new RegExp(`"started":true,"configured":${index === scenarios.length-1}`));
+  }
+});
+
+test('Bling actual Fastify logging strips callback query, headers, body and response cookie', () => {
+  const child = spawnSync(process.execPath, ['--import', './server/node_modules/tsx/dist/loader.mjs', '--input-type=module', '-e', `
+    import { createQaEnv } from './scripts/qa-env.mjs';
+    Object.assign(process.env, createQaEnv(), { NODE_ENV:'test', QA_MODE:'false', PRODUCT_STORAGE_DRIVER:'memory', BLING_CLIENT_ID:'', BLING_CLIENT_SECRET:'', BLING_REDIRECT_URI:'', INTEGRATION_ENCRYPTION_KEY:'' });
+    const { db } = await import('./server/src/db.ts');
+    const { hashPassword } = await import('./server/src/security/password.ts');
+    const password = 'PRIVATE_PASSWORD'; const hash = await hashPassword(password);
+    db.query = async sql => ({ rows: /FROM users|FROM sessions/.test(sql) ? [{ id:'u',company_id:'A',company_name:'QA',name:'QA',email:'qa@example.test',role:'admin',password_hash:hash,must_change_password:false }] : [] });
+    const { createApp } = await import('./server/src/app.ts'); const app = await createApp();
+    const login = await app.inject({ method:'POST', url:'/api/auth/login', headers:{authorization:'PRIVATE_AUTHORIZATION'}, payload:{email:'qa@example.test',password,client_secret:'PRIVATE_CLIENT_SECRET',access_token:'PRIVATE_ACCESS_TOKEN',refresh_token:'PRIVATE_REFRESH_TOKEN'} });
+    if (login.statusCode !== 200 || !login.headers['set-cookie']) throw new Error('login fixture failed');
+    const cookie = login.headers['set-cookie'].split(';')[0];
+    await app.inject({ method:'GET', url:'/api/integrations/bling/callback?code=PRIVATE_CODE&state=PRIVATE_STATE', headers:{cookie,authorization:'PRIVATE_AUTHORIZATION'} });
+    await app.close(); await db.end(); console.log('REAL_LOGGER_GATE_OK');
+  `], { encoding:'utf8', timeout:20000 });
+  assert.equal(child.status, 0, 'real logger fixture must complete');
+  assert.match(child.stdout, /REAL_LOGGER_GATE_OK/);
+  assert.match(child.stdout, /incoming request/); assert.match(child.stdout, /request completed/);
+  assert.doesNotMatch(child.stdout, /PRIVATE_|vitstock_session=|set-cookie/i);
 });

@@ -25,6 +25,7 @@ export function runtimeBling(): BlingDependencies | undefined {
   } catch { return undefined; }
 }
 export async function registerBlingRoutes(app: FastifyInstance, dependencies = runtimeBling()) {
+  app.addHook('onClose', async () => { await dependencies?.store.close?.(); });
   const base = '/api/integrations/bling';
   const redirect = (result: 'connected' | 'error') => `${config.FRONTEND_URL}/configuracoes?tab=integracoes&bling=${result}`;
   const safe = async (reply: FastifyReply, action: () => Promise<unknown>) => {
