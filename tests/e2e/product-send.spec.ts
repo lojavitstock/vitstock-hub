@@ -57,7 +57,7 @@ async function providerSends(page: Page) {
   return (await (await page.request.get(`${api}/api/qa/evolution/sends`)).json()).sends as Array<Record<string, unknown>>;
 }
 
-test('produto pela UI: loading/double click, envio único, FK local, cartão e snapshot histórico', async ({ page }, testInfo) => {
+test('produto pela UI: loading/double Enter, envio único, FK local, cartão e snapshot histórico', async ({ page }, testInfo) => {
   await login(page);
   const token = Date.now().toString().slice(-7);
   const name = `Produto Envio QA ${token}`;
@@ -88,14 +88,22 @@ test('produto pela UI: loading/double click, envio único, FK local, cartão e s
     await gate;
     await route.continue();
   });
-  await preview.getByRole('button', { name: 'Enviar', exact: true }).evaluate((button: HTMLButtonElement) => { button.click(); button.click(); });
+  // The preview contains no editable fields; default Enter shares the button's submit.
+  await expect(preview.locator('input, textarea, select, [contenteditable="true"]')).toHaveCount(0);
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Enter');
   await expect(preview.getByRole('button', { name: 'Enviando...' })).toBeDisabled();
   await expect.poll(() => requests).toBe(1);
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Escape');
+  await expect(preview).toBeVisible();
+  expect(requests).toBe(1);
   release();
   await expect(preview).toHaveCount(0);
   const card = page.getByRole('article', { name: `Produto ${name}` });
   await expect(card).toHaveCount(1);
   await expect(card).toContainText('R$ 28,00');
+  await expect(card.locator('xpath=ancestor::*[@data-message-id]').locator('p.whitespace-pre-wrap')).toHaveCount(0);
   await expect(composer).toHaveValue('Rascunho que não é a legenda');
   const refs = await readReferences(page, clientMessageId);
   expect(refs).toHaveLength(1);
@@ -111,6 +119,7 @@ test('produto pela UI: loading/double click, envio único, FK local, cartão e s
   await openConversation(page, contactName);
   await expect(card).toHaveCount(1);
   await expect(card).toContainText('R$ 28,00');
+  await expect(card.locator('xpath=ancestor::*[@data-message-id]').locator('p.whitespace-pre-wrap')).toHaveCount(0);
   await expect.poll(() => card.locator('img').evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
   const after = await readReferences(page, clientMessageId);
   expect(after[0].metadata.productSnapshot).toEqual(refs[0].metadata.productSnapshot);
@@ -134,9 +143,21 @@ test('produto: provider failure mantém preview/erro, registro failed e retry id
   const preview = page.getByRole('dialog', { name: 'Pré-visualizar produto' });
   const ids: string[] = [];
   page.on('request', (event) => { if (event.url().endsWith('/messages/send-product')) ids.push(event.postDataJSON().clientMessageId); });
+  await expect(preview.locator('[data-dialog-autofocus]')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(preview).toHaveCount(0);
+  const composer = page.getByPlaceholder('Digite sua mensagem para o WhatsApp...');
+  await composer.fill('');
+  await composer.press('Enter');
+  expect(ids).toHaveLength(0); // A valid, closed preview must not retain an Enter listener.
+  await composer.fill(`\\${name}`);
+  await expect(page.getByRole('listbox', { name: 'Opções de produtos' }).getByRole('option', { name: new RegExp(name) })).toBeVisible();
+  await composer.press('Enter');
+  await expect(preview.locator('[data-dialog-autofocus]')).toBeFocused();
+  expect(ids).toHaveLength(0); // Selecting a shortcut previews; it does not send yet.
   await page.request.post(`${api}/api/qa/evolution/media-scenario`, { data: { scenario: 'reject' } });
   try {
-    await preview.getByRole('button', { name: 'Enviar', exact: true }).click();
+    await page.keyboard.press('Enter');
     await expect(preview.getByRole('alert')).toContainText('Evolution API rejeitou');
     await expect(preview).toBeVisible();
     const refs = await readReferences(page, ids[0]);
@@ -145,7 +166,7 @@ test('produto: provider failure mantém preview/erro, registro failed e retry id
   } finally {
     await page.request.post(`${api}/api/qa/evolution/media-scenario`, { data: { scenario: 'success' } });
   }
-  await preview.getByRole('button', { name: 'Enviar', exact: true }).click();
+  await preview.getByRole('button', { name: 'Enviar', exact: true }).evaluate((button: HTMLButtonElement) => { button.click(); button.click(); });
   await expect(preview).toHaveCount(0);
   expect(ids).toHaveLength(2); expect(ids[1]).toBe(ids[0]);
   const refs = await readReferences(page, ids[0]); expect(refs).toHaveLength(1); expect(refs[0].status).toBe('sent');
@@ -193,4 +214,88 @@ test('produto: destinos LID e grupo exatos, dedup e autoridade de tenant', async
   expect((await page.request.post(`${api}/api/evolution/messages/send-product`, {
     data: { productId: product.id, remoteJid: `9036${token}@lid`, clientMessageId: randomUUID() },
   })).status()).toBe(404);
+});
+
+test('preview: Enter inválido não fecha/envia, Esc e controles nativos, lifecycle e atalho direto', async ({ page }) => {
+  await login(page);
+  const token = Date.now().toString().slice(-7);
+  const name = `Produto Teclado QA ${token}`;
+  const product = await createProduct(page, name);
+  let requests = 0;
+  page.on('request', (request) => { if (request.url().endsWith('/messages/send-product')) requests++; });
+  await page.goto('/atendimento');
+  await page.getByRole('button', { name: 'Nova mensagem', exact: true }).click();
+  const newMessage = page.getByRole('dialog', { name: 'Nova mensagem' });
+  await newMessage.getByRole('textbox', { name: 'Buscar nome ou digitar número' }).fill(`552197${token}`);
+  await newMessage.getByRole('button', { name: /Conversar com/ }).click();
+  const composer = page.getByPlaceholder('Digite sua mensagem para o WhatsApp...');
+  await expect(page.getByRole('button', { name: 'Anexar arquivo' })).toBeDisabled();
+  const openPicker = async () => {
+    await page.getByRole('button', { name: 'Produtos', exact: true }).click();
+    await page.getByLabel('Buscar produto para pré-visualizar').fill(name);
+    await page.getByRole('option', { name: new RegExp(name) }).click();
+  };
+  await openPicker();
+  const preview = page.getByRole('dialog', { name: 'Pré-visualizar produto' });
+  await expect(preview.locator('[data-dialog-autofocus]')).toBeFocused();
+  await expect(preview.getByRole('button', { name: 'Enviar', exact: true })).toBeDisabled();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Enter');
+  await expect(preview).toBeVisible();
+  expect(requests).toBe(0);
+  await page.keyboard.press('Escape');
+  await expect(preview).toHaveCount(0);
+  await composer.fill('');
+  await composer.press('Enter');
+  expect(requests).toBe(0);
+  await openPicker();
+  await expect(preview.locator('[data-dialog-autofocus]')).toBeFocused();
+  await preview.getByRole('button', { name: 'Voltar' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByLabel('Buscar produto para pré-visualizar')).toBeFocused();
+  await page.getByRole('option', { name: new RegExp(name) }).click();
+  await preview.getByRole('button', { name: 'Fechar prévia' }).click();
+  await expect(preview).toHaveCount(0);
+  await composer.fill(`\\${name}`);
+  await page.getByRole('listbox', { name: 'Opções de produtos' }).getByRole('option', { name: new RegExp(name) }).click();
+  await expect(preview.locator('[data-dialog-autofocus]')).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(preview).toBeVisible();
+  expect(requests).toBe(0);
+  await page.keyboard.press('Escape');
+  await expect(preview).toHaveCount(0);
+  await page.request.post(`${api}/api/products/${product.id}/archive`);
+});
+
+test('timeline: imagem comum com caption de produto, texto e reply não viram cartão', async ({ page }) => {
+  await login(page);
+  const token = Date.now().toString().slice(-7);
+  const contactName = `Timeline Caption QA ${token}`;
+  const remoteJid = `552195${token}@s.whatsapp.net`;
+  const caption = `Produto normal ${token}\nR$ 28,00`;
+  const response = await page.request.post(`${api}/api/qa/evolution/inbound`, {
+    data: { remoteJid, name: contactName, content: caption, mediaType: 'image' },
+  });
+  expect(response.status()).toBe(200);
+  const { evolutionMessageId } = await response.json();
+  await page.goto('/atendimento');
+  await openConversation(page, contactName);
+  const image = page.locator(`[data-message-id="${evolutionMessageId}"]`);
+  await expect(image.locator('img')).toBeVisible();
+  await expect(image.locator('p.whitespace-pre-wrap')).toHaveText(caption);
+  await expect(image.getByRole('article')).toHaveCount(0);
+  await image.getByRole('button', { name: 'Abrir ações da mensagem' }).click();
+  await page.getByRole('menuitem', { name: 'Responder', exact: true }).click();
+  const text = `Resposta comum QA ${token}`;
+  await page.getByPlaceholder('Digite sua mensagem para o WhatsApp...').fill(text);
+  await page.getByRole('button', { name: 'Enviar mensagem', exact: true }).click();
+  const reply = page.locator('[data-message-id]').filter({ has: page.locator('p.whitespace-pre-wrap', { hasText: text }) });
+  await expect(reply).toHaveCount(1);
+  await expect(reply.locator('p.whitespace-pre-wrap')).toHaveText(text);
+  await expect(reply.getByTitle('Ir para a mensagem citada')).toContainText(caption);
+  await expect(reply.getByRole('article')).toHaveCount(0);
+  await page.reload();
+  await openConversation(page, contactName);
+  await expect(image.locator('p.whitespace-pre-wrap')).toHaveText(caption);
+  await expect(reply.getByTitle('Ir para a mensagem citada')).toContainText(caption);
 });

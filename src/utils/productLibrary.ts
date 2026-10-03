@@ -44,3 +44,9 @@ export function productStorageImageUrl(imageObjectKey: string, apiBaseUrl = 'htt
   url.searchParams.set('key', imageObjectKey);
   return url.toString();
 }
+
+export function isRedundantProductCaption(content: string, snapshot: unknown): boolean {
+  if (!isProductMessageSnapshot(snapshot)) return false;
+  const caption = `${snapshot.name}\n${formatBrlPrice(snapshot.priceCents).replace(/\u00a0/g, ' ')}`;
+  return content === caption;
+}

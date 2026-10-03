@@ -33,7 +33,7 @@ import { EvolutionApiService } from '../../services/evolutionApi';
 import { ContactPhoto } from './ContactPhoto';
 import { MediaViewer } from './MediaViewer';
 import { ProductMessageCard } from './ProductMessageCard';
-import { isProductMessageSnapshot } from '../../utils/productLibrary';
+import { isProductMessageSnapshot, isRedundantProductCaption } from '../../utils/productLibrary';
 import { formatMessageDay, formatMessageTimestamp, formatOperatorLabel } from './conversationFormatters';
 import { quotedMediaLabel, quotedMessageExcerpt } from '../../utils/quotedMessage';
 import { getDocumentPresentation } from '../../utils/documentMedia';
@@ -766,7 +766,7 @@ export const MessageTimeline = React.memo<MessageTimelineProps>(({ messages, act
                   : <MediaMessageContent message={message} instanceName={instanceName} onOpenViewer={openMediaViewer} onLayoutChange={onLayoutChange} />}
                 <SpecialMessageContent message={message} contactPhone={activeConversation.isGroup ? undefined : activeConversation.contact.phone} />
                 <InteractiveMessageContent message={message} />
-                {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap"><WhatsAppFormattedText text={message.content} /></p>}
+                {!message.metadata?.contactCard && !message.metadata?.location && !message.metadata?.systemLabel && !isMediaPlaceholder(message) && message.content && !isRedundantProductCaption(message.content, productSnapshot) && !message.content.startsWith('[Imagem]') && !message.content.startsWith('[Áudio]') && !message.content.startsWith('[Vídeo]') && <p className="whitespace-pre-wrap"><WhatsAppFormattedText text={message.content} /></p>}
               </>}
               {message.metadata?.reactions?.length ? <ReactionBadges reactions={message.metadata.reactions} align={isMe ? 'right' : 'left'} /> : null}
             </div>
