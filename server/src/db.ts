@@ -11,21 +11,23 @@ const connectionTimeoutMillis = Number.isFinite(configuredConnectionTimeout)
 const isRemoteDb = !config.DATABASE_URL.includes('localhost') && !config.DATABASE_URL.includes('127.0.0.1');
 const useSsl = isProduction || isRemoteDb || config.DATABASE_URL.includes('sslmode=');
 
-export const db = new pg.Pool({
-  connectionString: config.DATABASE_URL,
-  ssl: useSsl ? { rejectUnauthorized: false } : undefined,
-  // O PostgreSQL Railway tem limite compartilhado de conexões; uma conexão
-  // por processo evita que deploys sobrepostos esgotem o limite.
-  // Permite as chamadas paralelas do inbox sem bloquear o pool em uma única conexão.
-  // Em ambientes muito restritos, DB_POOL_MAX pode reduzir esse valor.
-  max: poolMax,
-  idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis,
-});
+export function createDatabasePool(max = poolMax) {
+  const pool = new pg.Pool({
+    connectionString: config.DATABASE_URL,
+    ssl: useSsl ? { rejectUnauthorized: false } : undefined,
+    // DB_POOL_MAX continues to bound the Hub pool; Bling uses one isolated
+    // connection so provider waits cannot consume session/inbox/health slots.
+    max,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis,
+  });
+  pool.on('error', (error) => {
+    console.error('[PostgreSQL] Conexão ociosa encerrada:', error);
+  });
+  return pool;
+}
 
-db.on('error', (error) => {
-  console.error('[PostgreSQL] Conexão ociosa encerrada:', error);
-});
+export const db = createDatabasePool();
 
 export async function closeDatabase() {
   await db.end();

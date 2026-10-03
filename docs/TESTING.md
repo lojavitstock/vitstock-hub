@@ -268,6 +268,31 @@ Isso ainda não significa validação funcional final.
 
 ## 14. Referência rápida
 
+### Bling read-only foundation
+
+`tests/bling.test.ts` integra `npm test`: OAuth ADMIN/state/tenant/erros,
+criptografia autenticada com AAD, refresh e concorrência, headers JWT/Basic,
+timeout de corpo, 401/429/Retry-After/5xx/network/retries, contratos e IDs/string.
+Também cobre body OAuth estrito, inicialização do backend com env opcional
+incompleto/inválido e captura do logger Fastify real (request/response/callback).
+Confirma que confirmação tardia de reserva PostgreSQL não comprime a janela
+real de dispatch (quatro chamadas nunca cabem em um segundo).
+Transporte sempre injetado; runtime com `NODE_ENV=test` bloqueia Bling real.
+QA usa `blingQa.ts` interno (não existe base URL configurável/proxy externo).
+`dev:e2e` injeta credenciais fictícias e uma chave efêmera independente; reiniciar
+QA requer reconectar seus vínculos fictícios, pois a chave muda. Nenhum secret real.
+
+`npm run test:e2e -- tests/e2e/bling.spec.ts` testa Configurações/connect/callback/
+disconnect, ciphertext no PostgreSQL QA, state single-use/expirado, ADMIN/tenant,
+read models, dez GETs concorrentes com apenas um refresh e budget diário esgotado.
+Inclui duas instâncias PgBlingStore contra PostgreSQL real, refresh único,
+401/expiry/connect/disconnect concorrentes, rotação preservada após GET 403,
+janela de requests e disponibilidade do pool Hub com DB_POOL_MAX=1.
+Compara snapshots integrais de products/message_product_refs antes/depois, sem
+R2/provider real. Budget alterado apenas no banco QA fixo é restaurado no finally.
+Migration 022 só é aplicada pelo `dev:e2e` guardado; nunca banco remoto.
+OAuth real e dados reais são explicitamente excluídos deste gate.
+
 ```powershell
 npm test
 node tests/run-tests.mjs tests/core.test.ts

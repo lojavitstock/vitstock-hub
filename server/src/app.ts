@@ -12,12 +12,21 @@ import { registerConversationTagRoutes } from './conversationTags.js';
 import { registerQuickReplyRoutes } from './quickReplies.js';
 import { registerProductRoutes } from './products.js';
 import { selectProductStorage } from './productStorage.js';
+import { registerBlingRoutes } from './bling.js';
+
+export const safeRequestLog = (request: { method?: string; url?: string; id?: string }) => ({
+  method: request.method, url: request.url?.split('?')[0], id: request.id,
+});
 
 export async function createApp() {
   const app = Fastify({
     logger: {
       level: config.NODE_ENV === 'production' ? 'info' : 'debug',
       redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers.set-cookie'],
+      serializers: {
+        req: safeRequestLog,
+        res: (reply) => ({ statusCode: reply.statusCode }),
+      },
     },
     bodyLimit: 2 * 1024 * 1024,
   });
@@ -67,6 +76,7 @@ export async function createApp() {
 
   await registerAuthRoutes(app);
   await registerGoogleContactRoutes(app);
+  await registerBlingRoutes(app);
   await registerContactRoutes(app);
   await registerConversationTagRoutes(app);
   await registerQuickReplyRoutes(app);

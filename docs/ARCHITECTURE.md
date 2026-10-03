@@ -598,6 +598,85 @@ When a task changes message flow, Inbox state, SSE, caching, connection lifecycl
 
 If this document conflicts with the current implementation, inspect the source code, migrations and tests before making changes. Once actual behavior is confirmed, update this document so the architecture documentation remains aligned with the implementation.
 
+## 24. Bling read-only integration foundation
+
+`bling.ts` exposes authenticated, tenant-bound `/api/integrations/bling` routes.
+`blingClient.ts` calls Bling API v3 directly; MCP/ChatGPT are not runtime dependencies.
+Connect, callback and disconnect require an active ADMIN session. The callback
+requires the same user/company that started authorization. Random 256-bit state
+is hashed in PostgreSQL, expires after five minutes and is atomically marked used
+before exchanging the code. Reconnect invalidates previous states; disconnect
+removes pending states. Cookies/session must still be valid at callback time.
+
+Migration `022_bling_integration.sql` adds only `bling_connections`,
+`bling_oauth_states` and `bling_request_budgets`. There is no catalog, stock or
+image persistence. Access/refresh tokens use AES-256-GCM with a separate backend
+`INTEGRATION_ENCRYPTION_KEY` (32 random bytes in base64). AAD binds ciphertext to
+provider, version, company and token kind. The key must remain persistent per
+environment; replacing/losing it requires reconnecting existing companies, with
+no fallback decryption key. Google encryption was inspected but
+not reused because it currently derives its key from `SESSION_SECRET`.
+Request logging omits query strings, including OAuth code/state; integration
+errors never include provider bodies, credentials or authorization headers.
+
+PostgreSQL company advisory transaction locks serialize refresh/reconnect/
+disconnect across replicas. Successful token rotations and consumed request
+budgets commit even if the later provider GET fails. SQL/storage failure after
+provider rotation is not recoverable atomically across both systems: reconnect
+may be required. No OAuth POST is automatically retried. Refresh occurs within
+60 seconds of access-token expiry, or once after 401. A second 401 fails closed.
+
+A conservative shared PostgreSQL budget serializes ALL Hub Bling calls (not
+just per company), including across replicas: at least 340 ms between requests,
+120,000/day using the UTC calendar date, and at least 3,100 ms between
+token requests (below the documented 20/minute/IP). Locks remain held through
+transport to avoid delayed-reservation bursts, using one pool connection. Spacing
+is also extended after each HTTP attempt (including failures), so a late database
+acknowledgement cannot compress actual dispatches. This deliberately sacrifices
+throughput/holds a DB connection for a bounded request.
+Bling owns a separate pool capped at one connection and closes it with Fastify.
+The Hub pool remains bounded by DB_POOL_MAX (default four, maximum eight): a
+configured integration adds at most one connection per process, not per tenant.
+This prevents slow provider calls from exhausting session/inbox/health slots,
+including DB_POOL_MAX=1. Bling requests may fail with a bounded pool/lock timeout;
+they do not block unrelated Hub requests. No pool is created if Bling is disabled.
+Other apps/accounts sharing an upstream account or egress IP are outside Hub
+coordination; 429 remains authoritative. Retry-After cooldown is persisted.
+GET retries are limited to two for network/5xx/429 (backoff+jitter); waits over
+five seconds return a sanitized limit error instead of retrying too early.
+Each attempt has an eight-second timeout covering headers AND body, a 5 MiB
+body ceiling and no redirect following. Database lock wait is capped at 12 s.
+
+Read routes allow only fixed product/deposit/stock paths, explicit page/limit
+(1..10,000 / 1..100; defaults 1/50), product name/criterion/type and warehouse
+description/status filters. No arbitrary upstream URL or full-catalog scan.
+IDs normalize to strings; unsafe JSON numeric IDs fail rather than round.
+Variations retain their own IDs and explicit parent relation. Warehouse field
+`descricao` and flags are preserved. Physical/virtual totals and deposit balances
+remain separate: no recomputation, aggregation or available-stock business rule.
+Images/HTML are not imported or persisted. Product Library, R2, send-product,
+message references, historical snapshots, orders and webhooks are untouched.
+Local disconnect deletes only credentials/states; revoke authorization separately
+in Bling's authorized applications when needed.
+
+Official sources (consulted 2026-10-03):
+[applications/OAuth](https://developer.bling.com.br/aplicativos),
+[JWT](https://developer.bling.com.br/migracao-jwt),
+[limits](https://developer.bling.com.br/limites),
+[OpenAPI reference](https://developer.bling.com.br/referencia) and its linked
+[schema](https://developer.bling.com.br/build/assets/openapi-Dw6cY8yQ.json).
+Contract: `https://api.bling.com.br/Api/v3`, authorization
+`https://bling.com.br/Api/v3/oauth/authorize`, token
+`https://api.bling.com.br/Api/v3/oauth/token`, Basic app credentials + form body,
+JWT `enable-jwt: 1` on exchange/refresh/authenticated GETs. Honor `expires_in`
+(OAuth example 21,600 s); refresh lifetime is documented as 30 days; authorization
+code one minute. OpenAPI security scheme uses `bling.com.br` for token host;
+the applications guide uses `api.bling.com.br/Api/v3/oauth/token`, selected here.
+The JWT guide also contains a curl example omitting `/Api/v3`; this discrepancy
+must be checked during the separately authorized first real OAuth gate.
+Pagination OpenAPI minimum is one/default limit 100, with no declared maximum;
+Hub's 100 ceiling is defensive, not claimed as an upstream maximum.
+
 ## Evidence Used
 
 The main sources used for this document were:

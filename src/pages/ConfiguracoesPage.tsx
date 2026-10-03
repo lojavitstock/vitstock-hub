@@ -7,6 +7,7 @@ import { useAuth } from '../auth/AuthContext';
 import { mockAttendants, mockQuickReplies } from '../services/mockData';
 import { ConexoesPage } from './ConexoesPage';
 import { GoogleContactsIntegrationCard } from '../components/settings/GoogleContactsIntegrationCard';
+import { BlingIntegrationCard } from '../components/settings/BlingIntegrationCard';
 import { createQuickReply, deleteQuickReply, fetchQuickReplies, updateQuickReply } from '../services/quickRepliesApi';
 import { quickReplyShortcutError } from '../utils/quickReplies';
 import { ApplicationSettings } from '../components/settings/ApplicationSettings';
@@ -575,7 +576,7 @@ export const ConfiguracoesPage: React.FC = () => {
 
       {activeTab === 'connections' && <ConexoesPage embedded />}
 
-      {activeTab === 'integracoes' && <GoogleContactsIntegrationCard />}
+      {activeTab === 'integracoes' && <><GoogleContactsIntegrationCard /><BlingIntegrationCard /></>}
 
       {activeTab === 'departments' && (
         <div className="max-w-3xl space-y-4">
