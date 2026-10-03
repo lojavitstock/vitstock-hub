@@ -1,6 +1,6 @@
 # Vitstock Hub — Architecture
 
-> **Integration flow:** `preview` is the current integration and validation branch. After review and human functional validation, changes may be promoted to `main`. For an isolated task, use the branch explicitly indicated by that task as the implementation baseline.
+> **Integration flow:** new work starts from `origin/preview` in a dedicated `feature/*`, `fix/*` or `chore/*` branch unless the task explicitly specifies otherwise. PRs integrate work into `preview` for pre-production deployment and human validation; a separate PR from `preview` to `main` promotes Production only after technical gates, human validation and an explicit promotion decision. Development does not occur directly on either integration branch.
 >
 > When investigating implementation details, confirm behavior in the source code, migrations and tests.
 

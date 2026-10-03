@@ -54,7 +54,7 @@ Se documentação e implementação atual divergirem, não assuma automaticament
 
 Google Docs, conversas antigas, handoffs e notas externas são apenas referências históricas; não são fonte oficial para implementação.
 
-Quando uma tarefa definir explicitamente uma branch de desenvolvimento, essa branch será a baseline de implementação da tarefa. Não assuma que `main` contém o trabalho mais recente desse ciclo; a baseline pode mudar em tarefas futuras.
+Novas features, fixes e chores começam em branch própria baseada em `origin/preview`, salvo instrução explícita diferente na tarefa. Uma branch indicada para continuar trabalho existente deve ter seu estado e baseline confirmados antes de uso.
 
 ---
 
@@ -104,7 +104,8 @@ Não implemente uma solução apenas com base na descrição da Issue sem primei
 
 Nunca:
 
-* faça commit, push ou merge diretamente em `main`;
+* desenvolva ou faça commit diretamente em `preview` ou `main`;
+* faça push direto para `preview` ou `main` no fluxo normal; integrações e promoções ocorrem por PR;
 * execute force push;
 * apague branches remotas sem autorização explícita;
 * altere histórico Git compartilhado;
@@ -117,13 +118,17 @@ git status
 git branch --show-current
 ```
 
-Se já existir uma branch definida para a tarefa, utilize-a. Não crie outra branch desnecessariamente. Se nenhuma branch estiver definida, utilize uma branch descritiva, preferencialmente `codex/<tipo>-<descricao>`.
+Use `feature/<descricao>`, `fix/<descricao>` ou `chore/<descricao>` a partir de `origin/preview`, salvo tarefa explicitamente diferente. Reutilize uma branch existente somente para continuar trabalho identificado; não a use como atalho para iniciar outra tarefa.
 
-A integração com `main` exige aprovação humana.
+Publique cedo o trabalho significativo na branch própria, inclusive checkpoints de trabalho incompleto. Features e fixes significativos podem abrir Draft PR para `preview` antes da conclusão, permitindo diff visível, CI, continuidade entre computadores e revisão.
+
+O fluxo normal é `feature/*`, `fix/*` ou `chore/*` → PR → `preview` → deploy de pré-produção e validação humana → PR → `main`. Enquanto não for necessário teste humano oficial, mantenha o trabalho na branch de desenvolvimento. Integração em `preview` exige revisão e autorização; `main` representa Production e só recebe alterações de `preview` após gates técnicos, validação humana e decisão explícita de promoção. Não faça merge ou deploy automaticamente.
 
 ### Branch por Issue e baseline
 
-Para uma Issue autorizada, use uma branch isolada no formato `codex/issue-<numero>-<slug-curto>`, por exemplo `codex/issue-4-websocket-copy`. Confirme a baseline antes de criar a branch; ela pode ser `codex/perf-atendimento-inbox` neste ciclo e não deve ser presumida como `main`. Se a baseline não estiver clara, pare e peça orientação. Cada Issue deve permanecer isolada em sua própria branch e Pull Request.
+Para uma Issue autorizada, atualize os refs com `git fetch origin` e confirme a baseline antes de criar, por exemplo, `feature/issue-4-websocket-copy` ou `fix/issue-4-websocket-copy`. O padrão é `origin/preview`; exceções devem estar explícitas na tarefa. Cada Issue permanece isolada em sua branch e PR para `preview`.
+
+Não remova branches apenas por estarem antigas. A remoção local/remota exige merge confirmado, ausência de commits exclusivos, validação no estágio apropriado e nenhuma necessidade razoável de recuperação, além de autorização para exclusão. O procedimento está em `docs/RUNBOOK.md`.
 
 ---
 
@@ -165,7 +170,7 @@ Antes de executar uma ação que possa modificar dados, enviar mensagens, altera
 
 Nunca coloque credenciais em código, commits, logs, Issues, Pull Requests, documentação ou arquivos versionados.
 
-Utilize variáveis de ambiente. Arquivos `.env` reais não devem ser commitados; somente arquivos como `.env.example`, sem valores sensíveis, podem ser versionados.
+Utilize variáveis de ambiente. Configurações reais `.env`, `.env.*`, `*.local` e credenciais nunca entram no Git; modelos como `.env.example` e `.env.e2e.preview.example` só podem conter placeholders sem valores sensíveis. Secrets exigem armazenamento e sincronização separados do repositório, por mecanismo seguro autorizado.
 
 Se uma credencial aparecer acidentalmente em contexto ou arquivo, não a reproduza.
 
@@ -269,12 +274,13 @@ branch de desenvolvimento
 → Playwright local
 → corrigir e repetir até PASS
 → regressão
-→ commit/push autorizado
-→ preview
+→ commit/checkpoint e push da branch própria
+→ PR para preview, revisão e integração autorizada
+→ preview e deploy de pré-produção
 → E2E Preview quando a integração real for necessária
 → READY FOR HUMAN REVIEW
 → validação humana
-→ merge humano
+→ decisão explícita de promoção e PR de preview para main
 ```
 
 O QA local iniciado por `npm run dev:e2e` é o ambiente padrão para testes de
@@ -293,10 +299,9 @@ DOM, console, network, screenshots, traces e logs antes de pedir intervenção
 humana. Pode parar somente por decisão de produto, credencial externa
 indispensável, risco de Production, requisito ambíguo ou bloqueio técnico real.
 
-Ao trocar de máquina, finalize o trabalho versionado com `git status`, commit
-e push; na outra máquina use `git fetch`, checkout da branch de trabalho e
-`git pull`. Git não sincroniza arquivos `.env`, credenciais, bancos Docker ou
-outros artefatos ignorados.
+Nenhuma sessão de desenvolvimento deve terminar com trabalho relevante existindo somente localmente. Antes de encerrar ou trocar de computador, crie commit/checkpoint, envie a branch própria ao GitHub e confirme que o commit está em `origin/<branch>`. Deixe a working tree limpa ou registre um estado explicitamente preservado; pendências devem ter localização e forma de recuperação conhecidas.
+
+No outro computador, faça `git fetch origin` e verifique branch, HEAD, working tree, ahead/behind e divergência antes de sincronizar. Use `git pull --ff-only` somente quando comprovadamente seguro. Nunca use reset, rebase, force, clean, restore ou stash automático como reação para resolver diferenças. Git não sincroniza `.env`, credenciais, bancos Docker ou outros artefatos ignorados; siga `docs/RUNBOOK.md` para o procedimento.
 
 ---
 
@@ -313,17 +318,17 @@ testes
 ↓
 checks e build aplicáveis
 ↓
-commit, quando autorizado
+commit/checkpoint e push da branch própria
 ↓
-push, quando autorizado
+PR para preview e revisão técnica
 ↓
-Pull Request, quando solicitado
+integração autorizada em preview e deploy
 ↓
 READY FOR HUMAN REVIEW
 ↓
 Preview / validação humana
 ↓
-merge
+decisão explícita de promoção e PR de preview para main
 ```
 
 A validação funcional ocorre no ambiente de Preview. Somente uma pessoa pode confirmar que uma funcionalidade foi validada funcionalmente. O agente nunca deve afirmar validação funcional apenas porque testes automatizados passaram.
@@ -422,9 +427,8 @@ O trabalho do agente está concluído quando:
 * checks e builds aplicáveis passaram;
 * documentação necessária foi atualizada;
 * mudanças foram revisadas;
-* commit foi criado quando solicitado;
-* branch foi enviada quando solicitado;
-* PR foi criado quando solicitado;
+* trabalho relevante foi commitado e publicado na branch própria, com checkpoint remoto confirmado;
+* PR foi criado ou atualizado quando solicitado, podendo permanecer Draft durante o desenvolvimento;
 * instruções de validação foram fornecidas.
 
 O estado final do agente deve ser **READY FOR HUMAN REVIEW**, nunca **DONE**. A conclusão funcional depende de validação humana.
