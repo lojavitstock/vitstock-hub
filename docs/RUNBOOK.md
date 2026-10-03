@@ -500,6 +500,34 @@ Para Atendimento, inclua Inbox, timeline, mensagens, SSE/polling, scroll, atuali
 
 ## 17. Referência rápida de comandos confirmados
 
+### Bling foundation — gate separado de OAuth real
+
+Runtime é API v3/OAuth, nunca MCP. Configure somente no backend e somente após
+revisão/autorização separada: `BLING_CLIENT_ID`, `BLING_CLIENT_SECRET`,
+`BLING_REDIRECT_URI`, `INTEGRATION_ENCRYPTION_KEY`. A chave é independente,
+32 bytes criptograficamente aleatórios em base64; preserve-a em armazenamento
+seguro, não no Git. Perder/trocar a chave exige reconectar os tenants existentes.
+Callback cadastrado no app Bling deve corresponder ao env, terminar em
+`/api/integrations/bling/callback` e usar HTTPS fora de QA. Não copiar credenciais
+Production para Preview. Envs incompletos/chave inválida desabilitam a conexão.
+
+Migration `022_bling_integration.sql` é aditiva (três tabelas da integração),
+sem alteração de produtos/contatos/mensagens. Validar somente pelo harness QA
+local. Railway aplicará pelo runner existente apenas em deployment posteriormente
+aprovado; este desenvolvimento não autoriza aplicar em Preview/Production.
+Recuperação lógica, por operador autorizado: desabilitar env Bling/reverter código
+sem remover tabelas; remoção posterior das três tabelas perde vínculos/states/
+budget mas não afeta catálogo local. Não apagar a migration de controle em uso.
+
+Primeiro OAuth real: gate separado, humano ADMIN no Preview, conferir contrato
+de token/JWT divergente nos exemplos oficiais, status sanitizado, leitura de uma
+página/produto/depósito/estoque e desconexão. Nunca scan completo, sync, pedidos,
+webhooks, importação de imagens ou alteração da Product Library. Não registrar
+codes/tokens nem anexar HAR/trace contendo callback/credenciais. Desconectar no
+Hub não revoga o app na conta Bling; revogação é feita separadamente no provider.
+401 persistente exige reconectar; não repetir token POST automaticamente após
+timeout, pois uma rotação pode ter ocorrido. Não promover só por testes verdes.
+
 ```powershell
 # Git (leitura e revisão)
 git status

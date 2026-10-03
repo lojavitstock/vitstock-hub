@@ -547,6 +547,15 @@ O roadmap detalhado pertence a `ROADMAP.md`.
 
 # 22. Product Philosophy
 
+## Bling integration foundation
+
+Configurações → Integrações inclui Bling, com conexão/desconexão por ADMIN e
+status sanitizado por empresa. A primeira fase usa API v3/OAuth no backend
+(não MCP), tokens criptografados e leitura paginada de produtos, depósitos e
+saldos físicos/virtuais distintos. Não sincroniza Product Library, não importa
+imagens/R2, não altera snapshots/envios e não cria pedidos ou webhooks.
+OAuth real no Preview exige revisão e autorização humana em gate separado.
+
 Vitstock Hub deve permanecer uma ferramenta prática.
 
 A pergunta para uma nova funcionalidade não deve ser:
