@@ -32,6 +32,30 @@ const uploadValidProductImage = async (page: Page) => {
   });
 };
 
+const openFreshProductConversation = async (page: Page) => {
+  // Shared Ana QA may carry media/leases from other suites; product UX needs its own fixture.
+  expect(new URL(apiUrl).hostname).toMatch(/^(localhost|127\.0\.0\.1)$/);
+  const admin = await request.newContext();
+  const name = `Picker QA ${Date.now()}`;
+  try {
+    const marker = await admin.get(`${apiUrl}/api/qa/ready`);
+    expect(await marker.json()).toMatchObject({ qaMode: true, evolution: 'mock-only' });
+    expect((await admin.post(`${apiUrl}/api/auth/login`, { data: { email, password } })).status()).toBe(200);
+    expect((await admin.post(`${apiUrl}/api/qa/evolution/inbound`, { data: {
+      remoteJid: `552197${Date.now().toString().slice(-7)}@s.whatsapp.net`, name, content: 'Fixture isolada de Produtos',
+    } })).status()).toBe(200);
+  } finally { await admin.dispose(); }
+  const conversation = page.getByRole('button', { name: `Abrir conversa com ${name}`, exact: true });
+  await expect.poll(async () => {
+    if (await conversation.isVisible().catch(() => false)) return true;
+    const sync = page.getByRole('button', { name: 'Sincronizar Mensagens' });
+    if (await sync.isEnabled().catch(() => false)) await sync.click();
+    return conversation.isVisible().catch(() => false);
+  }, { timeout: 20_000, intervals: [500, 1500, 3000] }).toBe(true);
+  await conversation.click();
+  return name;
+};
+
 test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar', async ({ page }, testInfo) => {
   test.skip(!email || !password, 'credenciais QA ausentes');
   const errors: string[] = [];
@@ -42,8 +66,8 @@ test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar
   page.on('request', (event) => {
     if (event.method() !== 'GET' && /\/api\/evolution\/(?:messages|media)\//.test(event.url())) sends.push(event.url());
   });
-  await page.getByRole('button', { name: /Abrir conversa com Ana QA/ }).first().click();
-  await expect(page.getByRole('heading', { name: 'Ana QA', exact: true })).toBeVisible();
+  const conversationName = await openFreshProductConversation(page);
+  await expect(page.getByRole('heading', { name: conversationName, exact: true })).toBeVisible();
   const composer = page.getByPlaceholder('Digite sua mensagem para o WhatsApp...');
   await composer.fill('Rascunho preservado');
   await page.locator('input[type="file"][multiple]').setInputFiles({ name: 'rascunho.png', mimeType: 'image/png', buffer: Buffer.from(tinyPng, 'base64') });
@@ -81,7 +105,7 @@ test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar
     await expect(page).toHaveURL(/\/atendimento$/);
     expect(await page.evaluate(() => (window as any).__sameTabDocument)).toBe(documentToken);
     await expect(picker).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Ana QA', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: conversationName, exact: true })).toBeVisible();
     await picker.getByLabel('Buscar produto para pré-visualizar').fill(name);
     await expect(picker.getByRole('option', { name: new RegExp(name) })).toBeVisible();
     await picker.getByRole('button', { name: 'Cancelar' }).click();
@@ -101,7 +125,7 @@ test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar
     await composer.press('Enter');
     const preview = page.getByRole('dialog', { name: 'Pré-visualizar produto' });
     await expect(preview).toContainText(name);
-    await expect(preview.getByRole('button', { name: 'Enviar', exact: true })).toBeDisabled();
+    await expect(preview.getByRole('button', { name: 'Enviar', exact: true })).toBeEnabled();
     await preview.getByRole('button', { name: 'Fechar prévia' }).click();
     await expect(composer).toHaveValue('Confira ');
     await expect(composer).toBeFocused();
@@ -174,7 +198,7 @@ test('busca de produtos descarta respostas antigas, mostra erro e não envia ao 
 test('atendente não vê + de cadastro e action=new não abre formulário sem permissão', async ({ page }) => {
   test.skip(!secondEmail || !secondPassword, 'credenciais QA ausentes');
   await login(page, { email: secondEmail, password: secondPassword });
-  await page.getByRole('button', { name: /Abrir conversa com Ana QA/ }).first().click();
+  await openFreshProductConversation(page);
   await page.getByRole('button', { name: 'Produtos', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Produtos', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Adicionar produto', exact: true })).toHaveCount(0);
@@ -252,8 +276,8 @@ test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar 
   const preview = page.getByRole('dialog', { name: 'Pré-visualizar produto' });
   await expect(preview).toBeVisible();
   await expect(preview).toContainText(productName);
-  await expect(preview.getByRole('button', { name: 'Enviar', exact: true })).toBeDisabled();
-  await expect(preview.getByText(/envio de produtos pelo WhatsApp ainda não está conectado/i)).toBeVisible();
+  await expect(preview.getByRole('button', { name: 'Enviar', exact: true })).toBeEnabled();
+  await expect(preview.getByText(/envio de produtos pelo WhatsApp ainda não está conectado/i)).toHaveCount(0);
   expect(providerMutations).toEqual([]);
 
   await page.goto('/configuracoes?tab=products');

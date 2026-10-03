@@ -36,7 +36,8 @@ O projeto usa a API nativa `node:test`, executada em arquivos TypeScript pelo bo
 | `tests/os-userinfo.cjs` | Helper carregado pelo bootstrap; não é uma suíte independente. |
 | `tests/e2e/*.spec.ts` | Smoke, Atendimento e notificações/PWA no Chromium via Playwright; inclui o botão de teste desktop e o caminho de mensagem em background, executados contra QA local por padrão. |
 
-| `tests/e2e/products.spec.ts` | CRUD visual de produtos, upload fake em memória, preview sem envio, arquivamento, autorização e isolamento entre empresas em QA local. |
+| `tests/e2e/products.spec.ts` | CRUD visual de produtos, upload fake em memória, prévia, atalhos, retorno same-tab, arquivamento, autorização e isolamento entre empresas em QA local. |
+| `tests/e2e/product-send.spec.ts` | Envio de produto pelo mock Evolution, loading/double click, falha/retry, FK local/snapshot histórico, PN/LID/grupo e isolamento de tenant. |
 
 O comando `npm test` executa a suíte principal definida no `package.json`, usando o bootstrap `tests/run-tests.mjs` para os arquivos TypeScript listados pelo runner. Para uma suíte específica, execute diretamente o bootstrap com o arquivo desejado.
 
@@ -195,7 +196,9 @@ Uma migration exige revisão de:
 
 Não execute migration em produção como agente. Se um teste local de migration for necessário, confirme antes que o banco é seguro: `localhost` não garante PostgreSQL local nem ambiente isolado.
 
-Para a biblioteca de produtos, `npm run dev:e2e`/`npm run qa:setup` são os fluxos autorizados para aplicar `021_product_library.sql`; os guards fixam PostgreSQL em `127.0.0.1:55432/vitstock_qa`, Evolution/Google em mocks locais e abortam se os limites não forem satisfeitos. Não rode `server:migrate` sem confirmar explicitamente o destino. O driver padrão de QA é `memory`; `npm --prefix server run product:r2-smoke` é um smoke opt-in que grava e remove somente um objeto temporário no bucket R2 Preview, e `npm run product:r2-qa-smoke` exercita a Product API em QA local com R2 real quando o backend QA foi iniciado explicitamente com `PRODUCT_STORAGE_DRIVER=r2`. Nenhum teste padrão de CI escreve em R2. Evolution continua mock-only e envio real de produto não existe.
+Para a biblioteca de produtos, `npm run dev:e2e`/`npm run qa:setup` são os fluxos autorizados para aplicar `021_product_library.sql`; os guards fixam PostgreSQL em `127.0.0.1:55432/vitstock_qa`, Evolution/Google em mocks locais e abortam se os limites não forem satisfeitos. Não rode `server:migrate` sem confirmar explicitamente o destino. O driver padrão de QA é `memory`; `npm --prefix server run product:r2-smoke` é um smoke opt-in que grava e remove somente um objeto temporário no bucket R2 Preview, e `npm run product:r2-qa-smoke` exercita a Product API em QA local com R2 real quando o backend QA foi iniciado explicitamente com `PRODUCT_STORAGE_DRIVER=r2`. Nenhum teste padrão de CI escreve em R2. Evolution continua mock-only; o envio real Preview exige autorização separada.
+
+`npm run test:e2e -- tests/e2e/product-send.spec.ts tests/e2e/products.spec.ts` valida o fluxo de produtos em QA. A suíte de envio consulta refs por conexão fixa ao PostgreSQL QA somente após confirmar `/api/qa/ready`; não usa `.env.local` ou `DATABASE_URL`. O cenário de rejeição de mídia é controlado por uma rota admin registrada apenas em QA e restaurado após o teste. Os testes backend em `tests/server.test.ts` usam banco/transport/storage simulados para rollback, concorrência, tenant, campos forjados e corrida de confirmação/webhook, sem R2 ou provider reais.
 
 ## 10. Falhas e serviços externos
 

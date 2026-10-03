@@ -5,7 +5,7 @@ import { formatBrlPrice, productStorageImageUrl } from '../../utils/productLibra
 
 export const ProductMessageCard: React.FC<{ snapshot: ProductMessageSnapshot }> = ({ snapshot }) => {
   const [imageFailed, setImageFailed] = useState(false);
-  const imageUrl = productStorageImageUrl(snapshot.imageObjectKey);
+  const imageUrl = productStorageImageUrl(snapshot.imageObjectKey, import.meta.env?.VITE_API_URL || 'http://localhost:3001');
 
   useEffect(() => setImageFailed(false), [snapshot.imageObjectKey]);
 

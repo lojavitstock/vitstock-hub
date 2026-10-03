@@ -11,6 +11,7 @@ export type QaGoogleScenario = 'success' | 'conflict' | 'rate-limit' | 'timeout'
 let googleScenario: QaGoogleScenario = 'success';
 let providerOnlyChat: Record<string, any> | null = null;
 let qaWebhookConfig: Record<string, any> | null = null;
+let qaMediaSendScenario: 'success' | 'reject' = 'success';
 const qaImageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const qaDocumentBase64 = 'ZHVjdW1lbnRvLXFh';
 const qaVideoBase64 = 'dmlkZW8tcWE=';
@@ -260,6 +261,9 @@ function qaEvolutionResponse(path: string, init?: RequestInit) {
       ...(typeof requestBody?.fileName === 'string' ? { fileName: requestBody.fileName } : {}),
       ...(typeof requestBody?.caption === 'string' ? { caption: requestBody.caption } : {}),
     });
+    if (qaMediaSendScenario === 'reject') {
+      return Promise.resolve(new Response(JSON.stringify({ error: 'QA_MEDIA_REJECTED' }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+    }
   }
   if (path.includes('/message/sendText/')) {
     qaEvolutionSends.push({
@@ -356,6 +360,13 @@ const qaInboundSchema = z.object({
 
 export async function registerQaRoutes(app: FastifyInstance) {
   if (!isQaMode) return;
+
+  app.post('/api/qa/evolution/media-scenario', { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({ scenario: z.enum(['success', 'reject']) }).strict().safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Cenário QA inválido' });
+    qaMediaSendScenario = parsed.data.scenario;
+    return { scenario: qaMediaSendScenario };
+  });
 
   app.get<{ Params: { variant: string } }>('/api/qa/avatar/:variant', async (request, reply) => {
     const variant = request.params.variant;

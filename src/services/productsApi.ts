@@ -24,3 +24,11 @@ export async function updateProduct(id: string, input: Partial<ProductInput>) {
 export async function archiveProduct(id: string) {
   return apiRequest<{ archived: boolean; id: string }>(`/api/products/${encodeURIComponent(id)}/archive`, { method: 'POST' });
 }
+
+export async function sendProduct(input: { productId: string; remoteJid: string; clientMessageId: string }) {
+  return apiRequest<{
+    remoteJid: string;
+    message: { id: string; evolutionMessageId?: string; status: string; senderName: string };
+    deduplicated?: boolean;
+  }>('/api/evolution/messages/send-product', { method: 'POST', body: JSON.stringify(input) });
+}

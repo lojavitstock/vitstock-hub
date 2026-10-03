@@ -50,6 +50,8 @@ import { normalizeConversationTags } from '../utils/conversationTags';
 import { isMediaBase64SizeAllowed, isMediaFileSizeAllowed } from '../utils/mediaLimits';
 import { outboundErrorMessage } from '../utils/outboundError';
 import { fetchQuickReplies, markQuickReplyUsed } from '../services/quickRepliesApi';
+import { sendProduct } from '../services/productsApi';
+import { mergeConversationMessages } from '../utils/messageMerge';
 import { mockQuickReplies } from '../services/mockData';
 import {
   classifyAttachmentFile,
@@ -1625,7 +1627,9 @@ export const AtendimentoPage: React.FC = () => {
 
     try {
       let result: any;
-      if ((message.mediaType === 'image' || message.mediaType === 'video' || message.mediaType === 'document')
+      if (message.metadata?.productSnapshot) {
+        result = await sendProduct({ productId: message.metadata.productSnapshot.productId, remoteJid: activeConv.id, clientMessageId });
+      } else if ((message.mediaType === 'image' || message.mediaType === 'video' || message.mediaType === 'document')
         && message.mediaUrl?.startsWith('data:')) {
         const [dataHeader, media] = message.mediaUrl.split(',', 2);
         if (!media) throw new Error('O anexo original não está disponível para nova tentativa.');
@@ -2029,7 +2033,24 @@ export const AtendimentoPage: React.FC = () => {
               editingMessage={editingMessage}
               onCancelEditing={cancelEditingMessage}
             />
-            {productPickerOpen && <ProductPickerDialog initialProduct={previewProduct} onCreateProduct={() => {
+            {productPickerOpen && <ProductPickerDialog initialProduct={previewProduct}
+              canSend={!isMock && whatsappConnected && !activeChatLocked && !activeConv.isPending && !sendingMedia && !isInternalNote}
+              onSend={async (productId, clientMessageId) => {
+                const conversationId = activeConv.id;
+                const result = await sendProduct({ productId, remoteJid: conversationId, clientMessageId });
+                if (!['sent', 'delivered', 'read'].includes(result.message.status)) {
+                  throw new Error('O envio ainda está em processamento. Aguarde antes de tentar novamente.');
+                }
+                // Only confirmed history is merged; SSE remains the primary incremental path.
+                try {
+                  const confirmed = await EvolutionApiService.fetchMessages(instanceName, conversationId, '', attendantName);
+                  if (activeConversationIdRef.current === conversationId) {
+                    setMessages((previous) => mergeConversationMessages(previous, confirmed));
+                  }
+                } catch {
+                  setAssignmentFeedback('Produto enviado. O histórico será atualizado pela sincronização normal.');
+                }
+              }} onCreateProduct={() => {
               if (!activeConvId || sendingMedia) return;
               productReturnState.current = {
                 conversationId: activeConvId,

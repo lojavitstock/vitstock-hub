@@ -66,7 +66,6 @@ export async function createApp() {
   });
 
   await registerAuthRoutes(app);
-  await registerEvolutionRoutes(app);
   await registerGoogleContactRoutes(app);
   await registerContactRoutes(app);
   await registerConversationTagRoutes(app);
@@ -83,6 +82,7 @@ export async function createApp() {
       publicBaseUrl: config.R2_PUBLIC_BASE_URL,
     },
   });
+  await registerEvolutionRoutes(app, productStorage || undefined);
   if (productStorage) {
     await registerProductRoutes(app, productStorage);
     app.addHook('onClose', async () => productStorage.close?.());
