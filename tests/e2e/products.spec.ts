@@ -32,7 +32,7 @@ const uploadValidProductImage = async (page: Page) => {
   });
 };
 
-test('+ abre cadastro em nova aba e atalho de produtos preserva atendimento sem enviar', async ({ page }, testInfo) => {
+test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar', async ({ page }, testInfo) => {
   test.skip(!email || !password, 'credenciais QA ausentes');
   const errors: string[] = [];
   const sends: string[] = [];
@@ -43,13 +43,14 @@ test('+ abre cadastro em nova aba e atalho de produtos preserva atendimento sem 
     if (event.method() !== 'GET' && /\/api\/evolution\/(?:messages|media)\//.test(event.url())) sends.push(event.url());
   });
   await page.getByRole('button', { name: /Abrir conversa com Ana QA/ }).first().click();
+  await expect(page.getByRole('heading', { name: 'Ana QA', exact: true })).toBeVisible();
   const composer = page.getByPlaceholder('Digite sua mensagem para o WhatsApp...');
   await composer.fill('Rascunho preservado');
   await page.locator('input[type="file"][multiple]').setInputFiles({ name: 'rascunho.png', mimeType: 'image/png', buffer: Buffer.from(tinyPng, 'base64') });
   await expect(page.getByTestId('attachment-draft')).toHaveCount(1);
   await page.getByRole('button', { name: 'Produtos', exact: true }).click();
   const picker = page.getByRole('dialog', { name: 'Produtos', exact: true });
-  const add = picker.getByRole('link', { name: 'Adicionar produto (nova aba)' });
+  const add = picker.getByRole('button', { name: 'Adicionar produto', exact: true });
   const bounds = await add.boundingBox();
   expect(bounds!.width).toBeGreaterThanOrEqual(44);
   expect(bounds!.height).toBeGreaterThanOrEqual(44);
@@ -57,13 +58,15 @@ test('+ abre cadastro em nova aba e atalho de produtos preserva atendimento sem 
   await expect(add).toBeInViewport();
   await picker.screenshot({ path: testInfo.outputPath('picker-mobile.png') });
   await page.setViewportSize({ width: 1280, height: 900 });
-  const newTabPromise = page.context().waitForEvent('page');
+  const originalPages = page.context().pages().length;
+  const documentToken = `spa-${Date.now()}`;
+  await page.evaluate((token) => { (window as any).__sameTabDocument = token; }, documentToken);
   await add.click();
-  const settings = await newTabPromise;
-  settings.on('pageerror', (error) => errors.push(error.message));
-  settings.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+  const settings = page;
   await expect(settings.getByRole('dialog', { name: 'Adicionar produto' })).toBeVisible();
   await expect(settings).toHaveURL(/\/configuracoes\?tab=products$/);
+  expect(page.context().pages()).toHaveLength(originalPages);
+  expect(await page.evaluate(() => (window as any).__sameTabDocument)).toBe(documentToken);
   const name = `Atalho Produto QA ${Date.now()}`;
   let id = '';
   try {
@@ -74,15 +77,18 @@ test('+ abre cadastro em nova aba e atalho de produtos preserva atendimento sem 
     await settings.getByRole('button', { name: 'Salvar produto' }).click();
     id = (await (await saved).json()).product.id;
     await expect(settings.getByRole('status')).toContainText('Produto cadastrado.');
-    await settings.close();
-    await page.bringToFront();
-    // Headless browsers do not always emit native focus when closing a tab.
-    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await page.goBack();
+    await expect(page).toHaveURL(/\/atendimento$/);
+    expect(await page.evaluate(() => (window as any).__sameTabDocument)).toBe(documentToken);
+    await expect(picker).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Ana QA', exact: true })).toBeVisible();
     await picker.getByLabel('Buscar produto para pré-visualizar').fill(name);
     await expect(picker.getByRole('option', { name: new RegExp(name) })).toBeVisible();
     await picker.getByRole('button', { name: 'Cancelar' }).click();
     await expect(composer).toHaveValue('Rascunho preservado');
     await expect(page.getByTestId('attachment-draft')).toHaveCount(1);
+    await expect.poll(() => page.getByTestId('attachment-draft').locator('img')
+      .evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
     await composer.fill(`Confira \\${name}`);
     const suggestions = page.getByRole('dialog', { name: 'Sugestões de produtos' });
     const option = suggestions.getByRole('option', { name: new RegExp(name) });
@@ -121,7 +127,6 @@ test('+ abre cadastro em nova aba e atalho de produtos preserva atendimento sem 
     expect(sends).toEqual([]);
     expect(errors).toEqual([]);
   } finally {
-    if (!settings.isClosed()) await settings.close();
     if (id) await page.request.post(`${apiUrl}/api/products/${id}/archive`);
   }
 });
@@ -172,7 +177,7 @@ test('atendente não vê + de cadastro e action=new não abre formulário sem pe
   await page.getByRole('button', { name: /Abrir conversa com Ana QA/ }).first().click();
   await page.getByRole('button', { name: 'Produtos', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Produtos', exact: true })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Adicionar produto (nova aba)' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Adicionar produto', exact: true })).toHaveCount(0);
   await page.goto('/configuracoes?tab=products&action=new');
   await expect(page.getByRole('heading', { name: 'Produtos', exact: true })).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'Adicionar produto' })).toHaveCount(0);

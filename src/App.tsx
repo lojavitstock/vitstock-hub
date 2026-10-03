@@ -8,6 +8,7 @@ import { ConfiguracoesPage } from './pages/ConfiguracoesPage';
 import { LoginPage } from './pages/LoginPage';
 import { useAuth } from './auth/AuthContext';
 import { NotificationProvider } from './components/notifications/NotificationProvider';
+import { ProductReturnProvider } from './components/conversations/ProductReturnContext';
 
 const AuthenticatedApp: React.FC = () => {
   const { user, loading } = useAuth();
@@ -19,6 +20,7 @@ const AuthenticatedApp: React.FC = () => {
   if (!user) return <LoginPage />;
 
   return (
+    <ProductReturnProvider key={`${user.companyId}:${user.id}`}>
     <Routes>
       <Route path="/" element={<AppLayout />}>
         <Route index element={<Navigate to="/atendimento" replace />} />
@@ -30,6 +32,7 @@ const AuthenticatedApp: React.FC = () => {
         <Route path="*" element={<Navigate to="/atendimento" replace />} />
       </Route>
     </Routes>
+    </ProductReturnProvider>
   );
 };
 
