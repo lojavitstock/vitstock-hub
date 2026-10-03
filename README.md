@@ -30,9 +30,9 @@ cd vitstock-hub
 git fetch --all
 ```
 
-`main` é a linha estável/produção, `preview` é a integração e o trabalho
-deve ocorrer em branch própria (`codex/...`, `feature/...` ou `fix/...`).
-Confirme a baseline antes de começar; não assuma `main`.
+`main` é a linha estável/produção, `preview` é a integração e nenhuma alteração
+deve ser feita diretamente nelas. Toda feature, fix ou chore nasce de
+`origin/preview` em branch própria (`feature/...`, `fix/...` ou `chore/...`).
 
 ```powershell
 npm ci
@@ -135,8 +135,9 @@ Não documente Client IDs, Client Secrets ou tokens reais.
 ## Fluxo Git e dois PCs
 
 ```text
-branch própria → QA local + Playwright → PASS/regressão → commit/push
-→ preview → E2E Preview quando necessário → revisão humana → merge humano
+origin/preview → branch própria → QA local + Playwright → PASS/regressão
+→ commits/checkpoints + push cedo → Draft PR para `preview`
+→ E2E Preview quando necessário → revisão humana → merge humano
 ```
 
 O Codex entrega em **READY FOR HUMAN REVIEW**; não faz merge automático.
@@ -161,9 +162,10 @@ git checkout <branch-de-trabalho>
 git pull
 ```
 
-Antes de trocar de máquina, faça `git status`, commit autorizado e `git push`.
-Git não sincroniza `.env.local`, `.env.e2e.preview.local`, credenciais, bancos
-Docker ou `.qa/qa-credentials.json`.
+Antes de trocar de máquina ou encerrar uma sessão, nenhum trabalho relevante pode ficar apenas local:
+confirme working tree limpa, commit de checkpoint criado, branch pushada e que o
+commit está presente em `origin/<branch>`. Git não sincroniza `.env.local`,
+`.env.e2e.preview.local`, credenciais, bancos Docker ou `.qa/qa-credentials.json`.
 
 ## Checks confirmados
 

@@ -1,6 +1,6 @@
 # Vitstock Hub — Runbook de Desenvolvimento
 
-> **Fluxo de integração:** use a branch explicitamente indicada pela tarefa como baseline de implementação. No fluxo compartilhado, `preview` é a branch de integração e validação antes da promoção, sob aprovação humana, para `main`.
+> **Fluxo de integração:** toda alteração nova nasce de `origin/preview` em branch própria (`feature/*`, `fix/*` ou `chore/*`). `preview` é a branch de integração e validação antes da promoção, sob aprovação humana, para `main`.
 >
 > Este runbook descreve procedimentos do repositório atual. Ele não autoriza deploy, merge, migrations de produção, alteração de infraestrutura ou uso de credenciais.
 
@@ -25,9 +25,11 @@ testes / checks / build aplicáveis
   ↓
 revisar diff
   ↓
-commit e push, quando autorizados
+  commits/checkpoints e push cedo na branch própria
   ↓
-READY FOR HUMAN REVIEW
+  Draft PR da branch para `preview`
+  ↓
+  READY FOR HUMAN REVIEW
   ↓
 Preview e validação humana
   ↓
@@ -53,11 +55,11 @@ Antes de modificar qualquer arquivo:
    git status
    ```
 
-4. Se a tarefa indicar uma branch, use-a como baseline. Não troque de branch automaticamente quando houver divergência: informe o problema.
+4. Atualize as referências remotas e crie a branch nova a partir de `origin/preview`, usando `feature/<descricao>`, `fix/<descricao>` ou `chore/<descricao>`. Não trabalhe diretamente em `preview` ou `main`; se houver divergência ou uma branch existente, informe o problema antes de continuar.
 5. Identifique os arquivos, testes e efeitos colaterais diretamente relacionados.
 6. Investigue a implementação existente antes de editar. Para bugs sem causa clara, diagnostique antes de corrigir.
 
-Não é necessário criar branch nova quando a tarefa já atribui uma. Nunca trabalhe diretamente em `main`.
+Nunca trabalhe diretamente em `preview` ou `main`. Uma branch já existente só deve ser reutilizada para continuar trabalho explicitamente identificado, nunca como atalho para iniciar uma alteração nova.
 
 ### Fila autorizada e execução de uma Issue
 
@@ -67,12 +69,12 @@ Trabalhe em uma única Issue autorizada por vez. Não misture escopos nem inicie
 
 1. localize a Issue aberta e confirme `codex-ready`, quando o trabalho vier da fila;
 2. leia a Issue e confirme o escopo e os critérios de aceite;
-3. confirme a baseline indicada, sem assumir `main`;
-4. crie/use `codex/issue-<numero>-<slug-curto>` a partir da baseline confirmada;
+3. confirme `origin/preview` como baseline;
+4. crie/use `feature/`, `fix/` ou `chore/` a partir de `origin/preview`;
 5. investigue o código e implemente a menor mudança verificável;
 6. execute os checks aplicáveis de `docs/TESTING.md`;
 7. faça o self-review do diff e confirme que não há mudanças fora do escopo;
-8. crie commit, faça push somente da branch da Issue e prepare a Pull Request contra a baseline correta, quando solicitado;
+8. faça commits pequenos/checkpoints, envie cedo somente a branch da Issue e abra/atualize um Draft PR contra `preview`;
 9. remova `codex-ready` após criar a Pull Request e mantenha a Issue aberta;
 10. forneça o plano de validação manual e pare em **READY FOR HUMAN REVIEW**.
 
@@ -91,11 +93,15 @@ O objetivo é preservar trabalho preexistente, mesmo quando ele parecer incomple
 
 ## 4. Política de branches e Git
 
-- Nunca faça commit, push ou merge direto em `main`.
-- Use a branch atribuída pela tarefa. Se não houver uma, crie uma branch descritiva somente quando necessário, preferencialmente `codex/<tipo>-<descricao>`.
+- Nunca desenvolva nem faça commit, push ou merge direto em `preview` ou `main`.
+- Para toda alteração nova, crie `feature/<descricao>`, `fix/<descricao>` ou `chore/<descricao>` a partir de `origin/preview`.
+- Faça commits/checkpoints frequentes, envie a branch ao GitHub cedo e mantenha um Draft PR aberto para `preview`.
 - Nunca use `git push --force` em branch compartilhada.
-- Nunca reescreva histórico compartilhado ou exclua branch remota sem autorização explícita.
-- O merge depende de aprovação humana após Preview e validação funcional.
+- Nunca reescreva histórico compartilhado.
+- Após merge, deploy e validação humana, remova branches obsoletas locais e remotas somente depois de confirmar o merge e que não existem commits exclusivos; não use `-D` nem `git push origin --delete` por suposição.
+- O merge de uma branch para `preview` e a promoção de `preview` para `main` dependem de aprovação humana após Preview e validação funcional. `main` recebe mudanças somente por PR com origem em `preview`.
+
+Antes da limpeza, faça `git fetch origin --prune`, confirme o estado mergeado do PR e revise `git cherry -v origin/preview origin/<branch>`; qualquer linha com `+` indica commit exclusivo e bloqueia a remoção. Remova a cópia local somente com `git branch -d <branch>` e a remota somente após a mesma confirmação.
 
 O fluxo compartilhado é `preview` → validação e testes → `main`; a promoção depende de aprovação humana.
 
@@ -291,7 +297,7 @@ Quando ferramenta, serviço ou configuração externa estiver indisponível, pri
 
 ### Commit
 
-Faça commit somente quando solicitado. Antes, execute a validação aplicável, revise o diff e confirme que não há segredo ou arquivo fora do escopo.
+Faça commits pequenos e frequentes, incluindo checkpoints antes de trocar de máquina ou encerrar uma sessão. Antes de cada commit, execute a validação aplicável, revise o diff e confirme que não há segredo ou arquivo fora do escopo.
 
 Use Conventional Commits claros:
 
@@ -305,7 +311,7 @@ Não misture mudanças não relacionadas no mesmo commit.
 
 ### Push
 
-Faça push somente com instrução/autorização. Nunca faça push para `main` nem use `git push --force` em branch compartilhada.
+Envie a branch própria ao GitHub cedo e após checkpoints relevantes. Antes de trocar de máquina ou encerrar uma sessão, confirme working tree limpa, commit criado, branch pushada e igualdade entre `HEAD` e `origin/<branch>`. Nunca faça push para `preview` ou `main` nem use `git push --force` em branch compartilhada.
 
 ### Pull Request / entrega para revisão
 
@@ -328,7 +334,7 @@ Para migrations, acrescente `## Migration Impact`. Em alterações sensíveis de
 O Preview da Vercel é o ambiente de validação funcional antes do merge:
 
 ```text
-branch → push → READY FOR HUMAN REVIEW → Preview → validação humana → merge
+origin/preview → branch própria → commits/checkpoints + push → Draft PR para preview → Preview → validação humana → merge
 ```
 
 O agente pode confirmar implementação, checks executados e a existência de Preview quando observável. Não pode confirmar sozinho aprovação funcional, UX, integração ou prontidão para produção.
@@ -354,7 +360,7 @@ validação técnica
 ↓
 revisão do diff
 ↓
-commit/push/PR quando autorizado
+commits/checkpoints + push + Draft PR para `preview`
 ↓
 READY FOR HUMAN REVIEW
 ↓
@@ -376,13 +382,13 @@ Uma tarefa chega a **READY FOR HUMAN REVIEW** quando, conforme aplicável:
 - diff revisado;
 - documentação necessária atualizada;
 - branch correta;
-- commit, push e PR feitos somente quando solicitados;
+- commits/checkpoints, push e Draft PR registrados na branch própria;
 - riscos e pendências informados;
 - plano objetivo de teste manual fornecido.
 
 Não use apenas `DONE`: aprovação funcional continua sendo humana.
 
-Após a validação humana, o merge somente pode ocorrer com autorização explícita, na baseline correta. Em seguida, registre a validação, feche a Issue quando apropriado, remova a branch da Issue somente quando for seguro e sincronize a baseline. **READY FOR HUMAN REVIEW** nunca implica merge automático.
+Após a validação humana, o merge somente pode ocorrer com autorização explícita: primeiro para `preview` e, depois da validação, por PR de `preview` para `main`. Em seguida, registre a validação, feche a Issue quando apropriado e remova a branch da Issue somente após confirmar merge e ausência de commits exclusivos, tanto localmente quanto no remoto. **READY FOR HUMAN REVIEW** nunca implica merge automático.
 
 ### Relatório final
 

@@ -54,7 +54,7 @@ Se documentação e implementação atual divergirem, não assuma automaticament
 
 Google Docs, conversas antigas, handoffs e notas externas são apenas referências históricas; não são fonte oficial para implementação.
 
-Quando uma tarefa definir explicitamente uma branch de desenvolvimento, essa branch será a baseline de implementação da tarefa. Não assuma que `main` contém o trabalho mais recente desse ciclo; a baseline pode mudar em tarefas futuras.
+No fluxo normal, toda `feature`, `fix` ou `chore` nasce de `origin/preview`. Uma branch explicitamente indicada pela tarefa pode ser usada para continuar trabalho já existente, mas não substitui essa regra para uma nova alteração.
 
 ---
 
@@ -104,6 +104,7 @@ Não implemente uma solução apenas com base na descrição da Issue sem primei
 
 Nunca:
 
+* desenvolva diretamente em `preview` ou `main`;
 * faça commit, push ou merge diretamente em `main`;
 * execute force push;
 * apague branches remotas sem autorização explícita;
@@ -117,13 +118,18 @@ git status
 git branch --show-current
 ```
 
-Se já existir uma branch definida para a tarefa, utilize-a. Não crie outra branch desnecessariamente. Se nenhuma branch estiver definida, utilize uma branch descritiva, preferencialmente `codex/<tipo>-<descricao>`.
+Para uma alteração nova, atualize as referências remotas e crie a branch a partir de `origin/preview`, usando somente os formatos `feature/<descricao>`, `fix/<descricao>` ou `chore/<descricao>`. Não desenvolva diretamente em `preview` nem em `main`.
+
+Faça commits pequenos e frequentes, incluindo checkpoints quando o trabalho ainda não estiver concluído, e envie a branch ao GitHub cedo. Abra um Draft PR da branch para `preview` assim que houver um primeiro checkpoint coerente e mantenha-o atualizado. O trabalho relevante não deve permanecer apenas no computador local.
 
 A integração com `main` exige aprovação humana.
+`main` recebe mudanças somente por Pull Request com origem em `preview`, após validação humana do Preview.
 
 ### Branch por Issue e baseline
 
-Para uma Issue autorizada, use uma branch isolada no formato `codex/issue-<numero>-<slug-curto>`, por exemplo `codex/issue-4-websocket-copy`. Confirme a baseline antes de criar a branch; ela pode ser `codex/perf-atendimento-inbox` neste ciclo e não deve ser presumida como `main`. Se a baseline não estiver clara, pare e peça orientação. Cada Issue deve permanecer isolada em sua própria branch e Pull Request.
+Para uma Issue autorizada, confirme `git fetch origin --prune` e crie uma branch isolada de `origin/preview`, por exemplo `feature/issue-4-websocket-copy` ou `fix/issue-4-websocket-copy`. Cada Issue deve permanecer isolada em sua própria branch e Draft PR para `preview`.
+
+Depois do merge no destino correto, do deploy e da validação humana, elimine a branch obsoleta local e remota somente após confirmar que o PR foi mergeado e que a branch não contém commits exclusivos. Use a verificação de estado do PR, compare a branch com `origin/preview` e revise os commits antes de remover; nunca use `-D` ou apague uma branch remota por suposição.
 
 ---
 
@@ -293,10 +299,12 @@ DOM, console, network, screenshots, traces e logs antes de pedir intervenção
 humana. Pode parar somente por decisão de produto, credencial externa
 indispensável, risco de Production, requisito ambíguo ou bloqueio técnico real.
 
-Ao trocar de máquina, finalize o trabalho versionado com `git status`, commit
-e push; na outra máquina use `git fetch`, checkout da branch de trabalho e
-`git pull`. Git não sincroniza arquivos `.env`, credenciais, bancos Docker ou
-outros artefatos ignorados.
+Ao trocar de máquina ou encerrar uma sessão, nenhum trabalho relevante pode ficar apenas local. Finalize
+o trabalho versionado com working tree limpa, commit de checkpoint criado, branch
+enviada ao GitHub e confirmação de que o commit local está presente em
+`origin/<branch>`; na outra máquina use `git fetch`, checkout da branch de
+trabalho e `git pull`. Git não sincroniza arquivos `.env`, credenciais, bancos
+Docker ou outros artefatos ignorados.
 
 ---
 
@@ -422,9 +430,9 @@ O trabalho do agente está concluído quando:
 * checks e builds aplicáveis passaram;
 * documentação necessária foi atualizada;
 * mudanças foram revisadas;
-* commit foi criado quando solicitado;
-* branch foi enviada quando solicitado;
-* PR foi criado quando solicitado;
+* commits/checkpoints relevantes foram criados;
+* a branch foi enviada ao GitHub;
+* o Draft PR para `preview` foi criado ou atualizado;
 * instruções de validação foram fornecidas.
 
 O estado final do agente deve ser **READY FOR HUMAN REVIEW**, nunca **DONE**. A conclusão funcional depende de validação humana.

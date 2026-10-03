@@ -1,6 +1,6 @@
 # Vitstock Hub — Estratégia Prática de Testes
 
-> **Fluxo de integração:** use a branch explicitamente indicada pela tarefa como baseline. No fluxo compartilhado, `preview` é a branch de integração e validação antes da promoção, sob aprovação humana, para `main`.
+> **Fluxo de integração:** novas features, fixes e chores nascem de `origin/preview` em branch própria (`feature/*`, `fix/*` ou `chore/*`). `preview` é a branch de integração e validação antes da promoção, por PR e sob aprovação humana, para `main`.
 
 Este documento define o menor processo de validação que protege o Vitstock Hub sem transformar um projeto pequeno em uma operação corporativa de QA. Ele complementa o procedimento operacional em `RUNBOOK.md` e os invariantes técnicos em `ARCHITECTURE.md`.
 
