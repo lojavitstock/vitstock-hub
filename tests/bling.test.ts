@@ -172,6 +172,31 @@ test('Bling read models: identity, empty SKU, inactive, duplicate names, variati
   assert.throws(() => productListModel.parse({ ...product, id: Number.MAX_SAFE_INTEGER + 1 }));
   assert.throws(() => pagination.parse({ limit: 101 })); assert.throws(() => pagination.parse({ page: 0 }));
 });
+test('Bling real product list regression: observed E status remains explicit and IDs stay normalized', () => {
+  // Sanitized five-item shape: the real probe rejected situacao at indexes 3 and 4.
+  const fixture = { data: ['A', 'I', 'A', 'E', 'E'].map((situacao, index) => ({
+    id: 101 + index, nome: `Synthetic product ${index + 1}`, codigo: `SKU-${index + 1}`,
+    preco: 10 + index, tipo: 'P', situacao, formato: 'S', descricaoCurta: '',
+  })) };
+  const result = fixture.data.map(product => productListModel.parse(product));
+  assert.deepEqual(result.map(product => product.situacao), ['A', 'I', 'A', 'E', 'E']);
+  assert.deepEqual(result.map(product => product.id), ['101', '102', '103', '104', '105']);
+  const observed = fixture.data[3]!;
+  assert.equal(productListModel.parse({ ...observed, id: '104' }).id, '104');
+  assert.throws(() => productListModel.parse({ ...observed, id: Number.MAX_SAFE_INTEGER + 1 }));
+  // The unobserved detail contract is deliberately unchanged.
+  assert.throws(() => productDetailModel.parse(observed));
+});
+test('Bling product list status correction rejects unknown values without weakening other fields', () => {
+  const product = { id: 101, nome: 'Synthetic product', tipo: 'P', situacao: 'A', formato: 'S' };
+  for (const situacao of ['X', '', 'e', ' E ', null, undefined, 0, true]) {
+    assert.throws(() => parseContract(productListModel, { ...product, situacao }), /fora do contrato/);
+  }
+  assert.throws(() => productListModel.parse({ ...product, tipo: 'X' }));
+  assert.throws(() => productListModel.parse({ ...product, formato: 'X' }));
+  assert.throws(() => productListModel.parse({ ...product, preco: '10' }));
+  assert.equal('privateField' in productListModel.parse({ ...product, privateField: 'discard' }), false);
+});
 test('Bling tenant isolation: company B cannot access A tokens/data', async () => {
   let calls = 0; const { client } = setup(async () => { calls++; return json({ data: [] }); });
   await assert.rejects(client.read('B', 'products', new URLSearchParams()), /não conectado/); assert.equal(calls, 0);
