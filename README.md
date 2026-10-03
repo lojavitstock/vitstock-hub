@@ -30,9 +30,10 @@ cd vitstock-hub
 git fetch --all
 ```
 
-`main` é a linha estável/produção, `preview` é a integração e o trabalho
-deve ocorrer em branch própria (`codex/...`, `feature/...` ou `fix/...`).
-Confirme a baseline antes de começar; não assuma `main`.
+`main` representa Production; `preview` integra mudanças para pré-produção e
+teste humano. Desenvolva em `feature/...`, `fix/...` ou `chore/...` baseada em
+`origin/preview`, salvo tarefa explicitamente diferente. O fluxo normal usa PRs,
+sem desenvolvimento ou push direto em `preview` ou `main`.
 
 ```powershell
 npm ci
@@ -135,11 +136,15 @@ Não documente Client IDs, Client Secrets ou tokens reais.
 ## Fluxo Git e dois PCs
 
 ```text
-branch própria → QA local + Playwright → PASS/regressão → commit/push
-→ preview → E2E Preview quando necessário → revisão humana → merge humano
+origin/preview → feature/fix/chore → commits/checkpoints + push cedo
+→ PR para preview → gates técnicos e integração autorizada → deploy Preview
+→ validação humana → decisão explícita de promoção → PR preview para main
 ```
 
 O Codex entrega em **READY FOR HUMAN REVIEW**; não faz merge automático.
+Features e fixes significativos podem abrir Draft PR para `preview` ainda em
+desenvolvimento: o diff, CI e revisão ficam disponíveis entre computadores.
+Até ser necessário teste humano oficial, o trabalho permanece na branch própria.
 
 Primeira configuração em outro PC:
 
@@ -148,22 +153,31 @@ git clone https://github.com/lojavitstock/vitstock-hub.git
 cd vitstock-hub
 npm ci
 npm --prefix server ci
-git fetch --all
-git checkout <branch-de-trabalho>
+git fetch origin
+git switch --track origin/<branch-de-trabalho>
 ```
 
 PC já configurado:
 
 ```powershell
-git status
-git fetch --all
-git checkout <branch-de-trabalho>
-git pull
+git fetch origin
+git status --short
+git branch --show-current
+git rev-parse HEAD
+git rev-list --left-right --count <branch-de-trabalho>...origin/<branch-de-trabalho>
+# Somente com working tree limpa, ahead=0 e sem divergência na branch alvo:
+git switch <branch-de-trabalho>
+git rev-list --left-right --count HEAD...origin/<branch-de-trabalho>
+git pull --ff-only origin <branch-de-trabalho>
 ```
 
-Antes de trocar de máquina, faça `git status`, commit autorizado e `git push`.
+Antes de encerrar uma sessão ou trocar de máquina, confirme que todo trabalho
+relevante está commitado, enviado na branch própria e presente em `origin`.
+Deixe a working tree limpa ou o estado explicitamente preservado. Não use
+reset, rebase, force, clean, restore ou stash automático para resolver diferenças;
+consulte o procedimento de sincronização em `docs/RUNBOOK.md`.
 Git não sincroniza `.env.local`, `.env.e2e.preview.local`, credenciais, bancos
-Docker ou `.qa/qa-credentials.json`.
+Docker ou `.qa/qa-credentials.json`; secrets usam armazenamento seguro separado.
 
 ## Checks confirmados
 
@@ -181,10 +195,11 @@ Não existe script de lint; não use `npm run lint`.
 
 ## Segurança
 
-Nunca versione `.env.local` ou `.env.e2e.preview.local`, secrets Google,
+Nunca versione configurações reais `.env`, `.env.*`, `*.local`, secrets Google,
 Evolution ou sessão. Não execute seed, migrations manuais, E2E, envio de
 mensagens ou alteração de sessão contra Production. Preview deve permanecer
 isolado de Production.
+Modelos `.env.example` e `.env.e2e.preview.example` contêm somente placeholders.
 
 ## Troubleshooting
 
@@ -223,8 +238,8 @@ cd vitstock-hub
 npm ci
 npm --prefix server ci
 npx playwright install chromium
-git fetch --all
-git checkout <branch-de-trabalho>
+git fetch origin
+git switch --track origin/<branch-de-trabalho>
 docker info
 npm run dev:e2e
 npm run test:e2e
@@ -233,10 +248,16 @@ npm run test:e2e
 ## Quick Start — PC já configurado
 
 ```powershell
-git status
-git fetch --all
-git checkout <branch-de-trabalho>
-git pull
+git fetch origin
+git status --short
+git branch --show-current
+git rev-parse HEAD
+git rev-list --left-right --count <branch-de-trabalho>...origin/<branch-de-trabalho>
+# Somente com working tree limpa, ahead=0 e sem divergência na branch alvo:
+git switch <branch-de-trabalho>
+git rev-list --left-right --count HEAD...origin/<branch-de-trabalho>
+# Somente se ahead=0 e sem divergência:
+git pull --ff-only origin <branch-de-trabalho>
 npm run dev:e2e
 npm run test:e2e
 ```

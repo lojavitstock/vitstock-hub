@@ -1,6 +1,6 @@
 # Vitstock Hub — Estratégia Prática de Testes
 
-> **Fluxo de integração:** use a branch explicitamente indicada pela tarefa como baseline. No fluxo compartilhado, `preview` é a branch de integração e validação antes da promoção, sob aprovação humana, para `main`.
+> **Fluxo de integração:** mudanças nascem de `origin/preview` em `feature/*`, `fix/*` ou `chore/*`, salvo tarefa explicitamente diferente. Gates técnicos precedem a integração autorizada por PR em `preview`, o deploy de pré-produção e a validação humana. Production (`main`) recebe mudanças somente por PR de `preview`, após esses gates e decisão explícita de promoção.
 
 Este documento define o menor processo de validação que protege o Vitstock Hub sem transformar um projeto pequeno em uma operação corporativa de QA. Ele complementa o procedimento operacional em `RUNBOOK.md` e os invariantes técnicos em `ARCHITECTURE.md`.
 
@@ -220,6 +220,8 @@ Testes unitários, type checks e builds normalmente não devem depender de Evolu
 - não altere provider, banco, QR, deploy ou infraestrutura como efeito colateral inesperado.
 
 ## 11. Preview e validação humana
+
+Enquanto não for necessário teste humano oficial, mantenha o trabalho na branch de desenvolvimento, com checkpoint remoto e Draft PR quando pertinente. Para esse teste, o fluxo é branch → PR → integração autorizada em `preview` → deploy → validação humana. Um Draft PR ou CI aprovado não constitui aprovação funcional nem autorização de promoção para `main`.
 
 Use um plano manual curto e específico para a mudança:
 
