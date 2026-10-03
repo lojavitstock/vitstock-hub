@@ -19,6 +19,9 @@ const fields = {
   descricaoCurta: z.string().optional(),
 };
 export const productListModel = z.object({ ...fields, idProdutoPai: idSchema.optional(),
+  // Real GET /produtos with criterio=5 includes E; OpenAPI currently lists only A/I.
+  // Keep this observed extension list-only, without weakening the detail contract.
+  situacao: z.enum(['A', 'I', 'E']),
   estoque: z.object({ saldoVirtualTotal: z.number().optional() }).optional(),
 });
 const detailFields = { ...fields, unidade: z.string().optional(), gtin: z.string().optional(),
