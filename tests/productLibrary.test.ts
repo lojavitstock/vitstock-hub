@@ -13,6 +13,7 @@ import {
   formatBrlPrice,
   formatBrlPriceInput,
   isProductMessageSnapshot,
+  isRedundantProductCaption,
   normalizeBrlPriceDigits,
   parseBrlPriceCents,
   productStorageImageUrl,
@@ -234,4 +235,20 @@ test('timeline diferencia produto por snapshot estruturado, não por imagem comu
   assert.match(html, /aria-label="Produto V-Floc 500ml"/);
   assert.match(html, /R\$ 39,90/);
   assert.match(html, /api\/products\/storage\?key=company%2Fproduct%2Fimage.png/);
+});
+
+test('timeline suprime somente a caption gerada de um snapshot válido', () => {
+  const snapshot = { productId: 'product-1', name: 'V-Floc 500ml', priceCents: 129900,
+    currency: 'BRL', imageObjectKey: 'company/product/image.png' };
+  const caption = productCaption(snapshot);
+  assert.equal(isRedundantProductCaption(caption, snapshot), true);
+  for (const metadata of [null, undefined, {}, { ...snapshot, currency: 'USD' },
+    { ...snapshot, imageObjectKey: '' }, { mediaType: 'image', caption }]) {
+    assert.equal(isRedundantProductCaption(caption, metadata), false);
+  }
+  for (const content of ['Mensagem comum', `${caption}\nNota adicional`, 'Legenda de imagem',
+    `${snapshot.name}\nR$ 28,00`, '']) {
+    assert.equal(isRedundantProductCaption(content, snapshot), false);
+  }
+  assert.equal(isRedundantProductCaption(caption, { ...snapshot, name: 'Nome atual', priceCents: 2800 }), false);
 });

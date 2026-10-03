@@ -22,7 +22,7 @@ export const ProductPickerDialog: React.FC<ProductPickerDialogProps> = ({ onClos
   const submission = useRef<{ productId: string; clientMessageId: string } | null>(null);
   const close = () => { if (!inFlight.current) onClose(); };
   const submit = async () => {
-    if (!selectedProduct || !canSend || inFlight.current) return;
+    if (!selectedProduct || !canSend || sending || inFlight.current) return;
     inFlight.current = true;
     setSending(true);
     setSendError('');
@@ -40,9 +40,20 @@ export const ProductPickerDialog: React.FC<ProductPickerDialogProps> = ({ onClos
     }
   };
 
+  const handlePreviewKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Enter' || event.defaultPrevented || event.nativeEvent.isComposing
+      || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    // Native controls retain their own keyboard behavior; only passive preview content submits.
+    if (event.target instanceof HTMLElement && event.target.closest(
+      'button, input, textarea, select, a[href], [contenteditable]:not([contenteditable="false"]), [role="button"], [role="textbox"], [role="combobox"]',
+    )) return;
+    event.preventDefault();
+    if (!event.repeat) void submit();
+  };
+
   if (selectedProduct) {
-    return <ProductDialog title="Pré-visualizar produto" onClose={close}>
-      <div className="space-y-4">
+    return <ProductDialog key="preview" title="Pré-visualizar produto" onClose={close}>
+      <div className="space-y-4 outline-none" tabIndex={-1} data-dialog-autofocus onKeyDown={handlePreviewKeyDown}>
         <div className="flex aspect-square max-h-[42vh] items-center justify-center overflow-hidden rounded-xl bg-zinc-900 p-4 sm:aspect-[4/3]">
           <img src={selectedProduct.imageUrl} alt={`Imagem do produto ${selectedProduct.name}`} className="h-full w-full object-contain" />
         </div>
@@ -62,7 +73,7 @@ export const ProductPickerDialog: React.FC<ProductPickerDialogProps> = ({ onClos
     </ProductDialog>;
   }
 
-  return <ProductDialog title="Produtos" onClose={onClose}>
+  return <ProductDialog key="picker" title="Produtos" onClose={onClose}>
     <div className="space-y-3">
       <div className="flex items-center gap-2">
         <label className="relative block min-w-0 flex-1">
