@@ -144,7 +144,7 @@ A experiência deve favorecer velocidade operacional sem perder contexto.
 
 ### Biblioteca de Produtos no Atendimento
 
-O picker de Produtos oferece um `+` amarelo para administradores, que abre Configurações → Produtos diretamente no formulário de cadastro em nova aba. Ao voltar à aba original, a conversa, o rascunho e os anexos permanecem disponíveis e a busca de produtos é atualizada. No composer, `\` pesquisa produtos por nome, incluindo nomes com espaços, e permite selecionar por clique ou pelas setas e Enter. A seleção abre a mesma prévia de produto, com envio desabilitado; Escape fecha as sugestões. O atalho `/` de mensagens rápidas mantém seu comportamento.
+O picker de Produtos oferece um `+` amarelo para administradores, que abre Configurações → Produtos diretamente no formulário de cadastro na mesma aba, por navegação SPA. Ao retornar pelo histórico ou pela navegação do aplicativo, a conversa, o rascunho e os anexos são restaurados em memória e o picker busca produtos novamente. Esse contexto temporário não sobrevive a reload ou logout; arquivos não são gravados em armazenamento persistente. No composer, `\` pesquisa produtos por nome, incluindo nomes com espaços, e permite selecionar por clique ou pelas setas e Enter. A seleção abre a mesma prévia de produto, com envio desabilitado; Escape fecha as sugestões. O atalho `/` de mensagens rápidas mantém seu comportamento.
 
 ---
 
