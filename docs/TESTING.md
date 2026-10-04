@@ -285,13 +285,20 @@ QA requer reconectar seus vínculos fictícios, pois a chave muda. Nenhum secret
 `npm run test:e2e -- tests/e2e/bling.spec.ts` testa Configurações/connect/callback/
 disconnect, ciphertext no PostgreSQL QA, state single-use/expirado, ADMIN/tenant,
 read models, dez GETs concorrentes com apenas um refresh e budget diário esgotado.
-Inclui duas instâncias PgBlingStore contra PostgreSQL real, refresh único,
-401/expiry/connect/disconnect concorrentes, rotação preservada após GET 403,
-janela de requests e disponibilidade do pool Hub com DB_POOL_MAX=1.
-Compara snapshots integrais de products/message_product_refs antes/depois, sem
-R2/provider real. Budget alterado apenas no banco QA fixo é restaurado no finally.
-Migration 022 só é aplicada pelo `dev:e2e` guardado; nunca banco remoto.
-OAuth real e dados reais são explicitamente excluídos deste gate.
+Também valida importação com dados autoritativos e imagem local, duplicidade,
+link/relink/sync/unlink, proteção de nome/preço, saldos por depósito e rollback
+de sync quando o estoque é inválido. `tests/server.test.ts` simula falha SQL após
+upload e confirma rollback mais remoção somente do novo objeto armazenado.
+`tests/e2e/products.spec.ts` cobre o fluxo UI
+de importação/paginação, cache visível e campos vinculados somente leitura;
+`tests/e2e/product-send.spec.ts` confirma envio sem chamada Bling e preservação
+dos snapshots anteriores à sincronização. Inclui duas instâncias PgBlingStore
+contra PostgreSQL QA, refresh único, 401/expiry/connect/disconnect concorrentes,
+rotação preservada após GET 403, janela de requests e disponibilidade do pool
+Hub com DB_POOL_MAX=1. Compara snapshots de products/message_product_refs antes
+e depois quando aplicável, sem provider/R2 real. Budget alterado apenas no banco
+QA fixo é restaurado no finally. Migrations 022 e 023 só são aplicadas pelo
+`dev:e2e` guardado; nunca banco remoto. OAuth real e dados reais são excluídos.
 
 ```powershell
 npm test

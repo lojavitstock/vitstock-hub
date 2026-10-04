@@ -63,7 +63,7 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
     criterio: z.coerce.number().int().min(1).max(5).default(5), tipo: z.enum(['T','P','S','E','PS','C','V']).default('T') }).strict();
   const warehouseQuery = pagination.extend({ descricao: z.string().trim().min(1).max(120).optional(), situacao: z.coerce.number().int().min(0).max(1).optional() }).strict();
   for (const resource of ['products', 'warehouses'] as const) {
-    app.get(`${base}/${resource}`, { preHandler: requireUser }, async (request, reply) => safe(reply, async () => {
+    app.get(`${base}/${resource}`, { preHandler: requireAdmin }, async (request, reply) => safe(reply, async () => {
       const parsed = (resource === 'products' ? productQuery : warehouseQuery).safeParse(request.query);
       if (!parsed.success) throw new BlingError(400, 'Paginação ou filtros inválidos');
       const { page, limit, ...filters } = parsed.data;
@@ -75,12 +75,12 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
       return { data, page, limit };
     }));
   }
-  app.get(`${base}/products/:id`, { preHandler: requireUser }, async (request, reply) => safe(reply, async () => {
+  app.get(`${base}/products/:id`, { preHandler: requireAdmin }, async (request, reply) => safe(reply, async () => {
     const parsed = z.object({ id: idSchema }).safeParse(request.params);
     if (!parsed.success || Object.keys(request.query as object).length) throw new BlingError(400, 'Identificador ou parâmetros inválidos');
     return parseContract(z.object({ data: productDetailModel }), await ready().client.read(request.user!.companyId, 'product', new URLSearchParams(), parsed.data.id));
   }));
-  app.get(`${base}/products/:id/stock`, { preHandler: requireUser }, async (request, reply) => safe(reply, async () => {
+  app.get(`${base}/products/:id/stock`, { preHandler: requireAdmin }, async (request, reply) => safe(reply, async () => {
     const params = z.object({ id: idSchema }).safeParse(request.params);
     const query = z.object({ warehouseId: idSchema.optional() }).strict().safeParse(request.query);
     if (!params.success || !query.success) throw new BlingError(400, 'Identificador ou depósito inválido');

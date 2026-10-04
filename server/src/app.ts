@@ -12,7 +12,7 @@ import { registerConversationTagRoutes } from './conversationTags.js';
 import { registerQuickReplyRoutes } from './quickReplies.js';
 import { registerProductRoutes } from './products.js';
 import { selectProductStorage } from './productStorage.js';
-import { registerBlingRoutes } from './bling.js';
+import { registerBlingRoutes, runtimeBling } from './bling.js';
 
 export const safeRequestLog = (request: { method?: string; url?: string; id?: string }) => ({
   method: request.method, url: request.url?.split('?')[0], id: request.id,
@@ -74,9 +74,10 @@ export async function createApp() {
     }
   });
 
+  const bling = runtimeBling();
   await registerAuthRoutes(app);
   await registerGoogleContactRoutes(app);
-  await registerBlingRoutes(app);
+  await registerBlingRoutes(app, bling);
   await registerContactRoutes(app);
   await registerConversationTagRoutes(app);
   await registerQuickReplyRoutes(app);
@@ -94,7 +95,7 @@ export async function createApp() {
   });
   await registerEvolutionRoutes(app, productStorage || undefined);
   if (productStorage) {
-    await registerProductRoutes(app, productStorage);
+    await registerProductRoutes(app, productStorage, bling);
     app.addHook('onClose', async () => productStorage.close?.());
   }
   await registerQaRoutes(app);

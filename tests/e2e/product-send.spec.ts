@@ -127,6 +127,82 @@ test('produto pela UI: loading/double Enter, envio único, FK local, cartão e s
   expect(errors).toEqual([]);
 });
 
+test('produto Bling: send usa cache sem provider call e sync preserva snapshots históricos', async ({ page }) => {
+  await login(page);
+  const pool = new Pool({ connectionString: 'postgresql://vitstock@127.0.0.1:55432/vitstock_qa' });
+  let productId: string | null = null;
+  try {
+    await page.request.post(`${api}/api/integrations/bling/disconnect`);
+    const authorization = await (await page.request.post(`${api}/api/integrations/bling/connect`)).json();
+    const callback = await page.request.get(authorization.url, { maxRedirects: 0 });
+    expect(callback.status()).toBe(302);
+    expect(callback.headers().location).toContain('bling=connected');
+    await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'default' } });
+
+    const token = Date.now().toString().slice(-7);
+    const remoteJid = `552196${token}@s.whatsapp.net`;
+    const product = await createProduct(page, `Linked send QA ${token}`);
+    productId = product.id;
+    await prepareConversation(page, remoteJid, `Linked send contact ${token}`);
+    const linked = await page.request.post(`${api}/api/products/${productId}/bling-link`, { data: { blingProductId: '101' } });
+    expect(linked.status()).toBe(200);
+    expect((await linked.json()).product).toMatchObject({ name: 'Produto Bling QA', priceCents: 2800, source: 'bling' });
+
+    const apiBudget = async () => Number((await pool.query("SELECT requests FROM bling_request_budgets WHERE budget='api'")).rows[0].requests);
+    const firstClientMessageId = randomUUID();
+    const firstBudget = await apiBudget();
+    const firstSend = await page.request.post(`${api}/api/evolution/messages/send-product`, {
+      data: { productId, remoteJid, clientMessageId: firstClientMessageId },
+    });
+    expect(firstSend.status()).toBe(200);
+    expect(await apiBudget()).toBe(firstBudget);
+    const firstSnapshot = await readReferences(page, firstClientMessageId);
+    expect(firstSnapshot).toHaveLength(1);
+    expect(firstSnapshot[0]).toMatchObject({ product_name_snapshot: 'Produto Bling QA', product_price_cents_snapshot: 2800 });
+
+    expect((await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'updated' } })).status()).toBe(200);
+    const synced = await page.request.post(`${api}/api/products/${productId}/bling-sync`);
+    expect(synced.status()).toBe(200);
+    expect((await synced.json()).product).toMatchObject({ name: 'Produto Bling Atualizado QA', priceCents: 4000 });
+    const preservedSnapshot = await readReferences(page, firstClientMessageId);
+    expect(preservedSnapshot[0].product_name_snapshot).toBe('Produto Bling QA');
+    expect(preservedSnapshot[0].product_price_cents_snapshot).toBe(2800);
+    expect(preservedSnapshot[0].metadata.productSnapshot).toEqual(firstSnapshot[0].metadata.productSnapshot);
+
+    const secondClientMessageId = randomUUID();
+    const secondBudget = await apiBudget();
+    const secondSend = await page.request.post(`${api}/api/evolution/messages/send-product`, {
+      data: { productId, remoteJid, clientMessageId: secondClientMessageId },
+    });
+    expect(secondSend.status()).toBe(200);
+    expect(await apiBudget()).toBe(secondBudget);
+    const secondSnapshot = await readReferences(page, secondClientMessageId);
+    expect(secondSnapshot).toHaveLength(1);
+    expect(secondSnapshot[0]).toMatchObject({ product_name_snapshot: 'Produto Bling Atualizado QA', product_price_cents_snapshot: 4000 });
+
+    expect((await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'default' } })).status()).toBe(200);
+    const relink = await page.request.post(`${api}/api/products/${productId}/bling-link`, { data: { blingProductId: '304' } });
+    expect(relink.status()).toBe(200);
+    expect((await relink.json()).product).toMatchObject({ name: 'Produto Catálogo QA 304', priceCents: 18000, source: 'bling' });
+    const unlink = await page.request.delete(`${api}/api/products/${productId}/bling-link`);
+    expect(unlink.status()).toBe(200);
+    expect((await unlink.json()).product).toMatchObject({ name: 'Produto Catálogo QA 304', priceCents: 18000, source: 'manual', bling: null });
+    for (const [clientMessageId, expectedName, expectedPrice] of [
+      [firstClientMessageId, 'Produto Bling QA', 2800],
+      [secondClientMessageId, 'Produto Bling Atualizado QA', 4000],
+    ] as const) {
+      const historical = await readReferences(page, clientMessageId);
+      expect(historical).toHaveLength(1);
+      expect(historical[0]).toMatchObject({ product_name_snapshot: expectedName, product_price_cents_snapshot: expectedPrice });
+    }
+  } finally {
+    if (productId) await page.request.post(`${api}/api/products/${productId}/archive`).catch(() => undefined);
+    await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'default' } }).catch(() => undefined);
+    await page.request.post(`${api}/api/integrations/bling/disconnect`).catch(() => undefined);
+    await pool.end();
+  }
+});
+
 test('produto: provider failure mantém preview/erro, registro failed e retry idempotente', async ({ page }) => {
   await login(page);
   const token = Date.now().toString().slice(-7);

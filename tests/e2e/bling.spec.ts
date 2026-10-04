@@ -3,6 +3,7 @@ import pg from '../../server/node_modules/pg/lib/index.js';
 import { spawnSync } from 'node:child_process';
 
 const api = 'http://localhost:3001';
+const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 
 test('Bling isolated pool keeps Hub healthy with DB_POOL_MAX=1; replica locks serialize refresh and mixed operations', async () => {
   test.setTimeout(60000);
@@ -79,6 +80,9 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     (SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY id),'[]') FROM message_product_refs r) AS refs`)).rows[0];
   const before = await snapshot();
   const errors: string[] = []; const external: string[] = [];
+  let linkedProductId: string | null = null;
+  let createdProductId: string | null = null;
+  let importedProductId: string | null = null;
   page.on('pageerror', e => errors.push(e.message));
   page.on('request', r => { if (new URL(r.url()).hostname.endsWith('bling.com.br')) external.push(r.url()); });
   try {
@@ -107,6 +111,86 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
       if (path === 'products/101') expect(body.data.id).toBe('101');
       if (path.startsWith('products/101/stock')) expect(body.data[0]).toMatchObject({ produto: { id: '101' }, saldoFisicoTotal: 8, saldoVirtualTotal: 5 });
     }
+    const localProductResponse = await page.request.post(`${api}/api/products`, {
+      data: { name: `Bling Link QA ${Date.now()}`, priceCents: 2800, imageBase64: png, imageMimeType: 'image/png' },
+    });
+    expect(localProductResponse.status()).toBe(201);
+    linkedProductId = (await localProductResponse.json()).product.id;
+    createdProductId = linkedProductId;
+    const originalImage = (await pool.query('SELECT image_object_key FROM products WHERE id=$1', [linkedProductId])).rows[0].image_object_key;
+    const linkResponse = await page.request.post(`${api}/api/products/${linkedProductId}/bling-link`, { data: { blingProductId: '101' } });
+    expect(linkResponse.status()).toBe(200);
+    expect(await linkResponse.json()).toMatchObject({ product: {
+      id: linkedProductId, source: 'bling', name: 'Produto Bling QA', priceCents: 2800,
+      bling: { productId: '101', code: 'SKU-101', gtin: '7890000000001', unit: 'UN',
+        status: 'I', format: 'S', stockPhysicalTotal: '8', stockVirtualTotal: '5' },
+    } });
+    expect((await pool.query('SELECT image_object_key FROM products WHERE id=$1', [linkedProductId])).rows[0].image_object_key).toBe(originalImage);
+    expect((await pool.query('SELECT bling_warehouse_id,physical_balance,virtual_balance FROM product_bling_stock_balances WHERE product_id=$1', [linkedProductId])).rows)
+      .toEqual([{ bling_warehouse_id: '7', physical_balance: '8', virtual_balance: '5' }]);
+    expect((await (await page.request.get(`${api}/api/products/bling-links`)).json()).links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ productId: linkedProductId, blingProductId: '101' }),
+    ]));
+    expect((await page.request.patch(`${api}/api/products/${linkedProductId}`, { data: { name: 'Manual overwrite' } })).status()).toBe(409);
+    expect((await page.request.patch(`${api}/api/products/${linkedProductId}`, { data: { priceCents: 3000 } })).status()).toBe(409);
+    const imageEdit = await page.request.patch(`${api}/api/products/${linkedProductId}`, { data: { imageBase64: png, imageMimeType: 'image/png' } });
+    expect(imageEdit.status()).toBe(200);
+    expect((await imageEdit.json()).product).toMatchObject({ source: 'bling', name: 'Produto Bling QA', priceCents: 2800 });
+    const editedImage = (await pool.query('SELECT image_object_key FROM products WHERE id=$1', [linkedProductId])).rows[0].image_object_key;
+    expect(editedImage).not.toBe(originalImage);
+
+    const linkedState = async () => (await pool.query(`SELECT to_jsonb(p) AS product,
+      (SELECT to_jsonb(l) FROM product_bling_links l WHERE l.company_id=p.company_id AND l.product_id=p.id) AS link,
+      (SELECT COALESCE(jsonb_agg(to_jsonb(b) ORDER BY b.bling_warehouse_id),'[]') FROM product_bling_stock_balances b WHERE b.company_id=p.company_id AND b.product_id=p.id) AS balances
+      FROM products p WHERE p.id=$1`, [linkedProductId])).rows[0];
+    const beforeInvalidSync = await linkedState();
+    expect((await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'invalid-stock' } })).status()).toBe(200);
+    expect((await page.request.post(`${api}/api/products/${linkedProductId}/bling-sync`)).status()).toBe(502);
+    expect(await linkedState()).toEqual(beforeInvalidSync);
+    expect((await page.request.post(`${api}/api/products/${linkedProductId}/bling-sync`, { data: { blingProductId: '202' } })).status()).toBe(400);
+    expect((await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'updated' } })).status()).toBe(200);
+    const sync = await page.request.post(`${api}/api/products/${linkedProductId}/bling-sync`);
+    expect(sync.status()).toBe(200);
+    expect((await sync.json()).product).toMatchObject({ name: 'Produto Bling Atualizado QA', priceCents: 4000,
+      bling: { productId: '101', parentProductId: '90', stockPhysicalTotal: '14.25', stockVirtualTotal: '9' } });
+    expect((await pool.query('SELECT image_object_key FROM products WHERE id=$1', [linkedProductId])).rows[0].image_object_key).toBe(editedImage);
+
+    expect((await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'default' } })).status()).toBe(200);
+    const relink = await page.request.post(`${api}/api/products/${linkedProductId}/bling-link`, { data: { blingProductId: '304' } });
+    expect(relink.status()).toBe(200);
+    expect((await relink.json()).product).toMatchObject({ source: 'bling', name: 'Produto Catálogo QA 304', priceCents: 18000, bling: { productId: '304' } });
+    const beforeUnlink = (await pool.query('SELECT name,price_cents,image_object_key FROM products WHERE id=$1', [linkedProductId])).rows[0];
+    const unlink = await page.request.delete(`${api}/api/products/${linkedProductId}/bling-link`);
+    expect(unlink.status()).toBe(200);
+    expect((await unlink.json()).product).toMatchObject({ source: 'manual', name: beforeUnlink.name, priceCents: beforeUnlink.price_cents, bling: null });
+    expect((await pool.query('SELECT name,price_cents,image_object_key FROM products WHERE id=$1', [linkedProductId])).rows[0]).toEqual(beforeUnlink);
+    expect((await pool.query('SELECT 1 FROM product_bling_stock_balances WHERE product_id=$1', [linkedProductId])).rows).toHaveLength(0);
+    linkedProductId = null;
+
+    const productCountBeforeFailedImport = Number((await pool.query('SELECT count(*)::int AS count FROM products')).rows[0].count);
+    const importBody = { blingProductId: '303', imageBase64: png, imageMimeType: 'image/png' };
+    const imported = await page.request.post(`${api}/api/products/bling-import`, { data: importBody });
+    expect(imported.status()).toBe(201);
+    const importedProduct = (await imported.json()).product;
+    importedProductId = importedProduct.id;
+    expect(importedProduct).toMatchObject({ source: 'bling', name: 'Produto para Importar QA', priceCents: 18000,
+      bling: { productId: '303', code: 'SKU-303', unit: 'UN', status: 'A', format: 'S' } });
+    expect((await page.request.post(`${api}/api/products/bling-import`, { data: importBody })).status()).toBe(409);
+    expect((await page.request.get(`${api}/api/products/${importedProductId}`)).status()).toBe(200);
+    const importedImageKey = (await pool.query('SELECT image_object_key FROM products WHERE id=$1', [importedProductId])).rows[0].image_object_key;
+    expect(importedImageKey).toMatch(new RegExp(`^products/.+/${importedProductId}/.+\\.png$`));
+    const listWithEndedProduct = await page.request.get(`${api}/api/integrations/bling/products?page=1&limit=20`);
+    expect(listWithEndedProduct.status()).toBe(200);
+    expect((await listWithEndedProduct.json()).data).toEqual(expect.arrayContaining([expect.objectContaining({ id: '202', situacao: 'E' })]));
+    const endedDetail = await page.request.get(`${api}/api/integrations/bling/products/202`);
+    expect(endedDetail.status()).toBe(502);
+    expect(JSON.stringify(await endedDetail.json())).not.toContain('Produto Encerrado QA');
+
+    expect((await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'missing-price' } })).status()).toBe(200);
+    const missingPriceImport = await page.request.post(`${api}/api/products/bling-import`, { data: { ...importBody, blingProductId: '101' } });
+    expect(missingPriceImport.status()).toBe(502);
+    expect(Number((await pool.query('SELECT count(*)::int AS count FROM products')).rows[0].count)).toBe(productCountBeforeFailedImport + 1);
+    expect((await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'default' } })).status()).toBe(200);
     expect((await page.request.get(`${api}/api/integrations/bling/products?url=https://evil.example`)).status()).toBe(400);
     expect((await page.request.get(`${api}/api/integrations/bling/products?limit=101`)).status()).toBe(400);
     const oauthBefore = Number((await pool.query("SELECT requests FROM bling_request_budgets WHERE budget='oauth'")).rows[0].requests);
@@ -120,6 +204,7 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
       expect((await second.post(`${api}/api/auth/login`, { data: { email: 'qa-admin-b@vitstock.test', password: process.env.E2E_PASSWORD } })).status()).toBe(200);
       expect((await (await second.get(`${api}/api/integrations/bling/status`)).json()).connected).toBe(false);
       expect((await second.get(`${api}/api/integrations/bling/products`)).status()).toBe(409);
+      expect((await second.get(`${api}/api/products/${importedProductId}`)).status()).toBe(404);
     } finally { await second.dispose(); }
     const connect = await (await page.request.post(`${api}/api/integrations/bling/connect`)).json();
     expect((await page.request.get(connect.url, { maxRedirects: 0 })).headers().location).toContain('bling=connected');
@@ -132,8 +217,28 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     expect((await page.request.get(missingCode.href, { maxRedirects: 0 })).headers().location).toContain('bling=error');
     const denied = await request.newContext();
     try {
-      expect((await denied.post(`${api}/api/auth/login`, { data: { email: process.env.E2E_SECOND_EMAIL, password: process.env.E2E_SECOND_PASSWORD } })).status()).toBe(200);
+      const attendantLogin = await denied.post(`${api}/api/auth/login`, { data: { email: process.env.E2E_SECOND_EMAIL, password: process.env.E2E_SECOND_PASSWORD } });
+      expect(attendantLogin.status()).toBe(200);
+      expect((await attendantLogin.json()).user.role).toBe('attendant');
+      expect((await denied.get(`${api}/api/integrations/bling/status`)).status()).toBe(200);
+      const apiBudgetBeforeAttendantReads = Number((await pool.query("SELECT requests FROM bling_request_budgets WHERE budget='api'")).rows[0].requests);
+      const upstreamReads = await Promise.all([
+        denied.get(`${api}/api/integrations/bling/products`),
+        denied.get(`${api}/api/integrations/bling/products/101`),
+        denied.get(`${api}/api/integrations/bling/products/101/stock`),
+        denied.get(`${api}/api/integrations/bling/warehouses`),
+      ]);
+      expect(upstreamReads.map(response => response.status())).toEqual([403, 403, 403, 403]);
+      const apiBudgetAfterAttendantReads = Number((await pool.query("SELECT requests FROM bling_request_budgets WHERE budget='api'")).rows[0].requests);
+      expect(apiBudgetAfterAttendantReads).toBe(apiBudgetBeforeAttendantReads);
+      const localProductsResponse = await denied.get(`${api}/api/products`);
+      expect(localProductsResponse.status()).toBe(200);
+      expect((await localProductsResponse.json()).products).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: importedProductId, source: 'bling', bling: expect.objectContaining({ productId: '303' }) }),
+      ]));
       for (const action of ['connect', 'disconnect']) expect((await denied.post(`${api}/api/integrations/bling/${action}`)).status()).toBe(403);
+      expect((await denied.post(`${api}/api/products/${importedProductId}/bling-sync`)).status()).toBe(403);
+      expect((await denied.delete(`${api}/api/products/${importedProductId}/bling-link`)).status()).toBe(403);
     } finally { await denied.dispose(); }
     // Exhaust only the Bling QA budget, prove fail-closed, then restore test state.
     const budget = (await pool.query("SELECT requests,day FROM bling_request_budgets WHERE budget='api'")).rows[0];
@@ -145,9 +250,23 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     page.once('dialog', dialog => dialog.accept());
     await page.getByRole('button', { name: 'Desconectar Bling', exact: true }).click();
     await expect(page.getByTestId('bling-status')).toHaveText('Não conectado');
+    if (createdProductId) {
+      await pool.query('DELETE FROM products WHERE id=$1', [createdProductId]);
+      createdProductId = null;
+    }
+    if (importedProductId) {
+      await pool.query('DELETE FROM products WHERE id=$1', [importedProductId]);
+      importedProductId = null;
+    }
     expect(await snapshot()).toEqual(before);
     expect(external).toEqual([]); expect(errors).toEqual([]);
-  } finally { await page.request.post(`${api}/api/integrations/bling/disconnect`); await pool.end(); }
+  } finally {
+    if (linkedProductId) await page.request.delete(`${api}/api/products/${linkedProductId}/bling-link`).catch(() => undefined);
+    if (createdProductId) await pool.query('DELETE FROM products WHERE id=$1', [createdProductId]).catch(() => undefined);
+    if (importedProductId) await pool.query('DELETE FROM products WHERE id=$1', [importedProductId]).catch(() => undefined);
+    await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'default' } }).catch(() => undefined);
+    await page.request.post(`${api}/api/integrations/bling/disconnect`); await pool.end();
+  }
 });
 
 test('Bling QA migration is additive, constrained and logically reversible without committing removal', async ({ request }) => {
@@ -156,8 +275,14 @@ test('Bling QA migration is additive, constrained and logically reversible witho
   const client = await pool.connect();
   try {
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='022_bling_integration.sql'")).rows).toHaveLength(1);
+    expect((await client.query("SELECT name FROM schema_migrations WHERE name='023_product_bling_links.sql'")).rows).toHaveLength(1);
     const tables = (await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'bling_%' ORDER BY table_name")).rows.map(r => r.table_name);
     expect(tables).toEqual(['bling_connections','bling_oauth_states','bling_request_budgets']);
+    const productTables = (await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('product_bling_links','product_bling_stock_balances') ORDER BY table_name")).rows.map(r => r.table_name);
+    expect(productTables).toEqual(['product_bling_links','product_bling_stock_balances']);
+    const stockTypes = (await client.query("SELECT column_name,data_type FROM information_schema.columns WHERE table_name='product_bling_stock_balances' AND column_name IN ('physical_balance','virtual_balance') ORDER BY column_name")).rows;
+    expect(stockTypes).toEqual([{ column_name: 'physical_balance', data_type: 'numeric' }, { column_name: 'virtual_balance', data_type: 'numeric' }]);
+    expect((await client.query("SELECT constraint_name FROM information_schema.table_constraints WHERE table_name='product_bling_links' AND constraint_type='UNIQUE'")).rows).toEqual(expect.arrayContaining([{ constraint_name: 'product_bling_links_bling_id_unique' }]));
     expect((await client.query("SELECT constraint_type FROM information_schema.table_constraints WHERE table_name='bling_connections' AND constraint_type='PRIMARY KEY'")).rows).toHaveLength(1);
     await client.query('BEGIN');
     await client.query('DROP TABLE bling_oauth_states, bling_connections, bling_request_budgets');

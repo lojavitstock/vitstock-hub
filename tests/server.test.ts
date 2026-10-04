@@ -171,6 +171,69 @@ test('product send: trusted snapshots, tenant boundaries, exact JIDs and atomic 
   } finally { await app.close(); }
 });
 
+test('Bling import removes only the uploaded image when its product transaction rolls back', async (t) => {
+  const { registerProductRoutes } = await import('../server/src/products.js');
+  const { default: Fastify } = await import('../server/node_modules/fastify/fastify.js');
+  const companyId = '10000000-0000-4000-8000-000000000011';
+  const productId = '10000000-0000-4000-8000-000000000012';
+  const uploaded: string[] = [];
+  const removed: string[] = [];
+  let productInserted = false;
+  let rolledBack = false;
+  const storage = {
+    async put(_companyId: string, key: string) { uploaded.push(key); },
+    async remove(_companyId: string, key: string) { removed.push(key); },
+    async get() { return null; },
+    async exists() { return false; },
+    buildUrl(key: string) { return `https://media.qa.test/${key}`; },
+  };
+  const sqlText = (query: unknown) => (typeof query === 'string' ? query : String((query as any)?.text || '')).replace(/\s+/g, ' ').trim();
+
+  t.mock.method(db as any, 'query', async (query: unknown) => {
+    assert.match(sqlText(query), /FROM product_bling_links/);
+    return { rows: [] };
+  });
+  t.mock.method(db as any, 'connect', async () => ({
+    release() {},
+    async query(query: unknown, values: unknown[] = []) {
+      const sql = sqlText(query);
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] };
+      if (sql.startsWith('INSERT INTO products')) {
+        assert.equal(values[0], productId);
+        productInserted = true;
+        return { rows: [] };
+      }
+      if (sql.startsWith('SELECT id FROM products')) return { rows: productInserted ? [{ id: productId }] : [] };
+      if (sql.startsWith('SELECT bling_product_id FROM product_bling_links')) return { rows: [] };
+      if (sql.startsWith('INSERT INTO product_bling_links')) throw new Error('Simulated database constraint failure');
+      if (sql === 'ROLLBACK') { rolledBack = true; productInserted = false; return { rows: [] }; }
+      return { rows: [] };
+    },
+  }));
+
+  const bling = { client: { read: async (_company: string, resource: string) => resource === 'product'
+    ? { data: { id: '101', nome: 'Produto importado QA', codigo: 'SKU-101', preco: 28, tipo: 'P', situacao: 'A', formato: 'S' } }
+    : { data: [{ produto: { id: '101' }, saldoFisicoTotal: 8, saldoVirtualTotal: 5,
+      depositos: [{ id: '7', saldoFisico: 8, saldoVirtual: 5 }] }] } } };
+  const app = Fastify();
+  app.decorateRequest('user', null);
+  app.addHook('onRequest', async (request) => {
+    (request as any).user = { id: productId, companyId, companyName: 'QA', name: 'QA Admin', role: 'admin', email: 'qa@example.test' };
+  });
+  await registerProductRoutes(app, storage as any, bling as any);
+  try {
+    const png = Buffer.from('89504e470d0a1a0a', 'hex').toString('base64');
+    const result = await app.inject({ method: 'POST', url: '/api/products/bling-import', payload: {
+      blingProductId: '101', imageBase64: png, imageMimeType: 'image/png',
+    } });
+    assert.equal(result.statusCode, 500, result.body);
+    assert.equal(rolledBack, true);
+    assert.equal(productInserted, false);
+    assert.equal(uploaded.length, 1);
+    assert.deepEqual(removed, uploaded, 'rollback must remove exactly the object uploaded by this request');
+  } finally { await app.close(); }
+});
+
 test('reply schema rejection is traced before any Evolution provider request', async () => {
   const app = await createApp();
   app.addHook('onRequest', async (request) => {

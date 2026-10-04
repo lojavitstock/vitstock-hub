@@ -5,6 +5,7 @@ import { isQaMode } from './config.js';
 import { db } from './db.js';
 import { requireAdmin } from './auth.js';
 import { publishRealtimeEvent } from './realtime.js';
+import { setQaBlingScenario, type QaBlingScenario } from './blingQa.js';
 
 export type QaGoogleScenario = 'success' | 'conflict' | 'rate-limit' | 'timeout' | 'sync-token-expired' | 'partial' | 'external-delete';
 
@@ -366,6 +367,15 @@ export async function registerQaRoutes(app: FastifyInstance) {
     if (!parsed.success) return reply.code(400).send({ error: 'Cenário QA inválido' });
     qaMediaSendScenario = parsed.data.scenario;
     return { scenario: qaMediaSendScenario };
+  });
+
+  app.post('/api/qa/bling/scenario', { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({
+      scenario: z.enum(['default', 'updated', 'invalid-stock', 'empty-stock', 'missing-price', 'detail-mismatch']),
+    }).strict().safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Cenário Bling QA inválido' });
+    setQaBlingScenario(parsed.data.scenario as QaBlingScenario);
+    return { scenario: parsed.data.scenario };
   });
 
   app.get<{ Params: { variant: string } }>('/api/qa/avatar/:variant', async (request, reply) => {
