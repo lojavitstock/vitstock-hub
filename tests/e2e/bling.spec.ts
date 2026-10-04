@@ -217,10 +217,26 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     expect((await page.request.get(missingCode.href, { maxRedirects: 0 })).headers().location).toContain('bling=error');
     const denied = await request.newContext();
     try {
-      expect((await denied.post(`${api}/api/auth/login`, { data: { email: process.env.E2E_SECOND_EMAIL, password: process.env.E2E_SECOND_PASSWORD } })).status()).toBe(200);
+      const attendantLogin = await denied.post(`${api}/api/auth/login`, { data: { email: process.env.E2E_SECOND_EMAIL, password: process.env.E2E_SECOND_PASSWORD } });
+      expect(attendantLogin.status()).toBe(200);
+      expect((await attendantLogin.json()).user.role).toBe('attendant');
+      expect((await denied.get(`${api}/api/integrations/bling/status`)).status()).toBe(200);
+      const apiBudgetBeforeAttendantReads = Number((await pool.query("SELECT requests FROM bling_request_budgets WHERE budget='api'")).rows[0].requests);
+      const upstreamReads = await Promise.all([
+        denied.get(`${api}/api/integrations/bling/products`),
+        denied.get(`${api}/api/integrations/bling/products/101`),
+        denied.get(`${api}/api/integrations/bling/products/101/stock`),
+        denied.get(`${api}/api/integrations/bling/warehouses`),
+      ]);
+      expect(upstreamReads.map(response => response.status())).toEqual([403, 403, 403, 403]);
+      const apiBudgetAfterAttendantReads = Number((await pool.query("SELECT requests FROM bling_request_budgets WHERE budget='api'")).rows[0].requests);
+      expect(apiBudgetAfterAttendantReads).toBe(apiBudgetBeforeAttendantReads);
+      const localProductsResponse = await denied.get(`${api}/api/products`);
+      expect(localProductsResponse.status()).toBe(200);
+      expect((await localProductsResponse.json()).products).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: importedProductId, source: 'bling', bling: expect.objectContaining({ productId: '303' }) }),
+      ]));
       for (const action of ['connect', 'disconnect']) expect((await denied.post(`${api}/api/integrations/bling/${action}`)).status()).toBe(403);
-      const cachedProducts = await (await denied.get(`${api}/api/products`)).json();
-      expect(cachedProducts.products).toEqual(expect.arrayContaining([expect.objectContaining({ id: importedProductId, source: 'bling', bling: expect.objectContaining({ productId: '303' }) })]));
       expect((await denied.post(`${api}/api/products/${importedProductId}/bling-sync`)).status()).toBe(403);
       expect((await denied.delete(`${api}/api/products/${importedProductId}/bling-link`)).status()).toBe(403);
     } finally { await denied.dispose(); }
