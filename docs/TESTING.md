@@ -285,6 +285,8 @@ QA requer reconectar seus vínculos fictícios, pois a chave muda. Nenhum secret
 `npm run test:e2e -- tests/e2e/bling.spec.ts` testa Configurações/connect/callback/
 disconnect, ciphertext no PostgreSQL QA, state single-use/expirado, ADMIN/tenant,
 read models, dez GETs concorrentes com apenas um refresh e budget diário esgotado.
+Também valida catálogo operacional via `criterio=2`, paginação/busca ativa,
+guards de import/link/relink para `I`/`E` e sync authoritative de vínculo existente.
 Também valida importação com dados autoritativos e imagem local, duplicidade,
 link/relink/sync/unlink, proteção de nome/preço, saldos por depósito e rollback
 de sync quando o estoque é inválido. `tests/server.test.ts` simula falha SQL após

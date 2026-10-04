@@ -19,7 +19,7 @@ export type ProductBlingLink = {
   blingGtin: string | null;
   blingUnit: string | null;
   blingPriceCents: number;
-  blingStatus: 'A' | 'I';
+  blingStatus: 'A' | 'I' | 'E';
   blingFormat: 'S' | 'V' | 'E';
   stockPhysicalTotal: string | null;
   stockVirtualTotal: string | null;

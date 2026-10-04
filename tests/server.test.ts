@@ -171,6 +171,54 @@ test('product send: trusted snapshots, tenant boundaries, exact JIDs and atomic 
   } finally { await app.close(); }
 });
 
+test('Bling product selection catalog fixes active criterion, honors search/pagination and fails closed on provider violations', async () => {
+  const { default: Fastify } = await import('../server/node_modules/fastify/fastify.js');
+  const { registerBlingRoutes } = await import('../server/src/bling.js');
+  const calls: Array<{ resource: string; query: URLSearchParams }> = [];
+  let providerValue: unknown = { data: [
+    { id: '301', nome: 'Produto QA A', codigo: 'SKU-301', tipo: 'P', situacao: 'A', formato: 'S' },
+    { id: '302', nome: 'Produto QA B', codigo: 'SKU-302', tipo: 'P', situacao: 'A', formato: 'S' },
+  ] };
+  const app = Fastify({ logger: false });
+  app.decorateRequest('user', null);
+  app.addHook('onRequest', async (request) => {
+    (request as any).user = { id: 'qa-admin', companyId: 'qa-company', companyName: 'QA', name: 'QA Admin', role: 'admin', email: 'qa@example.test' };
+  });
+  await registerBlingRoutes(app, {
+    store: {}, credentials: { clientId: 'qa', clientSecret: 'not-used', redirectUri: 'https://api.example.test/callback' },
+    client: { read: async (_company: string, resource: string, query: URLSearchParams) => {
+      calls.push({ resource, query: new URLSearchParams(query) });
+      return providerValue;
+    } },
+  } as any);
+  try {
+    const response = await app.inject({ method: 'GET', url: '/api/integrations/bling/products?page=3&limit=2&nome=Produto%20QA' });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.deepEqual(response.json().data.map((item: { situacao: string }) => item.situacao), ['A', 'A']);
+    assert.equal(response.json().page, 3);
+    assert.equal(response.json().limit, 2);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.resource, 'products');
+    assert.equal(calls[0]!.query.get('criterio'), '2');
+    assert.equal(calls[0]!.query.get('pagina'), '3');
+    assert.equal(calls[0]!.query.get('limite'), '2');
+    assert.equal(calls[0]!.query.get('nome'), 'Produto QA');
+
+    const override = await app.inject({ method: 'GET', url: '/api/integrations/bling/products?criterio=5' });
+    assert.equal(override.statusCode, 400);
+    assert.equal(calls.length, 1, 'a rejected client criterion must not call Bling');
+
+    providerValue = { data: [
+      { id: '301', nome: 'Produto QA A', tipo: 'P', situacao: 'A', formato: 'S' },
+      { id: '201', nome: 'Produto inativo', tipo: 'P', situacao: 'I', formato: 'S' },
+    ] };
+    const providerViolation = await app.inject({ method: 'GET', url: '/api/integrations/bling/products?page=2&limit=2' });
+    assert.equal(providerViolation.statusCode, 502);
+    assert.equal(calls[1]!.query.get('criterio'), '2');
+    assert.match(providerViolation.json().error, /não ativo/i);
+  } finally { await app.close(); }
+});
+
 test('Bling import removes only the uploaded image when its product transaction rolls back', async (t) => {
   const { registerProductRoutes } = await import('../server/src/products.js');
   const { default: Fastify } = await import('../server/node_modules/fastify/fastify.js');
@@ -178,6 +226,9 @@ test('Bling import removes only the uploaded image when its product transaction 
   const productId = '10000000-0000-4000-8000-000000000012';
   const uploaded: string[] = [];
   const removed: string[] = [];
+  const providerReads: Array<{ resource: string; id?: string }> = [];
+  let connectCalls = 0;
+  let duplicateReads = 0;
   let productInserted = false;
   let rolledBack = false;
   const storage = {
@@ -190,10 +241,13 @@ test('Bling import removes only the uploaded image when its product transaction 
   const sqlText = (query: unknown) => (typeof query === 'string' ? query : String((query as any)?.text || '')).replace(/\s+/g, ' ').trim();
 
   t.mock.method(db as any, 'query', async (query: unknown) => {
+    duplicateReads++;
     assert.match(sqlText(query), /FROM product_bling_links/);
     return { rows: [] };
   });
-  t.mock.method(db as any, 'connect', async () => ({
+  t.mock.method(db as any, 'connect', async () => {
+    connectCalls++;
+    return ({
     release() {},
     async query(query: unknown, values: unknown[] = []) {
       const sql = sqlText(query);
@@ -209,12 +263,22 @@ test('Bling import removes only the uploaded image when its product transaction 
       if (sql === 'ROLLBACK') { rolledBack = true; productInserted = false; return { rows: [] }; }
       return { rows: [] };
     },
-  }));
+    });
+  });
 
-  const bling = { client: { read: async (_company: string, resource: string) => resource === 'product'
-    ? { data: { id: '101', nome: 'Produto importado QA', codigo: 'SKU-101', preco: 28, tipo: 'P', situacao: 'A', formato: 'S' } }
-    : { data: [{ produto: { id: '101' }, saldoFisicoTotal: 8, saldoVirtualTotal: 5,
-      depositos: [{ id: '7', saldoFisico: 8, saldoVirtual: 5 }] }] } } };
+  const bling = {
+    client: {
+      read: async (_company: string, resource: string, _query: URLSearchParams, id?: string) => {
+        providerReads.push({ resource, id });
+        if (resource === 'product') {
+          const situacao = id === '201' ? 'I' : id === '202' ? 'E' : 'A';
+          return { data: { id, nome: 'Produto importado QA', codigo: 'SKU-101', preco: 28, tipo: 'P', situacao, formato: 'S' } };
+        }
+        return { data: [{ produto: { id: id || '101' }, saldoFisicoTotal: 8, saldoVirtualTotal: 5,
+          depositos: [{ id: '7', saldoFisico: 8, saldoVirtual: 5 }] }] };
+      },
+    },
+  };
   const app = Fastify();
   app.decorateRequest('user', null);
   app.addHook('onRequest', async (request) => {
@@ -223,6 +287,21 @@ test('Bling import removes only the uploaded image when its product transaction 
   await registerProductRoutes(app, storage as any, bling as any);
   try {
     const png = Buffer.from('89504e470d0a1a0a', 'hex').toString('base64');
+    for (const [blingProductId, situacao] of [['201', 'I'], ['202', 'E']]) {
+      const readsBefore = providerReads.length;
+      const rejected = await app.inject({ method: 'POST', url: '/api/products/bling-import', payload: {
+        blingProductId, imageBase64: png, imageMimeType: 'image/png',
+      } });
+      assert.equal(rejected.statusCode, 409, rejected.body);
+      assert.match(rejected.json().error, /somente produtos ativos/i);
+      assert.deepEqual(providerReads.slice(readsBefore), [{ resource: 'product', id: blingProductId }], `${situacao} must be rejected before stock lookup`);
+      assert.equal(uploaded.length, 0, `${situacao} must not upload an image`);
+      assert.equal(removed.length, 0);
+      assert.equal(connectCalls, 0, `${situacao} must not open a product transaction`);
+      assert.equal(duplicateReads, 0, `${situacao} must not read or alter product links`);
+      assert.equal(productInserted, false);
+    }
+
     const result = await app.inject({ method: 'POST', url: '/api/products/bling-import', payload: {
       blingProductId: '101', imageBase64: png, imageMimeType: 'image/png',
     } });

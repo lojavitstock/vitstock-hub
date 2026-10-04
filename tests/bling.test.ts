@@ -184,13 +184,14 @@ test('Bling real product list regression: observed E status remains explicit and
   const observed = fixture.data[3]!;
   assert.equal(productListModel.parse({ ...observed, id: '104' }).id, '104');
   assert.throws(() => productListModel.parse({ ...observed, id: Number.MAX_SAFE_INTEGER + 1 }));
-  // The unobserved detail contract is deliberately unchanged.
-  assert.throws(() => productDetailModel.parse(observed));
+  assert.equal(productDetailModel.parse(observed).situacao, 'E');
+  assert.throws(() => productDetailModel.parse({ ...observed, situacao: 'X' }));
 });
 test('Bling product list status correction rejects unknown values without weakening other fields', () => {
   const product = { id: 101, nome: 'Synthetic product', tipo: 'P', situacao: 'A', formato: 'S' };
   for (const situacao of ['X', '', 'e', ' E ', null, undefined, 0, true]) {
     assert.throws(() => parseContract(productListModel, { ...product, situacao }), /fora do contrato/);
+    assert.throws(() => parseContract(productDetailModel, { ...product, situacao }), /fora do contrato/);
   }
   assert.throws(() => productListModel.parse({ ...product, tipo: 'X' }));
   assert.throws(() => productListModel.parse({ ...product, formato: 'X' }));

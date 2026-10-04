@@ -56,7 +56,7 @@ type ProductRow = {
   bling_gtin?: string | null;
   bling_unit?: string | null;
   bling_price_cents?: number | null;
-  bling_status?: 'A' | 'I' | null;
+  bling_status?: 'A' | 'I' | 'E' | null;
   bling_format?: 'S' | 'V' | 'E' | null;
   stock_physical_total?: string | null;
   stock_virtual_total?: string | null;
@@ -73,7 +73,7 @@ type ProductBlingLinkRow = {
   bling_gtin: string | null;
   bling_unit: string | null;
   bling_price_cents: number;
-  bling_status: 'A' | 'I';
+  bling_status: 'A' | 'I' | 'E';
   bling_format: 'S' | 'V' | 'E';
   stock_physical_total: string | null;
   stock_virtual_total: string | null;
@@ -203,10 +203,14 @@ async function fetchBlingProductSyncSnapshot(
   companyId: string,
   blingProductId: string,
   bling: BlingDependencies,
+  use: 'selection' | 'existing-sync',
 ): Promise<BlingProductSyncSnapshot> {
   const detailValue = await bling.client.read(companyId, 'product', new URLSearchParams(), blingProductId);
   const detail = parseContract(z.object({ data: productDetailModel }), detailValue).data;
   if (detail.id !== blingProductId) throw new BlingError(502, 'Identidade do produto Bling não confere');
+  if (use === 'selection' && detail.situacao !== 'A') {
+    throw new BlingError(409, 'Somente produtos ativos do Bling podem ser vinculados ou importados.');
+  }
   const stockQuery = new URLSearchParams({ 'idsProdutos[]': blingProductId });
   const stockValue = await bling.client.read(companyId, 'stock', stockQuery, blingProductId);
   return toBlingProductSyncSnapshot(detail, stockValue, blingProductId);
@@ -362,7 +366,7 @@ export async function registerProductRoutes(app: FastifyInstance, storage: Produ
     }
 
     try {
-      const snapshot = await fetchBlingProductSyncSnapshot(companyId, body.data.blingProductId, bling);
+      const snapshot = await fetchBlingProductSyncSnapshot(companyId, body.data.blingProductId, bling, 'selection');
       const row = await inTransaction((client) => persistBlingSnapshot(client, companyId, params.data.id, snapshot));
       return { product: toPublicProduct(row, storage, localApiBaseForOrigin(request.headers.origin)) };
     } catch (error) {
@@ -391,7 +395,7 @@ export async function registerProductRoutes(app: FastifyInstance, storage: Produ
     if (!blingProductId) return reply.code(409).send({ error: 'Produto sem vínculo Bling para sincronizar.' });
 
     try {
-      const snapshot = await fetchBlingProductSyncSnapshot(companyId, blingProductId, bling);
+      const snapshot = await fetchBlingProductSyncSnapshot(companyId, blingProductId, bling, 'existing-sync');
       const row = await inTransaction((client) => persistBlingSnapshot(
         client, companyId, params.data.id, snapshot, blingProductId,
       ));
@@ -416,7 +420,7 @@ export async function registerProductRoutes(app: FastifyInstance, storage: Produ
     const companyId = request.user!.companyId;
     let snapshot: BlingProductSyncSnapshot;
     try {
-      snapshot = await fetchBlingProductSyncSnapshot(companyId, parsed.data.blingProductId, bling);
+      snapshot = await fetchBlingProductSyncSnapshot(companyId, parsed.data.blingProductId, bling, 'selection');
     } catch (error) {
       const response = sendBlingOperationError(reply, error);
       if (response) return response;

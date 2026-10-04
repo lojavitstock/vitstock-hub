@@ -240,10 +240,12 @@ test('Product Library importa pelo Bling paginado e preserva campos vinculados n
   await expect(page.getByRole('heading', { name: 'Produtos', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Importar do Bling', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Importar produto do Bling' });
-  await expect(dialog.getByRole('button', { name: /Encerrado \(E\)/ })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /Ativo \(A\)/ }).first()).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /Inativo \(I\)/ })).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: /Encerrado \(E\)/ })).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: 'Carregar mais', exact: true })).toBeVisible();
   await dialog.getByRole('button', { name: 'Carregar mais', exact: true }).click();
-  await expect(dialog.getByRole('button').filter({ hasText: 'ID 321' })).toBeVisible();
+  await expect(dialog.getByRole('button').filter({ hasText: 'ID 322' })).toBeVisible();
   const search = dialog.getByLabel('Buscar produto no Bling para importar');
   await search.fill('Produto Catálogo QA 321');
   const item = dialog.getByRole('button', { name: /Produto Catálogo QA 321/ });
