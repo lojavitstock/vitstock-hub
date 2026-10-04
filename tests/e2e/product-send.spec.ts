@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
+import { deleteQaProductFixture, ensureQaBlingConnected, importQaProduct, nextQaBlingProductId } from './productFixtures';
 
 const { Pool } = createRequire(import.meta.url)('../../server/node_modules/pg');
 const api = process.env.VITE_API_URL || 'http://localhost:3001';
@@ -15,11 +16,7 @@ async function login(page: Page) {
 }
 
 async function createProduct(page: Page, name: string) {
-  const response = await page.request.post(`${api}/api/products`, {
-    data: { name, priceCents: 2800, imageBase64: png, imageMimeType: 'image/png' },
-  });
-  expect(response.status()).toBe(201);
-  return (await response.json()).product;
+  return importQaProduct(page.request, api, { blingProductId: nextQaBlingProductId(), name });
 }
 
 async function prepareConversation(page: Page, remoteJid: string, name: string) {
@@ -53,6 +50,13 @@ async function readReferences(page: Page, clientMessageId: string) {
   } finally { await pool.end(); }
 }
 
+async function readBlingApiBudget(page: Page) {
+  expect((await (await page.request.get(`${api}/api/qa/ready`)).json()).database).toBe('local-only');
+  const pool = new Pool({ connectionString: 'postgresql://vitstock@127.0.0.1:55432/vitstock_qa' });
+  try { return Number((await pool.query("SELECT requests FROM bling_request_budgets WHERE budget='api'")).rows[0].requests); }
+  finally { await pool.end(); }
+}
+
 async function providerSends(page: Page) {
   return (await (await page.request.get(`${api}/api/qa/evolution/sends`)).json()).sends as Array<Record<string, unknown>>;
 }
@@ -65,6 +69,7 @@ test('produto pela UI: loading/double Enter, envio único, FK local, cartão e s
   const remoteJid = `552199${token}@s.whatsapp.net`;
   const product = await createProduct(page, name);
   await prepareConversation(page, remoteJid, contactName);
+  expect((await page.request.post(`${api}/api/integrations/bling/disconnect`)).status()).toBe(200);
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('/atendimento');
@@ -75,6 +80,9 @@ test('produto pela UI: loading/double Enter, envio único, FK local, cartão e s
   await page.getByLabel('Buscar produto para pré-visualizar').fill(name);
   await page.getByRole('option', { name: new RegExp(name) }).click();
   const preview = page.getByRole('dialog', { name: 'Pré-visualizar produto' });
+  await expect(preview.getByLabel('Valor desta mensagem')).toHaveValue('28,00');
+  await preview.getByLabel('Valor desta mensagem').fill('12,34');
+  await preview.locator('[data-dialog-autofocus]').focus();
   let requests = 0;
   let clientMessageId = '';
   let release!: () => void;
@@ -82,14 +90,16 @@ test('produto pela UI: loading/double Enter, envio único, FK local, cartão e s
   await page.route('**/api/evolution/messages/send-product', async (route) => {
     requests++;
     const payload = route.request().postDataJSON();
-    expect(Object.keys(payload).sort()).toEqual(['clientMessageId', 'productId', 'remoteJid']);
+    expect(Object.keys(payload).sort()).toEqual(['clientMessageId', 'priceCentsOverride', 'productId', 'remoteJid']);
+    expect(payload.priceCentsOverride).toBe(1234);
     expect(payload.remoteJid).toBe(remoteJid);
     clientMessageId = payload.clientMessageId;
     await gate;
     await route.continue();
   });
-  // The preview contains no editable fields; default Enter shares the button's submit.
-  await expect(preview.locator('input, textarea, select, [contenteditable="true"]')).toHaveCount(0);
+  const blingBudgetBeforeSend = await readBlingApiBudget(page);
+  // Editable message pricing still shares the guarded Enter submit.
+  await expect(preview.locator('input, textarea, select, [contenteditable="true"]')).toHaveCount(1);
   await page.keyboard.press('Enter');
   await page.keyboard.press('Enter');
   await expect(preview.getByRole('button', { name: 'Enviando...' })).toBeDisabled();
@@ -98,27 +108,38 @@ test('produto pela UI: loading/double Enter, envio único, FK local, cartão e s
   await page.keyboard.press('Escape');
   await expect(preview).toBeVisible();
   expect(requests).toBe(1);
+  expect(await readBlingApiBudget(page)).toBe(blingBudgetBeforeSend);
   release();
   await expect(preview).toHaveCount(0);
   const card = page.getByRole('article', { name: `Produto ${name}` });
   await expect(card).toHaveCount(1);
-  await expect(card).toContainText('R$ 28,00');
+  await expect(card).toContainText('R$ 12,34');
   await expect(card.locator('xpath=ancestor::*[@data-message-id]').locator('p.whitespace-pre-wrap')).toHaveCount(0);
   await expect(composer).toHaveValue('Rascunho que não é a legenda');
   const refs = await readReferences(page, clientMessageId);
   expect(refs).toHaveLength(1);
-  expect(refs[0]).toMatchObject({ status: 'sent', message_id: refs[0].id, product_name_snapshot: name, product_price_cents_snapshot: 2800, product_currency_snapshot: 'BRL' });
+  expect(refs[0]).toMatchObject({ status: 'sent', message_id: refs[0].id, product_name_snapshot: name, product_price_cents_snapshot: 1234, product_currency_snapshot: 'BRL' });
   expect(refs[0].id).not.toBe(refs[0].evolution_message_id);
-  const sends = (await providerSends(page)).filter((send) => send.caption === `${name}\nR$ 28,00`);
+  const sends = (await providerSends(page)).filter((send) => send.caption === `${name}\nR$ 12,34`);
   expect(sends).toHaveLength(1);
   expect(sends[0]).toMatchObject({ number: remoteJid, mediatype: 'image', mimetype: 'image/png' });
   expect(String(sends[0].media)).toContain(encodeURIComponent(refs[0].product_image_object_key_snapshot));
-  await page.request.patch(`${api}/api/products/${product.id}`, { data: { name: `${name} editado`, priceCents: 9999, imageBase64: png, imageMimeType: 'image/png' } });
+  const catalogPrice = await (await page.request.get(`${api}/api/products/${product.id}`)).json();
+  expect(catalogPrice.product.priceCents).toBe(2800);
+  await page.getByRole('button', { name: 'Produtos', exact: true }).click();
+  await page.getByLabel('Buscar produto para pré-visualizar').fill(name);
+  await page.getByRole('option', { name: new RegExp(name) }).click();
+  const nextPreview = page.getByRole('dialog', { name: 'Pré-visualizar produto' });
+  await expect(nextPreview.getByLabel('Valor desta mensagem')).toHaveValue('28,00');
+  await nextPreview.getByRole('button', { name: 'Fechar prévia' }).click();
+  const catalogEdit = await page.request.patch(`${api}/api/products/${product.id}`, { data: { name: `${name} editado`, imageBase64: png, imageMimeType: 'image/png' } });
+  expect(catalogEdit.status()).toBe(200);
+  expect((await catalogEdit.json()).product.priceCents).toBe(2800);
   await page.request.post(`${api}/api/products/${product.id}/archive`);
   await page.reload();
   await openConversation(page, contactName);
   await expect(card).toHaveCount(1);
-  await expect(card).toContainText('R$ 28,00');
+  await expect(card).toContainText('R$ 12,34');
   await expect(card.locator('xpath=ancestor::*[@data-message-id]').locator('p.whitespace-pre-wrap')).toHaveCount(0);
   await expect.poll(() => card.locator('img').evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
   const after = await readReferences(page, clientMessageId);
@@ -143,12 +164,22 @@ test('produto Bling: send usa cache sem provider call e sync preserva snapshots 
     const remoteJid = `552196${token}@s.whatsapp.net`;
     const product = await createProduct(page, `Linked send QA ${token}`);
     productId = product.id;
-    await prepareConversation(page, remoteJid, `Linked send contact ${token}`);
+    const lifecycleState = async () => (await pool.query(`SELECT to_jsonb(p) AS product,
+      (SELECT to_jsonb(l) FROM product_bling_links l WHERE l.company_id=p.company_id AND l.product_id=p.id) AS link,
+      (SELECT COALESCE(jsonb_agg(to_jsonb(b) ORDER BY b.bling_warehouse_id),'[]'::jsonb) FROM product_bling_stock_balances b WHERE b.company_id=p.company_id AND b.product_id=p.id) AS balances,
+      (SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY r.created_at,r.id),'[]'::jsonb) FROM message_product_refs r WHERE r.company_id=p.company_id AND r.product_id=p.id) AS refs,
+      (SELECT COALESCE(jsonb_agg(jsonb_build_object('messageId',m.id,'metadata',m.metadata) ORDER BY m.id),'[]'::jsonb)
+        FROM message_product_refs r JOIN messages m ON m.company_id=r.company_id AND m.id=r.message_id
+        WHERE r.company_id=p.company_id AND r.product_id=p.id) AS message_snapshots
+      FROM products p WHERE p.id=$1`, [product.id])).rows[0];
+    const contactName = `Linked send contact ${token}`;
+    await prepareConversation(page, remoteJid, contactName);
     const linked = await page.request.post(`${api}/api/products/${productId}/bling-link`, { data: { blingProductId: '101' } });
     expect(linked.status()).toBe(200);
-    expect((await linked.json()).product).toMatchObject({ name: 'Produto Bling QA', priceCents: 2800, source: 'bling' });
+    expect((await linked.json()).product).toMatchObject({ name: `Linked send QA ${token}`, priceCents: 2800, source: 'bling', bling: { name: 'Produto Bling QA' } });
 
     const apiBudget = async () => Number((await pool.query("SELECT requests FROM bling_request_budgets WHERE budget='api'")).rows[0].requests);
+    expect((await page.request.post(`${api}/api/integrations/bling/disconnect`)).status()).toBe(200);
     const firstClientMessageId = randomUUID();
     const firstBudget = await apiBudget();
     const firstSend = await page.request.post(`${api}/api/evolution/messages/send-product`, {
@@ -158,45 +189,82 @@ test('produto Bling: send usa cache sem provider call e sync preserva snapshots 
     expect(await apiBudget()).toBe(firstBudget);
     const firstSnapshot = await readReferences(page, firstClientMessageId);
     expect(firstSnapshot).toHaveLength(1);
-    expect(firstSnapshot[0]).toMatchObject({ product_name_snapshot: 'Produto Bling QA', product_price_cents_snapshot: 2800 });
+    expect(firstSnapshot[0]).toMatchObject({ product_name_snapshot: `Linked send QA ${token}`, product_price_cents_snapshot: 2800 });
 
+    await ensureQaBlingConnected(page.request, api);
     expect((await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'updated' } })).status()).toBe(200);
     const synced = await page.request.post(`${api}/api/products/${productId}/bling-sync`);
     expect(synced.status()).toBe(200);
-    expect((await synced.json()).product).toMatchObject({ name: 'Produto Bling Atualizado QA', priceCents: 4000 });
+    expect((await synced.json()).product).toMatchObject({ name: `Linked send QA ${token}`, priceCents: 4000, bling: { name: 'Produto Bling Atualizado QA' } });
     const preservedSnapshot = await readReferences(page, firstClientMessageId);
-    expect(preservedSnapshot[0].product_name_snapshot).toBe('Produto Bling QA');
+    expect(preservedSnapshot[0].product_name_snapshot).toBe(`Linked send QA ${token}`);
     expect(preservedSnapshot[0].product_price_cents_snapshot).toBe(2800);
     expect(preservedSnapshot[0].metadata.productSnapshot).toEqual(firstSnapshot[0].metadata.productSnapshot);
 
     const secondClientMessageId = randomUUID();
     const secondBudget = await apiBudget();
     const secondSend = await page.request.post(`${api}/api/evolution/messages/send-product`, {
-      data: { productId, remoteJid, clientMessageId: secondClientMessageId },
+      data: { productId, remoteJid, clientMessageId: secondClientMessageId, priceCentsOverride: 4990 },
     });
     expect(secondSend.status()).toBe(200);
     expect(await apiBudget()).toBe(secondBudget);
     const secondSnapshot = await readReferences(page, secondClientMessageId);
     expect(secondSnapshot).toHaveLength(1);
-    expect(secondSnapshot[0]).toMatchObject({ product_name_snapshot: 'Produto Bling Atualizado QA', product_price_cents_snapshot: 4000 });
+    expect(secondSnapshot[0]).toMatchObject({ product_name_snapshot: `Linked send QA ${token}`, product_price_cents_snapshot: 4990 });
+
+    expect((await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'price-updated' } })).status()).toBe(200);
+    const newerSync = await page.request.post(`${api}/api/products/${productId}/bling-sync`);
+    expect(newerSync.status()).toBe(200);
+    expect((await newerSync.json()).product).toMatchObject({ name: `Linked send QA ${token}`, priceCents: 6000,
+      bling: { name: 'Produto Bling Preço Atualizado QA' } });
+    const historicalOverride = await readReferences(page, secondClientMessageId);
+    expect(historicalOverride[0]).toMatchObject({ product_name_snapshot: `Linked send QA ${token}`, product_price_cents_snapshot: 4990 });
+    await page.goto('/atendimento');
+    await openConversation(page, contactName);
+    await page.getByRole('button', { name: 'Produtos', exact: true }).click();
+    await page.getByLabel('Buscar produto para pré-visualizar').fill(`Linked send QA ${token}`);
+    await page.getByRole('option', { name: new RegExp(`Linked send QA ${token}`) }).click();
+    const updatedPreview = page.getByRole('dialog', { name: 'Pré-visualizar produto' });
+    await expect(updatedPreview.getByLabel('Valor desta mensagem')).toHaveValue('60,00');
+    await updatedPreview.getByRole('button', { name: 'Fechar prévia' }).click();
 
     expect((await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'default' } })).status()).toBe(200);
-    const relink = await page.request.post(`${api}/api/products/${productId}/bling-link`, { data: { blingProductId: '304' } });
+    const relinkBlingProductId = nextQaBlingProductId();
+    const relink = await page.request.post(`${api}/api/products/${productId}/bling-link`, { data: { blingProductId: relinkBlingProductId } });
     expect(relink.status()).toBe(200);
-    expect((await relink.json()).product).toMatchObject({ name: 'Produto Catálogo QA 304', priceCents: 18000, source: 'bling' });
+    expect((await relink.json()).product).toMatchObject({ name: `Linked send QA ${token}`, priceCents: 2800, source: 'bling', bling: { productId: relinkBlingProductId, name: `Produto Catálogo QA ${relinkBlingProductId}` } });
+    const beforeUnlink = await lifecycleState();
+    expect(beforeUnlink.product).toMatchObject({ name: `Linked send QA ${token}`, price_cents: 2800 });
+    expect(beforeUnlink.link).toMatchObject({ bling_product_id: relinkBlingProductId, bling_code: `SKU-${relinkBlingProductId}` });
+    expect(beforeUnlink.balances.length).toBeGreaterThan(0);
+    expect(beforeUnlink.refs).toHaveLength(2);
+    expect(beforeUnlink.message_snapshots).toHaveLength(2);
+    expect(beforeUnlink.refs.map((ref: { product_price_cents_snapshot: number }) => ref.product_price_cents_snapshot).sort((a: number, b: number) => a - b)).toEqual([2800, 4990]);
     const unlink = await page.request.delete(`${api}/api/products/${productId}/bling-link`);
-    expect(unlink.status()).toBe(200);
-    expect((await unlink.json()).product).toMatchObject({ name: 'Produto Catálogo QA 304', priceCents: 18000, source: 'manual', bling: null });
-    for (const [clientMessageId, expectedName, expectedPrice] of [
-      [firstClientMessageId, 'Produto Bling QA', 2800],
-      [secondClientMessageId, 'Produto Bling Atualizado QA', 4000],
-    ] as const) {
-      const historical = await readReferences(page, clientMessageId);
-      expect(historical).toHaveLength(1);
-      expect(historical[0]).toMatchObject({ product_name_snapshot: expectedName, product_price_cents_snapshot: expectedPrice });
-    }
+    expect(unlink.status()).toBe(409);
+    expect(await unlink.json()).toMatchObject({
+      code: 'bling_unlink_prohibited',
+      error: 'Produtos do Hub precisam permanecer vinculados ao Bling. Altere o produto Bling ou arquive o cadastro.',
+    });
+    expect(await lifecycleState()).toEqual(beforeUnlink);
+
+    const archive = await page.request.post(`${api}/api/products/${productId}/archive`);
+    expect(archive.status()).toBe(200);
+    const afterArchive = await lifecycleState();
+    const stableProductColumns = (productRow: Record<string, unknown>) => Object.fromEntries(
+      Object.entries(productRow).filter(([key]) => key !== 'archived_at' && key !== 'updated_at'),
+    );
+    expect(afterArchive.product.archived_at).not.toBeNull();
+    expect(stableProductColumns(afterArchive.product)).toEqual(stableProductColumns(beforeUnlink.product));
+    expect(afterArchive.link).toEqual(beforeUnlink.link);
+    expect(afterArchive.balances).toEqual(beforeUnlink.balances);
+    expect(afterArchive.refs).toEqual(beforeUnlink.refs);
+    expect(afterArchive.message_snapshots).toEqual(beforeUnlink.message_snapshots);
+    const activeProducts = await (await page.request.get(`${api}/api/products`)).json();
+    expect(activeProducts.products).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: productId })]));
   } finally {
     if (productId) await page.request.post(`${api}/api/products/${productId}/archive`).catch(() => undefined);
+    if (productId) await deleteQaProductFixture(page.request, api, productId).catch(() => undefined);
     await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'default' } }).catch(() => undefined);
     await page.request.post(`${api}/api/integrations/bling/disconnect`).catch(() => undefined);
     await pool.end();
@@ -279,12 +347,7 @@ test('produto: destinos LID e grupo exatos, dedup e autoridade de tenant', async
     const ownProductResponse = await contextB.request.post(`${api}/api/products`, {
       data: { name: `Produto Tenant B ${token}`, priceCents: 100, imageBase64: png, imageMimeType: 'image/png' },
     });
-    expect(ownProductResponse.status()).toBe(201);
-    const ownProduct = (await ownProductResponse.json()).product;
-    expect((await contextB.request.post(`${api}/api/evolution/messages/send-product`, {
-      data: { productId: ownProduct.id, remoteJid: `9036${token}@lid`, clientMessageId: randomUUID() },
-    })).status()).toBe(404);
-    await contextB.request.post(`${api}/api/products/${ownProduct.id}/archive`);
+    expect(ownProductResponse.status()).toBe(409);
   } finally { await contextB.close(); }
   await page.request.post(`${api}/api/products/${product.id}/archive`);
   expect((await page.request.post(`${api}/api/evolution/messages/send-product`, {
@@ -357,7 +420,7 @@ test('timeline: imagem comum com caption de produto, texto e reply não viram ca
   await page.goto('/atendimento');
   await openConversation(page, contactName);
   const image = page.locator(`[data-message-id="${evolutionMessageId}"]`);
-  await expect(image.locator('img')).toBeVisible();
+  await expect(image.locator('img[alt="Imagem WhatsApp"]')).toBeVisible();
   await expect(image.locator('p.whitespace-pre-wrap')).toHaveText(caption);
   await expect(image.getByRole('article')).toHaveCount(0);
   await image.getByRole('button', { name: 'Abrir ações da mensagem' }).click();

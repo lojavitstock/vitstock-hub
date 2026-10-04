@@ -371,7 +371,8 @@ export async function registerQaRoutes(app: FastifyInstance) {
 
   app.post('/api/qa/bling/scenario', { preHandler: requireAdmin }, async (request, reply) => {
     const parsed = z.object({
-      scenario: z.enum(['default', 'updated', 'invalid-stock', 'empty-stock', 'missing-price', 'detail-mismatch']),
+      scenario: z.enum(['default', 'updated', 'price-updated', 'invalid-stock', 'empty-stock', 'missing-price', 'detail-mismatch',
+        'missing-sku', 'blank-sku', 'physical-only', 'virtual-zero', 'virtual-negative', 'sku-collision']),
     }).strict().safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Cenário Bling QA inválido' });
     setQaBlingScenario(parsed.data.scenario as QaBlingScenario);

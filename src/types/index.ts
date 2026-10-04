@@ -51,6 +51,7 @@ export interface Product {
 
 export interface ProductBlingMetadata {
   productId: string;
+  name: string;
   parentProductId?: string;
   code?: string;
   gtin?: string;

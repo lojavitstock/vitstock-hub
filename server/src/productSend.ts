@@ -5,6 +5,7 @@ export const productSendSchema = z.object({
   productId: z.string().uuid(),
   remoteJid: z.string().trim().min(1).max(160),
   clientMessageId: z.string().trim().min(8).max(160),
+  priceCentsOverride: z.number().int().min(1).max(2_147_483_647).optional(),
 }).strict().refine((value) => isValidEvolutionTextRecipient({ remoteJid: value.remoteJid }), {
   message: 'Conversa inválida', path: ['remoteJid'],
 });

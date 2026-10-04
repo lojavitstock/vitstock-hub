@@ -10,6 +10,18 @@ export type BlingProduct = {
   formato: 'S' | 'V' | 'E';
 };
 
+export type BlingProductDetail = BlingProduct & {
+  unidade?: string;
+  gtin?: string;
+  idProdutoPai?: string;
+};
+
+export type BlingProductStock = {
+  produto: { id: string };
+  saldoFisicoTotal?: number;
+  saldoVirtualTotal?: number;
+};
+
 export type ProductBlingLink = {
   productId: string;
   blingProductId: string;
@@ -34,6 +46,14 @@ export async function fetchBlingProducts(search = '', page = 1, signal?: AbortSi
   return apiRequest<{ data: BlingProduct[]; page: number; limit: number }>(`/api/integrations/bling/products?${params.toString()}`, { signal });
 }
 
+export async function fetchBlingProductDetail(id: string, signal?: AbortSignal) {
+  return apiRequest<{ data: BlingProductDetail }>(`/api/integrations/bling/products/${encodeURIComponent(id)}`, { signal });
+}
+
+export async function fetchBlingProductStock(id: string, signal?: AbortSignal) {
+  return apiRequest<{ data: BlingProductStock[] }>(`/api/integrations/bling/products/${encodeURIComponent(id)}/stock`, { signal });
+}
+
 export async function fetchBlingConnectionStatus() {
   return apiRequest<{ configured: boolean; connected: boolean; connectedAt: string | null }>('/api/integrations/bling/status');
 }
@@ -55,14 +75,11 @@ export async function syncProductFromBling(productId: string) {
 
 export async function importProductFromBling(input: {
   blingProductId: string;
+  name: string;
   imageBase64: string;
   imageMimeType: import('../types').Product['imageMimeType'];
 }) {
   return apiRequest<{ product: import('../types').Product }>('/api/products/bling-import', {
     method: 'POST', body: JSON.stringify(input),
   });
-}
-
-export async function unlinkProductFromBling(productId: string) {
-  return apiRequest<{ unlinked: boolean; productId: string; product: import('../types').Product }>(`/api/products/${encodeURIComponent(productId)}/bling-link`, { method: 'DELETE' });
 }
