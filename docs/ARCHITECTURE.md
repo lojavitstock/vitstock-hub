@@ -470,10 +470,11 @@ The timeline supports image, audio, video, sticker and document message types. `
 
 `/configuracoes?tab=products` uses its own product API and UI; it is not coupled to Quick Replies. `server/src/products.ts` derives company scope from the authenticated session, permits product reads to authenticated company users, and restricts create/update/archive and Bling linking to `admin`. Search is name-only and excludes archived products. Products are archived rather than hard-deleted.
 
-Products have an explicit source: legacy/unlinked `manual` or `bling`. New
-products can only be created by importing an active Bling product; `POST
-/api/products` rejects manual creation in normal runtime. For linked products,
-Bling is authoritative for product ID, `bling_name`, price, SKU/code, GTIN,
+Products have an explicit source: legacy `manual` or `bling`. `manual` exists
+only for pre-rule legacy records; new and operational products must remain
+Bling-backed. New products can only be created by importing an active Bling
+product; `POST /api/products` rejects manual creation in normal runtime. For
+linked products, Bling is authoritative for product ID, `bling_name`, price, SKU/code, GTIN,
 unit, status, format, explicit parent relation and physical/virtual stock.
 `products.name` is the Hub's editable local display name and is never replaced
 by import, link, relink or sync. The Hub also owns the local image, archive
@@ -488,8 +489,10 @@ ordinary local verification.
 
 ADMIN can import an active Bling product only with a local JPEG/PNG/WebP image
 up to 1 MB, link/relink an existing local product, explicitly sync its current
-Bling ID, and unlink it. Import/link/sync fetch authoritative detail and stock
-before a database transaction; active status, nonblank SKU and numeric
+Bling ID, and archive products no longer in active use. Unlinking a product is
+prohibited: the compatibility route `DELETE /api/products/:id/bling-link`
+returns 409 without issuing database writes. Import/link/sync fetch authoritative
+detail and stock before a database transaction; active status, nonblank SKU and numeric
 effective stock are required. Effective stock is `stockVirtualTotal ??
 stockPhysicalTotal`: zero and negative virtual balances are valid, and physical
 stock is used only when virtual stock is absent. Missing/invalid price, missing
@@ -499,11 +502,12 @@ case-insensitive SKUs; link/relink/sync conflicts return 409 and transaction
 rollback preserves the previous cache. The full provider snapshot and
 warehouse-balance replacement commit atomically. Relink and sync update
 authoritative Bling fields without changing the local display name, image,
-archive state or historical message snapshots. Unlinking removes only the link
-and dependent balances, retaining the current local name, cached price, image
-and history for that existing product. ADMIN may edit the local display name
-and image; catalog price and Bling identity remain read-only. Authenticated
-company users can read cached linked data while Bling is disconnected; all
+archive state or historical message snapshots. Archive removes a product from
+active use while retaining its row, Bling link/balances, image and history. The
+rejected unlink route leaves the product, link, balances, image and snapshots
+unchanged. ADMIN may edit the local display name and image; catalog price and
+Bling identity remain read-only. Authenticated company users can read cached
+linked data while Bling is disconnected; all
 these mutations remain ADMIN-only.
 
 The product image contract accepts JPEG, PNG or WebP up to 1,000,000 decoded bytes, validates base64 plus magic bytes against the declared MIME type, and stores only an immutable object key and metadata in PostgreSQL. Add/edit forms accept image paste anywhere in the modal: supported images up to 1 MB replace the selection, invalid images preserve the previous selection, and plain-text paste remains native. `ProductStorage` has two explicit drivers: `memory` for local/QA and `r2` for an explicitly configured S3-compatible Cloudflare R2 bucket. R2 requires `PRODUCT_STORAGE_DRIVER=r2` plus server-side `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` and `R2_PUBLIC_BASE_URL`; these must never be exposed through `VITE_` variables. When no driver is set, only local/QA can receive the in-memory adapter; external databases do not silently receive ephemeral storage. Explicit `r2` configuration is validated at startup and registers the product routes; incomplete configuration fails without printing credential values.
@@ -516,7 +520,7 @@ The product preview shows local name, linked SKU/effective stock, registered cat
 
 The normal outbox transaction locks the client ID and catalog row, inserts a pending local message with structured `productSnapshot`, and inserts `message_product_refs` using its local UUID (not the provider ID). This path uses the locally cached product/image and makes no realtime Bling request. Failure rolls back both before transport; provider rejection retains a failed message/ref. Only failed attempts can retry, reusing their original snapshot/ref; accepted or pending attempts are deduplicated without another provider request or message-upsert publication. Reusing a product client ID for another product or transport JID is rejected. If an early webhook creates a provider row, confirmation transfers the reference and Hub metadata to the surviving local UUID transactionally before removing the pending row.
 
-After success the existing message-upsert/SSE path updates the timeline; the UI merges confirmed history as a safety fallback, not a parallel optimistic product message. `ProductMessageCard` recognizes only structured metadata, never captions, URLs, filenames or OCR. Stored name, integer price, BRL currency and immutable image key survive catalog edits, replacement images, archiving, linking, relinking, sync and unlinking. Historical images are served through the authenticated storage route authorized by the tenant's message references. A real Preview provider send still requires a separately authorized human gate.
+After success the existing message-upsert/SSE path updates the timeline; the UI merges confirmed history as a safety fallback, not a parallel optimistic product message. `ProductMessageCard` recognizes only structured metadata, never captions, URLs, filenames or OCR. Stored name, integer price, BRL currency and immutable image key survive catalog edits, replacement images, archiving, linking, relinking and sync; rejected unlink attempts do not mutate them. Historical images are served through the authenticated storage route authorized by the tenant's message references. A real Preview provider send still requires a separately authorized human gate.
 
 ### Quoted messages
 
@@ -709,8 +713,9 @@ Variations retain their own IDs and explicit parent relation. Warehouse field
 remain separate: no recomputation, aggregation or available-stock business rule.
 Product images are not fetched from Bling. The product send path uses cached
 values and makes no Bling request. Message references and historical snapshots
-are untouched by link/sync/relink/unlink. Orders and webhooks remain outside
-scope.
+are untouched by link/sync/relink/archive; the compatibility unlink route
+rejects with 409 and leaves these records unchanged. Orders and webhooks remain
+outside scope.
 Local disconnect deletes only credentials/states; revoke authorization separately
 in Bling's authorized applications when needed.
 

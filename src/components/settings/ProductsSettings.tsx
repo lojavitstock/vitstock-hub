@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ImagePlus, Link2, Loader2, MoreVertical, Package, PencilLine, Plus, RefreshCw, Search, Save, Unlink } from 'lucide-react';
+import { ImagePlus, Link2, Loader2, MoreVertical, Package, PencilLine, Plus, RefreshCw, Search, Save } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { useSearchParams } from 'react-router-dom';
 import type { Product } from '../../types';
 import type { BlingProduct, BlingProductDetail, ProductBlingLink } from '../../services/blingApi';
-import { fetchBlingConnectionStatus, fetchBlingProductDetail, fetchBlingProductStock, fetchBlingProducts, fetchProductBlingLinks, importProductFromBling, linkProductToBling, syncProductFromBling, unlinkProductFromBling } from '../../services/blingApi';
+import { fetchBlingConnectionStatus, fetchBlingProductDetail, fetchBlingProductStock, fetchBlingProducts, fetchProductBlingLinks, importProductFromBling, linkProductToBling, syncProductFromBling } from '../../services/blingApi';
 import { archiveProduct, fetchProducts, updateProduct } from '../../services/productsApi';
 import { effectiveBlingStock, formatBrlPrice, normalizeBlingSku } from '../../utils/productLibrary';
 import { ProductDialog } from '../products/ProductDialog';
@@ -504,23 +504,6 @@ export const ProductsSettings: React.FC = () => {
     }
   };
 
-  const removeBlingLink = async (product: Product) => {
-    if (blingMutationInFlightRef.current.has(product.id)
-      || !window.confirm(`Desvincular “${product.name}” do Bling? O nome, preço, imagem e histórico existentes serão preservados.`)) return;
-    blingMutationInFlightRef.current.add(product.id);
-    setError('');
-    try {
-      const result = await unlinkProductFromBling(product.id);
-      applySavedProduct(result.product);
-      setFeedback('Produto desvinculado; nome e preço voltaram a ser locais.');
-      setOpenMenuId(null);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Não foi possível remover o vínculo Bling.');
-    } finally {
-      blingMutationInFlightRef.current.delete(product.id);
-    }
-  };
-
   return (
     <section className="max-w-5xl space-y-5" aria-labelledby="products-settings-title">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -570,7 +553,6 @@ export const ProductsSettings: React.FC = () => {
                          ? <>
                            <button type="button" disabled={blingSyncingId === product.id} onClick={() => void syncBlingProduct(product)} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-semibold text-sky-300 hover:bg-sky-500/10 disabled:opacity-50"><RefreshCw className="h-3.5 w-3.5" /> {blingSyncingId === product.id ? 'Sincronizando...' : 'Atualizar do Bling'}</button>
                            <button type="button" onClick={() => openBlingLink(product, 'relink')} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-semibold text-sky-300 hover:bg-sky-500/10"><Link2 className="h-3.5 w-3.5" /> Alterar produto Bling</button>
-                           <button type="button" onClick={() => void removeBlingLink(product)} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-semibold text-zinc-300 hover:bg-white/5"><Unlink className="h-3.5 w-3.5" /> Desvincular do Bling</button>
                          </>
                          : <button type="button" onClick={() => openBlingLink(product, 'link')} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-semibold text-sky-300 hover:bg-sky-500/10"><Link2 className="h-3.5 w-3.5" /> Vincular ao Bling</button>}
                        <button type="button" onClick={() => { setArchiveTarget(product); setOpenMenuId(null); }} className="w-full rounded-md px-3 py-2 text-left text-xs font-semibold text-red-300 hover:bg-red-500/10">Arquivar</button>

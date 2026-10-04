@@ -552,13 +552,18 @@ O roadmap detalhado pertence a `ROADMAP.md`.
 Configurações → Integrações inclui Bling, com conexão/desconexão por ADMIN e
 status sanitizado por empresa. A primeira fase usa API v3/OAuth no backend
 (não MCP), tokens criptografados e leitura paginada de produtos, depósitos e
-saldos físicos/virtuais distintos. A Product Library agora suporta importação
-com imagem local, vínculo/revínculo e sincronização explícita dos campos
-controlados pelo Bling, além de desvincular. OAuth real no Preview exige revisão
-e autorização humana em gate separado.
+saldos físicos/virtuais distintos. A Product Library suporta importação com
+imagem local, alteração da identidade por relink, sincronização explícita e
+arquivamento. Desvincular um produto é proibido; a rota legada responde HTTP
+409 sem mutações. OAuth real no Preview exige revisão e autorização humana em
+gate separado.
 
-Novos produtos só podem ser importados do Bling por ADMIN; o endpoint de criação
-manual é rejeitado também no backend. Para itens vinculados, `products.name` é
+Novos produtos só podem ser importados do Bling por ADMIN; criação manual é
+rejeitada também no backend. `source=manual` permanece apenas para registros
+legacy anteriores à regra, até um gate separado de limpeza exclusivamente no
+Preview. Produtos operacionais devem permanecer vinculados ao Bling: relink
+altera a identidade provider, e arquivar remove o item do uso ativo sem apagar
+seu vínculo, imagem ou histórico. Para itens vinculados, `products.name` é
 o nome local editável no Hub e `product_bling_links.bling_name` preserva o nome
 autoritativo do Bling. Preço, SKU, GTIN, unidade, status/formato e estoque
 físico/virtual permanecem autoritativos do provider; imagem, arquivamento e

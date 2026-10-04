@@ -1,6 +1,6 @@
 import { expect, request, test, type Locator, type Page } from '@playwright/test';
 import { createRequire } from 'node:module';
-import { ensureQaBlingConnected, importQaProduct, nextQaBlingProductId } from './productFixtures';
+import { deleteQaProductFixture, ensureQaBlingConnected, importQaProduct, nextQaBlingProductId } from './productFixtures';
 
 const { Pool } = createRequire(import.meta.url)('../../server/node_modules/pg');
 
@@ -10,6 +10,14 @@ const secondEmail = process.env.E2E_SECOND_EMAIL?.trim();
 const secondPassword = process.env.E2E_SECOND_PASSWORD;
 const apiUrl = process.env.VITE_API_URL || 'http://localhost:3001';
 const tinyPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+const productFixturesForCleanup = new Set<string>();
+
+test.afterEach(async ({ request }) => {
+  for (const productId of productFixturesForCleanup) {
+    await deleteQaProductFixture(request, apiUrl, productId).catch(() => undefined);
+  }
+  productFixturesForCleanup.clear();
+});
 
 const login = async (page: import('@playwright/test').Page, credentials = { email, password }) => {
   await page.goto('/');
@@ -186,8 +194,8 @@ test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar
     expect(errors).toEqual([]);
   } finally {
     if (id) {
-      await page.request.delete(`${apiUrl}/api/products/${id}/bling-link`).catch(() => undefined);
       await page.request.post(`${apiUrl}/api/products/${id}/archive`).catch(() => undefined);
+      await deleteQaProductFixture(page.request, apiUrl, id).catch(() => undefined);
     }
   }
 });
@@ -325,7 +333,7 @@ test('Product Library importa pelo Bling paginado e preserva campos vinculados n
   await card.getByRole('button', { name: 'Ações de Nome local QA 321', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Atualizar do Bling', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Alterar produto Bling', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Desvincular do Bling', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Desvincular do Bling', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Arquivar', exact: true })).toBeVisible();
   expect(externalRequests).toEqual([]);
   } finally {
@@ -417,6 +425,7 @@ test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar 
   const createResponse = await created;
   expect(createResponse.status()).toBe(201);
   createdProductId = (await createResponse.json()).product.id;
+  productFixturesForCleanup.add(createdProductId);
 
   const card = page.locator('article').filter({ hasText: productName }).first();
   await expect(card).toBeVisible();
@@ -487,8 +496,6 @@ test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar 
   await archiveDialog.getByRole('button', { name: 'Arquivar', exact: true }).click();
   await expect(refreshedCard).toHaveCount(0);
   await expect(page.getByText('Produto arquivado.', { exact: true })).toBeVisible();
-  expect((await page.request.delete(`${apiUrl}/api/products/${createdProductId}/bling-link`)).status()).toBe(200);
-
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto('/atendimento');
   await conversation.waitFor({ state: 'visible', timeout: 15_000 });
@@ -498,6 +505,7 @@ test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar 
   await archivedPicker.getByLabel('Buscar produto para pré-visualizar').fill(productName);
   await expect(archivedPicker.getByText('Nenhum produto encontrado.')).toBeVisible();
   expect(providerMutations).toEqual([]);
+  await deleteQaProductFixture(page.request, apiUrl, createdProductId);
 });
 
 test('UI bloqueia SKU duplicado após normalização por caixa e espaços', async ({ page }) => {
@@ -683,7 +691,7 @@ test('mutations confirmadas continuam sucesso quando o refresh da lista falha', 
   await expect(page.getByText('Produto arquivado.', { exact: true })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Produto arquivado, mas não foi possível atualizar a lista.');
   expect(mutationRequests.archive).toBe(1);
-  expect((await page.request.delete(`${apiUrl}/api/products/${imported.id}/bling-link`)).status()).toBe(200);
+  await deleteQaProductFixture(page.request, apiUrl, imported.id);
 });
 
 test('falha real da mutation continua visível e submit repetido não duplica create', async ({ page }) => {

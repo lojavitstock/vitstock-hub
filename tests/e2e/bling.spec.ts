@@ -198,13 +198,14 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     const relink = await page.request.post(`${api}/api/products/${linkedProductId}/bling-link`, { data: { blingProductId: '304' } });
     expect(relink.status()).toBe(200);
     expect((await relink.json()).product).toMatchObject({ source: 'bling', name: 'Nome curado no Hub', priceCents: 18000, bling: { productId: '304', name: 'Produto Catálogo QA 304' } });
-    const beforeUnlink = (await pool.query('SELECT name,price_cents,image_object_key FROM products WHERE id=$1', [linkedProductId])).rows[0];
+    const beforeUnlink = await linkedState();
     const unlink = await page.request.delete(`${api}/api/products/${linkedProductId}/bling-link`);
-    expect(unlink.status()).toBe(200);
-    expect((await unlink.json()).product).toMatchObject({ source: 'manual', name: beforeUnlink.name, priceCents: beforeUnlink.price_cents, bling: null });
-    expect((await pool.query('SELECT name,price_cents,image_object_key FROM products WHERE id=$1', [linkedProductId])).rows[0]).toEqual(beforeUnlink);
-    expect((await pool.query('SELECT 1 FROM product_bling_stock_balances WHERE product_id=$1', [linkedProductId])).rows).toHaveLength(0);
-    linkedProductId = null;
+    expect(unlink.status()).toBe(409);
+    expect(await unlink.json()).toMatchObject({
+      code: 'bling_unlink_prohibited',
+      error: 'Produtos do Hub precisam permanecer vinculados ao Bling. Altere o produto Bling ou arquive o cadastro.',
+    });
+    expect(await linkedState()).toEqual(beforeUnlink);
 
     const productCountBeforeFailedImport = Number((await pool.query('SELECT count(*)::int AS count FROM products')).rows[0].count);
     const beforeInactiveImports = await snapshot();
@@ -304,6 +305,7 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     if (createdProductId) {
       await pool.query('DELETE FROM products WHERE id=$1', [createdProductId]);
       createdProductId = null;
+      linkedProductId = null;
     }
     if (importedProductId) {
       await pool.query('DELETE FROM products WHERE id=$1', [importedProductId]);
@@ -312,7 +314,6 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     expect(await snapshot()).toEqual(before);
     expect(external).toEqual([]); expect(errors).toEqual([]);
   } finally {
-    if (linkedProductId) await page.request.delete(`${api}/api/products/${linkedProductId}/bling-link`).catch(() => undefined);
     if (createdProductId) await pool.query('DELETE FROM products WHERE id=$1', [createdProductId]).catch(() => undefined);
     if (importedProductId) await pool.query('DELETE FROM products WHERE id=$1', [importedProductId]).catch(() => undefined);
     await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'default' } }).catch(() => undefined);
@@ -349,7 +350,6 @@ test('SKU normalization, failed link/sync atomicity and effective stock rules', 
 
     const linkCandidate = await importQaProduct(page.request, api, { blingProductId: nextId(), name: 'SKU link candidate QA' });
     createdIds.push(linkCandidate.id);
-    expect((await page.request.delete(`${api}/api/products/${linkCandidate.id}/bling-link`)).status()).toBe(200);
     const relinkCandidate = await importQaProduct(page.request, api, { blingProductId: nextId(), name: 'SKU relink candidate QA' });
     createdIds.push(relinkCandidate.id);
     const syncCandidate = await importQaProduct(page.request, api, { blingProductId: nextId(), name: 'SKU sync candidate QA' });

@@ -482,31 +482,10 @@ export async function registerProductRoutes(app: FastifyInstance, storage: Produ
   app.delete('/api/products/:id/bling-link', { preHandler: requireAdmin }, async (request, reply) => {
     const params = parseId(request.params);
     if (!params.success) return reply.code(400).send({ error: 'Produto inválido.' });
-    const companyId = request.user!.companyId;
-    const row = await inTransaction(async (client) => {
-      const product = await client.query<{ id: string }>(
-        `SELECT id FROM products WHERE company_id = $1 AND id = $2 FOR UPDATE`,
-        [companyId, params.data.id],
-      );
-      if (!product.rows[0]) return null;
-      const deleted = await client.query<{ product_id: string }>(
-        `DELETE FROM product_bling_links WHERE company_id = $1 AND product_id = $2 RETURNING product_id`,
-        [companyId, params.data.id],
-      );
-      if (!deleted.rows[0]) return null;
-      const result = await client.query<ProductRow>(
-        `SELECT ${publicProductColumns} ${publicProductFrom}
-         WHERE p.company_id = $1 AND p.id = $2 LIMIT 1`,
-        [companyId, params.data.id],
-      );
-      return result.rows[0] || null;
+    return reply.code(409).send({
+      error: 'Produtos do Hub precisam permanecer vinculados ao Bling. Altere o produto Bling ou arquive o cadastro.',
+      code: 'bling_unlink_prohibited',
     });
-    if (!row) return reply.code(404).send({ error: 'Vínculo Bling não encontrado.' });
-    return {
-      unlinked: true,
-      productId: params.data.id,
-      product: toPublicProduct(row, storage, localApiBaseForOrigin(request.headers.origin)),
-    };
   });
 
   app.post('/api/products', { preHandler: requireAdmin }, async (request, reply) => {

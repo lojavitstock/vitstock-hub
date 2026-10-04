@@ -83,7 +83,3 @@ export async function importProductFromBling(input: {
     method: 'POST', body: JSON.stringify(input),
   });
 }
-
-export async function unlinkProductFromBling(productId: string) {
-  return apiRequest<{ unlinked: boolean; productId: string; product: import('../types').Product }>(`/api/products/${encodeURIComponent(productId)}/bling-link`, { method: 'DELETE' });
-}

@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
-import { ensureQaBlingConnected, importQaProduct, nextQaBlingProductId } from './productFixtures';
+import { deleteQaProductFixture, ensureQaBlingConnected, importQaProduct, nextQaBlingProductId } from './productFixtures';
 
 const { Pool } = createRequire(import.meta.url)('../../server/node_modules/pg');
 const api = process.env.VITE_API_URL || 'http://localhost:3001';
@@ -164,6 +164,14 @@ test('produto Bling: send usa cache sem provider call e sync preserva snapshots 
     const remoteJid = `552196${token}@s.whatsapp.net`;
     const product = await createProduct(page, `Linked send QA ${token}`);
     productId = product.id;
+    const lifecycleState = async () => (await pool.query(`SELECT to_jsonb(p) AS product,
+      (SELECT to_jsonb(l) FROM product_bling_links l WHERE l.company_id=p.company_id AND l.product_id=p.id) AS link,
+      (SELECT COALESCE(jsonb_agg(to_jsonb(b) ORDER BY b.bling_warehouse_id),'[]'::jsonb) FROM product_bling_stock_balances b WHERE b.company_id=p.company_id AND b.product_id=p.id) AS balances,
+      (SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY r.created_at,r.id),'[]'::jsonb) FROM message_product_refs r WHERE r.company_id=p.company_id AND r.product_id=p.id) AS refs,
+      (SELECT COALESCE(jsonb_agg(jsonb_build_object('messageId',m.id,'metadata',m.metadata) ORDER BY m.id),'[]'::jsonb)
+        FROM message_product_refs r JOIN messages m ON m.company_id=r.company_id AND m.id=r.message_id
+        WHERE r.company_id=p.company_id AND r.product_id=p.id) AS message_snapshots
+      FROM products p WHERE p.id=$1`, [product.id])).rows[0];
     const contactName = `Linked send contact ${token}`;
     await prepareConversation(page, remoteJid, contactName);
     const linked = await page.request.post(`${api}/api/products/${productId}/bling-link`, { data: { blingProductId: '101' } });
@@ -221,22 +229,42 @@ test('produto Bling: send usa cache sem provider call e sync preserva snapshots 
     await updatedPreview.getByRole('button', { name: 'Fechar prévia' }).click();
 
     expect((await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'default' } })).status()).toBe(200);
-    const relink = await page.request.post(`${api}/api/products/${productId}/bling-link`, { data: { blingProductId: '304' } });
+    const relinkBlingProductId = nextQaBlingProductId();
+    const relink = await page.request.post(`${api}/api/products/${productId}/bling-link`, { data: { blingProductId: relinkBlingProductId } });
     expect(relink.status()).toBe(200);
-    expect((await relink.json()).product).toMatchObject({ name: `Linked send QA ${token}`, priceCents: 18000, source: 'bling', bling: { name: 'Produto Catálogo QA 304' } });
+    expect((await relink.json()).product).toMatchObject({ name: `Linked send QA ${token}`, priceCents: 2800, source: 'bling', bling: { productId: relinkBlingProductId, name: `Produto Catálogo QA ${relinkBlingProductId}` } });
+    const beforeUnlink = await lifecycleState();
+    expect(beforeUnlink.product).toMatchObject({ name: `Linked send QA ${token}`, price_cents: 2800 });
+    expect(beforeUnlink.link).toMatchObject({ bling_product_id: relinkBlingProductId, bling_code: `SKU-${relinkBlingProductId}` });
+    expect(beforeUnlink.balances.length).toBeGreaterThan(0);
+    expect(beforeUnlink.refs).toHaveLength(2);
+    expect(beforeUnlink.message_snapshots).toHaveLength(2);
+    expect(beforeUnlink.refs.map((ref: { product_price_cents_snapshot: number }) => ref.product_price_cents_snapshot).sort((a: number, b: number) => a - b)).toEqual([2800, 4990]);
     const unlink = await page.request.delete(`${api}/api/products/${productId}/bling-link`);
-    expect(unlink.status()).toBe(200);
-    expect((await unlink.json()).product).toMatchObject({ name: `Linked send QA ${token}`, priceCents: 18000, source: 'manual', bling: null });
-    for (const [clientMessageId, expectedName, expectedPrice] of [
-      [firstClientMessageId, `Linked send QA ${token}`, 2800],
-      [secondClientMessageId, `Linked send QA ${token}`, 4990],
-    ] as const) {
-      const historical = await readReferences(page, clientMessageId);
-      expect(historical).toHaveLength(1);
-      expect(historical[0]).toMatchObject({ product_name_snapshot: expectedName, product_price_cents_snapshot: expectedPrice });
-    }
+    expect(unlink.status()).toBe(409);
+    expect(await unlink.json()).toMatchObject({
+      code: 'bling_unlink_prohibited',
+      error: 'Produtos do Hub precisam permanecer vinculados ao Bling. Altere o produto Bling ou arquive o cadastro.',
+    });
+    expect(await lifecycleState()).toEqual(beforeUnlink);
+
+    const archive = await page.request.post(`${api}/api/products/${productId}/archive`);
+    expect(archive.status()).toBe(200);
+    const afterArchive = await lifecycleState();
+    const stableProductColumns = (productRow: Record<string, unknown>) => Object.fromEntries(
+      Object.entries(productRow).filter(([key]) => key !== 'archived_at' && key !== 'updated_at'),
+    );
+    expect(afterArchive.product.archived_at).not.toBeNull();
+    expect(stableProductColumns(afterArchive.product)).toEqual(stableProductColumns(beforeUnlink.product));
+    expect(afterArchive.link).toEqual(beforeUnlink.link);
+    expect(afterArchive.balances).toEqual(beforeUnlink.balances);
+    expect(afterArchive.refs).toEqual(beforeUnlink.refs);
+    expect(afterArchive.message_snapshots).toEqual(beforeUnlink.message_snapshots);
+    const activeProducts = await (await page.request.get(`${api}/api/products`)).json();
+    expect(activeProducts.products).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: productId })]));
   } finally {
     if (productId) await page.request.post(`${api}/api/products/${productId}/archive`).catch(() => undefined);
+    if (productId) await deleteQaProductFixture(page.request, api, productId).catch(() => undefined);
     await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'default' } }).catch(() => undefined);
     await page.request.post(`${api}/api/integrations/bling/disconnect`).catch(() => undefined);
     await pool.end();

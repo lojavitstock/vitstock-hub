@@ -1,4 +1,7 @@
 import type { APIRequestContext } from '@playwright/test';
+import { createRequire } from 'node:module';
+
+const { Pool } = createRequire(import.meta.url)('../../server/node_modules/pg');
 
 export const qaProductPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 
@@ -32,4 +35,21 @@ export async function importQaProduct(api: APIRequestContext, apiBase: string, i
   });
   if (response.status() !== 201) throw new Error(`QA Bling import failed with HTTP ${response.status()}.`);
   return (await response.json()).product as { id: string; name: string; priceCents: number; [key: string]: unknown };
+}
+
+export async function deleteQaProductFixture(api: APIRequestContext, apiBase: string, productId: string) {
+  const marker = await api.get(`${apiBase}/api/qa/ready`);
+  const environment = marker.ok() ? await marker.json() : null;
+  if (!environment?.qaMode || environment.database !== 'local-only') {
+    throw new Error('Product fixture cleanup requires the isolated local QA database.');
+  }
+
+  const pool = new Pool({ connectionString: 'postgresql://vitstock@127.0.0.1:55432/vitstock_qa' });
+  try {
+    await pool.query(`DELETE FROM message_product_refs
+      WHERE company_id = (SELECT company_id FROM products WHERE id=$1) AND product_id=$1`, [productId]);
+    await pool.query('DELETE FROM products WHERE id=$1', [productId]);
+  } finally {
+    await pool.end();
+  }
 }

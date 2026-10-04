@@ -294,8 +294,13 @@ com 502. Detail, snapshots persistidos e sync de vínculo existente permanecem
 somente unicidade case-insensitive de SKU por empresa; migrations 022, 023 e
 024 são aplicadas apenas pelo `dev:e2e` guardado. Também valida importação com
 dados autoritativos e imagem local, SKU ausente e duplicado, conflito atômico no
-sync, link/relink/sync/unlink, nome local preservado, preço cadastrado protegido,
-saldos físicos/virtuais e rollback quando o estoque é inválido.
+sync, link/relink/sync, nome local preservado, preço cadastrado protegido,
+saldos físicos/virtuais e rollback quando o estoque é inválido. O DELETE de
+vínculo permanece como rota de compatibilidade e deve responder 409 sem mudar
+produto, vínculo, saldos, imagem ou referências/snapshots; a UI não deve expor
+ação de desvincular. Relink permanece funcional e archive retira da lista ativa
+preservando vínculo e histórico. `POST /api/products` continua rejeitando
+criação manual com `bling_product_required`.
 `tests/server.test.ts` simula falha SQL após upload e confirma rollback mais
 remoção somente do novo objeto armazenado. `tests/e2e/products.spec.ts` cobre o
 fluxo UI Bling-only, paginação, validação de SKU, imagem colada/substituída,
