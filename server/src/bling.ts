@@ -60,7 +60,7 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
     return { disconnected: true };
   }));
   const productQuery = pagination.extend({ nome: z.string().trim().min(1).max(120).optional(),
-    criterio: z.coerce.number().int().min(1).max(5).default(5), tipo: z.enum(['T','P','S','E','PS','C','V']).default('T') }).strict();
+    tipo: z.enum(['T','P','S','E','PS','C','V']).default('T') }).strict();
   const warehouseQuery = pagination.extend({ descricao: z.string().trim().min(1).max(120).optional(), situacao: z.coerce.number().int().min(0).max(1).optional() }).strict();
   for (const resource of ['products', 'warehouses'] as const) {
     app.get(`${base}/${resource}`, { preHandler: requireAdmin }, async (request, reply) => safe(reply, async () => {
@@ -68,10 +68,15 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
       if (!parsed.success) throw new BlingError(400, 'Paginação ou filtros inválidos');
       const { page, limit, ...filters } = parsed.data;
       const query = new URLSearchParams({ pagina: String(page), limite: String(limit) });
+      if (resource === 'products') query.set('criterio', '2');
       for (const [key, value] of Object.entries(filters)) if (value !== undefined) query.set(key, String(value));
       const value = await ready().client.read(request.user!.companyId, resource, query);
-      const data = resource === 'products' ? parseContract(z.object({ data: z.array(productListModel) }), value).data
+      const data = resource === 'products'
+        ? parseContract(z.object({ data: z.array(productListModel) }), value).data
         : parseContract(z.object({ data: z.array(warehouseModel) }), value).data;
+      if (resource === 'products' && data.some(product => product.situacao !== 'A')) {
+        throw new BlingError(502, 'Resposta do catálogo Bling contém produto não ativo');
+      }
       return { data, page, limit };
     }));
   }

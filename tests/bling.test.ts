@@ -172,7 +172,7 @@ test('Bling read models: identity, empty SKU, inactive, duplicate names, variati
   assert.throws(() => productListModel.parse({ ...product, id: Number.MAX_SAFE_INTEGER + 1 }));
   assert.throws(() => pagination.parse({ limit: 101 })); assert.throws(() => pagination.parse({ page: 0 }));
 });
-test('Bling real product list regression: observed E status remains explicit and IDs stay normalized', () => {
+test('Bling real product list accepts observed E while detail remains A/I and IDs stay normalized', () => {
   // Sanitized five-item shape: the real probe rejected situacao at indexes 3 and 4.
   const fixture = { data: ['A', 'I', 'A', 'E', 'E'].map((situacao, index) => ({
     id: 101 + index, nome: `Synthetic product ${index + 1}`, codigo: `SKU-${index + 1}`,
@@ -184,13 +184,16 @@ test('Bling real product list regression: observed E status remains explicit and
   const observed = fixture.data[3]!;
   assert.equal(productListModel.parse({ ...observed, id: '104' }).id, '104');
   assert.throws(() => productListModel.parse({ ...observed, id: Number.MAX_SAFE_INTEGER + 1 }));
-  // The unobserved detail contract is deliberately unchanged.
-  assert.throws(() => productDetailModel.parse(observed));
+  assert.equal(productDetailModel.parse({ ...observed, situacao: 'A' }).situacao, 'A');
+  assert.equal(productDetailModel.parse({ ...observed, situacao: 'I' }).situacao, 'I');
+  assert.throws(() => parseContract(productDetailModel, observed), /fora do contrato/);
+  assert.throws(() => productDetailModel.parse({ ...observed, situacao: 'X' }));
 });
 test('Bling product list status correction rejects unknown values without weakening other fields', () => {
   const product = { id: 101, nome: 'Synthetic product', tipo: 'P', situacao: 'A', formato: 'S' };
   for (const situacao of ['X', '', 'e', ' E ', null, undefined, 0, true]) {
     assert.throws(() => parseContract(productListModel, { ...product, situacao }), /fora do contrato/);
+    assert.throws(() => parseContract(productDetailModel, { ...product, situacao }), /fora do contrato/);
   }
   assert.throws(() => productListModel.parse({ ...product, tipo: 'X' }));
   assert.throws(() => productListModel.parse({ ...product, formato: 'X' }));

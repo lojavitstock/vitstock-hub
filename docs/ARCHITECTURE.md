@@ -673,8 +673,21 @@ Each attempt has an eight-second timeout covering headers AND body, a 5 MiB
 body ceiling and no redirect following. Database lock wait is capped at 12 s.
 
 Read routes allow only fixed product/deposit/stock paths, explicit page/limit
-(1..10,000 / 1..100; defaults 1/50), product name/criterion/type and warehouse
-description/status filters. No arbitrary upstream URL or full-catalog scan.
+(1..10,000 / 1..100; defaults 1/50), product name/type and warehouse
+description/status filters. The operational product-selection catalog always
+uses upstream `criterio=2` (active products); clients cannot override that
+criterion, and the Hub fails closed if the provider returns any non-active item
+in that catalog page. Import, link and relink revalidate status from the
+authoritative detail response and accept only `A`. Sync of an existing link is
+different: it remains allowed and records authoritative `A` or `I` status
+without automatically unlinking the product. The product-list contract accepts
+`A`, `I` and the observed `E`, but the detail and persisted link/snapshot
+contracts remain `A`/`I`. An explicit `E` detail is not accepted: selection
+rejects it with 409 before stock lookup or mutation, while direct detail reads
+and existing-link sync fail closed with 502 until the detail contract is
+verified. Migration 023 remains the last product-link migration and retains
+the `A`/`I` status constraint; it does not alter product data or images. No
+arbitrary upstream URL or full-catalog scan is allowed.
 IDs normalize to strings; unsafe JSON numeric IDs fail rather than round.
 Variations retain their own IDs and explicit parent relation. Warehouse field
 `descricao` and flags are preserved. Physical/virtual totals and deposit balances
