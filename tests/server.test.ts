@@ -132,6 +132,19 @@ test('product send: trusted snapshots, tenant boundaries, exact JIDs and atomic 
         reset(); assert.equal((await send({ [field]: 'untrusted' })).statusCode, 400); assert.equal(calls.length, 0);
       });
     }
+    await t.test('message override changes only the historical message snapshot', async () => {
+      reset();
+      const result = await send({ priceCentsOverride: 1299 });
+      assert.equal(result.statusCode, 200, result.body);
+      assert.equal(calls[0].caption, 'Produto QA\nR$ 12,99');
+      assert.equal(references[0][4], 1299);
+      assert.equal(price, 2800, 'catalog price is never updated by message send');
+    });
+    for (const priceCentsOverride of [0, -1, 1.5, 2_147_483_648, '1299']) {
+      await t.test(`rejects invalid message override ${String(priceCentsOverride)}`, async () => {
+        reset(); assert.equal((await send({ priceCentsOverride })).statusCode, 400); assert.equal(calls.length, 0);
+      });
+    }
     await t.test('missing/archived and cross-tenant products and destinations fail closed', async () => {
       reset(); productAvailable = false; assert.equal((await send()).statusCode, 404);
       reset(); assert.equal((await send({ productId: '10000000-0000-4000-8000-000000000099' })).statusCode, 404);
@@ -148,11 +161,12 @@ test('product send: trusted snapshots, tenant boundaries, exact JIDs and atomic 
       assert.equal(stored, null); assert.equal(references.length, 0); assert.equal(calls.length, 0);
     });
     await t.test('provider failure persists failed snapshot; retry keeps original name/price/key and reference', async () => {
-      reset(); providerFailure = true; assert.equal((await send()).statusCode, 400);
+      reset(); providerFailure = true; assert.equal((await send({ priceCentsOverride: 3900 })).statusCode, 400);
       assert.equal(stored.status, 'failed'); assert.equal(references.length, 1);
       productName = 'Edited later'; price = 9999; providerFailure = false;
       assert.equal((await send()).statusCode, 200);
-      assert.equal(calls[1].caption, 'Produto QA\nR$ 28,00'); assert.equal(references.length, 1);
+      assert.equal(calls[0].caption, 'Produto QA\nR$ 39,00');
+      assert.equal(calls[1].caption, 'Produto QA\nR$ 39,00'); assert.equal(references.length, 1);
     });
     await t.test('concurrent double submit and accepted retries dispatch once', async () => {
       reset(); const results = await Promise.all([send(), send()]);
@@ -290,7 +304,7 @@ test('Bling import removes only the uploaded image when its product transaction 
     for (const [blingProductId, situacao] of [['201', 'I'], ['202', 'E']]) {
       const readsBefore = providerReads.length;
       const rejected = await app.inject({ method: 'POST', url: '/api/products/bling-import', payload: {
-        blingProductId, imageBase64: png, imageMimeType: 'image/png',
+        blingProductId, name: 'Produto local QA', imageBase64: png, imageMimeType: 'image/png',
       } });
       assert.equal(rejected.statusCode, 409, rejected.body);
       assert.match(rejected.json().error, /somente produtos ativos/i);
@@ -303,7 +317,7 @@ test('Bling import removes only the uploaded image when its product transaction 
     }
 
     const result = await app.inject({ method: 'POST', url: '/api/products/bling-import', payload: {
-      blingProductId: '101', imageBase64: png, imageMimeType: 'image/png',
+      blingProductId: '101', name: 'Produto local QA', imageBase64: png, imageMimeType: 'image/png',
     } });
     assert.equal(result.statusCode, 500, result.body);
     assert.equal(rolledBack, true);

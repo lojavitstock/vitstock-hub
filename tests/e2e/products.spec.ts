@@ -1,5 +1,6 @@
-import { expect, request, test, type Page } from '@playwright/test';
+import { expect, request, test, type Locator, type Page } from '@playwright/test';
 import { createRequire } from 'node:module';
+import { ensureQaBlingConnected, importQaProduct, nextQaBlingProductId } from './productFixtures';
 
 const { Pool } = createRequire(import.meta.url)('../../server/node_modules/pg');
 
@@ -35,6 +36,29 @@ const uploadValidProductImage = async (page: Page) => {
   });
 };
 
+const pasteImageIntoProductForm = async (dialog: Locator, mimeType: string, dataUrl: string, oversized = false) => {
+  const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+  return dialog.getByLabel('Nome local *').evaluate((input, payload) => {
+    const source = Uint8Array.from(atob(payload.base64), (character) => character.charCodeAt(0));
+    const bytes = payload.oversized ? new Uint8Array(1_000_001) : source;
+    if (payload.oversized) bytes.set(source.slice(0, Math.min(source.length, bytes.length)));
+    const file = new File([bytes], 'clipboard-image', { type: payload.mimeType });
+    const item = { type: payload.mimeType, getAsFile: () => file };
+    const event = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', { value: { items: [item] } });
+    input.dispatchEvent(event);
+    return event.defaultPrevented;
+  }, { base64, mimeType, oversized });
+};
+
+const pastePlainTextIntoProductName = async (page: Page, dialog: Locator, text: string) => {
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.evaluate((value) => navigator.clipboard.writeText(value), text);
+  const name = dialog.getByLabel('Nome local *');
+  await name.focus();
+  await name.press('Control+V');
+};
+
 const openFreshProductConversation = async (page: Page) => {
   // Shared Ana QA may carry media/leases from other suites; product UX needs its own fixture.
   expect(new URL(apiUrl).hostname).toMatch(/^(localhost|127\.0\.0\.1)$/);
@@ -64,6 +88,7 @@ test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar
   const errors: string[] = [];
   const sends: string[] = [];
   await login(page);
+  await ensureQaBlingConnected(page.request, apiUrl);
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
   page.on('request', (event) => {
@@ -97,13 +122,19 @@ test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar
   const name = `Atalho Produto QA ${Date.now()}`;
   let id = '';
   try {
-    await uploadValidProductImage(settings);
-    await settings.getByLabel('Nome *').fill(name);
-    await settings.getByLabel(/Valor/).fill('3990');
-    const saved = settings.waitForResponse((response) => new URL(response.url()).pathname === '/api/products' && response.request().method() === 'POST');
+    const addDialog = settings.getByRole('dialog', { name: 'Adicionar produto' });
+    await addDialog.getByLabel('Buscar produto no Bling para importar').fill('Produto Catálogo QA 322');
+    await addDialog.getByRole('button', { name: /Produto Catálogo QA 322/ }).click();
+    await expect(addDialog.getByLabel('Nome local *')).toBeEnabled();
+    await expect(addDialog.getByLabel('Preço no Bling')).toBeDisabled();
+    await expect(addDialog.getByLabel('SKU')).toHaveValue('SKU-322');
+    await expect(addDialog.getByLabel('Estoque virtual')).toHaveValue('5');
+    await addDialog.getByLabel('Nome local *').fill(name);
+    await addDialog.getByLabel('Imagem local para importação').setInputFiles({ name: 'product.png', mimeType: 'image/png', buffer: Buffer.from(tinyPng, 'base64') });
+    const saved = settings.waitForResponse((response) => new URL(response.url()).pathname === '/api/products/bling-import' && response.request().method() === 'POST');
     await settings.getByRole('button', { name: 'Salvar produto' }).click();
     id = (await (await saved).json()).product.id;
-    await expect(settings.getByText('Produto cadastrado.', { exact: true })).toBeVisible();
+    await expect(settings.getByText(`Produto Bling importado: “${name}”.`, { exact: true })).toBeVisible();
     await page.goBack();
     await expect(page).toHaveURL(/\/atendimento$/);
     expect(await page.evaluate(() => (window as any).__sameTabDocument)).toBe(documentToken);
@@ -120,7 +151,7 @@ test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar
     const suggestions = page.getByRole('dialog', { name: 'Sugestões de produtos' });
     const option = suggestions.getByRole('option', { name: new RegExp(name) });
     await expect(option).toBeVisible();
-    await expect(option).toContainText('R$ 39,90');
+    await expect(option).toContainText('R$ 180,00');
     await expect.poll(() => option.locator('img').evaluate((element: HTMLImageElement) => element.naturalWidth)).toBeGreaterThan(0);
     await suggestions.screenshot({ path: testInfo.outputPath('product-suggestions.png') });
     await composer.press('ArrowDown');
@@ -154,7 +185,10 @@ test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar
     expect(sends).toEqual([]);
     expect(errors).toEqual([]);
   } finally {
-    if (id) await page.request.post(`${apiUrl}/api/products/${id}/archive`);
+    if (id) {
+      await page.request.delete(`${apiUrl}/api/products/${id}/bling-link`).catch(() => undefined);
+      await page.request.post(`${apiUrl}/api/products/${id}/archive`).catch(() => undefined);
+    }
   }
 });
 
@@ -238,46 +272,57 @@ test('Product Library importa pelo Bling paginado e preserva campos vinculados n
 
   await page.goto('/configuracoes?tab=products');
   await expect(page.getByRole('heading', { name: 'Produtos', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Importar do Bling', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: 'Importar produto do Bling' });
+  await page.getByRole('button', { name: 'Adicionar produto', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Adicionar produto' });
   await expect(dialog.getByRole('button', { name: /Ativo \(A\)/ }).first()).toBeVisible();
   await expect(dialog.getByRole('button', { name: /Inativo \(I\)/ })).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: /Encerrado \(E\)/ })).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: 'Carregar mais', exact: true })).toBeVisible();
   await dialog.getByRole('button', { name: 'Carregar mais', exact: true }).click();
   await expect(dialog.getByRole('button').filter({ hasText: 'ID 322' })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Salvar produto' })).toBeDisabled();
+  await expect(dialog.getByLabel('Nome local *')).toBeDisabled();
+  await expect(dialog.getByLabel('Preço no Bling')).toBeDisabled();
+  await expect(dialog.getByLabel('SKU')).toBeDisabled();
+  await expect(dialog.getByLabel('Estoque virtual')).toBeDisabled();
   const search = dialog.getByLabel('Buscar produto no Bling para importar');
   await search.fill('Produto Catálogo QA 321');
   const item = dialog.getByRole('button', { name: /Produto Catálogo QA 321/ });
   await item.click();
+  await expect(dialog.getByLabel('Nome local *')).toHaveValue('Produto Catálogo QA 321');
+  await dialog.getByLabel('Nome local *').fill('Nome local QA 321');
+  await expect(dialog.getByLabel('SKU')).toHaveValue('SKU-321');
+  await expect(dialog.getByLabel('Estoque virtual')).toHaveValue('5');
+  await expect(dialog.getByRole('button', { name: 'Salvar produto' })).toBeDisabled();
   await dialog.getByLabel('Imagem local para importação').setInputFiles({
     name: 'bling-import-qa.png', mimeType: 'image/png', buffer: Buffer.from(tinyPng, 'base64'),
   });
+  await expect(dialog.getByRole('button', { name: 'Salvar produto' })).toBeEnabled();
   const importResponse = page.waitForResponse((response) => (
     response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/products/bling-import'
   ));
-  await dialog.getByRole('button', { name: 'Importar produto', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Salvar produto', exact: true }).click();
   const completedImport = await importResponse;
   expect(completedImport.status()).toBe(201);
   importedId = (await completedImport.json()).product.id;
-  const card = page.locator('article').filter({ has: page.getByRole('heading', { name: 'Produto Catálogo QA 321', exact: true }) });
+  const card = page.locator('article').filter({ has: page.getByRole('heading', { name: 'Nome local QA 321', exact: true }) });
   await expect(card).toHaveCount(1);
   await expect(card).toContainText('R$ 180,00');
   await expect(card).toContainText('Bling');
   await expect(card).toContainText('SKU: SKU-321');
-  await expect(card).toContainText('Físico: 8 · Virtual: 5');
-  expect(importPayload && Object.keys(importPayload).sort()).toEqual(['blingProductId', 'imageBase64', 'imageMimeType']);
-  expect(importPayload).toMatchObject({ blingProductId: '321', imageMimeType: 'image/png' });
+  await expect(card).toContainText('Estoque virtual: 5');
+  expect(importPayload && Object.keys(importPayload).sort()).toEqual(['blingProductId', 'imageBase64', 'imageMimeType', 'name']);
+  expect(importPayload).toMatchObject({ blingProductId: '321', name: 'Nome local QA 321', imageMimeType: 'image/png' });
 
-  await card.getByRole('button', { name: 'Editar imagem' }).click();
-  const editDialog = page.getByRole('dialog', { name: 'Editar imagem do produto' });
-  await expect(editDialog.getByLabel('Nome')).toHaveAttribute('readonly', '');
-  await expect(editDialog.getByLabel('Valor')).toHaveAttribute('readonly', '');
+  await card.getByRole('button', { name: 'Editar nome/imagem' }).click();
+  const editDialog = page.getByRole('dialog', { name: 'Editar produto' });
+  await expect(editDialog.getByLabel('Nome local *')).toBeEnabled();
+  await expect(editDialog).toContainText('R$ 180,00');
   await uploadValidProductImage(page);
-  await editDialog.getByRole('button', { name: 'Salvar imagem', exact: true }).click();
+  await editDialog.getByRole('button', { name: 'Salvar alterações', exact: true }).click();
   await expect(card).toContainText('R$ 180,00');
   await expect(card).toContainText('SKU: SKU-321');
-  await card.getByRole('button', { name: 'Ações de Produto Catálogo QA 321', exact: true }).click();
+  await card.getByRole('button', { name: 'Ações de Nome local QA 321', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Atualizar do Bling', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Alterar produto Bling', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Desvincular do Bling', exact: true })).toBeVisible();
@@ -285,7 +330,6 @@ test('Product Library importa pelo Bling paginado e preserva campos vinculados n
   expect(externalRequests).toEqual([]);
   } finally {
     if (importedId) {
-      await page.request.delete(`${apiUrl}/api/products/${importedId}/bling-link`).catch(() => undefined);
       await qaPool.query('DELETE FROM products WHERE id=$1', [importedId]).catch(() => undefined);
     }
     await page.request.post(`${apiUrl}/api/qa/bling/scenario`, { data: { scenario: 'default' } }).catch(() => undefined);
@@ -297,7 +341,9 @@ test('Product Library importa pelo Bling paginado e preserva campos vinculados n
 test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar e arquivar sem envio real', async ({ page }) => {
   test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
   await login(page);
+  await ensureQaBlingConnected(page.request, apiUrl);
   const productName = `Produto QA ${Date.now()}`;
+  let createdProductId = '';
   const providerMutations: string[] = [];
   const imageResponseStatuses: number[] = [];
   page.on('request', (requestEvent) => {
@@ -312,28 +358,71 @@ test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar 
   await page.goto('/configuracoes?tab=products');
   await expect(page.getByRole('heading', { name: 'Produtos', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Adicionar produto' }).click();
-  const browserGeneratedPngBase64 = await page.evaluate(() => {
+  const addDialog = page.getByRole('dialog', { name: 'Adicionar produto' });
+  await addDialog.getByLabel('Buscar produto no Bling para importar').fill('Produto Catálogo QA 323');
+  await addDialog.getByRole('button', { name: /Produto Catálogo QA 323/ }).click();
+  await expect(addDialog.getByLabel('Nome local *')).toBeEnabled();
+  await expect(addDialog.getByLabel('Preço no Bling')).toBeDisabled();
+  await expect(addDialog.getByLabel('SKU')).toHaveValue('SKU-323');
+  await expect(addDialog.getByLabel('Estoque virtual')).toHaveValue('5');
+  await addDialog.getByLabel('Nome local *').fill(productName);
+  const browserGeneratedImages = await page.evaluate(() => {
     const canvas = document.createElement('canvas');
     canvas.width = 2;
     canvas.height = 2;
     const context = canvas.getContext('2d')!;
     context.fillStyle = '#eebb2c';
     context.fillRect(0, 0, 2, 2);
-    return canvas.toDataURL('image/png').split(',')[1];
+    return {
+      png: canvas.toDataURL('image/png'),
+      jpeg: canvas.toDataURL('image/jpeg'),
+      webp: canvas.toDataURL('image/webp'),
+    };
   });
-  await page.getByLabel('Imagem do produto').setInputFiles({
+  expect(browserGeneratedImages.webp).toMatch(/^data:image\/webp;base64,/);
+  const browserGeneratedPngBase64 = browserGeneratedImages.png.split(',')[1];
+  await addDialog.getByLabel('Imagem local para importação').setInputFiles({
     name: 'produto-qa.png',
     mimeType: 'image/png',
     buffer: Buffer.from(browserGeneratedPngBase64, 'base64'),
   });
-  await expect(page.getByAltText('Pré-visualização da imagem do produto')).toBeVisible();
-  await page.getByLabel('Nome *').fill(productName);
-  await page.getByLabel(/Valor/).fill('3990');
+  await expect(addDialog.getByAltText('Prévia da imagem local')).toBeVisible();
+  const importImagePreview = addDialog.getByAltText('Prévia da imagem local');
+  let previousImageUrl = await importImagePreview.getAttribute('src');
+  for (const [mimeType, dataUrl] of [
+    ['image/png', browserGeneratedImages.png],
+    ['image/jpeg', browserGeneratedImages.jpeg],
+    ['image/webp', browserGeneratedImages.webp],
+  ] as const) {
+    expect(await pasteImageIntoProductForm(addDialog, mimeType, dataUrl)).toBe(false);
+    await expect(importImagePreview).not.toHaveAttribute('src', previousImageUrl!);
+    previousImageUrl = await importImagePreview.getAttribute('src');
+  }
+  await addDialog.getByLabel('Nome local *').fill('Texto ');
+  await pastePlainTextIntoProductName(page, addDialog, 'normal');
+  await expect(addDialog.getByLabel('Nome local *')).toHaveValue('Texto normal');
+  await addDialog.getByLabel('Nome local *').fill(productName);
+  const imageBeforeInvalidPaste = await importImagePreview.getAttribute('src');
+  await pasteImageIntoProductForm(addDialog, 'image/gif', browserGeneratedImages.png);
+  await expect(addDialog.getByRole('alert')).toHaveText('Use uma imagem JPEG, PNG ou WebP.');
+  await expect(importImagePreview).toHaveAttribute('src', imageBeforeInvalidPaste!);
+  await pasteImageIntoProductForm(addDialog, 'image/png', browserGeneratedImages.png, true);
+  await expect(addDialog.getByRole('alert')).toHaveText('A imagem deve ter entre 1 byte e 1 MB.');
+  await expect(importImagePreview).toHaveAttribute('src', imageBeforeInvalidPaste!);
+  await pasteImageIntoProductForm(addDialog, 'image/webp', browserGeneratedImages.webp);
+  await expect(addDialog.getByRole('alert')).toHaveCount(0);
+  await expect(importImagePreview).not.toHaveAttribute('src', imageBeforeInvalidPaste!);
+  const created = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/products/bling-import');
   await page.getByRole('button', { name: 'Salvar produto' }).click();
+  const createResponse = await created;
+  expect(createResponse.status()).toBe(201);
+  createdProductId = (await createResponse.json()).product.id;
 
   const card = page.locator('article').filter({ hasText: productName }).first();
   await expect(card).toBeVisible();
-  await expect(card).toContainText('R$ 39,90');
+  await expect(card).toContainText('R$ 180,00');
+  await expect(card).toContainText('SKU: SKU-323');
+  await expect(card).toContainText('Estoque virtual: 5');
   await expect.poll(() => imageResponseStatuses.length).toBeGreaterThan(0);
   expect(imageResponseStatuses.at(-1)).toBe(200);
   await expect.poll(() => card.locator('img').evaluate((element: HTMLImageElement) => element.naturalWidth)).toBeGreaterThan(0);
@@ -342,10 +431,17 @@ test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar 
   await expect(card).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByLabel('Buscar produto')).toBeVisible();
-  await card.getByRole('button', { name: 'Editar' }).click();
-  await page.getByLabel(/Valor/).fill('129900');
-  await page.getByRole('button', { name: 'Salvar produto' }).click();
-  await expect(card).toContainText('R$ 1.299,00');
+  await card.getByRole('button', { name: 'Editar nome/imagem' }).click();
+  await expect(page.getByLabel('Nome local *')).toHaveValue(productName);
+  const editDialog = page.getByRole('dialog', { name: 'Editar produto' });
+  await expect(editDialog).toContainText('Preço do catálogo · Bling');
+  await expect(editDialog).toContainText('R$ 180,00');
+  const editImagePreview = page.getByAltText('Pré-visualização da imagem do produto');
+  const imageBeforeEditPaste = await editImagePreview.getAttribute('src');
+  await pasteImageIntoProductForm(editDialog, 'image/jpeg', browserGeneratedImages.jpeg);
+  await expect(editImagePreview).not.toHaveAttribute('src', imageBeforeEditPaste!);
+  await page.getByRole('button', { name: 'Salvar alterações' }).click();
+  await expect(card).toContainText('R$ 180,00');
   await page.getByLabel('Buscar produto').fill(productName);
   await expect(card).toBeVisible();
 
@@ -363,8 +459,22 @@ test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar 
   const preview = page.getByRole('dialog', { name: 'Pré-visualizar produto' });
   await expect(preview).toBeVisible();
   await expect(preview).toContainText(productName);
+  await expect(preview).toContainText('SKU: SKU-323');
+  await expect(preview).toContainText('Estoque virtual: 5');
+  await expect(preview).toContainText('Preço cadastrado: R$ 180,00');
+  await expect(preview.getByLabel('Valor desta mensagem')).toHaveValue('180,00');
+  const blingBadge = preview.getByLabel('Vinculado ao Bling');
+  await expect(blingBadge).toHaveAttribute('title', 'Vinculado ao Bling');
+  expect(await blingBadge.getAttribute('class')).toContain('text-emerald-300');
+  await preview.getByLabel('Valor desta mensagem').fill('49,90');
+  await expect(preview).toContainText('Preço cadastrado: R$ 180,00');
   await expect(preview.getByRole('button', { name: 'Enviar', exact: true })).toBeEnabled();
   await expect(preview.getByText(/envio de produtos pelo WhatsApp ainda não está conectado/i)).toHaveCount(0);
+  await preview.getByRole('button', { name: 'Voltar', exact: true }).click();
+  await picker.getByRole('option', { name: new RegExp(productName) }).click();
+  const resetPreview = page.getByRole('dialog', { name: 'Pré-visualizar produto' });
+  await expect(resetPreview.getByLabel('Valor desta mensagem')).toHaveValue('180,00');
+  await resetPreview.getByRole('button', { name: 'Fechar prévia' }).click();
   expect(providerMutations).toEqual([]);
 
   await page.goto('/configuracoes?tab=products');
@@ -377,6 +487,7 @@ test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar 
   await archiveDialog.getByRole('button', { name: 'Arquivar', exact: true }).click();
   await expect(refreshedCard).toHaveCount(0);
   await expect(page.getByText('Produto arquivado.', { exact: true })).toBeVisible();
+  expect((await page.request.delete(`${apiUrl}/api/products/${createdProductId}/bling-link`)).status()).toBe(200);
 
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto('/atendimento');
@@ -387,6 +498,87 @@ test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar 
   await archivedPicker.getByLabel('Buscar produto para pré-visualizar').fill(productName);
   await expect(archivedPicker.getByText('Nenhum produto encontrado.')).toBeVisible();
   expect(providerMutations).toEqual([]);
+});
+
+test('UI bloqueia SKU duplicado após normalização por caixa e espaços', async ({ page }) => {
+  test.skip(!email || !password, 'credenciais QA ausentes');
+  await login(page);
+  await ensureQaBlingConnected(page.request, apiUrl);
+  const pool = new Pool({ connectionString: 'postgresql://vitstock@127.0.0.1:55432/vitstock_qa' });
+  let productId: string | null = null;
+  try {
+    const existing = await importQaProduct(page.request, apiUrl, {
+      blingProductId: nextQaBlingProductId(), name: `SKU Base QA ${Date.now()}`,
+    });
+    productId = existing.id;
+    const linked = await page.request.post(`${apiUrl}/api/products/${productId}/bling-link`, { data: { blingProductId: '101' } });
+    expect(linked.status()).toBe(200);
+    expect((await linked.json()).product.bling.code).toBe('SKU-101');
+    expect((await page.request.post(`${apiUrl}/api/qa/bling/scenario`, { data: { scenario: 'sku-collision' } })).status()).toBe(200);
+
+    await page.goto('/configuracoes?tab=products');
+    await page.getByRole('button', { name: 'Adicionar produto', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Adicionar produto' });
+    await dialog.getByLabel('Buscar produto no Bling para importar').fill('Produto Catálogo QA 321');
+    await dialog.getByRole('button', { name: /Produto Catálogo QA 321/ }).click();
+    await expect(dialog.getByLabel('SKU')).toHaveValue(' sku-101 ');
+    await expect(dialog.getByRole('alert')).toContainText('Já existe um produto cadastrado no Hub com este SKU.');
+    await dialog.getByLabel('Imagem local para importação').setInputFiles({
+      name: 'duplicate-sku.png', mimeType: 'image/png', buffer: Buffer.from(tinyPng, 'base64'),
+    });
+    await expect(dialog.getByRole('button', { name: 'Salvar produto' })).toBeDisabled();
+  } finally {
+    await page.request.post(`${apiUrl}/api/qa/bling/scenario`, { data: { scenario: 'default' } }).catch(() => undefined);
+    if (productId) await pool.query('DELETE FROM products WHERE id=$1', [productId]).catch(() => undefined);
+    await pool.end();
+  }
+});
+
+test('estoque efetivo usa fallback físico e mantém zero/negativo em vermelho na prévia', async ({ page }) => {
+  test.skip(!email || !password, 'credenciais QA ausentes');
+  await login(page);
+  await ensureQaBlingConnected(page.request, apiUrl);
+  const pool = new Pool({ connectionString: 'postgresql://vitstock@127.0.0.1:55432/vitstock_qa' });
+  const fixtures: Array<{ id: string; name: string; value: string; isNonPositive: boolean }> = [];
+  try {
+    for (const [scenario, value, isNonPositive] of [
+      ['physical-only', '7', false],
+      ['virtual-zero', '0', true],
+      ['virtual-negative', '-2', true],
+    ] as const) {
+      expect((await page.request.post(`${apiUrl}/api/qa/bling/scenario`, { data: { scenario } })).status()).toBe(200);
+      const name = `Estoque ${scenario} QA ${Date.now()}`;
+      const product = await importQaProduct(page.request, apiUrl, { blingProductId: nextQaBlingProductId(), name });
+      fixtures.push({ id: product.id, name, value, isNonPositive });
+      const response = await page.request.get(`${apiUrl}/api/products/${product.id}`);
+      expect(response.status()).toBe(200);
+      const stored = (await response.json()).product;
+      if (scenario === 'physical-only') expect(stored.bling).toMatchObject({ stockPhysicalTotal: '7', stockVirtualTotal: null });
+      if (scenario === 'virtual-zero') expect(stored.bling).toMatchObject({ stockPhysicalTotal: '8', stockVirtualTotal: '0' });
+      if (scenario === 'virtual-negative') expect(stored.bling).toMatchObject({ stockPhysicalTotal: '8', stockVirtualTotal: '-2' });
+    }
+    expect((await page.request.post(`${apiUrl}/api/qa/bling/scenario`, { data: { scenario: 'default' } })).status()).toBe(200);
+    await page.goto('/atendimento');
+    const contactName = await openFreshProductConversation(page);
+    await page.getByRole('button', { name: 'Produtos', exact: true }).click();
+    const picker = page.getByRole('dialog', { name: 'Produtos' });
+    for (const fixture of fixtures) {
+      await picker.getByLabel('Buscar produto para pré-visualizar').fill(fixture.name);
+      await picker.getByRole('option', { name: new RegExp(fixture.name) }).click();
+      const preview = page.getByRole('dialog', { name: 'Pré-visualizar produto' });
+      const stock = preview.getByText(`Estoque virtual: ${fixture.value}`, { exact: true });
+      await expect(stock).toBeVisible();
+      const stockClass = await stock.getAttribute('class');
+      if (fixture.isNonPositive) expect(stockClass).toContain('text-red-300');
+      else expect(stockClass).not.toContain('text-red-300');
+      await preview.getByRole('button', { name: 'Voltar', exact: true }).click();
+    }
+    expect(contactName).toContain('Picker QA');
+  } finally {
+    await page.request.post(`${apiUrl}/api/qa/bling/scenario`, { data: { scenario: 'default' } }).catch(() => undefined);
+    for (const fixture of fixtures) await pool.query('DELETE FROM products WHERE id=$1', [fixture.id]).catch(() => undefined);
+    await pool.end();
+  }
 });
 
 test('Produtos respeita permissões de administrador e isolamento por empresa', async () => {
@@ -405,17 +597,14 @@ test('Produtos respeita permissões de administrador e isolamento por empresa', 
     expect(tenantBLogin.ok()).toBeTruthy();
 
     const productName = `Tenant isolation QA ${Date.now()}`;
-    const create = await companyA.post('/api/products', {
-      data: { name: productName, priceCents: 500, imageMimeType: 'image/png', imageBase64: tinyPng, companyId: '00000000-0000-4000-8000-000000000099' },
-    });
-    expect(create.status()).toBe(400);
-
-    const created = await companyA.post('/api/products', {
+    const manualCreate = await companyA.post('/api/products', {
       data: { name: productName, priceCents: 500, imageMimeType: 'image/png', imageBase64: tinyPng },
     });
-    expect(created.status()).toBe(201);
-    const payload = await created.json() as { product: { id: string; name: string; imageUrl: string; companyId?: string } };
-    productId = payload.product.id;
+    expect(manualCreate.status()).toBe(409);
+    expect(await manualCreate.json()).toMatchObject({ code: 'bling_product_required' });
+    const imported = await importQaProduct(companyA, apiUrl, { blingProductId: nextQaBlingProductId(), name: productName });
+    productId = imported.id;
+    const payload = await (await companyA.get(`/api/products/${productId}`)).json() as { product: { id: string; name: string; imageUrl: string; companyId?: string } };
     productImageUrl = payload.product.imageUrl;
     expect(payload.product.companyId).toBeUndefined();
 
@@ -428,16 +617,6 @@ test('Produtos respeita permissões de administrador e isolamento por empresa', 
     const caseInsensitiveSearch = await companyA.get(`/api/products?search=${encodeURIComponent(productName.toLowerCase())}`);
     expect((await caseInsensitiveSearch.json()).products.some((item: { id: string }) => item.id === productId)).toBe(true);
     expect((await companyA.get(`/api/products?search=${'x'.repeat(121)}`)).status()).toBe(400);
-    expect((await companyA.post('/api/products', {
-      data: { name: 'Invalid price QA', priceCents: -1, imageMimeType: 'image/png', imageBase64: tinyPng },
-    })).status()).toBe(400);
-    expect((await companyA.post('/api/products', {
-      data: { name: 'Invalid base64 QA', priceCents: 1, imageMimeType: 'image/png', imageBase64: 'not base64' },
-    })).status()).toBe(400);
-    expect((await companyA.post('/api/products', {
-      data: { name: 'Spoofed MIME QA', priceCents: 1, imageMimeType: 'image/jpeg', imageBase64: tinyPng },
-    })).status()).toBe(400);
-
     const attendantCreate = await sameCompanyAttendant.post('/api/products', {
       data: { name: 'Forbidden QA', priceCents: 0, imageMimeType: 'image/png', imageBase64: tinyPng },
     });
@@ -460,11 +639,13 @@ test('Produtos respeita permissões de administrador e isolamento por empresa', 
 test('mutations confirmadas continuam sucesso quando o refresh da lista falha', async ({ page }) => {
   test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
   await login(page);
+  const productName = `Refresh QA ${Date.now()}`;
+  const imported = await importQaProduct(page.request, apiUrl, { blingProductId: nextQaBlingProductId(), name: productName });
   await page.goto('/configuracoes?tab=products');
   await expect(page.getByRole('heading', { name: 'Produtos', exact: true })).toBeVisible();
 
   let failNextListRefresh = false;
-  const mutationRequests = { create: 0, update: 0, archive: 0 };
+  const mutationRequests = { update: 0, archive: 0 };
   const corsHeaders = {
     'access-control-allow-origin': 'http://localhost:3000',
     'access-control-allow-credentials': 'true',
@@ -477,30 +658,18 @@ test('mutations confirmadas continuam sucesso quando o refresh da lista falha', 
       await route.fulfill({ status: 503, contentType: 'application/json', headers: corsHeaders, body: JSON.stringify({ error: 'Falha de refresh QA.' }) });
       return;
     }
-    if (requestEvent.method() === 'POST' && url.pathname === '/api/products') mutationRequests.create += 1;
     if (requestEvent.method() === 'PATCH' && /^\/api\/products\/[0-9a-f-]+$/i.test(url.pathname)) mutationRequests.update += 1;
     if (requestEvent.method() === 'POST' && /^\/api\/products\/[0-9a-f-]+\/archive$/i.test(url.pathname)) mutationRequests.archive += 1;
     await route.continue();
   });
 
-  const productName = `Refresh QA ${Date.now()}`;
-  await page.getByRole('button', { name: 'Adicionar produto' }).click();
-  await uploadValidProductImage(page);
-  await page.getByLabel('Nome *').fill(productName);
-  await page.getByLabel(/Valor/).fill('3990');
-  failNextListRefresh = true;
-  await page.getByRole('button', { name: 'Salvar produto' }).click();
   const card = page.locator('article').filter({ hasText: productName }).first();
   await expect(card).toBeVisible();
-  await expect(page.getByText('Produto cadastrado.', { exact: true })).toBeVisible();
-  await expect(page.getByRole('alert')).toContainText('Produto cadastrado, mas não foi possível atualizar a lista.');
-  expect(mutationRequests.create).toBe(1);
-
-  await card.getByRole('button', { name: 'Editar' }).click();
-  await page.getByLabel(/Valor/).fill('129900');
+  await card.getByRole('button', { name: 'Editar nome/imagem' }).click();
+  await page.getByLabel('Nome local *').fill(productName);
   failNextListRefresh = true;
-  await page.getByRole('button', { name: 'Salvar produto' }).click();
-  await expect(card).toContainText('R$ 1.299,00');
+  await page.getByRole('button', { name: 'Salvar alterações' }).click();
+  await expect(card).toContainText('R$ 28,00');
   await expect(page.getByText('Produto atualizado.', { exact: true })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Produto atualizado, mas não foi possível atualizar a lista.');
   expect(mutationRequests.update).toBe(1);
@@ -514,18 +683,20 @@ test('mutations confirmadas continuam sucesso quando o refresh da lista falha', 
   await expect(page.getByText('Produto arquivado.', { exact: true })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Produto arquivado, mas não foi possível atualizar a lista.');
   expect(mutationRequests.archive).toBe(1);
+  expect((await page.request.delete(`${apiUrl}/api/products/${imported.id}/bling-link`)).status()).toBe(200);
 });
 
 test('falha real da mutation continua visível e submit repetido não duplica create', async ({ page }) => {
   test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
   await login(page);
+  await ensureQaBlingConnected(page.request, apiUrl);
   await page.goto('/configuracoes?tab=products');
   await expect(page.getByRole('heading', { name: 'Produtos', exact: true })).toBeVisible();
 
   let createRequests = 0;
   await page.route('**/api/products**', async (route) => {
     const requestEvent = route.request();
-    if (requestEvent.method() === 'POST' && new URL(requestEvent.url()).pathname === '/api/products') {
+    if (requestEvent.method() === 'POST' && new URL(requestEvent.url()).pathname === '/api/products/bling-import') {
       createRequests += 1;
       await new Promise((resolve) => setTimeout(resolve, 200));
       await route.fulfill({ status: 500, contentType: 'application/json', headers: {
@@ -538,17 +709,18 @@ test('falha real da mutation continua visível e submit repetido não duplica cr
   });
 
   await page.getByRole('button', { name: 'Adicionar produto' }).click();
-  await uploadValidProductImage(page);
-  await page.getByLabel('Nome *').fill(`Mutation failure QA ${Date.now()}`);
-  await page.getByLabel(/Valor/).fill('100');
+  const dialog = page.getByRole('dialog', { name: 'Adicionar produto' });
+  await dialog.getByLabel('Buscar produto no Bling para importar').fill('Produto Catálogo QA 321');
+  await dialog.getByRole('button', { name: /Produto Catálogo QA 321/ }).click();
+  await dialog.getByLabel('Nome local *').fill(`Mutation failure QA ${Date.now()}`);
+  await dialog.getByLabel('Imagem local para importação').setInputFiles({ name: 'product.png', mimeType: 'image/png', buffer: Buffer.from(tinyPng, 'base64') });
   await page.locator('[role="dialog"] form').evaluate((form) => {
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   });
 
-  const dialog = page.getByRole('dialog', { name: 'Adicionar produto' });
   await expect(dialog.getByRole('alert')).toHaveText('Falha real de gravação QA.');
   await expect(dialog).toBeVisible();
   expect(createRequests).toBe(1);
-  await expect(page.getByText('Produto cadastrado.', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Produto Bling importado', { exact: false })).toHaveCount(0);
 });

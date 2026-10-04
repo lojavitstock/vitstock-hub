@@ -3302,7 +3302,8 @@ async function ensureOutboundMessage(input: {
       const row = product.rows[0];
       if (!row) throw Object.assign(new Error('Produto ativo não encontrado'), { statusCode: 404 });
       input.productSnapshot = { productId: input.productSnapshot.productId, name: row.name,
-        priceCents: row.price_cents, currency: row.currency, imageObjectKey: row.image_object_key, imageMimeType: row.image_mime_type };
+        priceCents: input.productSnapshot.priceCents, currency: row.currency,
+        imageObjectKey: row.image_object_key, imageMimeType: row.image_mime_type };
       input.content = productCaption(input.productSnapshot);
     }
     const isGroup = isWhatsAppGroupJid(input.remoteJid);
@@ -5556,7 +5557,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance, productStora
     const parsed = productSendSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Envio de produto inválido', code: 'invalid_product_send' });
     if (!productStorage) return reply.code(503).send({ error: 'Armazenamento de produtos indisponível' });
-    const { productId, remoteJid, clientMessageId } = parsed.data;
+    const { productId, remoteJid, clientMessageId, priceCentsOverride } = parsed.data;
     const product = await db.query<{
       id: string; name: string; price_cents: number; currency: 'BRL';
       image_object_key: string; image_mime_type: ProductSendSnapshot['imageMimeType'];
@@ -5570,7 +5571,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance, productStora
     const destination = await resolveConversationForOperation({ companyId: request.user!.companyId, remoteJid }, { createIfMissing: false });
     if (!destination) return reply.code(404).send({ error: 'Conversa não encontrada', code: 'destination_conversation_not_found' });
     const snapshot: ProductSendSnapshot = {
-      productId: row.id, name: row.name, priceCents: row.price_cents, currency: row.currency,
+      productId: row.id, name: row.name, priceCents: priceCentsOverride ?? row.price_cents, currency: row.currency,
       imageObjectKey: row.image_object_key, imageMimeType: row.image_mime_type,
     };
     if (!await productStorage.exists(request.user!.companyId, snapshot.imageObjectKey)) {

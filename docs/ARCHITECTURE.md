@@ -470,36 +470,49 @@ The timeline supports image, audio, video, sticker and document message types. `
 
 `/configuracoes?tab=products` uses its own product API and UI; it is not coupled to Quick Replies. `server/src/products.ts` derives company scope from the authenticated session, permits product reads to authenticated company users, and restricts create/update/archive and Bling linking to `admin`. Search is name-only and excludes archived products. Products are archived rather than hard-deleted.
 
-Products have an explicit source: `manual` or `bling`. Manual products are
-owned by the Hub. For linked products, Bling is authoritative for name, price,
-code, GTIN, unit, status, format, explicit parent relation and physical/virtual
-stock; the Hub retains ownership of the local image, archive state and message
-history. `product_bling_links` is company-scoped and stores the last sanitized
-provider snapshot. `product_bling_stock_balances` stores the latest physical
-and virtual balances by warehouse. Migration `023_product_bling_links.sql`
-adds/extends only these link and balance tables; the guarded local QA harness is
-the validation target for it. Do not apply it to Preview or Production as part
-of ordinary local verification.
+Products have an explicit source: legacy/unlinked `manual` or `bling`. New
+products can only be created by importing an active Bling product; `POST
+/api/products` rejects manual creation in normal runtime. For linked products,
+Bling is authoritative for product ID, `bling_name`, price, SKU/code, GTIN,
+unit, status, format, explicit parent relation and physical/virtual stock.
+`products.name` is the Hub's editable local display name and is never replaced
+by import, link, relink or sync. The Hub also owns the local image, archive
+state and message history. `product_bling_links` is company-scoped and stores
+the last sanitized provider snapshot. `product_bling_stock_balances` stores
+physical and virtual balances separately by warehouse. Migration
+`023_product_bling_links.sql` adds the link and balance tables; migration
+`024_product_bling_sku_unique.sql` adds only a partial unique index on
+`(company_id, lower(btrim(bling_code)))`. The guarded local QA harness is the
+validation target; do not apply migrations to Preview or Production as part of
+ordinary local verification.
 
-ADMIN can import a Bling product only with a local JPEG/PNG/WebP image up to
-1 MB, link/relink a local product, explicitly sync its existing Bling ID, and
-unlink it. Import/link/sync fetch detail and stock before a database transaction;
-the product values, link metadata and complete warehouse-balance replacement
-commit atomically. Missing/invalid price or mismatched provider IDs fail before
-writes. Relinking updates the authoritative Bling fields but preserves image,
-archive state and historical message snapshots. Unlinking removes only the link
-and its dependent stock balances, leaving the current name, price, image and
-history as a manual product. Linked name/price edits are rejected; image-only
-edits remain available. Authenticated company users can read cached linked data
-while Bling is disconnected; all these mutations remain ADMIN-only.
+ADMIN can import an active Bling product only with a local JPEG/PNG/WebP image
+up to 1 MB, link/relink an existing local product, explicitly sync its current
+Bling ID, and unlink it. Import/link/sync fetch authoritative detail and stock
+before a database transaction; active status, nonblank SKU and numeric
+effective stock are required. Effective stock is `stockVirtualTotal ??
+stockPhysicalTotal`: zero and negative virtual balances are valid, and physical
+stock is used only when virtual stock is absent. Missing/invalid price, missing
+SKU, unresolved stock or mismatched provider IDs fail before writes. A
+company-scoped partial unique index prevents duplicate trimmed,
+case-insensitive SKUs; link/relink/sync conflicts return 409 and transaction
+rollback preserves the previous cache. The full provider snapshot and
+warehouse-balance replacement commit atomically. Relink and sync update
+authoritative Bling fields without changing the local display name, image,
+archive state or historical message snapshots. Unlinking removes only the link
+and dependent balances, retaining the current local name, cached price, image
+and history for that existing product. ADMIN may edit the local display name
+and image; catalog price and Bling identity remain read-only. Authenticated
+company users can read cached linked data while Bling is disconnected; all
+these mutations remain ADMIN-only.
 
-The product image contract accepts JPEG, PNG or WebP up to 1,000,000 decoded bytes, validates base64 plus magic bytes against the declared MIME type, and stores only an immutable object key and metadata in PostgreSQL. `ProductStorage` has two explicit drivers: `memory` for local/QA and `r2` for an explicitly configured S3-compatible Cloudflare R2 bucket. R2 requires `PRODUCT_STORAGE_DRIVER=r2` plus server-side `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` and `R2_PUBLIC_BASE_URL`; these must never be exposed through `VITE_` variables. When no driver is set, only local/QA can receive the in-memory adapter; external databases do not silently receive ephemeral storage. Explicit `r2` configuration is validated at startup and registers the product routes; incomplete configuration fails without printing credential values.
+The product image contract accepts JPEG, PNG or WebP up to 1,000,000 decoded bytes, validates base64 plus magic bytes against the declared MIME type, and stores only an immutable object key and metadata in PostgreSQL. Add/edit forms accept image paste anywhere in the modal: supported images up to 1 MB replace the selection, invalid images preserve the previous selection, and plain-text paste remains native. `ProductStorage` has two explicit drivers: `memory` for local/QA and `r2` for an explicitly configured S3-compatible Cloudflare R2 bucket. R2 requires `PRODUCT_STORAGE_DRIVER=r2` plus server-side `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` and `R2_PUBLIC_BASE_URL`; these must never be exposed through `VITE_` variables. When no driver is set, only local/QA can receive the in-memory adapter; external databases do not silently receive ephemeral storage. Explicit `r2` configuration is validated at startup and registers the product routes; incomplete configuration fails without printing credential values.
 
 R2 object keys are generated by the backend as `products/<company_id>/<product_uuid>/<image_uuid>.<ext>`; the browser never chooses the key or receives S3 credentials. R2 stores image bytes, while PostgreSQL stores product metadata and the key. Public image URLs use the configured custom-domain base; this bucket's images are intentionally public. The Preview bucket is `vitstock-hub-products-preview` at `https://media-preview.vitstock.com.br`; its managed `r2.dev` URL must remain disabled. Railway Preview environment values are a later deployment step and are not part of the local integration.
 
 The in-memory adapter remains the default for local/QA and is not safe for external databases or multiple backend instances. Update-image creates a new immutable key and does not delete the previous object; archiving a product also preserves its image. If product-row creation fails after an upload, the backend makes a best-effort delete of only that request's new object and logs cleanup failure without replacing the original database error.
 
-The product preview submits only `productId`, the existing conversation's explicit `remoteJid`, and `clientMessageId` to authenticated `POST /api/evolution/messages/send-product`. The backend requires an active tenant-owned product and an accessible existing tenant conversation, then acquires the normal conversation lease. It never accepts a browser-selected price, name, image key/URL, bucket or company. `ProductStorage.buildUrl()` supplies the trusted remote image URL and the catalog supplies MIME; Evolution receives `sendMedia` with `mediatype=image`, the exact PN/LID/group recipient, and the product name plus deterministic BRL price, without an operator signature or an implicit composer quote.
+The product preview shows local name, linked SKU/effective stock, registered catalog price and an editable positive BRL message price (up to two decimals). It submits `productId`, the existing conversation's explicit `remoteJid`, `clientMessageId` and optional integer-cent `priceCentsOverride` to authenticated `POST /api/evolution/messages/send-product`. The backend validates the override and snapshots it only into that message; catalog and Bling cache prices are unchanged. It requires an active tenant-owned product and accessible existing tenant conversation, then acquires the normal conversation lease. Name, image key/URL, bucket and company remain server-owned. `ProductStorage.buildUrl()` supplies the trusted image URL and catalog supplies MIME; Evolution receives `sendMedia` with `mediatype=image`, exact PN/LID/group recipient and local display name plus the deterministic message-snapshot price. This path makes no Bling call and reads only local cache.
 
 The normal outbox transaction locks the client ID and catalog row, inserts a pending local message with structured `productSnapshot`, and inserts `message_product_refs` using its local UUID (not the provider ID). This path uses the locally cached product/image and makes no realtime Bling request. Failure rolls back both before transport; provider rejection retains a failed message/ref. Only failed attempts can retry, reusing their original snapshot/ref; accepted or pending attempts are deduplicated without another provider request or message-upsert publication. Reusing a product client ID for another product or transport JID is rejected. If an early webhook creates a provider row, confirmation transfers the reference and Hub metadata to the surviving local UUID transactionally before removing the pending row.
 
@@ -634,7 +647,8 @@ removes pending states. Cookies/session must still be valid at callback time.
 Migration `022_bling_integration.sql` adds `bling_connections`,
 `bling_oauth_states` and `bling_request_budgets`. Migration
 `023_product_bling_links.sql` adds the company-scoped Product Library link and
-warehouse-balance cache described above; product images remain local Hub/R2
+warehouse-balance cache; `024_product_bling_sku_unique.sql` adds only the
+normalized company/SKU uniqueness index. Product images remain local Hub/R2
 objects and are never fetched from Bling. Access/refresh tokens use AES-256-GCM with a separate backend
 `INTEGRATION_ENCRYPTION_KEY` (32 random bytes in base64). AAD binds ciphertext to
 provider, version, company and token kind. The key must remain persistent per
@@ -685,9 +699,10 @@ without automatically unlinking the product. The product-list contract accepts
 contracts remain `A`/`I`. An explicit `E` detail is not accepted: selection
 rejects it with 409 before stock lookup or mutation, while direct detail reads
 and existing-link sync fail closed with 502 until the detail contract is
-verified. Migration 023 remains the last product-link migration and retains
-the `A`/`I` status constraint; it does not alter product data or images. No
-arbitrary upstream URL or full-catalog scan is allowed.
+verified. Migration 023 retains the `A`/`I` status constraint; migration 024
+only enforces normalized company/SKU uniqueness and does not delete or rewrite
+product data, message snapshots or images. No arbitrary upstream URL or
+full-catalog scan is allowed.
 IDs normalize to strings; unsafe JSON numeric IDs fail rather than round.
 Variations retain their own IDs and explicit parent relation. Warehouse field
 `descricao` and flags are preserved. Physical/virtual totals and deposit balances

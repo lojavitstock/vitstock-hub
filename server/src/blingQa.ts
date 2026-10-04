@@ -2,7 +2,8 @@ import { isQaMode } from './config.js';
 import { API_BASE, TOKEN_URL, BlingError } from './blingContract.js';
 import type { BlingTransport } from './blingClient.js';
 
-export type QaBlingScenario = 'default' | 'updated' | 'invalid-stock' | 'empty-stock' | 'missing-price' | 'detail-mismatch';
+export type QaBlingScenario = 'default' | 'updated' | 'price-updated' | 'invalid-stock' | 'empty-stock' | 'missing-price' | 'detail-mismatch'
+  | 'missing-sku' | 'blank-sku' | 'physical-only' | 'virtual-zero' | 'virtual-negative' | 'sku-collision';
 let scenario: QaBlingScenario = 'default';
 
 export function setQaBlingScenario(value: QaBlingScenario) {
@@ -12,18 +13,24 @@ export function setQaBlingScenario(value: QaBlingScenario) {
 const productDetail = (id: string) => {
   if (id === '201') return { id: 201, nome: 'Produto Inativo QA', codigo: 'SKU-201', preco: 99, tipo: 'P', situacao: 'I', formato: 'S' };
   if (id === '202') return { id: 202, nome: 'Produto Encerrado QA', codigo: '', preco: 99, tipo: 'P', situacao: 'E', formato: 'S' };
-  if (id !== '101') return {
+  if (id !== '101') {
+    const generated = Number(id) >= 900_000_000_000;
+    return {
     id: Number(id), nome: id === '303' ? 'Produto para Importar QA' : `Produto Catálogo QA ${id}`,
-    codigo: `SKU-${id}`, preco: 180, tipo: 'P', situacao: 'A', formato: 'S', unidade: 'UN',
-  };
+    codigo: scenario === 'missing-sku' ? undefined : scenario === 'blank-sku' ? '   '
+      : scenario === 'sku-collision' && id !== '101' ? ' sku-101 ' : `SKU-${id}`,
+    preco: scenario === 'price-updated' && generated ? 60 : generated ? 28 : 180, tipo: 'P', situacao: 'A', formato: 'S', unidade: 'UN',
+    };
+  }
   const updated = scenario === 'updated';
+  const priceUpdated = scenario === 'price-updated';
   return {
     id: scenario === 'detail-mismatch' ? 102 : 101,
-    nome: updated ? 'Produto Bling Atualizado QA' : 'Produto Bling QA',
+    nome: updated ? 'Produto Bling Atualizado QA' : priceUpdated ? 'Produto Bling Preço Atualizado QA' : 'Produto Bling QA',
     codigo: updated ? 'SKU-101-NOVO' : 'SKU-101',
     tipo: 'P', situacao: updated ? 'I' : 'A', formato: 'S', unidade: 'UN', gtin: '7890000000001',
     ...(updated ? { idProdutoPai: 90 } : {}),
-    ...(scenario === 'missing-price' ? {} : { preco: updated ? 40 : 28 }),
+    ...(scenario === 'missing-price' ? {} : { preco: priceUpdated ? 60 : updated ? 40 : 28 }),
   };
 };
 
@@ -38,7 +45,7 @@ export const qaBlingTransport: BlingTransport = async (url, init) => {
     body = { access_token: 'qa.header.signature', refresh_token: 'qa-local-refresh', expires_in: 21600, token_type: 'Bearer' };
   } else if (init.method !== 'GET') throw new BlingError(400);
   else if (target.pathname === '/Api/v3/produtos') {
-    const products = [productDetail('101'), productDetail('201'), productDetail('202'), ...Array.from({ length: 20 }, (_, index) => productDetail(String(303 + index)))];
+    const products = [productDetail('101'), productDetail('201'), productDetail('202'), ...Array.from({ length: 21 }, (_, index) => productDetail(String(303 + index)))];
     const criterion = Number(target.searchParams.get('criterio') || 5);
     const byCriterion = criterion === 2 ? products.filter(item => item.situacao === 'A')
       : criterion === 3 ? products.filter(item => item.situacao === 'I')
@@ -55,6 +62,9 @@ export const qaBlingTransport: BlingTransport = async (url, init) => {
     const productId = target.searchParams.get('idsProdutos[]') || '101';
     if (scenario === 'invalid-stock' && productId === '101') body = { data: [{ produto: { id: productId }, depositos: [{ id: 7, saldoFisico: 'inválido' }] }] };
     else if (scenario === 'empty-stock') body = { data: [] };
+    else if (scenario === 'physical-only') body = { data: [{ produto: { id: productId }, saldoFisicoTotal: 7 }] };
+    else if (scenario === 'virtual-zero') body = { data: [{ produto: { id: productId }, saldoFisicoTotal: 8, saldoVirtualTotal: 0 }] };
+    else if (scenario === 'virtual-negative') body = { data: [{ produto: { id: productId }, saldoFisicoTotal: 8, saldoVirtualTotal: -2 }] };
     else if (scenario === 'updated' && productId === '101') body = { data: [{ produto: { id: productId }, saldoFisicoTotal: 14.25, saldoVirtualTotal: 9,
       depositos: [{ id: 7, saldoFisico: 4.25, saldoVirtual: 9 }] }] };
     else body = { data: [{ produto: { id: productId }, saldoFisicoTotal: 8, saldoVirtualTotal: 5,

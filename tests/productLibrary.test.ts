@@ -17,6 +17,10 @@ import {
   isRedundantProductCaption,
   normalizeBrlPriceDigits,
   parseBrlPriceCents,
+  parseMessagePriceCents,
+  formatMessagePriceInput,
+  effectiveBlingStock,
+  normalizeBlingSku,
   productStorageImageUrl,
 } from '../src/utils/productLibrary';
 
@@ -31,6 +35,35 @@ test('product send caption is deterministic and transport requires explicit exis
   }
   assert.equal(productSendSchema.safeParse({ productId: snapshot.productId, remoteJid: 'status@broadcast', clientMessageId: 'product-client-1' }).success, false);
   assert.equal(productSendSchema.safeParse({ productId: snapshot.productId, number: '5521999000001', clientMessageId: 'product-client-1' }).success, false);
+  assert.equal(productSendSchema.safeParse({ productId: snapshot.productId, remoteJid: '5521999000001@s.whatsapp.net', clientMessageId: 'product-client-1', priceCentsOverride: 1 }).success, true);
+  for (const priceCentsOverride of [0, -1, 1.5, 2_147_483_648, '100']) {
+    assert.equal(productSendSchema.safeParse({ productId: snapshot.productId, remoteJid: '5521999000001@s.whatsapp.net', clientMessageId: 'product-client-1', priceCentsOverride }).success, false);
+  }
+});
+
+test('preço por mensagem aceita somente BRL positivo com até duas casas e não interpreta calculadoras', () => {
+  for (const [value, expected] of [['0,01', 1], ['12', 1200], ['12,3', 1230], ['1.234,56', 123456], ['R$ 1.234,56', 123456]] as const) {
+    assert.equal(parseMessagePriceCents(value), expected);
+  }
+  for (const value of ['', '0', '0,00', '-1,00', '1,234', '1.23', '1+2', '1*2', 'R$ -4,00', '999999999999999999']) {
+    assert.equal(parseMessagePriceCents(value), null, value);
+  }
+  assert.equal(formatMessagePriceInput(123456), '1.234,56');
+});
+
+test('estoque efetivo prioriza virtual inclusive zero/negativo e só usa físico quando virtual é ausente', () => {
+  assert.equal(effectiveBlingStock('0', '9'), 0);
+  assert.equal(effectiveBlingStock('-2.5', '9'), -2.5);
+  assert.equal(effectiveBlingStock(null, '4.25'), 4.25);
+  assert.equal(effectiveBlingStock(undefined, 3), 3);
+  assert.equal(effectiveBlingStock(null, null), null);
+  assert.equal(effectiveBlingStock('NaN', 3), null);
+});
+
+test('SKU Bling é normalizado por trim e sem distinção de caixa para validação', () => {
+  assert.equal(normalizeBlingSku(' ABC-123 '), 'abc-123');
+  assert.equal(normalizeBlingSku('abc-123'), normalizeBlingSku('ABC-123'));
+  assert.equal(normalizeBlingSku('   '), '');
 });
 
 test('atalho de produto aceita nome com espaços, preserva texto e não muda o token de Quick Replies', () => {
@@ -93,6 +126,10 @@ test('migration Bling mantém identidade tenant-safe e saldos por depósito em N
   assert.match(migration, /virtual_balance NUMERIC/);
   assert.match(migration, /FOREIGN KEY \(company_id, product_id\) REFERENCES product_bling_links\(company_id, product_id\)/);
   assert.match(migration, /PRIMARY KEY \(company_id, product_id, bling_warehouse_id\)/);
+  const skuMigration = await readFile(new URL('../server/migrations/024_product_bling_sku_unique.sql', import.meta.url), 'utf8');
+  assert.match(skuMigration, /CREATE UNIQUE INDEX IF NOT EXISTS product_bling_links_company_sku_unique/);
+  assert.match(skuMigration, /company_id, lower\(btrim\(bling_code\)\)/);
+  assert.match(skuMigration, /bling_code IS NOT NULL AND btrim\(bling_code\) <> ''/);
 });
 
 test('preço authoritative Bling converte centavos sem overflow e exige preço válido', () => {
@@ -120,13 +157,16 @@ test('snapshot Bling valida IDs e preserva relação, metadados e estoque físic
     physicalTotal: 8.5, virtualTotal: 5,
     balances: [{ warehouseId: '7', physicalBalance: 3.5, virtualBalance: 6.5 }],
   });
-  const absent = toBlingProductSyncSnapshot({ ...detail, idProdutoPai: undefined }, { data: [] }, '101');
-  assert.equal(absent.physicalTotal, null);
-  assert.equal(absent.virtualTotal, null);
-  assert.deepEqual(absent.balances, []);
+  const physicalFallback = toBlingProductSyncSnapshot({ ...detail, idProdutoPai: undefined }, { data: [{ produto: { id: '101' }, saldoFisicoTotal: 0 }] }, '101');
+  assert.equal(physicalFallback.physicalTotal, 0);
+  assert.equal(physicalFallback.virtualTotal, null);
+  assert.equal(toBlingProductSyncSnapshot(detail, { data: [{ produto: { id: '101' }, saldoFisicoTotal: -1, saldoVirtualTotal: 0 }] }, '101').virtualTotal, 0);
+  assert.equal(toBlingProductSyncSnapshot(detail, { data: [{ produto: { id: '101' }, saldoFisicoTotal: -1, saldoVirtualTotal: -2 }] }, '101').virtualTotal, -2);
+  assert.throws(() => toBlingProductSyncSnapshot({ ...detail, idProdutoPai: undefined }, { data: [] }, '101'), /Não foi possível obter o estoque/);
+  assert.throws(() => toBlingProductSyncSnapshot({ ...detail, codigo: '' }, { data: [{ produto: { id: '101' }, saldoFisicoTotal: 1 }] }, '101'), /não possui SKU/);
   assert.throws(() => toBlingProductSyncSnapshot(detail, { data: [] }, '102'), /Identidade do produto/);
   assert.throws(() => toBlingProductSyncSnapshot(detail, { data: [{ produto: { id: '102' } }] }, '101'), /Identidade do estoque/);
-  assert.throws(() => toBlingProductSyncSnapshot({ ...detail, preco: undefined }, { data: [] }, '101'), /Preço do produto Bling/);
+  assert.throws(() => toBlingProductSyncSnapshot({ ...detail, preco: undefined }, { data: [{ produto: { id: '101' }, saldoFisicoTotal: 1 }] }, '101'), /Preço do produto Bling/);
 });
 
 test('produto rejeita base64 vazio, malformado, MIME spoof e payload acima de 1 MB', () => {

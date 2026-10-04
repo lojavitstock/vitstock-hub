@@ -290,21 +290,24 @@ contrato de status `A`/`I`/`E` da lista observada e fail-closed do catálogo
 selecionável. Import/link/relink rejeitam `I` e `E`; `E` no detail é somente um
 sinal de rejeição para seleção, enquanto leitura direta rejeita esse contrato
 com 502. Detail, snapshots persistidos e sync de vínculo existente permanecem
-`A`/`I`; sync continua cobrindo status autoritativo `I`. As migrations param em 023.
-Também valida importação com dados autoritativos e imagem local, duplicidade,
-link/relink/sync/unlink, proteção de nome/preço, saldos por depósito e rollback
-de sync quando o estoque é inválido. `tests/server.test.ts` simula falha SQL após
-upload e confirma rollback mais remoção somente do novo objeto armazenado.
-`tests/e2e/products.spec.ts` cobre o fluxo UI
-de importação/paginação, cache visível e campos vinculados somente leitura;
-`tests/e2e/product-send.spec.ts` confirma envio sem chamada Bling e preservação
-dos snapshots anteriores à sincronização. Inclui duas instâncias PgBlingStore
+`A`/`I`; sync continua cobrindo status autoritativo `I`. A migration 024 adiciona
+somente unicidade case-insensitive de SKU por empresa; migrations 022, 023 e
+024 são aplicadas apenas pelo `dev:e2e` guardado. Também valida importação com
+dados autoritativos e imagem local, SKU ausente e duplicado, conflito atômico no
+sync, link/relink/sync/unlink, nome local preservado, preço cadastrado protegido,
+saldos físicos/virtuais e rollback quando o estoque é inválido.
+`tests/server.test.ts` simula falha SQL após upload e confirma rollback mais
+remoção somente do novo objeto armazenado. `tests/e2e/products.spec.ts` cobre o
+fluxo UI Bling-only, paginação, validação de SKU, imagem colada/substituída,
+estoque e preço na prévia; `tests/e2e/product-send.spec.ts` confirma override
+imutável por mensagem, envio sem chamada Bling e preservação dos snapshots
+anteriores à sincronização. Inclui duas instâncias PgBlingStore
 contra PostgreSQL QA, refresh único, 401/expiry/connect/disconnect concorrentes,
 rotação preservada após GET 403, janela de requests e disponibilidade do pool
 Hub com DB_POOL_MAX=1. Compara snapshots de products/message_product_refs antes
 e depois quando aplicável, sem provider/R2 real. Budget alterado apenas no banco
-QA fixo é restaurado no finally. Migrations 022 e 023 só são aplicadas pelo
-`dev:e2e` guardado; nunca banco remoto. OAuth real e dados reais são excluídos.
+QA fixo é restaurado no finally; nunca banco remoto. OAuth real e dados reais
+são excluídos.
 
 ```powershell
 npm test

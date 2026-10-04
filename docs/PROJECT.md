@@ -557,20 +557,26 @@ com imagem local, vínculo/revínculo e sincronização explícita dos campos
 controlados pelo Bling, além de desvincular. OAuth real no Preview exige revisão
 e autorização humana em gate separado.
 
-Produtos manuais têm nome e preço controlados pelo Hub. Produtos importados ou
-vinculados passam a ter nome, preço, código, GTIN, unidade, status/formato e
-estoque físico/virtual do Bling como fonte autoritativa; a imagem local, estado
-de arquivamento e histórico continuam controlados pelo Hub. Uma imagem
-JPEG/PNG/WebP local de até 1 MB é obrigatória na importação; imagens do provider
-nunca são importadas. A migration 023 armazena o vínculo por tenant e saldos por
-depósito. Link, relink e sync buscam detalhe e estoque antes de persistir o
-snapshot de forma atômica. O envio de produto usa somente os valores em cache,
-sem consulta realtime ao Bling; cada mensagem conserva seu snapshot histórico
-de nome, preço e imagem mesmo após sincronização ou desvinculação. Atendentes
-podem ler esses dados em cache; mutações são exclusivas de ADMIN.
+Novos produtos só podem ser importados do Bling por ADMIN; o endpoint de criação
+manual é rejeitado também no backend. Para itens vinculados, `products.name` é
+o nome local editável no Hub e `product_bling_links.bling_name` preserva o nome
+autoritativo do Bling. Preço, SKU, GTIN, unidade, status/formato e estoque
+físico/virtual permanecem autoritativos do provider; imagem, arquivamento e
+histórico são locais. SKU é obrigatório e único por empresa após trim e
+comparação sem distinção de caixa. Estoque efetivo usa virtual quando presente
+(inclusive zero/negativo), senão físico; ambos ausentes bloqueiam a operação.
+Uma imagem JPEG/PNG/WebP local de até 1 MB é obrigatória na importação e pode
+ser colada em qualquer ponto dos modais de adicionar/editar; texto colado
+continua normal e imagem inválida não substitui a seleção atual.
 
-Migration 023 deve ser validada somente pela infraestrutura QA local guardada
-nesta tarefa. Não aplicar ao banco Preview nem Production neste fluxo.
+As migrations 023 (vínculo/saldos) e 024 (índice único normalizado de SKU) são
+validadas somente pela infraestrutura QA local guardada nesta tarefa; não
+aplicar ao banco Preview nem Production neste fluxo. O preview de envio mostra
+nome local, SKU, estoque efetivo e preço cadastrado, e permite um preço BRL
+específico por mensagem. O backend valida e persiste esse override somente no
+snapshot histórico da mensagem, sem alterar preço de catálogo/cache e sem
+chamar o Bling durante o envio. Atendentes podem ler dados em cache; mutações de
+produto continuam exclusivas de ADMIN.
 
 Vitstock Hub deve permanecer uma ferramenta prática.
 

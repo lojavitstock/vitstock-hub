@@ -2035,9 +2035,9 @@ export const AtendimentoPage: React.FC = () => {
             />
             {productPickerOpen && <ProductPickerDialog initialProduct={previewProduct}
               canSend={!isMock && whatsappConnected && !activeChatLocked && !activeConv.isPending && !sendingMedia && !isInternalNote}
-              onSend={async (productId, clientMessageId) => {
+              onSend={async (productId, clientMessageId, priceCentsOverride) => {
                 const conversationId = activeConv.id;
-                const result = await sendProduct({ productId, remoteJid: conversationId, clientMessageId });
+                const result = await sendProduct({ productId, remoteJid: conversationId, clientMessageId, ...(priceCentsOverride === undefined ? {} : { priceCentsOverride }) });
                 if (!['sent', 'delivered', 'read'].includes(result.message.status)) {
                   throw new Error('O envio ainda está em processamento. Aguarde antes de tentar novamente.');
                 }

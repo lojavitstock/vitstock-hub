@@ -69,6 +69,14 @@ export function toBlingProductSyncSnapshot(
   if (new Set(balances.map((balance) => balance.warehouseId)).size !== balances.length) {
     throw new BlingError(502, 'Depósitos duplicados na resposta de estoque Bling');
   }
+  if (!product.codigo?.trim()) {
+    throw new BlingError(409, 'Este produto não possui SKU no Bling. Adicione um SKU no Bling e tente novamente.');
+  }
+  const physicalTotal = finiteOrNull(totals?.saldoFisicoTotal, 'físico total');
+  const virtualTotal = finiteOrNull(totals?.saldoVirtualTotal, 'virtual total');
+  if (virtualTotal === null && physicalTotal === null) {
+    throw new BlingError(409, 'Não foi possível obter o estoque deste produto no Bling.');
+  }
 
   return {
     blingProductId: product.id,
@@ -80,8 +88,8 @@ export function toBlingProductSyncSnapshot(
     status: product.situacao,
     format: product.formato,
     priceCents: blingPriceToCents(product.preco),
-    physicalTotal: finiteOrNull(totals?.saldoFisicoTotal, 'físico total'),
-    virtualTotal: finiteOrNull(totals?.saldoVirtualTotal, 'virtual total'),
+    physicalTotal,
+    virtualTotal,
     balances,
   };
 }

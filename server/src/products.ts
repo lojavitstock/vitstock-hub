@@ -13,20 +13,11 @@ import type { ProductImageMimeType } from './productImageValidation.js';
 import type { ProductStorage } from './productStorage.js';
 
 const productNameSchema = z.string().trim().min(1).max(120);
-const priceCentsSchema = z.number().int().min(0).max(2_147_483_647);
 const imageBase64Schema = z.string().min(1).max(1_333_336);
 const imageMimeTypeSchema = z.enum(['image/jpeg', 'image/png', 'image/webp']);
 
-const createProductSchema = z.object({
-  name: productNameSchema,
-  priceCents: priceCentsSchema,
-  imageBase64: imageBase64Schema,
-  imageMimeType: imageMimeTypeSchema,
-}).strict();
-
 const updateProductSchema = z.object({
   name: productNameSchema.optional(),
-  priceCents: priceCentsSchema.optional(),
   imageBase64: imageBase64Schema.optional(),
   imageMimeType: imageMimeTypeSchema.optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, { message: 'Informe ao menos uma alteração.' })
@@ -93,7 +84,6 @@ const publicProductFrom = `FROM products p LEFT JOIN product_bling_links l
   ON l.company_id = p.company_id AND l.product_id = p.id`;
 
 class ProductNotFoundError extends Error {}
-class LinkedProductEditError extends Error {}
 class StaleBlingLinkError extends Error {}
 
 async function inTransaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -132,6 +122,7 @@ function publicProductForCompany(
     source: linked ? 'bling' as const : 'manual' as const,
     bling: linked ? {
       productId: row.bling_product_id!,
+      name: row.bling_name!,
       ...(row.bling_parent_product_id ? { parentProductId: row.bling_parent_product_id } : {}),
       ...(row.bling_code !== null && row.bling_code !== undefined ? { code: row.bling_code } : {}),
       ...(row.bling_gtin ? { gtin: row.bling_gtin } : {}),
@@ -254,9 +245,9 @@ async function persistBlingSnapshot(
   }
 
   await client.query(
-    `UPDATE products SET name = $3, price_cents = $4, updated_at = now()
+    `UPDATE products SET price_cents = $3, updated_at = now()
      WHERE company_id = $1 AND id = $2 AND archived_at IS NULL`,
-    [companyId, productId, snapshot.name, snapshot.priceCents],
+    [companyId, productId, snapshot.priceCents],
   );
   await client.query(
     `INSERT INTO product_bling_links
@@ -310,6 +301,10 @@ function sendBlingOperationError(reply: { code: (status: number) => { send: (pay
   if (error instanceof BlingError) return reply.code(error.statusCode).send({ error: error.message });
   if (error instanceof ProductNotFoundError) return reply.code(404).send({ error: 'Produto não encontrado.' });
   if (error instanceof StaleBlingLinkError) return reply.code(409).send({ error: 'O vínculo Bling mudou durante a sincronização. Atualize a tela e tente novamente.' });
+  if ((error as { code?: string; constraint?: string })?.code === '23505'
+    && (error as { constraint?: string }).constraint === 'product_bling_links_company_sku_unique') {
+    return reply.code(409).send({ error: 'Já existe um produto cadastrado no Hub com este SKU.' });
+  }
   if ((error as { code?: string })?.code === '23505') return reply.code(409).send({ error: 'Este produto Bling já está vinculado a outro produto local.' });
   return null;
 }
@@ -422,12 +417,13 @@ export async function registerProductRoutes(app: FastifyInstance, storage: Produ
 
   const blingImportSchema = z.object({
     blingProductId: idSchema,
+    name: productNameSchema,
     imageBase64: imageBase64Schema,
     imageMimeType: imageMimeTypeSchema,
   }).strict();
   app.post('/api/products/bling-import', { preHandler: requireAdmin }, async (request, reply) => {
     const parsed = blingImportSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Produto Bling e imagem local válidos são obrigatórios.' });
+    if (!parsed.success) return reply.code(400).send({ error: 'Produto Bling, nome local e imagem válidos são obrigatórios.' });
     if (!bling) return reply.code(503).send({ error: 'Integração Bling não configurada.' });
 
     const companyId = request.user!.companyId;
@@ -470,7 +466,7 @@ export async function registerProductRoutes(app: FastifyInstance, storage: Produ
           `INSERT INTO products
             (id, company_id, name, price_cents, currency, image_object_key, image_mime_type, image_size_bytes)
            VALUES ($1, $2, $3, $4, 'BRL', $5, $6, $7)`,
-          [productId, companyId, snapshot.name, snapshot.priceCents, key, image.mimeType, image.sizeBytes],
+          [productId, companyId, parsed.data.name, snapshot.priceCents, key, image.mimeType, image.sizeBytes],
         );
         return persistBlingSnapshot(client, companyId, productId, snapshot);
       });
@@ -514,37 +510,10 @@ export async function registerProductRoutes(app: FastifyInstance, storage: Produ
   });
 
   app.post('/api/products', { preHandler: requireAdmin }, async (request, reply) => {
-    const parsed = createProductSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Informe nome, valor em centavos e imagem válidos.', code: 'invalid_product' });
-    let image;
-    try {
-      image = decodeProductImage(parsed.data.imageBase64, parsed.data.imageMimeType);
-    } catch (error) {
-      const response = sendValidationError(reply, error);
-      if (response) return response;
-      throw error;
-    }
-
-    const companyId = request.user!.companyId;
-    const id = randomUUID();
-    const key = imageKey(companyId, id, image.mimeType);
-    try {
-      await storage.put(companyId, key, image.bytes, image.mimeType);
-    } catch {
-      return reply.code(503).send({ error: 'O armazenamento de imagens está indisponível.', code: 'product_storage_unavailable' });
-    }
-    try {
-      const result = await db.query<ProductRow>(
-        `INSERT INTO products (id, company_id, name, price_cents, currency, image_object_key, image_mime_type, image_size_bytes)
-         VALUES ($1, $2, $3, $4, 'BRL', $5, $6, $7)
-         RETURNING ${productColumns}`,
-        [id, companyId, parsed.data.name, parsed.data.priceCents, key, image.mimeType, image.sizeBytes],
-      );
-      return reply.code(201).send({ product: toPublicProduct(result.rows[0]!, storage, localApiBaseForOrigin(request.headers.origin)) });
-    } catch (error) {
-      await removeNewImageBestEffort(request, storage, companyId, key);
-      throw error;
-    }
+    return reply.code(409).send({
+      error: 'Produtos novos precisam ser selecionados no Bling.',
+      code: 'bling_product_required',
+    });
   });
 
   app.patch('/api/products/:id', { preHandler: requireAdmin }, async (request, reply) => {
@@ -561,17 +530,6 @@ export async function registerProductRoutes(app: FastifyInstance, storage: Produ
     );
     const current = existing.rows[0];
     if (!current) return reply.code(404).send({ error: 'Produto não encontrado.' });
-    const changesIdentityFields = Object.hasOwn(parsed.data, 'name') || Object.hasOwn(parsed.data, 'priceCents');
-    const existingLink = changesIdentityFields
-      ? await db.query<{ product_id: string }>(
-        `SELECT product_id FROM product_bling_links WHERE company_id = $1 AND product_id = $2 LIMIT 1`,
-        [companyId, params.data.id],
-      )
-      : null;
-    if (existingLink?.rows[0]) {
-      return reply.code(409).send({ error: 'Nome e preço de produtos vinculados são gerenciados pelo Bling.' });
-    }
-
     let image: ReturnType<typeof decodeProductImage> | undefined;
     if (parsed.data.imageBase64 && parsed.data.imageMimeType) {
       try {
@@ -601,24 +559,15 @@ export async function registerProductRoutes(app: FastifyInstance, storage: Produ
         );
         const lockedProduct = locked.rows[0];
         if (!lockedProduct) throw new ProductNotFoundError();
-        if (changesIdentityFields) {
-          const linked = await client.query<{ product_id: string }>(
-            `SELECT product_id FROM product_bling_links WHERE company_id = $1 AND product_id = $2 LIMIT 1`,
-            [companyId, current.id],
-          );
-          if (linked.rows[0]) throw new LinkedProductEditError();
-        }
         await client.query(
           `UPDATE products
            SET name = $3,
-               price_cents = $4,
-               image_object_key = $5,
-               image_mime_type = $6,
-               image_size_bytes = $7,
+               image_object_key = $4,
+               image_mime_type = $5,
+               image_size_bytes = $6,
                updated_at = now()
            WHERE company_id = $1 AND id = $2 AND archived_at IS NULL`,
-          [companyId, current.id, parsed.data.name ?? lockedProduct.name,
-            parsed.data.priceCents ?? Number(lockedProduct.price_cents), nextKey,
+          [companyId, current.id, parsed.data.name ?? lockedProduct.name, nextKey,
             image?.mimeType ?? lockedProduct.image_mime_type,
             image?.sizeBytes ?? Number(lockedProduct.image_size_bytes)],
         );
@@ -633,9 +582,6 @@ export async function registerProductRoutes(app: FastifyInstance, storage: Produ
       return { product: toPublicProduct(row, storage, localApiBaseForOrigin(request.headers.origin)) };
     } catch (error) {
       if (image) await removeNewImageBestEffort(request, storage, companyId, nextKey);
-      if (error instanceof LinkedProductEditError) {
-        return reply.code(409).send({ error: 'Nome e preço de produtos vinculados são gerenciados pelo Bling.' });
-      }
       if (error instanceof ProductNotFoundError) return reply.code(404).send({ error: 'Produto não encontrado.' });
       throw error;
     }
