@@ -183,14 +183,6 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     expect((await sync.json()).product).toMatchObject({ name: 'Produto Bling Atualizado QA', priceCents: 4000,
       bling: { productId: '101', parentProductId: '90', status: 'I', stockPhysicalTotal: '14.25', stockVirtualTotal: '9' } });
     expect((await pool.query('SELECT image_object_key FROM products WHERE id=$1', [linkedProductId])).rows[0].image_object_key).toBe(editedImage);
-    expect((await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'updated-ended' } })).status()).toBe(200);
-    const endedSync = await page.request.post(`${api}/api/products/${linkedProductId}/bling-sync`);
-    expect(endedSync.status()).toBe(200);
-    expect((await endedSync.json()).product).toMatchObject({
-      name: 'Produto Bling Atualizado QA', priceCents: 4000,
-      bling: { productId: '101', parentProductId: '90', status: 'E', stockPhysicalTotal: '14.25', stockVirtualTotal: '9' },
-    });
-
     expect((await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'default' } })).status()).toBe(200);
     for (const blingProductId of ['201', '202']) {
       const beforeInactiveRelink = await linkedState();
@@ -240,8 +232,7 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     expect(listedIds).not.toContain('201');
     expect(listedIds).not.toContain('202');
     const endedDetail = await page.request.get(`${api}/api/integrations/bling/products/202`);
-    expect(endedDetail.status()).toBe(200);
-    expect(await endedDetail.json()).toMatchObject({ data: { id: '202', situacao: 'E' } });
+    expect(endedDetail.status()).toBe(502);
 
     expect((await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'missing-price' } })).status()).toBe(200);
     const missingPriceImport = await page.request.post(`${api}/api/products/bling-import`, { data: { ...importBody, blingProductId: '101' } });
@@ -333,8 +324,6 @@ test('Bling QA migration is additive, constrained and logically reversible witho
   try {
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='022_bling_integration.sql'")).rows).toHaveLength(1);
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='023_product_bling_links.sql'")).rows).toHaveLength(1);
-    expect((await client.query("SELECT name FROM schema_migrations WHERE name='024_bling_ended_link_status.sql'")).rows).toHaveLength(1);
-    expect((await client.query("SELECT name FROM schema_migrations WHERE name='024_bling_ended_link_status.sql'")).rows).toHaveLength(1);
     const tables = (await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'bling_%' ORDER BY table_name")).rows.map(r => r.table_name);
     expect(tables).toEqual(['bling_connections','bling_oauth_states','bling_request_budgets']);
     const productTables = (await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('product_bling_links','product_bling_stock_balances') ORDER BY table_name")).rows.map(r => r.table_name);

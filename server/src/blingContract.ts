@@ -15,12 +15,12 @@ export const pagination = z.object({
 });
 const fields = {
   id: idSchema, nome: z.string(), codigo: z.string().optional(), preco: z.number().optional(),
-  tipo: z.enum(['S', 'P', 'N']), situacao: z.enum(['A', 'I', 'E']), formato: z.enum(['S', 'V', 'E']),
+  tipo: z.enum(['S', 'P', 'N']), situacao: z.enum(['A', 'I']), formato: z.enum(['S', 'V', 'E']),
   descricaoCurta: z.string().optional(),
 };
 export const productListModel = z.object({ ...fields, idProdutoPai: idSchema.optional(),
-  // Bling exposes A/I/E in list and detail contracts; the selectable catalog
-  // route applies criterio=2 and rejects any non-active result.
+  // E was observed in the product list only. Detail remains constrained to
+  // A/I, and the selectable catalog applies criterio=2 and fails closed.
   situacao: z.enum(['A', 'I', 'E']),
   estoque: z.object({ saldoVirtualTotal: z.number().optional() }).optional(),
 });

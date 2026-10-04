@@ -55,7 +55,7 @@ export interface ProductBlingMetadata {
   code?: string;
   gtin?: string;
   unit?: string;
-  status: 'A' | 'I' | 'E';
+  status: 'A' | 'I';
   format: 'S' | 'V' | 'E';
   stockPhysicalTotal: string | null;
   stockVirtualTotal: string | null;

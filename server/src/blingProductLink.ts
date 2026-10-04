@@ -10,7 +10,7 @@ export type BlingProductSyncSnapshot = {
   code: string | null;
   gtin: string | null;
   unit: string | null;
-  status: 'A' | 'I' | 'E';
+  status: 'A' | 'I';
   format: 'S' | 'V' | 'E';
   priceCents: number;
   physicalTotal: number | null;

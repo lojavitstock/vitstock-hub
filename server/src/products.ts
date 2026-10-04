@@ -56,7 +56,7 @@ type ProductRow = {
   bling_gtin?: string | null;
   bling_unit?: string | null;
   bling_price_cents?: number | null;
-  bling_status?: 'A' | 'I' | 'E' | null;
+  bling_status?: 'A' | 'I' | null;
   bling_format?: 'S' | 'V' | 'E' | null;
   stock_physical_total?: string | null;
   stock_virtual_total?: string | null;
@@ -73,7 +73,7 @@ type ProductBlingLinkRow = {
   bling_gtin: string | null;
   bling_unit: string | null;
   bling_price_cents: number;
-  bling_status: 'A' | 'I' | 'E';
+  bling_status: 'A' | 'I';
   bling_format: 'S' | 'V' | 'E';
   stock_physical_total: string | null;
   stock_virtual_total: string | null;
@@ -206,6 +206,19 @@ async function fetchBlingProductSyncSnapshot(
   use: 'selection' | 'existing-sync',
 ): Promise<BlingProductSyncSnapshot> {
   const detailValue = await bling.client.read(companyId, 'product', new URLSearchParams(), blingProductId);
+  const rawData = detailValue && typeof detailValue === 'object' && !Array.isArray(detailValue)
+    ? (detailValue as Record<string, unknown>).data
+    : undefined;
+  const rawDetail = rawData && typeof rawData === 'object' && !Array.isArray(rawData)
+    ? rawData as Record<string, unknown>
+    : undefined;
+  const rawId = rawDetail && idSchema.safeParse(rawDetail.id);
+  // E is not accepted as a detail contract. For selection, an explicit E on
+  // the matching product is only a reject-only signal (409), before stock or
+  // persistence; detail reads and existing-link sync still fail closed (502).
+  if (use === 'selection' && rawId?.success && rawId.data === blingProductId && rawDetail?.situacao === 'E') {
+    throw new BlingError(409, 'Somente produtos ativos do Bling podem ser vinculados ou importados.');
+  }
   const detail = parseContract(z.object({ data: productDetailModel }), detailValue).data;
   if (detail.id !== blingProductId) throw new BlingError(502, 'Identidade do produto Bling não confere');
   if (use === 'selection' && detail.situacao !== 'A') {
