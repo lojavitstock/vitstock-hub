@@ -518,10 +518,12 @@ Falha da troca de token mantém state consumido: iniciar um novo Conectar.
 Token POST usa apenas grant_type/code ou grant_type/refresh_token; redirect_uri
 é compatível no authorize, mas o Bling usa o callback cadastrado no aplicativo.
 
-Migration `022_bling_integration.sql` é aditiva (três tabelas da integração),
-sem alteração de produtos/contatos/mensagens. Validar somente pelo harness QA
-local. Railway aplicará pelo runner existente apenas em deployment posteriormente
-aprovado; este desenvolvimento não autoriza aplicar em Preview/Production.
+Migration `022_bling_integration.sql` é aditiva (três tabelas da integração).
+Migration `023_product_bling_links.sql` adiciona o vínculo Bling da Product
+Library e saldos por depósito; não altera registros históricos de mensagens.
+Validar ambas somente pelo harness QA local guardado. Railway aplicará pelo
+runner existente apenas em deployment posteriormente aprovado; esta tarefa não
+autoriza aplicar migration em Preview/Production.
 Recuperação lógica, por operador autorizado: desabilitar env Bling/reverter código
 sem remover tabelas; remoção posterior das três tabelas perde vínculos/states/
 budget mas não afeta catálogo local. Não apagar a migration de controle em uso.

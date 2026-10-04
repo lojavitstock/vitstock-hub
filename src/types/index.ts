@@ -45,6 +45,21 @@ export interface Product {
   imageSizeBytes: number;
   createdAt: string;
   updatedAt: string;
+  source: 'manual' | 'bling';
+  bling: ProductBlingMetadata | null;
+}
+
+export interface ProductBlingMetadata {
+  productId: string;
+  parentProductId?: string;
+  code?: string;
+  gtin?: string;
+  unit?: string;
+  status: 'A' | 'I';
+  format: 'S' | 'V' | 'E';
+  stockPhysicalTotal: string | null;
+  stockVirtualTotal: string | null;
+  syncedAt: string;
 }
 
 export interface ProductMessageSnapshot {

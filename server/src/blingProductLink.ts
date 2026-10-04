@@ -1,34 +1,87 @@
 import { z } from 'zod';
-import { BlingError, productDetailModel } from './blingContract.js';
+import { BlingError, parseContract, productDetailModel, stockModel } from './blingContract.js';
 
 type BlingProductDetail = z.infer<typeof productDetailModel>;
 
-export type BlingProductLinkSnapshot = {
+export type BlingProductSyncSnapshot = {
   blingProductId: string;
-  blingName: string;
-  blingCode: string | null;
-  blingPriceCents: number | null;
-  blingSituacao: 'A' | 'I';
-  blingFormato: 'S' | 'V' | 'E';
+  parentProductId: string | null;
+  name: string;
+  code: string | null;
+  gtin: string | null;
+  unit: string | null;
+  status: 'A' | 'I';
+  format: 'S' | 'V' | 'E';
+  priceCents: number;
+  physicalTotal: number | null;
+  virtualTotal: number | null;
+  balances: Array<{
+    warehouseId: string;
+    physicalBalance: number | null;
+    virtualBalance: number | null;
+  }>;
 };
 
-export function blingPriceToCents(value: number | undefined): number | null {
-  if (value === undefined) return null;
-  if (!Number.isFinite(value) || value < 0) throw new BlingError(502, 'Preço do produto Bling fora do contrato esperado');
+const localPriceLimit = 2_147_483_647;
+
+export function blingPriceToCents(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value) || value < 0) {
+    throw new BlingError(502, 'Preço do produto Bling fora do contrato esperado');
+  }
   const cents = Math.round(value * 100);
-  if (!Number.isSafeInteger(cents) || cents > 2_147_483_647) {
+  if (!Number.isSafeInteger(cents) || cents > localPriceLimit) {
     throw new BlingError(502, 'Preço do produto Bling fora do limite suportado');
   }
   return cents;
 }
 
-export function toBlingProductLinkSnapshot(product: BlingProductDetail): BlingProductLinkSnapshot {
+const finiteOrNull = (value: number | undefined, field: string) => {
+  if (value === undefined) return null;
+  if (!Number.isFinite(value)) throw new BlingError(502, `Saldo Bling inválido: ${field}`);
+  return value;
+};
+
+export function toBlingProductSyncSnapshot(
+  product: BlingProductDetail,
+  stockValue: unknown,
+  expectedProductId: string,
+): BlingProductSyncSnapshot {
+  if (product.id !== expectedProductId) throw new BlingError(502, 'Identidade do produto Bling não confere');
+  const name = product.nome.trim();
+  if (!name || name.length > 120) throw new BlingError(502, 'Nome do produto Bling fora do contrato esperado');
+
+  const explicitParent = product.idProdutoPai;
+  const variationParent = product.variacao?.produtoPai.id;
+  if (explicitParent && variationParent && explicitParent !== variationParent) {
+    throw new BlingError(502, 'Relação de variação Bling inconsistente');
+  }
+
+  const stock = parseContract(z.object({ data: z.array(stockModel) }), stockValue).data;
+  if (stock.length > 1 || (stock.length === 1 && stock[0]!.produto.id !== expectedProductId)) {
+    throw new BlingError(502, 'Identidade do estoque Bling não confere');
+  }
+  const totals = stock[0];
+  const balances = (totals?.depositos || []).map((balance) => ({
+    warehouseId: balance.id,
+    physicalBalance: finiteOrNull(balance.saldoFisico, 'físico'),
+    virtualBalance: finiteOrNull(balance.saldoVirtual, 'virtual'),
+  }));
+  if (new Set(balances.map((balance) => balance.warehouseId)).size !== balances.length) {
+    throw new BlingError(502, 'Depósitos duplicados na resposta de estoque Bling');
+  }
+
   return {
     blingProductId: product.id,
-    blingName: product.nome,
-    blingCode: product.codigo ?? null,
-    blingPriceCents: blingPriceToCents(product.preco),
-    blingSituacao: product.situacao,
-    blingFormato: product.formato,
+    parentProductId: explicitParent ?? variationParent ?? null,
+    name,
+    code: product.codigo ?? null,
+    gtin: product.gtin ?? null,
+    unit: product.unidade ?? null,
+    status: product.situacao,
+    format: product.formato,
+    priceCents: blingPriceToCents(product.preco),
+    physicalTotal: finiteOrNull(totals?.saldoFisicoTotal, 'físico total'),
+    virtualTotal: finiteOrNull(totals?.saldoVirtualTotal, 'virtual total'),
+    balances,
   };
 }

@@ -13,20 +13,29 @@ export type BlingProduct = {
 export type ProductBlingLink = {
   productId: string;
   blingProductId: string;
+  blingParentProductId: string | null;
   blingName: string;
   blingCode: string | null;
-  blingPriceCents: number | null;
-  blingSituacao: 'A' | 'I';
-  blingFormato: 'S' | 'V' | 'E';
+  blingGtin: string | null;
+  blingUnit: string | null;
+  blingPriceCents: number;
+  blingStatus: 'A' | 'I';
+  blingFormat: 'S' | 'V' | 'E';
+  stockPhysicalTotal: string | null;
+  stockVirtualTotal: string | null;
   lastSyncedAt: string;
   createdAt: string;
   updatedAt: string;
 };
 
-export async function fetchBlingProducts(search = '', signal?: AbortSignal) {
-  const params = new URLSearchParams({ page: '1', limit: '50' });
+export async function fetchBlingProducts(search = '', page = 1, signal?: AbortSignal) {
+  const params = new URLSearchParams({ page: String(page), limit: '20' });
   if (search.trim()) params.set('nome', search.trim());
-  return apiRequest<{ data: BlingProduct[] }>(`/api/integrations/bling/products?${params.toString()}`, { signal });
+  return apiRequest<{ data: BlingProduct[]; page: number; limit: number }>(`/api/integrations/bling/products?${params.toString()}`, { signal });
+}
+
+export async function fetchBlingConnectionStatus() {
+  return apiRequest<{ configured: boolean; connected: boolean; connectedAt: string | null }>('/api/integrations/bling/status');
 }
 
 export async function fetchProductBlingLinks() {
@@ -34,12 +43,26 @@ export async function fetchProductBlingLinks() {
 }
 
 export async function linkProductToBling(productId: string, blingProductId: string) {
-  return apiRequest<{ link: ProductBlingLink }>(`/api/products/${encodeURIComponent(productId)}/bling-link`, {
+  return apiRequest<{ product: import('../types').Product }>(`/api/products/${encodeURIComponent(productId)}/bling-link`, {
     method: 'POST',
     body: JSON.stringify({ blingProductId }),
   });
 }
 
+export async function syncProductFromBling(productId: string) {
+  return apiRequest<{ product: import('../types').Product }>(`/api/products/${encodeURIComponent(productId)}/bling-sync`, { method: 'POST' });
+}
+
+export async function importProductFromBling(input: {
+  blingProductId: string;
+  imageBase64: string;
+  imageMimeType: import('../types').Product['imageMimeType'];
+}) {
+  return apiRequest<{ product: import('../types').Product }>('/api/products/bling-import', {
+    method: 'POST', body: JSON.stringify(input),
+  });
+}
+
 export async function unlinkProductFromBling(productId: string) {
-  return apiRequest<{ unlinked: boolean; productId: string }>(`/api/products/${encodeURIComponent(productId)}/bling-link`, { method: 'DELETE' });
+  return apiRequest<{ unlinked: boolean; productId: string; product: import('../types').Product }>(`/api/products/${encodeURIComponent(productId)}/bling-link`, { method: 'DELETE' });
 }

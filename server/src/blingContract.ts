@@ -25,6 +25,7 @@ export const productListModel = z.object({ ...fields, idProdutoPai: idSchema.opt
   estoque: z.object({ saldoVirtualTotal: z.number().optional() }).optional(),
 });
 const detailFields = { ...fields, unidade: z.string().optional(), gtin: z.string().optional(),
+  idProdutoPai: idSchema.optional(),
   categoria: z.object({ id: idSchema }).optional(),
   variacao: z.object({ nome: z.string(), ordem: z.number().int(),
     produtoPai: z.object({ id: idSchema, cloneInfo: z.boolean().optional() }) }).optional(),
@@ -32,9 +33,9 @@ const detailFields = { ...fields, unidade: z.string().optional(), gtin: z.string
 export const productDetailModel = z.object({ ...detailFields, variacoes: z.array(z.object(detailFields)).optional() });
 export const warehouseModel = z.object({ id: idSchema, descricao: z.string(), situacao: z.union([z.literal(0), z.literal(1)]),
   padrao: z.boolean(), desconsiderarSaldo: z.boolean() });
-export const stockModel = z.object({ produto: z.object({ id: idSchema }), saldoFisicoTotal: z.number().optional(),
-  saldoVirtualTotal: z.number().optional(), depositos: z.array(z.object({ id: idSchema,
-    saldoFisico: z.number().optional(), saldoVirtual: z.number().optional() })).optional() });
+export const stockModel = z.object({ produto: z.object({ id: idSchema }), saldoFisicoTotal: z.number().finite().optional(),
+  saldoVirtualTotal: z.number().finite().optional(), depositos: z.array(z.object({ id: idSchema,
+    saldoFisico: z.number().finite().optional(), saldoVirtual: z.number().finite().optional() })).optional() });
 export const tokenModel = z.object({ access_token: z.string().min(1).max(16000), refresh_token: z.string().min(1).max(16000),
   token_type: z.string().refine(v => v.toLowerCase() === 'bearer'), expires_in: z.number().int().positive().max(86400) });
 export type Tokens = z.infer<typeof tokenModel>;

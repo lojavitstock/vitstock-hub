@@ -9,7 +9,7 @@ import { decodeProductImage, ProductImageValidationError } from '../server/src/p
 import { InMemoryProductStorage, R2ProductStorage, selectProductStorage } from '../server/src/productStorage.js';
 import { ProductMessageCard } from '../src/components/conversations/ProductMessageCard';
 import { productCaption, productSendSchema } from '../server/src/productSend.js';
-import { blingPriceToCents, toBlingProductLinkSnapshot } from '../server/src/blingProductLink.js';
+import { blingPriceToCents, toBlingProductSyncSnapshot } from '../server/src/blingProductLink.js';
 import {
   formatBrlPrice,
   formatBrlPriceInput,
@@ -77,21 +77,56 @@ test('migration modela produtos, arquivamento e snapshots tenant-safe para mensa
   assert.match(migration, /FOREIGN KEY \(company_id, product_id\) REFERENCES products\(company_id, id\)/);
 });
 
-test('vínculo Bling usa identidade externa, preço em centavos e não altera o snapshot local', async () => {
+test('migration Bling mantém identidade tenant-safe e saldos por depósito em NUMERIC', async () => {
   const migration = await readFile(new URL('../server/migrations/023_product_bling_links.sql', import.meta.url), 'utf8');
   assert.match(migration, /CREATE TABLE IF NOT EXISTS product_bling_links/);
+  assert.match(migration, /bling_parent_product_id TEXT/);
+  assert.match(migration, /bling_gtin TEXT/);
+  assert.match(migration, /bling_unit TEXT/);
+  assert.match(migration, /stock_physical_total NUMERIC/);
+  assert.match(migration, /stock_virtual_total NUMERIC/);
   assert.match(migration, /PRIMARY KEY \(company_id, product_id\)/);
   assert.match(migration, /UNIQUE \(company_id, bling_product_id\)/);
   assert.match(migration, /FOREIGN KEY \(company_id, product_id\) REFERENCES products\(company_id, id\)/);
-  assert.equal(blingPriceToCents(180), 18000);
-  assert.equal(blingPriceToCents(undefined), null);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS product_bling_stock_balances/);
+  assert.match(migration, /physical_balance NUMERIC/);
+  assert.match(migration, /virtual_balance NUMERIC/);
+  assert.match(migration, /FOREIGN KEY \(company_id, product_id\) REFERENCES product_bling_links\(company_id, product_id\)/);
+  assert.match(migration, /PRIMARY KEY \(company_id, product_id, bling_warehouse_id\)/);
+});
+
+test('preço authoritative Bling converte centavos sem overflow e exige preço válido', () => {
+  for (const [value, expected] of [[0, 0], [0.1, 10], [19.90, 1990], [28, 2800], [180, 18000], [1999.99, 199999]] as const) {
+    assert.equal(blingPriceToCents(value), expected);
+  }
+  assert.throws(() => blingPriceToCents(undefined), /fora do contrato/);
   assert.throws(() => blingPriceToCents(-1), /fora do contrato/);
-  assert.deepEqual(toBlingProductLinkSnapshot({
-    id: '101', nome: 'Produto Bling QA', codigo: '', preco: 12.5, tipo: 'P', situacao: 'I', formato: 'S',
-  }), {
-    blingProductId: '101', blingName: 'Produto Bling QA', blingCode: '', blingPriceCents: 1250,
-    blingSituacao: 'I', blingFormato: 'S',
+  assert.throws(() => blingPriceToCents(Number.POSITIVE_INFINITY), /fora do contrato/);
+  assert.throws(() => blingPriceToCents(21_474_836.48), /limite suportado/);
+});
+
+test('snapshot Bling valida IDs e preserva relação, metadados e estoque físico/virtual ausente distinto de zero', () => {
+  const detail = {
+    id: '101', nome: '  Produto Bling QA  ', codigo: 'SKU-101', preco: 19.9, tipo: 'P' as const,
+    situacao: 'A' as const, formato: 'V' as const, idProdutoPai: '90', unidade: 'UN', gtin: '7890000000001',
+  };
+  const snapshot = toBlingProductSyncSnapshot(detail, { data: [{
+    produto: { id: '101' }, saldoFisicoTotal: 8.5, saldoVirtualTotal: 5,
+    depositos: [{ id: '7', saldoFisico: 3.5, saldoVirtual: 6.5 }],
+  }] }, '101');
+  assert.deepEqual(snapshot, {
+    blingProductId: '101', parentProductId: '90', name: 'Produto Bling QA', code: 'SKU-101',
+    gtin: '7890000000001', unit: 'UN', status: 'A', format: 'V', priceCents: 1990,
+    physicalTotal: 8.5, virtualTotal: 5,
+    balances: [{ warehouseId: '7', physicalBalance: 3.5, virtualBalance: 6.5 }],
   });
+  const absent = toBlingProductSyncSnapshot({ ...detail, idProdutoPai: undefined }, { data: [] }, '101');
+  assert.equal(absent.physicalTotal, null);
+  assert.equal(absent.virtualTotal, null);
+  assert.deepEqual(absent.balances, []);
+  assert.throws(() => toBlingProductSyncSnapshot(detail, { data: [] }, '102'), /Identidade do produto/);
+  assert.throws(() => toBlingProductSyncSnapshot(detail, { data: [{ produto: { id: '102' } }] }, '101'), /Identidade do estoque/);
+  assert.throws(() => toBlingProductSyncSnapshot({ ...detail, preco: undefined }, { data: [] }, '101'), /Preço do produto Bling/);
 });
 
 test('produto rejeita base64 vazio, malformado, MIME spoof e payload acima de 1 MB', () => {

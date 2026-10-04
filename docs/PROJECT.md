@@ -552,15 +552,25 @@ O roadmap detalhado pertence a `ROADMAP.md`.
 Configurações → Integrações inclui Bling, com conexão/desconexão por ADMIN e
 status sanitizado por empresa. A primeira fase usa API v3/OAuth no backend
 (não MCP), tokens criptografados e leitura paginada de produtos, depósitos e
-saldos físicos/virtuais distintos. Não sincroniza Product Library, não importa
-imagens/R2, não altera snapshots/envios e não cria pedidos ou webhooks.
-OAuth real no Preview exige revisão e autorização humana em gate separado.
+saldos físicos/virtuais distintos. A Product Library agora suporta importação
+com imagem local, vínculo/revínculo e sincronização explícita dos campos
+controlados pelo Bling, além de desvincular. OAuth real no Preview exige revisão
+e autorização humana em gate separado.
 
-A integração evolui por etapas explícitas. A primeira etapa de Product Library
-permite ao ADMIN vincular um produto local a um ID de produto do Bling e
-atualizar a leitura sanitizada da origem. O vínculo não substitui nome, preço,
-imagem local ou snapshots de mensagens; importação automática de mídia e
-alteração automática do catálogo local permanecem fora deste escopo.
+Produtos manuais têm nome e preço controlados pelo Hub. Produtos importados ou
+vinculados passam a ter nome, preço, código, GTIN, unidade, status/formato e
+estoque físico/virtual do Bling como fonte autoritativa; a imagem local, estado
+de arquivamento e histórico continuam controlados pelo Hub. Uma imagem
+JPEG/PNG/WebP local de até 1 MB é obrigatória na importação; imagens do provider
+nunca são importadas. A migration 023 armazena o vínculo por tenant e saldos por
+depósito. Link, relink e sync buscam detalhe e estoque antes de persistir o
+snapshot de forma atômica. O envio de produto usa somente os valores em cache,
+sem consulta realtime ao Bling; cada mensagem conserva seu snapshot histórico
+de nome, preço e imagem mesmo após sincronização ou desvinculação. Atendentes
+podem ler esses dados em cache; mutações são exclusivas de ADMIN.
+
+Migration 023 deve ser validada somente pela infraestrutura QA local guardada
+nesta tarefa. Não aplicar ao banco Preview nem Production neste fluxo.
 
 Vitstock Hub deve permanecer uma ferramenta prática.
 

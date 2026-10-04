@@ -1,4 +1,7 @@
 import { expect, request, test, type Page } from '@playwright/test';
+import { createRequire } from 'node:module';
+
+const { Pool } = createRequire(import.meta.url)('../../server/node_modules/pg');
 
 const email = process.env.E2E_EMAIL?.trim();
 const password = process.env.E2E_PASSWORD;
@@ -25,7 +28,7 @@ const uploadValidProductImage = async (page: Page) => {
     context.fillRect(0, 0, 2, 2);
     return canvas.toDataURL('image/png').split(',')[1];
   });
-  await page.getByLabel('Imagem do produto').setInputFiles({
+  await page.locator('input[type="file"][aria-label="Imagem do produto"]').setInputFiles({
     name: 'produto-qa.png',
     mimeType: 'image/png',
     buffer: Buffer.from(base64, 'base64'),
@@ -100,7 +103,7 @@ test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar
     const saved = settings.waitForResponse((response) => new URL(response.url()).pathname === '/api/products' && response.request().method() === 'POST');
     await settings.getByRole('button', { name: 'Salvar produto' }).click();
     id = (await (await saved).json()).product.id;
-    await expect(settings.getByRole('status')).toContainText('Produto cadastrado.');
+    await expect(settings.getByText('Produto cadastrado.', { exact: true })).toBeVisible();
     await page.goBack();
     await expect(page).toHaveURL(/\/atendimento$/);
     expect(await page.evaluate(() => (window as any).__sameTabDocument)).toBe(documentToken);
@@ -202,9 +205,91 @@ test('atendente não vê + de cadastro e action=new não abre formulário sem pe
   await page.getByRole('button', { name: 'Produtos', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Produtos', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Adicionar produto', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Importar do Bling', exact: true })).toHaveCount(0);
   await page.goto('/configuracoes?tab=products&action=new');
   await expect(page.getByRole('heading', { name: 'Produtos', exact: true })).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'Adicionar produto' })).toHaveCount(0);
+});
+
+test('Product Library importa pelo Bling paginado e preserva campos vinculados na UI', async ({ page }) => {
+  test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
+  await login(page);
+  const marker = await (await page.request.get(`${apiUrl}/api/qa/ready`)).json();
+  expect(marker).toMatchObject({ qaMode: true, evolution: 'mock-only', database: 'local-only' });
+  const qaPool = new Pool({ connectionString: 'postgresql://vitstock@127.0.0.1:55432/vitstock_qa' });
+  await page.request.post(`${apiUrl}/api/integrations/bling/disconnect`);
+  const authorization = await (await page.request.post(`${apiUrl}/api/integrations/bling/connect`)).json();
+  const callback = await page.request.get(authorization.url, { maxRedirects: 0 });
+  expect(callback.status()).toBe(302);
+  expect(callback.headers().location).toContain('bling=connected');
+  await page.request.post(`${apiUrl}/api/qa/bling/scenario`, { data: { scenario: 'default' } });
+
+  const externalRequests: string[] = [];
+  let importPayload: Record<string, unknown> | null = null;
+  let importedId: string | null = null;
+  try {
+  page.on('request', (requestEvent) => {
+    if (new URL(requestEvent.url()).hostname.endsWith('bling.com.br')) externalRequests.push(requestEvent.url());
+  });
+  await page.route('**/api/products/bling-import', async (route) => {
+    importPayload = route.request().postDataJSON();
+    await route.continue();
+  });
+
+  await page.goto('/configuracoes?tab=products');
+  await expect(page.getByRole('heading', { name: 'Produtos', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Importar do Bling', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Importar produto do Bling' });
+  await expect(dialog.getByRole('button', { name: /Encerrado \(E\)/ })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Carregar mais', exact: true })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Carregar mais', exact: true }).click();
+  await expect(dialog.getByRole('button').filter({ hasText: 'ID 321' })).toBeVisible();
+  const search = dialog.getByLabel('Buscar produto no Bling para importar');
+  await search.fill('Produto Catálogo QA 321');
+  const item = dialog.getByRole('button', { name: /Produto Catálogo QA 321/ });
+  await item.click();
+  await dialog.getByLabel('Imagem local para importação').setInputFiles({
+    name: 'bling-import-qa.png', mimeType: 'image/png', buffer: Buffer.from(tinyPng, 'base64'),
+  });
+  const importResponse = page.waitForResponse((response) => (
+    response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/products/bling-import'
+  ));
+  await dialog.getByRole('button', { name: 'Importar produto', exact: true }).click();
+  const completedImport = await importResponse;
+  expect(completedImport.status()).toBe(201);
+  importedId = (await completedImport.json()).product.id;
+  const card = page.locator('article').filter({ has: page.getByRole('heading', { name: 'Produto Catálogo QA 321', exact: true }) });
+  await expect(card).toHaveCount(1);
+  await expect(card).toContainText('R$ 180,00');
+  await expect(card).toContainText('Bling');
+  await expect(card).toContainText('SKU: SKU-321');
+  await expect(card).toContainText('Físico: 8 · Virtual: 5');
+  expect(importPayload && Object.keys(importPayload).sort()).toEqual(['blingProductId', 'imageBase64', 'imageMimeType']);
+  expect(importPayload).toMatchObject({ blingProductId: '321', imageMimeType: 'image/png' });
+
+  await card.getByRole('button', { name: 'Editar imagem' }).click();
+  const editDialog = page.getByRole('dialog', { name: 'Editar imagem do produto' });
+  await expect(editDialog.getByLabel('Nome')).toHaveAttribute('readonly', '');
+  await expect(editDialog.getByLabel('Valor')).toHaveAttribute('readonly', '');
+  await uploadValidProductImage(page);
+  await editDialog.getByRole('button', { name: 'Salvar imagem', exact: true }).click();
+  await expect(card).toContainText('R$ 180,00');
+  await expect(card).toContainText('SKU: SKU-321');
+  await card.getByRole('button', { name: 'Ações de Produto Catálogo QA 321', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Atualizar do Bling', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Alterar produto Bling', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Desvincular do Bling', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Arquivar', exact: true })).toBeVisible();
+  expect(externalRequests).toEqual([]);
+  } finally {
+    if (importedId) {
+      await page.request.delete(`${apiUrl}/api/products/${importedId}/bling-link`).catch(() => undefined);
+      await qaPool.query('DELETE FROM products WHERE id=$1', [importedId]).catch(() => undefined);
+    }
+    await page.request.post(`${apiUrl}/api/qa/bling/scenario`, { data: { scenario: 'default' } }).catch(() => undefined);
+    await page.request.post(`${apiUrl}/api/integrations/bling/disconnect`).catch(() => undefined);
+    await qaPool.end();
+  }
 });
 
 test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar e arquivar sem envio real', async ({ page }) => {
@@ -289,7 +374,7 @@ test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar 
   await expect(archiveDialog).toBeVisible();
   await archiveDialog.getByRole('button', { name: 'Arquivar', exact: true }).click();
   await expect(refreshedCard).toHaveCount(0);
-  await expect(page.getByRole('status')).toContainText('Produto arquivado.');
+  await expect(page.getByText('Produto arquivado.', { exact: true })).toBeVisible();
 
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto('/atendimento');
@@ -405,7 +490,7 @@ test('mutations confirmadas continuam sucesso quando o refresh da lista falha', 
   await page.getByRole('button', { name: 'Salvar produto' }).click();
   const card = page.locator('article').filter({ hasText: productName }).first();
   await expect(card).toBeVisible();
-  await expect(page.getByRole('status')).toContainText('Produto cadastrado.');
+  await expect(page.getByText('Produto cadastrado.', { exact: true })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Produto cadastrado, mas não foi possível atualizar a lista.');
   expect(mutationRequests.create).toBe(1);
 
@@ -414,7 +499,7 @@ test('mutations confirmadas continuam sucesso quando o refresh da lista falha', 
   failNextListRefresh = true;
   await page.getByRole('button', { name: 'Salvar produto' }).click();
   await expect(card).toContainText('R$ 1.299,00');
-  await expect(page.getByRole('status')).toContainText('Produto atualizado.');
+  await expect(page.getByText('Produto atualizado.', { exact: true })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Produto atualizado, mas não foi possível atualizar a lista.');
   expect(mutationRequests.update).toBe(1);
 
@@ -424,7 +509,7 @@ test('mutations confirmadas continuam sucesso quando o refresh da lista falha', 
   failNextListRefresh = true;
   await archiveDialog.getByRole('button', { name: 'Arquivar', exact: true }).click();
   await expect(card).toHaveCount(0);
-  await expect(page.getByRole('status')).toContainText('Produto arquivado.');
+  await expect(page.getByText('Produto arquivado.', { exact: true })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Produto arquivado, mas não foi possível atualizar a lista.');
   expect(mutationRequests.archive).toBe(1);
 });
