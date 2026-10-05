@@ -122,6 +122,11 @@ test('produto pela UI: loading/double Enter, envio único, FK local, cartão e s
   expect(refs[0].id).not.toBe(refs[0].evolution_message_id);
   const sends = (await providerSends(page)).filter((send) => send.caption === `${name}\nR$ 12,34`);
   expect(sends).toHaveLength(1);
+  expect(String(sends[0]!.caption)).not.toMatch(/Qtd:|Estoque|SKU/i);
+  expect(JSON.stringify(refs[0]!.metadata.productSnapshot)).not.toMatch(/stock|estoque|sku/i);
+  expect(Object.keys(refs[0]!.metadata.productSnapshot as Record<string, unknown>).sort()).toEqual([
+    'currency', 'imageMimeType', 'imageObjectKey', 'name', 'priceCents', 'productId',
+  ]);
   expect(sends[0]).toMatchObject({ number: remoteJid, mediatype: 'image', mimetype: 'image/png' });
   expect(String(sends[0].media)).toContain(encodeURIComponent(refs[0].product_image_object_key_snapshot));
   const catalogPrice = await (await page.request.get(`${api}/api/products/${product.id}`)).json();

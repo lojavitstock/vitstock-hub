@@ -3,7 +3,7 @@ import { FileText, Package, Paperclip, Pencil, Plus, Reply, Send, Smile, X, Zap 
 import { Message, Product, QuickReply } from '../../types';
 import { useProductSearch } from '../../hooks/useProductSearch';
 import { findProductToken } from '../../utils/productShortcut';
-import { formatBrlPrice } from '../../utils/productLibrary';
+import { effectiveBlingStock, formatBrlPrice } from '../../utils/productLibrary';
 import { quotedMediaLabel, toQuotedMessage } from '../../utils/quotedMessage';
 import { insertComposerText } from '../../utils/composerSubmission';
 import type { AttachmentDraft } from '../../utils/composerAttachment';
@@ -459,7 +459,16 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
                 : <div role="listbox" aria-label="Opções de produtos" className="max-h-56 space-y-1 overflow-y-auto">
                   {productSuggestions.map((product, index) => <button key={product.id} type="button" role="option" aria-selected={index === productIndex} onMouseDown={(event) => event.preventDefault()} onClick={() => selectProduct(product)} className={`flex w-full items-center gap-3 rounded-lg p-2 text-left hover:bg-amber-400/10 focus:outline-none focus:ring-2 focus:ring-amber-400 ${index === productIndex ? 'bg-amber-400/10' : ''}`}>
                     <img src={product.imageUrl} alt="" className="h-10 w-10 shrink-0 rounded bg-black/30 object-contain" />
-                    <span className="min-w-0"><span className="block truncate text-sm font-bold text-slate-100">{product.name}</span><span className="block text-xs font-bold text-amber-300">{formatBrlPrice(product.priceCents)}</span></span>
+                    {(() => {
+                      const stock = effectiveBlingStock(product.bling?.stockVirtualTotal, product.bling?.stockPhysicalTotal);
+                      return <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-bold text-slate-100">{product.name}</span>
+                        <span className="mt-0.5 flex items-center justify-between gap-2">
+                          <span className="text-xs font-bold text-amber-300">{formatBrlPrice(product.priceCents)}</span>
+                          <span className={`shrink-0 text-xs font-semibold ${stock !== null && stock <= 0 ? 'text-red-300' : 'text-slate-400'}`}>Qtd: {stock ?? '—'}</span>
+                        </span>
+                      </span>;
+                    })()}
                   </button>)}
                   {!productSuggestions.length && <p role="status" className="py-3 text-sm text-slate-400">Nenhum produto encontrado.</p>}
                 </div>}
