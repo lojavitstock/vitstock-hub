@@ -1,11 +1,11 @@
-# Vitstock Hub — Design System V1.1
+# Vitstock Hub — Design System V1.2
 
-**Status:** versão candidata congelada para o Design System Validation Gate
+**Status:** candidato congelado para Design System Validation Gate — Run 2
 **Produto:** Vitstock Hub
 **Escopo:** apresentação e interação do frontend
 **Não é:** especificação de backend, contrato de dados, autorização ou realtime
 
-Este documento é o contrato visual do Vitstock Hub V1.1. Ele deve ser suficiente
+Este documento é o contrato visual do Vitstock Hub V1.2. Ele deve ser suficiente
 para que um agente implemente uma tela coerente sem screenshots, imagens
 conceituais ou acesso aos componentes visuais existentes.
 
@@ -200,6 +200,10 @@ verde e amarelo não podem ser a única diferença entre estados.
 | `message.internal.background` | `#3A3320` | Nota interna não visível ao cliente |
 | `message.internal.border` | `#806A28` | Contorno da nota interna |
 | `message.system.background` | `#182125` | Separador/aviso de sistema |
+| `message.quote.background` | `#151C1F` | Superfície da resposta citada dentro da mensagem |
+| `message.quote.border` | `#FFBC00` | Barra lateral da resposta citada |
+| `message.quote.author` | `#F3F5F6` | Autor/origem da resposta citada |
+| `message.quote.text` | `#C4CCD0` | Trecho citado |
 
 Toda bolha de mensagem enviada **MUST** usar exatamente os tokens
 `message.outgoing.background` (`#4B493A`), `message.outgoing.border` (`#6C674D`)
@@ -371,8 +375,9 @@ Regras:
   avatar individual;
 - `unread` e `needsResponse` são estados distintos e devem continuar distintos
   na forma e na label;
-- ordenação exibida deve respeitar a fonte funcional atual; o design não cria
-  uma ordenação nova.
+- no produto real, a ordenação exibida deve respeitar a fonte funcional atual;
+  o design não cria outra ordenação. No mock do Gate, use uma ordem estável
+  somente conforme a ambiguidade controlada da seção 16.
 
 Estados da linha:
 
@@ -425,6 +430,36 @@ inclusive a visualização full-screen em mobile, **MUST** ter nome acessível e
 dele, fechar por Escape e devolver o foco ao controle que o abriu. A visualização
 full-screen em mobile também oferece controles explícitos de voltar e fechar.
 
+#### Anatomia interna do painel
+
+Quando os dados existirem, o painel **MUST** apresentar suas seções nesta ordem:
+identidade; estado operacional/responsabilidade; tags; dados do contato; notas e
+contexto interno. Se uma seção não tiver dados aplicáveis, omita-a sem inventar
+valores ou placeholders que pareçam reais.
+
+1. **Identidade:** avatar, nome do contato, telefone ou identificador secundário
+   e uma informação curta de contexto quando disponível. O nome tem a maior
+   hierarquia; telefone e contexto usam `text.muted`.
+2. **Estado operacional/responsabilidade:** responsável/operador, estado da
+   conversa, conexão ou outro estado funcional real, somente quando aplicável.
+   Use os status semânticos existentes; não transforme a seção em dashboard.
+3. **Tags:** grupo próprio, seguindo exclusivamente as regras existentes de
+   Tag/Badge; não crie grandes áreas coloridas.
+4. **Dados do contato:** linhas compactas `label` / `valor`, sem card separado
+   por campo. Labels usam `type.meta` + `text.muted`; valores usam `type.body` +
+   `text.primary` ou `text.secondary`. O espaço vertical entre linhas é de
+   8–12px.
+5. **Notas:** seção visual intitulada “Notas”. Use título `type.section-title` ou
+   `type.body-strong`; cada item usa `surface.2`, borda `border.subtle`,
+   `radius.md` e padding 12px. O texto usa `type.body` / `text.secondary` e pode
+   incluir metadata opcional em `type.meta`. O mock pode mostrar autor/data
+   fictícios.
+
+Notas de contexto do contato **MUST NOT** parecer a “Nota interna” centralizada
+na timeline: não use sua composição/alinhamento nem a apresente como mensagem
+da conversa. São conteúdo do painel, não uma nova mensagem. Não invente edição,
+criação ou persistência de notas se isso não fizer parte do produto.
+
 ### 5.5 Mensagens
 
 Timeline usa exclusivamente `surface.canvas` (`#0B0D0F`) como fundo, com padding
@@ -455,6 +490,24 @@ preserva whitespace e links têm affordance clara.
 - `radius.md`, com o canto superior direito reduzido a 4px;
 - nome do operador aparece somente quando a autoria/estado funcional o exigir;
 - hora e status ficam abaixo, alinhados ao fim.
+
+#### Resposta citada (quoted reply)
+
+A resposta citada **MUST** aparecer dentro da bolha da mensagem, antes do
+conteúdo principal. Ela **MUST** usar `message.quote.background`, `radius.sm`,
+padding interno de `8px 10px` e uma barra esquerda de 3px em
+`message.quote.border`, mantendo 8px de distância do conteúdo principal. O
+amarelo institucional aparece somente nessa barra; a citação não é uma segunda
+mensagem independente nem uma grande superfície amarela.
+
+Autor/origem usa `message.quote.author` em `type.badge` ou `type.body-compact`,
+peso 600. O trecho usa `message.quote.text` em `type.meta` ou
+`type.body-compact`, limitado a no máximo duas linhas. Se houver truncamento,
+o trecho completo deve permanecer disponível para tecnologias assistivas e deve
+haver acesso claro ao conteúdo completo por teclado/touch quando necessário. A
+anatomia e os quatro tokens são idênticos em mensagens recebidas e enviadas. Esta
+regra governa somente a apresentação e não define comportamento funcional de
+reply.
 
 #### Sistema
 
@@ -689,7 +742,8 @@ Mobile não é desktop espremido. A composição muda de navegação e de foco.
 |---|---|
 | `>= 1440px` | Sidebar (64px/228px) + Inbox (320px) + conversa flexível (mín. 480px) + contexto persistente (336px padrão; 320–360px) se disponível; ver seção do painel |
 | `1024–1439px` | sidebar 64px + Inbox 300px + conversa; contexto abre Drawer sobreposto à conversa e não ocupa largura permanente |
-| `768–1023px` | navegação compacta + lista 288px ou conversa; contexto abre Drawer sobreposto |
+| `900–1023px` | navegação compacta 64px + Inbox 288px + conversa flexível; contexto abre Drawer sobreposto e não ocupa coluna persistente |
+| `768–899px` | uma área operacional principal por vez; inicia na Inbox e, ao abrir conversa, mostra a Conversa; navegação compacta permanece disponível; contexto abre Drawer sobreposto |
 | `< 768px` | uma coluna por vez, sem sidebar desktop permanente; contexto ocupa painel/tela full-screen com voltar/fechar explícitos |
 | `< 480px` | padding 12px, header simplificado, composer touch |
 
@@ -788,8 +842,9 @@ Motion é funcional e discreto:
    componentes, classes ou CSS existentes do Vitstock Hub durante o mock.
 5. Use dados fictícios e determinísticos: contatos, mensagens, tags e produtos
    não podem ser reais nem chamar API.
-6. Não adicione backend, SSE, polling, autenticação, banco, rota ou dependência
-   para cumprir o teste visual.
+6. Não adicione backend, SSE, polling, autenticação, banco ou rota para cumprir o
+   teste visual. O sandbox pode declarar somente as dependências mínimas para
+   executar e construir o mock em seu próprio `package.json`.
 7. Não invente um token cromático novo para resolver desconforto local. Primeiro
    use o token semântico mais próximo; se ele não servir, registre a lacuna e
    revise este documento antes de continuar.
@@ -803,10 +858,11 @@ Motion é funcional e discreto:
 
 ## 14. Design System Validation Gate
 
-Antes de qualquer migração do frontend real, outro agente deverá receber apenas:
+Antes de qualquer migração do frontend real, um novo agente deverá executar o
+Run 2 como teste independente, começando do zero. Ele receberá somente:
 
 - `AGENTS.md`;
-- `DESIGN.md`.
+- `DESIGN.md` V1.2.
 
 Instrução neutra ao agente: "Crie uma tela mock isolada de atendimento para um
 CRM baseado em WhatsApp. Siga `AGENTS.md` e `DESIGN.md`, use somente dados
@@ -815,6 +871,12 @@ fictícios e não conecte integrações."
 Esse agente deverá construir uma tela mock isolada de atendimento, com dados
 fictícios, sem API, banco, SSE, polling, Evolution, autenticação ou lógica real.
 
+O agente do Run 2 **MUST NOT** receber arquivos ou código do mock do Run 1,
+screenshots do Run 1, descrição estética do resultado, nem correções manuais
+aplicadas àquele mock. O Run 1 é preservado somente como evidência histórica e
+não pode servir de base de implementação. A instrução funcional permanece a
+mesma instrução neutra acima.
+
 Regras do blind test:
 
 - não reutilizar componentes, classes, tokens CSS ou arquivos visuais existentes
@@ -822,15 +884,29 @@ Regras do blind test:
 - não receber screenshots, imagens conceituais, links de referência visual ou
   a imagem que motivou a direção inicial;
 - implementar sidebar recolhida (64px) e expandida (228px), incluindo controle
-  visível de expandir/recolher, labels no estado expandido, iconografia e ordem
-  preservadas e estado `aria-expanded`. O mecanismo pode ser demonstrado de modo
-  interativo ou por dois estados claramente verificáveis. A composição também
+  visível de expandir/recolher, labels no estado expandido, iconografia coerente
+  e estado `aria-expanded`. O mecanismo pode ser demonstrado de modo interativo
+  ou por dois estados claramente verificáveis. A composição também
   demonstra lista de conversas, conversa ativa, header, mensagens
   recebidas/enviadas, composer, painel de contexto conforme desktop/mobile,
   filtros/estados, estados de conexão e pelo menos um overlay;
 - demonstrar estados selecionado, hover, foco, não lido, precisa de resposta,
   nota interna, pending/failed, empty ou error e mobile;
+- demonstrar também um product card, uma resposta citada, uma mensagem longa,
+  ação de emoji, preview de reply ou anexo no composer e uma nota fictícia no
+  painel de contexto;
+- validar as duas composições de tablet: 900–1023px com Inbox e conversa lado a
+  lado; 768–899px com Inbox ou Conversa como área principal, nunca ambas
+  comprimidas lado a lado;
 - não corrigir visualmente o mock por instrução baseada na imagem original.
+
+O sandbox do mock **MUST** ser reproduzível de forma independente: entregar seu
+próprio `package.json` e arquivo de lock (por exemplo, `package-lock.json` para
+npm), scripts mínimos `dev` e `build`, dependências explicitamente declaradas e
+nenhuma dependência do frontend real ou do `node_modules` do checkout anfitrião.
+Deve ser possível executar, a partir de uma cópia limpa do sandbox, `npm install`,
+`npm run dev` e `npm run build` sem importar ou compilar arquivos da aplicação
+real.
 
 O resultado será avaliado por pessoas. Se o agente precisar perguntar o que
 uma regra significa, ou se a interface ficar incoerente sem referência visual,
@@ -839,15 +915,19 @@ edição manual antes de corrigir o contrato. Somente depois de uma versão do
 documento produzir uma interface coerente o frontend real poderá ser migrado,
 em tarefa separada e autorizada.
 
-## 15. Critérios de aceitação da V1.1
+## 15. Critérios de aceitação da V1.2
 
-`DESIGN.md` V1.1 é candidato congelado para o gate quando:
+`DESIGN.md` V1.2 é candidato congelado para o Run 2 quando:
 - a composição confirma o painel persistente >=1440px, os limites de largura
   descritos e o fallback sobreposto/full-screen sem comprimir a conversa;
 - timeline, contraste de `text.subtle`, cores exatas da mensagem enviada e nota
   interna centralizada obedecem aos tokens e limites definidos neste documento;
 - todos os wrappers de mensagem, incluindo mídia, replies e product cards,
   respeitam os limites desktop/mobile sem exceções implícitas;
+- a anatomia da resposta citada e do painel de contexto segue este contrato,
+  incluindo a distinção entre Notas do contato e Nota interna da timeline;
+- as composições de tablet 900–1023px e 768–899px não são ambíguas nem
+  contraditórias;
 - um agente independente consegue identificar a filosofia dark-first,
   densidade, prioridades e limites funcionais;
 - todos os tokens principais têm nomes semânticos e valores concretos;
@@ -861,11 +941,12 @@ em tarefa separada e autorizada.
 - mobile possui composição própria e targets touch definidos;
 - acessibilidade, teclado, reduced motion e estados semânticos estão cobertos;
 - a regra de não alteração de backend/contratos está explícita;
-- o Validation Gate exige apenas `AGENTS.md` + `DESIGN.md` e proíbe screenshots;
+- o Run 2 exige apenas `AGENTS.md` + `DESIGN.md` V1.2, não recebe materiais do
+  Run 1 e exige sandbox isolado com execução reproduzível;
 - uma revisão crítica não encontra uma lacuna capaz de alterar a identidade,
   hierarquia ou leitura da tela.
 
-## 16. Ambiguidades controladas da V1.1
+## 16. Ambiguidades controladas da V1.2
 
 Estas são as únicas escolhas deixadas abertas porque não mudam a identidade ou
 a hierarquia do sistema:
@@ -883,7 +964,17 @@ a hierarquia do sistema:
    persistência entre sessões é decisão funcional fora deste documento.
 5. **Atalhos e envio:** este documento especifica aparência e estados do
    composer, não redefine a tecla que envia, o formato de draft ou o retry.
+6. **Navegação do mock:** nomes e ordem dos módulos não são arquitetura de
+   informação canônica do produto. No Validation Gate, o mock **MAY** usar labels
+   fictícias/determinísticas para demonstrar item ativo, inativo, badge e sidebar
+   recolhida/expandida. A escolha não representa a navegação definitiva, e sua
+   ausência não deve bloquear o agente.
+7. **Filtro e ordenação da Inbox do mock:** este documento não redefine filtro
+   inicial, ordenação funcional ou fonte de dados da Inbox. O blind mock usa um
+   conjunto fictício determinístico e uma ordem estável somente para demonstrar
+   visualmente os estados exigidos. Isso não é contrato funcional; não criar
+   lógica real nem bloquear por não conhecer a ordenação da aplicação.
 
-Nenhuma dessas ambiguidades autoriza novos tokens, novo comportamento ou
-reutilização do frontend real no blind test.
+Nenhuma dessas ambiguidades autoriza novos tokens, novo comportamento funcional
+ou reutilização do frontend real no blind test.
 
