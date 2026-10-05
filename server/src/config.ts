@@ -39,9 +39,20 @@ const configSchema = z.object({
   EVOLUTION_API_URL: z.string().url(),
   EVOLUTION_API_KEY: z.string().min(16),
   EVOLUTION_INSTANCE_NAME: z.string().min(1),
+  PRODUCT_STORAGE_DRIVER: z.enum(['memory', 'r2']).optional(),
+  R2_ACCOUNT_ID: z.string().optional(),
+  R2_ACCESS_KEY_ID: z.string().optional(),
+  R2_SECRET_ACCESS_KEY: z.string().optional(),
+  R2_BUCKET: z.string().optional(),
+  R2_PUBLIC_BASE_URL: z.string().optional(),
   GOOGLE_CLIENT_ID: z.string().min(20).optional(),
   GOOGLE_CLIENT_SECRET: z.string().min(20).optional(),
   GOOGLE_REDIRECT_URI: z.string().url().optional(),
+  BLING_CLIENT_ID: z.string().optional(),
+  BLING_CLIENT_SECRET: z.string().optional(),
+  // Optional integration validation belongs to runtimeBling(), not app startup.
+  BLING_REDIRECT_URI: z.string().optional(),
+  INTEGRATION_ENCRYPTION_KEY: z.string().optional(),
 });
 
 const parsed = configSchema.safeParse(process.env);

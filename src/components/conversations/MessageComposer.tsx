@@ -1,6 +1,9 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { FileText, Paperclip, Pencil, Plus, Reply, Send, Smile, X, Zap } from 'lucide-react';
-import { Message, QuickReply } from '../../types';
+import { FileText, Package, Paperclip, Pencil, Plus, Reply, Send, Smile, X, Zap } from 'lucide-react';
+import { Message, Product, QuickReply } from '../../types';
+import { useProductSearch } from '../../hooks/useProductSearch';
+import { findProductToken } from '../../utils/productShortcut';
+import { effectiveBlingStock, formatBrlPrice } from '../../utils/productLibrary';
 import { quotedMediaLabel, toQuotedMessage } from '../../utils/quotedMessage';
 import { insertComposerText } from '../../utils/composerSubmission';
 import type { AttachmentDraft } from '../../utils/composerAttachment';
@@ -20,6 +23,8 @@ type MessageComposerProps = {
   onTextChange?: (value: string) => void;
   onToggleInternalNote: (value: boolean) => void;
   onToggleQuickReply: () => void;
+  onOpenProducts?: () => void;
+  onPreviewProduct?: (product: Product) => void;
   quickReplies?: QuickReply[];
   quickReplyContext?: QuickReplyContext;
   onUseQuickReply?: (reply: QuickReply) => void;
@@ -93,6 +98,8 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   onTextChange,
   onToggleInternalNote,
   onToggleQuickReply,
+  onOpenProducts,
+  onPreviewProduct,
   quickReplies = [],
   quickReplyContext,
   onUseQuickReply,
@@ -123,6 +130,9 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   const [quickReplyCursor, setQuickReplyCursor] = useState(0);
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
+  const [productOpen, setProductOpen] = useState(false);
+  const [productIndex, setProductIndex] = useState(0);
+  const productPopoverRef = useRef<HTMLDivElement>(null);
   const hasAttachment = attachmentDrafts.length > 0 && !isInternalNote && !editingMessage;
 
   const slashToken = useMemo(
@@ -134,6 +144,47 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
     [quickReplies, slashToken],
   );
   const buttonReplies = useMemo(() => filterQuickReplies(quickReplies, quickReplySearch), [quickReplies, quickReplySearch]);
+  const productToken = !isInternalNote && !editingMessage && !activeChatLocked && !sendingMedia && onPreviewProduct && !slashToken
+    ? findProductToken(inputText, quickReplyCursor) : null;
+  const { products: productSuggestions, loading: productsLoading, error: productsError } = useProductSearch(
+    productToken && productOpen ? productToken.value.slice(1).trim().slice(0, 120) : null,
+  );
+
+  useEffect(() => {
+    setProductOpen(Boolean(productToken && !quickReplyOpen && !emojiOpen));
+    setProductIndex(0);
+  }, [productToken?.value, productToken?.start, activeConversationId, quickReplyOpen, emojiOpen]);
+
+  useEffect(() => {
+    productPopoverRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+  }, [productIndex, productSuggestions.length]);
+
+  useEffect(() => {
+    if (!productOpen) return;
+    const close = (event: PointerEvent) => {
+      if (event.target instanceof Node && !productPopoverRef.current?.contains(event.target)) setProductOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { setProductOpen(false); textareaRef.current?.focus(); }
+    };
+    document.addEventListener('pointerdown', close);
+    document.addEventListener('keydown', escape);
+    return () => {
+      document.removeEventListener('pointerdown', close);
+      document.removeEventListener('keydown', escape);
+    };
+  }, [productOpen]);
+
+  const selectProduct = (product: Product) => {
+    if (!productToken || !onPreviewProduct) return;
+    const next = insertQuickReplyAtToken(inputText, productToken, '');
+    setInputText(next.value);
+    setQuickReplyCursor(next.cursor);
+    onTextChange?.(next.value);
+    setProductOpen(false);
+    textareaRef.current?.setSelectionRange(next.cursor, next.cursor);
+    onPreviewProduct(product);
+  };
 
   useEffect(() => {
     setEmojiOpen(false);
@@ -256,6 +307,20 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
   }), [onTextChange]);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (productOpen && productToken && !event.nativeEvent.isComposing) {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (productSuggestions.length) setProductIndex((current) => (current + (event.key === 'ArrowDown' ? 1 : -1) + productSuggestions.length) % productSuggestions.length);
+        return;
+      }
+      if (event.key === 'Escape') { event.preventDefault(); setProductOpen(false); return; }
+      if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey) {
+        event.preventDefault();
+        const product = productSuggestions[productIndex] || productSuggestions[0];
+        if (product) selectProduct(product);
+        return;
+      }
+    }
     const token = slashToken;
     if (event.key === 'ArrowDown' && slashOpen && slashReplies.length > 0) {
       event.preventDefault();
@@ -386,6 +451,29 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
       {mediaSendProgress && <p className="mb-2 text-xs font-semibold text-amber-200">Enviando {mediaSendProgress.current} de {mediaSendProgress.total}...</p>}
 
       <div className="relative flex items-center gap-2">
+        {productOpen && productToken && (
+          <div ref={productPopoverRef} role="dialog" aria-label="Sugestões de produtos" className="absolute bottom-full left-0 z-30 mb-2 w-[min(24rem,calc(100vw-2rem))] rounded-xl border border-amber-400/30 bg-[#182126] p-3 shadow-2xl">
+            <p className="mb-2 text-xs font-bold text-slate-300">Produtos · ↑ ↓ para selecionar · Enter para pré-visualizar</p>
+            {productsLoading ? <p role="status" className="py-3 text-sm text-slate-400">Buscando produtos...</p>
+              : productsError ? <p role="alert" className="py-3 text-sm text-red-300">{productsError}</p>
+                : <div role="listbox" aria-label="Opções de produtos" className="max-h-56 space-y-1 overflow-y-auto">
+                  {productSuggestions.map((product, index) => <button key={product.id} type="button" role="option" aria-selected={index === productIndex} onMouseDown={(event) => event.preventDefault()} onClick={() => selectProduct(product)} className={`flex w-full items-center gap-3 rounded-lg p-2 text-left hover:bg-amber-400/10 focus:outline-none focus:ring-2 focus:ring-amber-400 ${index === productIndex ? 'bg-amber-400/10' : ''}`}>
+                    <img src={product.imageUrl} alt="" className="h-10 w-10 shrink-0 rounded bg-black/30 object-contain" />
+                    {(() => {
+                      const stock = effectiveBlingStock(product.bling?.stockVirtualTotal, product.bling?.stockPhysicalTotal);
+                      return <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-bold text-slate-100">{product.name}</span>
+                        <span className="mt-0.5 flex items-center justify-between gap-2">
+                          <span className="text-xs font-bold text-amber-300">{formatBrlPrice(product.priceCents)}</span>
+                          <span className={`shrink-0 text-xs font-semibold ${stock !== null && stock <= 0 ? 'text-red-300' : 'text-slate-400'}`}>Qtd: {stock ?? '—'}</span>
+                        </span>
+                      </span>;
+                    })()}
+                  </button>)}
+                  {!productSuggestions.length && <p role="status" className="py-3 text-sm text-slate-400">Nenhum produto encontrado.</p>}
+                </div>}
+          </div>
+        )}
         {(quickReplyOpen || slashOpen) && !isInternalNote && (
           <div ref={quickReplyPopoverRef} role="dialog" aria-label="Mensagens rápidas" className="absolute bottom-full left-0 z-30 mb-2 w-[min(24rem,calc(100vw-2rem))] rounded-xl border border-amber-400/30 bg-[#182126] p-3 shadow-2xl">
             {quickReplyOpen && (
@@ -450,6 +538,9 @@ export const MessageComposer = forwardRef<MessageComposerHandle, MessageComposer
         </button>
         {!isInternalNote && !editingMessage && <button ref={quickReplyButtonRef} type="button" disabled={activeChatLocked || sendingMedia} onMouseDown={(event) => event.preventDefault()} onClick={() => { setEmojiOpen(false); setQuickReplySearch(''); setSlashOpen(false); onToggleQuickReply(); }} aria-label="Mensagens rápidas" title="Mensagens rápidas" className={`shrink-0 rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40 ${quickReplyOpen ? 'text-amber-300' : ''}`}>
           <Zap className="h-4 w-4" />
+        </button>}
+        {!isInternalNote && !editingMessage && onOpenProducts && <button type="button" disabled={activeChatLocked || sendingMedia} onMouseDown={(event) => event.preventDefault()} onClick={() => { setEmojiOpen(false); setSlashOpen(false); onOpenProducts(); }} aria-label="Produtos" title="Pré-visualizar produto" className="shrink-0 rounded-full bg-transparent p-2.5 text-slate-400 transition-colors hover:bg-[#2a343a] hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40">
+          <Package className="h-4 w-4" />
         </button>}
         <textarea ref={textareaRef} rows={1} value={inputText} onChange={(event) => { setInputText(event.target.value); setQuickReplyCursor(event.target.selectionStart); onTextChange?.(event.target.value); }} onSelect={(event) => setQuickReplyCursor(event.currentTarget.selectionStart)} onKeyDown={handleKeyDown} onPaste={onInputPaste} disabled={activeChatLocked || sendingMedia} placeholder={editingMessage ? 'Edite sua mensagem...' : isInternalNote ? 'Digite uma nota interna para a equipe...' : 'Digite sua mensagem para o WhatsApp...'} title={!isInternalNote && !editingMessage ? 'Cole uma imagem com Ctrl+V para enviar' : undefined} className={`max-h-32 min-h-12 flex-1 resize-y rounded-2xl border bg-[#2a343a] px-4 py-3 text-base leading-6 text-slate-100 placeholder-slate-400 transition-colors focus:outline-none ${isInternalNote ? 'border-amber-400/50 bg-amber-400/5 focus:border-amber-400' : 'border-transparent focus:border-amber-400/70'}`} />
         <button type="submit" disabled={activeChatLocked || sendingMedia || (!isInternalNote && !whatsappConnected) || (!inputText.trim() && !hasAttachment)} aria-label={editingMessage ? 'Salvar edição' : 'Enviar mensagem'} title={editingMessage ? 'Salvar edição' : 'Enviar mensagem'} className={`flex items-center justify-center rounded-full p-3 font-bold transition-all ${isInternalNote ? 'bg-amber-500 text-zinc-950 hover:bg-amber-400' : 'bg-amber-400 text-zinc-950 shadow-[0_0_12px_rgba(238,187,44,0.3)] hover:bg-amber-300'} disabled:cursor-not-allowed disabled:opacity-40`}>

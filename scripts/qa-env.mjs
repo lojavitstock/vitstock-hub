@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 
 const qaSecret = (label) => `${label}-${randomUUID()}-${'x'.repeat(64)}`;
@@ -22,6 +22,10 @@ export function createQaEnv() {
     ALLOWED_FRONTEND_ORIGINS: 'http://127.0.0.1:3000',
     GOOGLE_CLIENT_ID: 'qa-local-google-client-id-not-real',
     GOOGLE_CLIENT_SECRET: 'qa-local-google-client-secret-not-real',
+    BLING_CLIENT_ID: 'qa-local-bling-client',
+    BLING_CLIENT_SECRET: 'qa-local-bling-secret',
+    BLING_REDIRECT_URI: 'http://localhost:3001/api/integrations/bling/callback',
+    INTEGRATION_ENCRYPTION_KEY: randomBytes(32).toString('base64'),
     QA_E2E_EMAIL: 'qa-admin-a@vitstock.test',
     QA_E2E_PASSWORD: qaPassword,
     QA_E2E_SECOND_EMAIL: 'qa-fernanda@vitstock.test',

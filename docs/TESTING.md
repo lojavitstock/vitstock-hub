@@ -1,6 +1,6 @@
 # Vitstock Hub — Estratégia Prática de Testes
 
-> **Fluxo de integração:** use a branch explicitamente indicada pela tarefa como baseline. No fluxo compartilhado, `preview` é a branch de integração e validação antes da promoção, sob aprovação humana, para `main`.
+> **Fluxo de integração:** mudanças nascem de `origin/preview` em `feature/*`, `fix/*` ou `chore/*`, salvo tarefa explicitamente diferente. Gates técnicos precedem a integração autorizada por PR em `preview`, o deploy de pré-produção e a validação humana. Production (`main`) recebe mudanças somente por PR de `preview`, após esses gates e decisão explícita de promoção.
 
 Este documento define o menor processo de validação que protege o Vitstock Hub sem transformar um projeto pequeno em uma operação corporativa de QA. Ele complementa o procedimento operacional em `RUNBOOK.md` e os invariantes técnicos em `ARCHITECTURE.md`.
 
@@ -25,6 +25,7 @@ O projeto usa a API nativa `node:test`, executada em arquivos TypeScript pelo bo
 | `tests/server.test.ts` | Contratos básicos do Fastify, health, CORS, autenticação e webhook. |
 | `tests/evolutionWebhook.test.ts` | Reconciliação e monitoramento do webhook da Evolution. |
 | `tests/messageEditDelete.test.ts` | Regras e payloads de edição, exclusão e ações de mensagem. |
+| `tests/productLibrary.test.ts` | Validação de imagem/MIME/tamanho, storage fake e regra de preço/snapshot da biblioteca de produtos. |
 | `tests/qaServer.test.ts` | Rotas e fixtures exclusivas do modo QA. |
 | `tests/groupConversations.test.ts` | Regressões específicas de conversas em grupo. |
 | `tests/contactDomain.test.ts` | Normalização, deduplicação e domínio de contatos. |
@@ -34,6 +35,9 @@ O projeto usa a API nativa `node:test`, executada em arquivos TypeScript pelo bo
 | `tests/notifications.test.ts` | Elegibilidade, dedupe, previews, navegação por ID explícito, captura antecipada do prompt, passthrough restrito do service worker e resultados estruturados de notificações desktop. |
 | `tests/os-userinfo.cjs` | Helper carregado pelo bootstrap; não é uma suíte independente. |
 | `tests/e2e/*.spec.ts` | Smoke, Atendimento e notificações/PWA no Chromium via Playwright; inclui o botão de teste desktop e o caminho de mensagem em background, executados contra QA local por padrão. |
+
+| `tests/e2e/products.spec.ts` | CRUD visual de produtos, upload fake em memória, prévia, atalhos, retorno same-tab, arquivamento, autorização e isolamento entre empresas em QA local. |
+| `tests/e2e/product-send.spec.ts` | Envio de produto pelo mock Evolution, loading/double click, falha/retry, FK local/snapshot histórico, PN/LID/grupo e isolamento de tenant. |
 
 O comando `npm test` executa a suíte principal definida no `package.json`, usando o bootstrap `tests/run-tests.mjs` para os arquivos TypeScript listados pelo runner. Para uma suíte específica, execute diretamente o bootstrap com o arquivo desejado.
 
@@ -192,6 +196,10 @@ Uma migration exige revisão de:
 
 Não execute migration em produção como agente. Se um teste local de migration for necessário, confirme antes que o banco é seguro: `localhost` não garante PostgreSQL local nem ambiente isolado.
 
+Para a biblioteca de produtos, `npm run dev:e2e`/`npm run qa:setup` são os fluxos autorizados para aplicar `021_product_library.sql`; os guards fixam PostgreSQL em `127.0.0.1:55432/vitstock_qa`, Evolution/Google em mocks locais e abortam se os limites não forem satisfeitos. Não rode `server:migrate` sem confirmar explicitamente o destino. O driver padrão de QA é `memory`; `npm --prefix server run product:r2-smoke` é um smoke opt-in que grava e remove somente um objeto temporário no bucket R2 Preview, e `npm run product:r2-qa-smoke` exercita a Product API em QA local com R2 real quando o backend QA foi iniciado explicitamente com `PRODUCT_STORAGE_DRIVER=r2`. Nenhum teste padrão de CI escreve em R2. Evolution continua mock-only; o envio real Preview exige autorização separada.
+
+`npm run test:e2e -- tests/e2e/product-send.spec.ts tests/e2e/products.spec.ts` valida o fluxo de produtos em QA. A suíte de envio consulta refs por conexão fixa ao PostgreSQL QA somente após confirmar `/api/qa/ready`; não usa `.env.local` ou `DATABASE_URL`. O cenário de rejeição de mídia é controlado por uma rota admin registrada apenas em QA e restaurado após o teste. Os testes backend em `tests/server.test.ts` usam banco/transport/storage simulados para rollback, concorrência, tenant, campos forjados e corrida de confirmação/webhook, sem R2 ou provider reais.
+
 ## 10. Falhas e serviços externos
 
 ### Teste ou build falhou
@@ -212,6 +220,8 @@ Testes unitários, type checks e builds normalmente não devem depender de Evolu
 - não altere provider, banco, QR, deploy ou infraestrutura como efeito colateral inesperado.
 
 ## 11. Preview e validação humana
+
+Enquanto não for necessário teste humano oficial, mantenha o trabalho na branch de desenvolvimento, com checkpoint remoto e Draft PR quando pertinente. Para esse teste, o fluxo é branch → PR → integração autorizada em `preview` → deploy → validação humana. Um Draft PR ou CI aprovado não constitui aprovação funcional nem autorização de promoção para `main`.
 
 Use um plano manual curto e específico para a mudança:
 
@@ -257,6 +267,52 @@ Uma mudança segue para **READY FOR HUMAN REVIEW** quando, conforme aplicável:
 Isso ainda não significa validação funcional final.
 
 ## 14. Referência rápida
+
+### Bling read-only foundation
+
+`tests/bling.test.ts` integra `npm test`: OAuth ADMIN/state/tenant/erros,
+criptografia autenticada com AAD, refresh e concorrência, headers JWT/Basic,
+timeout de corpo, 401/429/Retry-After/5xx/network/retries, contratos e IDs/string.
+Também cobre body OAuth estrito, inicialização do backend com env opcional
+incompleto/inválido e captura do logger Fastify real (request/response/callback).
+Confirma que confirmação tardia de reserva PostgreSQL não comprime a janela
+real de dispatch (quatro chamadas nunca cabem em um segundo).
+Transporte sempre injetado; runtime com `NODE_ENV=test` bloqueia Bling real.
+QA usa `blingQa.ts` interno (não existe base URL configurável/proxy externo).
+`dev:e2e` injeta credenciais fictícias e uma chave efêmera independente; reiniciar
+QA requer reconectar seus vínculos fictícios, pois a chave muda. Nenhum secret real.
+
+`npm run test:e2e -- tests/e2e/bling.spec.ts` testa Configurações/connect/callback/
+disconnect, ciphertext no PostgreSQL QA, state single-use/expirado, ADMIN/tenant,
+read models, dez GETs concorrentes com apenas um refresh e budget diário esgotado.
+Também valida catálogo operacional via `criterio=2`, paginação/busca ativa,
+contrato de status `A`/`I`/`E` da lista observada e fail-closed do catálogo
+selecionável. Import/link/relink rejeitam `I` e `E`; `E` no detail é somente um
+sinal de rejeição para seleção, enquanto leitura direta rejeita esse contrato
+com 502. Detail, snapshots persistidos e sync de vínculo existente permanecem
+`A`/`I`; sync continua cobrindo status autoritativo `I`. A migration 024 adiciona
+somente unicidade case-insensitive de SKU por empresa; migrations 022, 023 e
+024 são aplicadas apenas pelo `dev:e2e` guardado. Também valida importação com
+dados autoritativos e imagem local, SKU ausente e duplicado, conflito atômico no
+sync, link/relink/sync, nome local preservado, preço cadastrado protegido,
+saldos físicos/virtuais e rollback quando o estoque é inválido. O DELETE de
+vínculo permanece como rota de compatibilidade e deve responder 409 sem mudar
+produto, vínculo, saldos, imagem ou referências/snapshots; a UI não deve expor
+ação de desvincular. Relink permanece funcional e archive retira da lista ativa
+preservando vínculo e histórico. `POST /api/products` continua rejeitando
+criação manual com `bling_product_required`.
+`tests/server.test.ts` simula falha SQL após upload e confirma rollback mais
+remoção somente do novo objeto armazenado. `tests/e2e/products.spec.ts` cobre o
+fluxo UI Bling-only, paginação, validação de SKU, imagem colada/substituída,
+estoque e preço na prévia; `tests/e2e/product-send.spec.ts` confirma override
+imutável por mensagem, envio sem chamada Bling e preservação dos snapshots
+anteriores à sincronização. Inclui duas instâncias PgBlingStore
+contra PostgreSQL QA, refresh único, 401/expiry/connect/disconnect concorrentes,
+rotação preservada após GET 403, janela de requests e disponibilidade do pool
+Hub com DB_POOL_MAX=1. Compara snapshots de products/message_product_refs antes
+e depois quando aplicável, sem provider/R2 real. Budget alterado apenas no banco
+QA fixo é restaurado no finally; nunca banco remoto. OAuth real e dados reais
+são excluídos.
 
 ```powershell
 npm test

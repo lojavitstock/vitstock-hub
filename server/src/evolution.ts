@@ -5,6 +5,8 @@ import { z } from 'zod';
 import { config, isAllowedFrontendOrigin, isQaMode } from './config.js';
 import { requireAdmin, requireUser } from './auth.js';
 import { db } from './db.js';
+import type { ProductStorage } from './productStorage.js';
+import { productCaption, productSendSchema, type ProductSendSnapshot } from './productSend.js';
 import { buildHasOlderMessagesQuery } from './hasOlderMessagesQuery.js';
 import { buildExistingConversationQuery } from './conversationQueries.js';
 import { publishRealtimeEvent, registerRealtimeClient } from './realtime.js';
@@ -3257,12 +3259,23 @@ async function ensureOutboundMessage(input: {
   location?: ForwardableLocation;
   clientMessageId?: string;
   quotedMessage?: QuotedMessage;
+  productSnapshot?: ProductSendSnapshot;
 }) {
   const persistenceStartedAt = Date.now();
   let idempotencyLockMs: number | undefined;
   const quotedMessage = normalizedQuotedMessage(input.quotedMessage, input.remoteJid);
   const client = await db.connect();
   let transactionStarted = false;
+  const findExisting = () => client.query<{
+    id: string; conversation_id: string; evolution_message_id: string | null;
+    status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
+    metadata?: { productSnapshot?: ProductSendSnapshot; productRemoteJid?: string };
+  }>(
+    `SELECT id, conversation_id, evolution_message_id, status, metadata
+     FROM messages WHERE company_id = $1 AND metadata->>'clientMessageId' = $2
+     ORDER BY created_at DESC LIMIT 1`,
+    [input.companyId, input.clientMessageId],
+  );
   try {
     await client.query('BEGIN');
     transactionStarted = true;
@@ -3276,6 +3289,23 @@ async function ensureOutboundMessage(input: {
       );
       idempotencyLockMs = Date.now() - lockStartedAt;
     }
+    if (input.productSnapshot) {
+      // Keep the confirmed catalog row stable until its immutable snapshot/ref is committed.
+      const product = await client.query<{
+        name: string; price_cents: number; currency: 'BRL'; image_object_key: string;
+        image_mime_type: ProductSendSnapshot['imageMimeType'];
+      }>(
+        `SELECT name, price_cents, currency, image_object_key, image_mime_type FROM products
+         WHERE company_id = $1 AND id = $2 AND archived_at IS NULL FOR SHARE`,
+        [input.companyId, input.productSnapshot.productId],
+      );
+      const row = product.rows[0];
+      if (!row) throw Object.assign(new Error('Produto ativo não encontrado'), { statusCode: 404 });
+      input.productSnapshot = { productId: input.productSnapshot.productId, name: row.name,
+        priceCents: input.productSnapshot.priceCents, currency: row.currency,
+        imageObjectKey: row.image_object_key, imageMimeType: row.image_mime_type };
+      input.content = productCaption(input.productSnapshot);
+    }
     const isGroup = isWhatsAppGroupJid(input.remoteJid);
     const phoneDigits = input.number.replace(/\D/g, '');
     const phoneJid = phoneDigits.length >= 8 && phoneDigits.length <= 20
@@ -3284,7 +3314,7 @@ async function ensureOutboundMessage(input: {
     const identityCandidates = isGroup
       ? [input.remoteJid]
       : [input.remoteJid, phoneJid].filter(Boolean);
-    const canonicalConversation = isGroup
+    const canonicalConversation = isGroup && !input.productSnapshot
       ? undefined
       : await resolveConversationWithClient(client, {
         companyId: input.companyId,
@@ -3292,6 +3322,30 @@ async function ensureOutboundMessage(input: {
         phone: input.number,
         identityCandidates,
       }, { createIfMissing: false });
+    if (input.productSnapshot && !canonicalConversation) {
+      throw Object.assign(new Error('Conversa não encontrada'), { statusCode: 404 });
+    }
+    // An accepted replay must not renew conversation activity or write identities.
+    const productExisting = input.productSnapshot && input.clientMessageId ? await findExisting() : undefined;
+    const priorProduct = productExisting?.rows[0];
+    if (priorProduct && input.productSnapshot) {
+      const snapshot = priorProduct.metadata?.productSnapshot;
+      if (priorProduct.conversation_id !== canonicalConversation?.id
+        || snapshot?.productId !== input.productSnapshot.productId
+        || priorProduct.metadata?.productRemoteJid !== input.remoteJid) {
+        throw Object.assign(new Error('Identificador de envio já usado em outra operação'), { statusCode: 409 });
+      }
+      if (outboundDispatchAction(priorProduct.status) !== 'retry') {
+        await client.query('COMMIT');
+        transactionStarted = false;
+        return { conversationId: priorProduct.conversation_id, messageId: priorProduct.id,
+          evolutionMessageId: priorProduct.evolution_message_id, status: priorProduct.status,
+          deduplicated: true, persistenceMs: Date.now() - persistenceStartedAt, idempotencyLockMs,
+          productSnapshot: snapshot };
+      }
+      input.productSnapshot = snapshot!;
+      input.content = productCaption(snapshot!);
+    }
     const contactPhone = isGroup ? input.remoteJid : phoneForContactStorage(input.number);
     const contactName = isGroup ? `Grupo ${input.remoteJid.split('@')[0]}` : contactPhone;
     const conversationPreview = isGroup ? `${input.userName}: ${input.content}` : input.content;
@@ -3342,22 +3396,14 @@ async function ensureOutboundMessage(input: {
     if (!conversationId) throw new Error('Conversa não pôde ser preparada para o envio');
 
   if (input.clientMessageId) {
-    const existing = await client.query<{
-      id: string;
-      conversation_id: string;
-      evolution_message_id: string | null;
-      status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
-    }>(
-      `SELECT id, conversation_id, evolution_message_id, status
-       FROM messages
-       WHERE company_id = $1
-         AND metadata->>'clientMessageId' = $2
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      [input.companyId, input.clientMessageId],
-    );
+    const existing = productExisting ?? await findExisting();
     const previous = existing.rows[0];
     if (previous) {
+      if (input.productSnapshot && (previous.conversation_id !== conversationId
+        || previous.metadata?.productSnapshot?.productId !== input.productSnapshot.productId
+        || previous.metadata?.productRemoteJid !== input.remoteJid)) {
+        throw Object.assign(new Error('Identificador de envio já usado em outra operação'), { statusCode: 409 });
+      }
       if (outboundDispatchAction(previous.status) === 'retry') {
         await client.query(
           `UPDATE messages
@@ -3376,6 +3422,7 @@ async function ensureOutboundMessage(input: {
           deduplicated: false,
           persistenceMs: Date.now() - persistenceStartedAt,
           idempotencyLockMs,
+          productSnapshot: previous.metadata?.productSnapshot,
         };
       }
       await client.query('COMMIT');
@@ -3388,6 +3435,7 @@ async function ensureOutboundMessage(input: {
         deduplicated: true,
         persistenceMs: Date.now() - persistenceStartedAt,
         idempotencyLockMs,
+        productSnapshot: previous.metadata?.productSnapshot,
       };
     }
   }
@@ -3410,6 +3458,7 @@ async function ensureOutboundMessage(input: {
         sentByUserName: input.userName,
         ...(input.document ? { document: input.document } : {}),
         ...(input.location ? { location: input.location } : {}),
+        ...(input.productSnapshot ? { productSnapshot: input.productSnapshot, productRemoteJid: input.remoteJid } : {}),
         ...(quotedMessage
           ? { quotedMessage }
           : {}),
@@ -3418,6 +3467,17 @@ async function ensureOutboundMessage(input: {
   );
   const messageId = message.rows[0]?.id;
   if (!messageId) throw new Error('Mensagem não pôde ser registrada');
+    if (input.productSnapshot) {
+      const snapshot = input.productSnapshot;
+      await client.query(
+        `INSERT INTO message_product_refs
+          (company_id, message_id, product_id, product_name_snapshot, product_price_cents_snapshot,
+           product_currency_snapshot, product_image_object_key_snapshot)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [input.companyId, messageId, snapshot.productId, snapshot.name, snapshot.priceCents,
+          snapshot.currency, snapshot.imageObjectKey],
+      );
+    }
     await client.query('COMMIT');
     transactionStarted = false;
     localInboxCache.delete(input.companyId);
@@ -3427,6 +3487,7 @@ async function ensureOutboundMessage(input: {
     evolutionMessageId: null,
     status: 'pending' as const,
     deduplicated: false,
+    productSnapshot: input.productSnapshot,
     persistenceMs: Date.now() - persistenceStartedAt,
     idempotencyLockMs,
     };
@@ -3452,47 +3513,63 @@ async function updateOutboundMessage(messageId: string, status: 'sent' | 'failed
        WHERE id = $1`,
       [messageId, status, evolutionMessageId || null, providerKey ? JSON.stringify(providerKey) : null],
     );
+    return messageId;
   } catch (error: any) {
     // Se o webhook vinculou o ID alguns milissegundos antes, a restrição
     // única pode bloquear esta atualização. Nesse caso, consolidamos o estado
     // no registro do provedor e removemos somente a linha local pendente.
     if (error?.code !== '23505' || !evolutionMessageId) throw error;
-    const pendingMessage = await db.query<{ sender_name: string | null; metadata: Record<string, any> }>(
-      `SELECT sender_name, metadata
-       FROM messages
-       WHERE id = $1
-       LIMIT 1`,
-      [messageId],
-    );
-    const providerMessage = await db.query<{ id: string }>(
-      `SELECT id
-       FROM messages
-       WHERE evolution_message_id = $1
-       LIMIT 1`,
-      [evolutionMessageId],
-    );
-    const pending = pendingMessage.rows[0];
-    if (!providerMessage.rows[0] || !pending) throw error;
-    await db.query(
-      `UPDATE messages
-       SET sender_name = $2,
-           metadata = (COALESCE(metadata, '{}'::jsonb) - 'sentOutsideHub') || $3::jsonb,
-           status = CASE
-             WHEN status IN ('read', 'delivered') AND $4 = 'sent' THEN status
-             WHEN status = 'failed' AND $4 <> 'failed' THEN status
-             ELSE $4
-           END
-       WHERE id = $1`,
-      [providerMessage.rows[0].id, pending.sender_name, JSON.stringify({
-        ...(pending.metadata || {}),
-        ...(providerKey ? { providerKey } : {}),
-      }), status],
-    );
-    await db.query(
-      `DELETE FROM messages
-       WHERE id = $1 AND evolution_message_id IS NULL`,
-      [messageId],
-    );
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const pendingMessage = await client.query<{ company_id: string; sender_name: string | null; metadata: Record<string, any> }>(
+        `SELECT company_id, sender_name, metadata
+         FROM messages
+         WHERE id = $1
+         FOR UPDATE`,
+        [messageId],
+      );
+      const providerMessage = await client.query<{ id: string }>(
+        `SELECT id
+         FROM messages
+         WHERE evolution_message_id = $1 AND company_id = $2
+         FOR UPDATE`,
+        [evolutionMessageId, pendingMessage.rows[0]?.company_id],
+      );
+      const pending = pendingMessage.rows[0];
+      if (!providerMessage.rows[0] || !pending) throw error;
+      await client.query(
+        `UPDATE messages
+         SET sender_name = $2,
+             metadata = (COALESCE(metadata, '{}'::jsonb) - 'sentOutsideHub') || $3::jsonb,
+             status = CASE
+               WHEN status IN ('read', 'delivered') AND $4 = 'sent' THEN status
+               WHEN status = 'failed' AND $4 <> 'failed' THEN status
+               ELSE $4
+             END
+         WHERE id = $1`,
+        [providerMessage.rows[0].id, pending.sender_name, JSON.stringify({
+          ...(pending.metadata || {}),
+          ...(providerKey ? { providerKey } : {}),
+        }), status],
+      );
+      await client.query(
+        `UPDATE message_product_refs SET message_id = $2 WHERE message_id = $1 AND company_id = $3`,
+        [messageId, providerMessage.rows[0].id, pending.company_id],
+      );
+      await client.query(
+        `DELETE FROM messages
+         WHERE id = $1 AND evolution_message_id IS NULL`,
+        [messageId],
+      );
+      await client.query('COMMIT');
+      return providerMessage.rows[0].id;
+    } catch (consolidationError) {
+      await client.query('ROLLBACK');
+      throw consolidationError;
+    } finally {
+      client.release();
+    }
   }
 }
 
@@ -3510,10 +3587,11 @@ async function dispatchForwardedMedia(input: {
   clientMessageId: string;
   leaseAcquisition: Awaited<ReturnType<typeof acquireOutboundLease>>;
   outboundStartedAt: number;
+  product?: { snapshot: ProductSendSnapshot; storage: ProductStorage };
 }) {
   const { request, reply, number, remoteJid, mediatype, mimetype, media, document, fileName, caption, clientMessageId } = input;
   const mediaLabel = mediatype === 'document' ? 'documento' : mediatype === 'video' ? 'vídeo' : 'imagem';
-  const text = caption?.trim() || (mediatype === 'document' ? '[document]' : mediatype === 'video' ? '[Vídeo]' : '[Imagem]');
+  let text = caption?.trim() || (mediatype === 'document' ? '[document]' : mediatype === 'video' ? '[Vídeo]' : '[Imagem]');
   const evolutionRecipient = resolveEvolutionRecipient({ remoteJid, canonicalPhone: number });
   let localMessage: Awaited<ReturnType<typeof ensureOutboundMessage>>;
   try {
@@ -3527,6 +3605,7 @@ async function dispatchForwardedMedia(input: {
       mediaType: mediatype,
       document: mediatype === 'document' ? document : undefined,
       clientMessageId,
+      productSnapshot: input.product?.snapshot,
     });
   } catch (error) {
     traceReplyFailure(request, {
@@ -3542,6 +3621,9 @@ async function dispatchForwardedMedia(input: {
     });
     throw error;
   }
+  // Retrying a failed product uses the original persisted snapshot, never today's catalog values.
+  const productSnapshot = localMessage.productSnapshot;
+  if (productSnapshot) text = productCaption(productSnapshot);
   traceOutbound(request, 'outbox.prepared', {
     clientMessageId,
     remoteJid,
@@ -3567,7 +3649,7 @@ async function dispatchForwardedMedia(input: {
   let dispatch: { ok: boolean; status: number; statusText: string; body: any; providerError?: unknown };
   const evolutionRequestStartedAt = Date.now();
   try {
-    const evolutionCaption = caption?.trim() || undefined;
+    const evolutionCaption = productSnapshot ? text : caption?.trim() || undefined;
     dispatch = await outboundMediaEvolutionRequests.run(
       `${request.user!.companyId}:${clientMessageId}`,
       async () => {
@@ -3579,8 +3661,8 @@ async function dispatchForwardedMedia(input: {
             body: JSON.stringify({
               number: evolutionRecipient.number,
               mediatype,
-              mimetype,
-              media,
+              mimetype: productSnapshot?.imageMimeType || mimetype,
+              media: productSnapshot && input.product ? input.product.storage.buildUrl(productSnapshot.imageObjectKey) : media,
               ...(mediatype === 'document' || mediatype === 'video'
                 ? { fileName: mediatype === 'document' ? document?.fileName : fileName }
                 : {}),
@@ -3672,7 +3754,7 @@ async function dispatchForwardedMedia(input: {
     elapsedMs: Date.now() - input.outboundStartedAt,
     evolutionRequestMs: Date.now() - evolutionRequestStartedAt,
   });
-  await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined, outboundProviderKey);
+  const confirmedLocalId = await updateOutboundMessage(localMessage.messageId, 'sent', typeof evolutionMessageId === 'string' ? evolutionMessageId : undefined, outboundProviderKey);
   const realtimeMessageId = typeof evolutionMessageId === 'string' ? evolutionMessageId : localMessage.messageId;
   const realtimeTimestampMs = Date.now();
   publishRealtimeEvent(request.user!.companyId, 'message.upsert', {
@@ -3693,6 +3775,7 @@ async function dispatchForwardedMedia(input: {
         sentByUserId: request.user!.id,
         sentByUserName: request.user!.name,
         ...(mediatype === 'document' && document ? { document } : {}),
+        ...(productSnapshot ? { productSnapshot } : {}),
         ...(clientMessageId ? { clientMessageId } : {}),
         ...(outboundProviderKey ? { providerKey: outboundProviderKey } : {}),
       },
@@ -3723,7 +3806,7 @@ async function dispatchForwardedMedia(input: {
     lease: input.leaseAcquisition.lease,
     remoteJid,
     message: {
-      id: localMessage.messageId,
+      id: confirmedLocalId,
       evolutionMessageId,
       status: 'sent',
       senderName: request.user!.name,
@@ -4267,7 +4350,7 @@ async function dispatchOutboundText(input: {
   };
 }
 
-export async function registerEvolutionRoutes(app: FastifyInstance) {
+export async function registerEvolutionRoutes(app: FastifyInstance, productStorage?: ProductStorage) {
   const webhookMonitor = createEvolutionWebhookMonitor({
     contract: buildEvolutionWebhookContract({
       publicBackendUrl: config.BACKEND_PUBLIC_URL,
@@ -5467,6 +5550,45 @@ export async function registerEvolutionRoutes(app: FastifyInstance) {
       evolutionRecipient,
       leaseAcquisition,
       outboundStartedAt,
+    });
+  });
+
+  app.post('/api/evolution/messages/send-product', { preHandler: requireUser }, async (request, reply) => {
+    const parsed = productSendSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Envio de produto inválido', code: 'invalid_product_send' });
+    if (!productStorage) return reply.code(503).send({ error: 'Armazenamento de produtos indisponível' });
+    const { productId, remoteJid, clientMessageId, priceCentsOverride } = parsed.data;
+    const product = await db.query<{
+      id: string; name: string; price_cents: number; currency: 'BRL';
+      image_object_key: string; image_mime_type: ProductSendSnapshot['imageMimeType'];
+    }>(
+      `SELECT id, name, price_cents, currency, image_object_key, image_mime_type
+       FROM products WHERE company_id = $1 AND id = $2 AND archived_at IS NULL`,
+      [request.user!.companyId, productId],
+    );
+    const row = product.rows[0];
+    if (!row) return reply.code(404).send({ error: 'Produto ativo não encontrado', code: 'product_not_found' });
+    const destination = await resolveConversationForOperation({ companyId: request.user!.companyId, remoteJid }, { createIfMissing: false });
+    if (!destination) return reply.code(404).send({ error: 'Conversa não encontrada', code: 'destination_conversation_not_found' });
+    const snapshot: ProductSendSnapshot = {
+      productId: row.id, name: row.name, priceCents: priceCentsOverride ?? row.price_cents, currency: row.currency,
+      imageObjectKey: row.image_object_key, imageMimeType: row.image_mime_type,
+    };
+    if (!await productStorage.exists(request.user!.companyId, snapshot.imageObjectKey)) {
+      return reply.code(422).send({ error: 'Imagem do produto indisponível', code: 'product_image_unavailable' });
+    }
+    const leaseAcquisition = await acquireOutboundLease({
+      companyId: request.user!.companyId, user: request.user!, number: '', remoteJid, conversationId: destination.id,
+    });
+    if (!leaseAcquisition.acquired) return reply.code(409).send({
+      error: `Atendimento em andamento por ${leaseAcquisition.lease.ownerName}`,
+      code: 'conversation_lease_active', lease: leaseAcquisition.lease,
+    });
+    publishRealtimeEvent(request.user!.companyId, 'conversation.updated', leaseRealtimePayload({ remoteJid, phone: '', lease: leaseAcquisition.lease }));
+    return dispatchForwardedMedia({
+      request, reply, number: '', remoteJid, mediatype: 'image', mimetype: snapshot.imageMimeType,
+      media: productStorage.buildUrl(snapshot.imageObjectKey), caption: productCaption(snapshot),
+      clientMessageId, leaseAcquisition, outboundStartedAt: Date.now(), product: { snapshot, storage: productStorage },
     });
   });
 

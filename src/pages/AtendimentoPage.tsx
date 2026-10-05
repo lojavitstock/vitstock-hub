@@ -24,7 +24,7 @@ import {
   Globe,
   Archive,
 } from 'lucide-react';
-import { Conversation, Message, QuickReply, Tag, WhatsappInstance } from '../types';
+import { Conversation, Message, Product, QuickReply, Tag, WhatsappInstance } from '../types';
 import { EvolutionApiService, type NewMessageDestination } from '../services/evolutionApi';
 import { useAuth } from '../auth/AuthContext';
 import { ConversationTagRail } from '../components/conversations/ConversationTagRail';
@@ -34,6 +34,8 @@ import { MessageTimeline } from '../components/conversations/MessageTimeline';
 import { MessageComposer, MessageComposerHandle } from '../components/conversations/MessageComposer';
 import { ForwardMessageDialog } from '../components/conversations/ForwardMessageDialog';
 import { NewMessageDialog } from '../components/conversations/NewMessageDialog';
+import { ProductPickerDialog } from '../components/conversations/ProductPickerDialog';
+import { useProductReturnState } from '../components/conversations/ProductReturnContext';
 import { formatPhoneForDisplay } from '../utils/phone';
 import { formatMessageTimestamp } from '../components/conversations/conversationFormatters';
 import { useConversationMessages } from '../hooks/useConversationMessages';
@@ -48,6 +50,8 @@ import { normalizeConversationTags } from '../utils/conversationTags';
 import { isMediaBase64SizeAllowed, isMediaFileSizeAllowed } from '../utils/mediaLimits';
 import { outboundErrorMessage } from '../utils/outboundError';
 import { fetchQuickReplies, markQuickReplyUsed } from '../services/quickRepliesApi';
+import { sendProduct } from '../services/productsApi';
+import { mergeConversationMessages } from '../utils/messageMerge';
 import { mockQuickReplies } from '../services/mockData';
 import {
   classifyAttachmentFile,
@@ -74,6 +78,8 @@ export const AtendimentoPage: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const productReturnState = useProductReturnState();
+  const pendingProductReturn = useRef(productReturnState.current);
   const {
     setActiveConversationId: setNotificationActiveConversationId,
     registerConversations: registerNotificationConversations,
@@ -87,7 +93,7 @@ export const AtendimentoPage: React.FC = () => {
   const whatsappConnected = whatsappStatus === 'connected';
   const composerRef = useRef<MessageComposerHandle>(null);
   const composerTextRef = useRef('');
-  const composerDraftsRef = useRef(new Map<string, string>());
+  const composerDraftsRef = useRef(new Map(pendingProductReturn.current?.drafts));
   const composerDraftRevisionRef = useRef(0);
   const activeConversationIdRef = useRef<string | null>(null);
   const autoReadMarkersRef = useRef(new Map<string, string>());
@@ -111,6 +117,8 @@ export const AtendimentoPage: React.FC = () => {
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [deletingMessage, setDeletingMessage] = useState<Message | null>(null);
   const [forwardingMessage, setForwardingMessage] = useState<Message | null>(null);
+  const [productPickerOpen, setProductPickerOpen] = useState(false);
+  const [previewProduct, setPreviewProduct] = useState<Product | null>(null);
   const [messageActionBusyId, setMessageActionBusyId] = useState<string | null>(null);
   // Estado para Nova mensagem; novos destinos permanecem somente no frontend até o primeiro envio.
   const [showNewChatModal, setShowNewChatModal] = useState(false);
@@ -275,10 +283,35 @@ export const AtendimentoPage: React.FC = () => {
     setEditingMessage(null);
     setDeletingMessage(null);
     setForwardingMessage(null);
+    setProductPickerOpen(false);
+    setPreviewProduct(null);
     setQuickReplyOpen(false);
     setShowConversationTagMenu(false);
     clearAttachmentDrafts();
   }, [activeConvId, clearAttachmentDrafts]);
+
+  useEffect(() => {
+    const saved = pendingProductReturn.current;
+    if (!saved || !hasLoadedChats) return;
+    if (!conversations.some((conversation) => conversation.id === saved.conversationId)) {
+      pendingProductReturn.current = null;
+      productReturnState.current = null;
+      return;
+    }
+    if (activeConvId !== saved.conversationId) {
+      setActiveConvId(saved.conversationId);
+      return;
+    }
+    replaceAttachmentDrafts(saved.attachments.map((draft) => ({
+      ...draft,
+      previewUrl: URL.createObjectURL(draft.file),
+    })));
+    setIsInternalNote(saved.isInternalNote);
+    setReplyTo(saved.replyTo);
+    setProductPickerOpen(true);
+    pendingProductReturn.current = null;
+    productReturnState.current = null;
+  }, [activeConvId, conversations, hasLoadedChats, productReturnState, replaceAttachmentDrafts, setActiveConvId]);
 
   useEffect(() => {
     if (isMock) {
@@ -1594,7 +1627,9 @@ export const AtendimentoPage: React.FC = () => {
 
     try {
       let result: any;
-      if ((message.mediaType === 'image' || message.mediaType === 'video' || message.mediaType === 'document')
+      if (message.metadata?.productSnapshot) {
+        result = await sendProduct({ productId: message.metadata.productSnapshot.productId, remoteJid: activeConv.id, clientMessageId });
+      } else if ((message.mediaType === 'image' || message.mediaType === 'video' || message.mediaType === 'document')
         && message.mediaUrl?.startsWith('data:')) {
         const [dataHeader, media] = message.mediaUrl.split(',', 2);
         if (!media) throw new Error('O anexo original não está disponível para nova tentativa.');
@@ -1982,6 +2017,8 @@ export const AtendimentoPage: React.FC = () => {
               onTextChange={handleComposerTextChange}
               onToggleInternalNote={handleToggleInternalNote}
               onToggleQuickReply={() => setQuickReplyOpen((open) => !open)}
+              onOpenProducts={() => { setQuickReplyOpen(false); setPreviewProduct(null); setProductPickerOpen(true); }}
+              onPreviewProduct={(product) => { setQuickReplyOpen(false); setPreviewProduct(product); setProductPickerOpen(true); }}
               onUseQuickReply={handleQuickReplyUse}
               onAttachmentChange={handleAttachmentChange}
               onInputPaste={handleInputPaste}
@@ -1996,6 +2033,34 @@ export const AtendimentoPage: React.FC = () => {
               editingMessage={editingMessage}
               onCancelEditing={cancelEditingMessage}
             />
+            {productPickerOpen && <ProductPickerDialog initialProduct={previewProduct}
+              canSend={!isMock && whatsappConnected && !activeChatLocked && !activeConv.isPending && !sendingMedia && !isInternalNote}
+              onSend={async (productId, clientMessageId, priceCentsOverride) => {
+                const conversationId = activeConv.id;
+                const result = await sendProduct({ productId, remoteJid: conversationId, clientMessageId, ...(priceCentsOverride === undefined ? {} : { priceCentsOverride }) });
+                if (!['sent', 'delivered', 'read'].includes(result.message.status)) {
+                  throw new Error('O envio ainda está em processamento. Aguarde antes de tentar novamente.');
+                }
+                // Only confirmed history is merged; SSE remains the primary incremental path.
+                try {
+                  const confirmed = await EvolutionApiService.fetchMessages(instanceName, conversationId, '', attendantName);
+                  if (activeConversationIdRef.current === conversationId) {
+                    setMessages((previous) => mergeConversationMessages(previous, confirmed));
+                  }
+                } catch {
+                  setAssignmentFeedback('Produto enviado. O histórico será atualizado pela sincronização normal.');
+                }
+              }} onCreateProduct={() => {
+              if (!activeConvId || sendingMedia) return;
+              productReturnState.current = {
+                conversationId: activeConvId,
+                drafts: new Map(composerDraftsRef.current),
+                attachments: attachmentDraftsRef.current.map(({ previewUrl: _previewUrl, ...draft }) => draft),
+                isInternalNote,
+                replyTo,
+              };
+              navigate('/configuracoes?tab=products&action=new');
+            }} onClose={() => { setProductPickerOpen(false); setPreviewProduct(null); composerRef.current?.focus(); }} />}
             {deletingMessage && (
               <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 px-4" role="dialog" aria-modal="true" aria-labelledby="delete-message-title">
                 <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#20292f] p-5 shadow-2xl">

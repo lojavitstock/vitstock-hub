@@ -1,6 +1,6 @@
 # Vitstock Hub — Runbook de Desenvolvimento
 
-> **Fluxo de integração:** use a branch explicitamente indicada pela tarefa como baseline de implementação. No fluxo compartilhado, `preview` é a branch de integração e validação antes da promoção, sob aprovação humana, para `main`.
+> **Fluxo de integração:** toda alteração nova começa em `feature/*`, `fix/*` ou `chore/*` baseada em `origin/preview`, salvo tarefa explicitamente diferente. O fluxo normal integra por PR em `preview` para deploy de pré-produção e teste humano; Production (`main`) recebe somente PR de `preview` após gates técnicos, validação humana e decisão explícita de promoção.
 >
 > Este runbook descreve procedimentos do repositório atual. Ele não autoriza deploy, merge, migrations de produção, alteração de infraestrutura ou uso de credenciais.
 
@@ -19,19 +19,21 @@ entender escopo e ler contexto necessário
   ↓
 verificar Git e ambiente
   ↓
+criar branch própria de origin/preview (salvo exceção explícita)
+  ↓
 implementar mudança pequena
   ↓
 testes / checks / build aplicáveis
   ↓
 revisar diff
   ↓
-commit e push, quando autorizados
+commits/checkpoints e push da branch própria; Draft PR quando pertinente
   ↓
-READY FOR HUMAN REVIEW
+PR para preview, revisão técnica e integração autorizada
   ↓
-Preview e validação humana
+deploy Preview → READY FOR HUMAN REVIEW → validação humana
   ↓
-merge humano
+decisão explícita de promoção → PR preview para main
 ```
 
 Testes e builds aprovados demonstram validação técnica, não aprovação funcional, de UX ou de produção.
@@ -53,11 +55,11 @@ Antes de modificar qualquer arquivo:
    git status
    ```
 
-4. Se a tarefa indicar uma branch, use-a como baseline. Não troque de branch automaticamente quando houver divergência: informe o problema.
+4. Execute `git fetch origin` e confirme `origin/preview` como baseline, salvo exceção explícita na tarefa. Com working tree limpa, crie uma branch `feature/<descricao>`, `fix/<descricao>` ou `chore/<descricao>` a partir dela. Se houver divergência, preserve o estado e informe o problema antes de mudar de branch.
 5. Identifique os arquivos, testes e efeitos colaterais diretamente relacionados.
 6. Investigue a implementação existente antes de editar. Para bugs sem causa clara, diagnostique antes de corrigir.
 
-Não é necessário criar branch nova quando a tarefa já atribui uma. Nunca trabalhe diretamente em `main`.
+Nunca desenvolva diretamente em `preview` ou `main`. Reutilize uma branch existente somente para continuar trabalho explicitamente identificado, depois de verificar sua baseline; não a reutilize para uma tarefa nova.
 
 ### Fila autorizada e execução de uma Issue
 
@@ -67,12 +69,12 @@ Trabalhe em uma única Issue autorizada por vez. Não misture escopos nem inicie
 
 1. localize a Issue aberta e confirme `codex-ready`, quando o trabalho vier da fila;
 2. leia a Issue e confirme o escopo e os critérios de aceite;
-3. confirme a baseline indicada, sem assumir `main`;
-4. crie/use `codex/issue-<numero>-<slug-curto>` a partir da baseline confirmada;
+3. confirme `origin/preview` como baseline, salvo tarefa explicitamente diferente;
+4. crie/use a branch própria, por exemplo `feature/issue-<numero>-<slug-curto>` ou `fix/issue-<numero>-<slug-curto>`;
 5. investigue o código e implemente a menor mudança verificável;
 6. execute os checks aplicáveis de `docs/TESTING.md`;
 7. faça o self-review do diff e confirme que não há mudanças fora do escopo;
-8. crie commit, faça push somente da branch da Issue e prepare a Pull Request contra a baseline correta, quando solicitado;
+8. crie commits/checkpoints, envie cedo somente a branch da Issue e prepare PR para `preview`; features/fixes significativos podem abrir Draft PR antes da conclusão;
 9. remova `codex-ready` após criar a Pull Request e mantenha a Issue aberta;
 10. forneça o plano de validação manual e pare em **READY FOR HUMAN REVIEW**.
 
@@ -91,13 +93,78 @@ O objetivo é preservar trabalho preexistente, mesmo quando ele parecer incomple
 
 ## 4. Política de branches e Git
 
-- Nunca faça commit, push ou merge direto em `main`.
-- Use a branch atribuída pela tarefa. Se não houver uma, crie uma branch descritiva somente quando necessário, preferencialmente `codex/<tipo>-<descricao>`.
+- Nunca desenvolva ou faça commit diretamente em `preview` ou `main`.
+- Para trabalho novo, use `feature/<descricao>`, `fix/<descricao>` ou `chore/<descricao>` a partir de `origin/preview`, salvo tarefa explicitamente diferente.
+- O fluxo normal não usa push direto para `preview` ou `main`; integrações e promoções ocorrem por PR.
 - Nunca use `git push --force` em branch compartilhada.
 - Nunca reescreva histórico compartilhado ou exclua branch remota sem autorização explícita.
-- O merge depende de aprovação humana após Preview e validação funcional.
+- Enquanto não for necessário teste humano oficial, mantenha o trabalho na branch de desenvolvimento.
+- Integração em `preview` exige revisão e autorização. Promoção para `main` exige gates técnicos, validação humana no Preview e decisão explícita.
 
-O fluxo compartilhado é `preview` → validação e testes → `main`; a promoção depende de aprovação humana.
+O modelo de branches é:
+
+```text
+feature/*, fix/*, chore/*
+  → PR e integração autorizada em preview
+  → deploy de pré-produção e validação humana
+  → decisão explícita de promoção e PR preview → main (Production)
+```
+
+### Draft PR e checkpoint remoto
+
+Publique cedo features/fixes significativos na branch própria; um Draft PR para `preview` pode ser aberto ainda durante o desenvolvimento. Ele mantém checkpoint remoto, diff visível, CI, continuidade entre computadores e espaço para revisão. Não é aprovação funcional nem autorização automática de merge ou deploy.
+
+Nenhuma sessão deve terminar com trabalho relevante existindo somente localmente. Antes de encerrar ou trocar de computador:
+
+1. revise o diff e execute a validação proporcional; exclua secrets e arquivos fora do escopo;
+2. adicione somente os arquivos relevantes e crie um commit/checkpoint na branch própria, mesmo que o trabalho ainda esteja incompleto;
+3. envie a branch ao GitHub e faça `git fetch origin`;
+4. compare `git rev-parse HEAD` e `git rev-parse origin/<branch-de-trabalho>` para confirmar a publicação do checkpoint; se os refs diferirem, investigue sem force;
+5. deixe a working tree limpa ou documente um estado explicitamente preservado, incluindo localização e forma de recuperação das pendências.
+
+Um commit só local, um Draft PR sem os últimos commits ou um diff não publicado não satisfazem esse checkpoint. Preservar trabalho local preexistente pode exigir uma tarefa explícita de checkpoint; não o descarte nem misture com outra tarefa.
+
+### Sincronização em outro computador
+
+Comece por leitura e atualização de refs:
+
+```powershell
+git fetch origin
+git branch --show-current
+git rev-parse HEAD
+git status --short
+git remote -v
+git rev-parse origin/<branch-de-trabalho>
+git rev-list --left-right --count <branch-de-trabalho>...origin/<branch-de-trabalho>
+```
+
+Na contagem, o primeiro número é ahead local e o segundo é behind. Se houver alterações locais, commits exclusivos ou divergência, pare, registre e preserve o estado. Não use reset, rebase, force, clean, restore ou stash automático como reação para resolver diferenças.
+
+Com working tree limpa, remoto oficial confirmado e branch local sem commits exclusivos, use `git switch <branch-de-trabalho>` e confira novamente branch e ahead/behind. Se a branch local não existir, crie tracking com `git switch --track origin/<branch-de-trabalho>` depois de confirmar o ref remoto. Não sincronize `main` quando a tarefa for de Preview ou de outra branch.
+
+Somente com branch correta, ahead=0 e sem divergência:
+
+```powershell
+git pull --ff-only origin <branch-de-trabalho>
+git rev-parse HEAD
+git rev-parse origin/<branch-de-trabalho>
+git status --short
+```
+
+Se já estiver alinhada, nenhum pull é necessário. Se o fast-forward falhar, preserve o estado e diagnostique; não gere merge ou rebase automático. Pull não recupera commits que nunca foram enviados pelo outro computador.
+
+### Encerramento e limpeza de branches
+
+Não apague `feature/*`, `fix/*` ou `chore/*` apenas por serem antigas. A remoção exige autorização e todas estas evidências:
+
+1. PR mergeado no destino correto;
+2. nenhum commit exclusivo local ou remoto;
+3. trabalho validado no estágio apropriado, incluindo Preview humano quando aplicável;
+4. nenhuma necessidade razoável de recuperação ou referência pendente.
+
+Atualize refs com `git fetch origin` e consulte o estado do PR. Compare a branch local com sua remota (`git log origin/<branch>..<branch>`) e revise `git cherry -v origin/preview <branch>` e `git cherry -v origin/preview origin/<branch>`. Qualquer linha `+` indica mudança exclusiva e bloqueia a remoção. Merge por squash pode manter SHAs diferentes; confirme também o diff e o PR, sem presumir exclusividade ou segurança apenas pelos nomes dos commits.
+
+Depois do encerramento, prefira remover as cópias local e remota. Fora da branch alvo, use `git branch -d <branch>` e, após a confirmação remota, `git push origin --delete <branch>`. Se `-d` recusar, pare e investigue; não use `-D` automaticamente. Preserve checkpoints enquanto ainda forem necessários para revisão ou recuperação.
 
 ## 5. Dependências
 
@@ -119,6 +186,8 @@ Use `npm install` (ou `npm --prefix server install`) apenas quando uma tarefa au
 | `server/src/config.ts` | Validação e normalização da configuração de runtime do backend. |
 
 O backend carrega `.env.local` da raiz e também aceita um `.env.local` dentro de `server/`, sem sobrescrever valores já definidos. Arquivos reais `.env`/ `.env.local` não devem ser commitados ou copiados para logs, Issues, PRs ou documentação.
+
+Configurações reais `.env`, `.env.*`, `*.local` e credenciais ficam fora do Git. Somente modelos como `.env.example` e `.env.e2e.preview.example`, sem valores sensíveis, são versionados. Secrets precisam de estratégia separada de armazenamento/sincronização em mecanismo seguro autorizado; Git não transporta esses valores entre computadores. Bancos Docker e outros artefatos ignorados também exigem preparo separado.
 
 Variáveis `VITE_*` já representadas no modelo, como `VITE_API_URL` e `VITE_USE_MOCK_DATA`, são públicas no bundle. Nunca coloque segredos nelas.
 
@@ -291,7 +360,7 @@ Quando ferramenta, serviço ou configuração externa estiver indisponível, pri
 
 ### Commit
 
-Faça commit somente quando solicitado. Antes, execute a validação aplicável, revise o diff e confirme que não há segredo ou arquivo fora do escopo.
+Faça commits/checkpoints pequenos para preservar trabalho relevante dentro do escopo autorizado, inclusive antes de encerrar uma sessão ou trocar de computador. Antes, execute a validação proporcional, revise o diff e confirme que não há segredo ou arquivo fora do escopo.
 
 Use Conventional Commits claros:
 
@@ -305,11 +374,11 @@ Não misture mudanças não relacionadas no mesmo commit.
 
 ### Push
 
-Faça push somente com instrução/autorização. Nunca faça push para `main` nem use `git push --force` em branch compartilhada.
+Publique cedo a branch própria e confirme o checkpoint em `origin`, conforme o procedimento da seção 4 e o escopo autorizado. O fluxo normal não usa push direto para `preview` ou `main`, nem force push em histórico compartilhado.
 
 ### Pull Request / entrega para revisão
 
-Quando solicitado, prepare:
+Para a revisão de um PR para `preview`, prepare:
 
 ```text
 ## Problem
@@ -325,10 +394,12 @@ Para migrations, acrescente `## Migration Impact`. Em alterações sensíveis de
 
 ## 13. Preview e validação humana
 
-O Preview da Vercel é o ambiente de validação funcional antes do merge:
+Preview é o ambiente oficial de integração, deploy de pré-produção e teste humano antes da promoção para `main`:
 
 ```text
-branch → push → READY FOR HUMAN REVIEW → Preview → validação humana → merge
+branch própria → PR → revisão e integração autorizada em preview → deploy
+→ READY FOR HUMAN REVIEW → validação humana
+→ decisão explícita de promoção → PR preview para main
 ```
 
 O agente pode confirmar implementação, checks executados e a existência de Preview quando observável. Não pode confirmar sozinho aprovação funcional, UX, integração ou prontidão para produção.
@@ -354,15 +425,15 @@ validação técnica
 ↓
 revisão do diff
 ↓
-commit/push/PR quando autorizado
+checkpoint remoto e PR para preview
 ↓
-READY FOR HUMAN REVIEW
+revisão e integração autorizada em preview
 ↓
-Preview
+deploy Preview → READY FOR HUMAN REVIEW
 ↓
 validação humana
 ↓
-merge humano
+decisão explícita de promoção → PR preview para main
 ```
 
 O Codex é atualmente o único agente automatizado autorizado nesse fluxo. Ferramentas auxiliares futuras dependerão de autorização humana explícita e não recebem autoridade automática para merge, deploy, produção, migrations de produção ou secrets.
@@ -376,13 +447,14 @@ Uma tarefa chega a **READY FOR HUMAN REVIEW** quando, conforme aplicável:
 - diff revisado;
 - documentação necessária atualizada;
 - branch correta;
-- commit, push e PR feitos somente quando solicitados;
+- trabalho relevante commitado e publicado na branch própria, com checkpoint confirmado em `origin`;
+- PR criado/atualizado quando solicitado, podendo ser Draft durante o desenvolvimento;
 - riscos e pendências informados;
 - plano objetivo de teste manual fornecido.
 
 Não use apenas `DONE`: aprovação funcional continua sendo humana.
 
-Após a validação humana, o merge somente pode ocorrer com autorização explícita, na baseline correta. Em seguida, registre a validação, feche a Issue quando apropriado, remova a branch da Issue somente quando for seguro e sincronize a baseline. **READY FOR HUMAN REVIEW** nunca implica merge automático.
+Integração da branch em `preview` e promoção para `main` são decisões distintas. Após gates técnicos e validação humana no Preview, a promoção só ocorre por PR de `preview` para `main` e decisão explícita. Registre a validação e feche a Issue quando apropriado; remova branches somente pelo procedimento da seção 4. **READY FOR HUMAN REVIEW** nunca implica merge automático.
 
 ### Relatório final
 
@@ -427,6 +499,43 @@ Regression checks:
 Para Atendimento, inclua Inbox, timeline, mensagens, SSE/polling, scroll, atualização otimista ou conexão apenas quando a mudança afetar esses fluxos.
 
 ## 17. Referência rápida de comandos confirmados
+
+### Bling foundation — gate separado de OAuth real
+
+Runtime é API v3/OAuth, nunca MCP. Configure somente no backend e somente após
+revisão/autorização separada: `BLING_CLIENT_ID`, `BLING_CLIENT_SECRET`,
+`BLING_REDIRECT_URI`, `INTEGRATION_ENCRYPTION_KEY`. A chave é independente,
+32 bytes criptograficamente aleatórios em base64; preserve-a em armazenamento
+seguro, não no Git. Perder/trocar a chave exige reconectar os tenants existentes.
+Callback cadastrado no app Bling deve corresponder ao env, terminar em
+`/api/integrations/bling/callback` e usar HTTPS fora de QA. Não copiar credenciais
+Production para Preview. Envs incompletos/chave inválida/callback inválido
+desabilitam a conexão sem impedir o backend de iniciar. Preserve a mesma chave
+por ambiente durante redeploys; não gere uma nova chave a cada deployment.
+O pool Bling acrescenta no máximo uma conexão por processo ao pool Hub existente
+(default quatro); considerar esse total e deploys sobrepostos no limite Railway.
+Falha da troca de token mantém state consumido: iniciar um novo Conectar.
+Token POST usa apenas grant_type/code ou grant_type/refresh_token; redirect_uri
+é compatível no authorize, mas o Bling usa o callback cadastrado no aplicativo.
+
+Migration `022_bling_integration.sql` é aditiva (três tabelas da integração).
+Migration `023_product_bling_links.sql` adiciona o vínculo Bling da Product
+Library e saldos por depósito; não altera registros históricos de mensagens.
+Validar ambas somente pelo harness QA local guardado. Railway aplicará pelo
+runner existente apenas em deployment posteriormente aprovado; esta tarefa não
+autoriza aplicar migration em Preview/Production.
+Recuperação lógica, por operador autorizado: desabilitar env Bling/reverter código
+sem remover tabelas; remoção posterior das três tabelas perde vínculos/states/
+budget mas não afeta catálogo local. Não apagar a migration de controle em uso.
+
+Primeiro OAuth real: gate separado, humano ADMIN no Preview, conferir contrato
+de token/JWT divergente nos exemplos oficiais, status sanitizado, leitura de uma
+página/produto/depósito/estoque e desconexão. Nunca scan completo, sync, pedidos,
+webhooks, importação de imagens ou alteração da Product Library. Não registrar
+codes/tokens nem anexar HAR/trace contendo callback/credenciais. Desconectar no
+Hub não revoga o app na conta Bling; revogação é feita separadamente no provider.
+401 persistente exige reconectar; não repetir token POST automaticamente após
+timeout, pois uma rotação pode ter ocorrido. Não promover só por testes verdes.
 
 ```powershell
 # Git (leitura e revisão)

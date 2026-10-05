@@ -142,6 +142,12 @@ Principais conceitos:
 
 A experiência deve favorecer velocidade operacional sem perder contexto.
 
+### Biblioteca de Produtos no Atendimento
+
+O picker de Produtos oferece um `+` amarelo para administradores, que abre Configurações → Produtos diretamente no formulário de cadastro na mesma aba, por navegação SPA. Ao retornar pelo histórico ou pela navegação do aplicativo, a conversa, o rascunho e os anexos são restaurados em memória e o picker busca produtos novamente. Esse contexto temporário não sobrevive a reload ou logout; arquivos não são gravados em armazenamento persistente. No composer, `\` pesquisa produtos por nome, incluindo nomes com espaços, e permite selecionar por clique ou pelas setas e Enter. A seleção abre a mesma prévia de produto; Escape fecha as sugestões. O atalho `/` de mensagens rápidas mantém seu comportamento.
+
+Na prévia, Enviar transmite a imagem e uma legenda com nome e preço BRL para a conversa existente, preservando sua identidade PN/LID/grupo. O backend define esses dados a partir do produto ativo da empresa. O botão indica envio em andamento e impede duplo clique; falhas mantêm a prévia aberta com erro e permitem repetir a mesma tentativa. O envio não consome o rascunho, anexos ou reply do composer. O cartão histórico usa snapshots do momento do envio, mesmo se o produto for editado ou arquivado posteriormente. O envio real no Preview depende de gate separado autorizado e validação humana; testes locais usam somente mock Evolution.
+
 ---
 
 # 5. Inbox
@@ -540,6 +546,42 @@ O roadmap detalhado pertence a `ROADMAP.md`.
 ---
 
 # 22. Product Philosophy
+
+## Bling integration foundation
+
+Configurações → Integrações inclui Bling, com conexão/desconexão por ADMIN e
+status sanitizado por empresa. A primeira fase usa API v3/OAuth no backend
+(não MCP), tokens criptografados e leitura paginada de produtos, depósitos e
+saldos físicos/virtuais distintos. A Product Library suporta importação com
+imagem local, alteração da identidade por relink, sincronização explícita e
+arquivamento. Desvincular um produto é proibido; a rota legada responde HTTP
+409 sem mutações. OAuth real no Preview exige revisão e autorização humana em
+gate separado.
+
+Novos produtos só podem ser importados do Bling por ADMIN; criação manual é
+rejeitada também no backend. `source=manual` permanece apenas para registros
+legacy anteriores à regra, até um gate separado de limpeza exclusivamente no
+Preview. Produtos operacionais devem permanecer vinculados ao Bling: relink
+altera a identidade provider, e arquivar remove o item do uso ativo sem apagar
+seu vínculo, imagem ou histórico. Para itens vinculados, `products.name` é
+o nome local editável no Hub e `product_bling_links.bling_name` preserva o nome
+autoritativo do Bling. Preço, SKU, GTIN, unidade, status/formato e estoque
+físico/virtual permanecem autoritativos do provider; imagem, arquivamento e
+histórico são locais. SKU é obrigatório e único por empresa após trim e
+comparação sem distinção de caixa. Estoque efetivo usa virtual quando presente
+(inclusive zero/negativo), senão físico; ambos ausentes bloqueiam a operação.
+Uma imagem JPEG/PNG/WebP local de até 1 MB é obrigatória na importação e pode
+ser colada em qualquer ponto dos modais de adicionar/editar; texto colado
+continua normal e imagem inválida não substitui a seleção atual.
+
+As migrations 023 (vínculo/saldos) e 024 (índice único normalizado de SKU) são
+validadas somente pela infraestrutura QA local guardada nesta tarefa; não
+aplicar ao banco Preview nem Production neste fluxo. O preview de envio mostra
+nome local, SKU, estoque efetivo e preço cadastrado, e permite um preço BRL
+específico por mensagem. O backend valida e persiste esse override somente no
+snapshot histórico da mensagem, sem alterar preço de catálogo/cache e sem
+chamar o Bling durante o envio. Atendentes podem ler dados em cache; mutações de
+produto continuam exclusivas de ADMIN.
 
 Vitstock Hub deve permanecer uma ferramenta prática.
 

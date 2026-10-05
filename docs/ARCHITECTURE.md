@@ -1,6 +1,6 @@
 # Vitstock Hub — Architecture
 
-> **Integration flow:** `preview` is the current integration and validation branch. After review and human functional validation, changes may be promoted to `main`. For an isolated task, use the branch explicitly indicated by that task as the implementation baseline.
+> **Integration flow:** new work starts from `origin/preview` in a dedicated `feature/*`, `fix/*` or `chore/*` branch unless the task explicitly specifies otherwise. PRs integrate work into `preview` for pre-production deployment and human validation; a separate PR from `preview` to `main` promotes Production only after technical gates, human validation and an explicit promotion decision. Development does not occur directly on either integration branch.
 >
 > When investigating implementation details, confirm behavior in the source code, migrations and tests.
 
@@ -161,7 +161,8 @@ The current migration sequence also includes:
 
 - `018_conversation_tags.sql` — conversation-scoped tags and their links, including tenant-scoped uniqueness and indexes;
 - `019_evolution_message_staging.sql` — tenant-scoped staging for provider messages awaiting processing, with expiry and attempt tracking;
-- `020_quick_replies.sql` — company/user quick replies, shortcuts, ordering, usage counts and active-state constraints.
+- `020_quick_replies.sql` — company/user quick replies, shortcuts, ordering, usage counts and active-state constraints;
+- `021_product_library.sql` — company-scoped product metadata and message-product snapshot references. The reference table enforces that both the message and product belong to the same company.
 
 ### Main entities
 
@@ -177,6 +178,7 @@ The schema is company-scoped. The important tables are:
 | Google Contacts | `google_connections` and Google-related fields on `contacts` | OAuth token material is stored encrypted by the backend integration; migration 017 adds persisted sync state, last-sync summary and a safe error message for the administrative integration card. |
 | Operational conversation state | `conversation_assignments`, `conversation_statuses`, `conversation_read_states`, `conversation_daily_responders`, `conversation_notes`, `conversation_leases` | These are scoped by company and Evolution JID or conversation. |
 | Provider contact cache | `whatsapp_contact_names` | Stores provider names and avatars independently of Google contact data. |
+| Product library | `products`, `message_product_refs` | Company-scoped catalog metadata and immutable product/price/image-key snapshots inserted atomically with local outbound messages. |
 
 `messages.metadata` holds optional provider and UI-relevant data, including media/document metadata, quoted-message context, Hub authorship (`sentByHub`, user identifiers and `clientMessageId`), traffic metadata, location/contact card data and reactions.
 
@@ -464,6 +466,62 @@ The timeline supports image, audio, video, sticker and document message types. `
 
 `MediaViewer` is a focused modal for images, videos and PDFs. It supports close button, Escape, optional overlay close, focus containment and download. Opening/closing a viewer does not change the active conversation or reload history.
 
+### Product library and image storage
+
+`/configuracoes?tab=products` uses its own product API and UI; it is not coupled to Quick Replies. `server/src/products.ts` derives company scope from the authenticated session, permits product reads to authenticated company users, and restricts create/update/archive and Bling linking to `admin`. Search is name-only and excludes archived products. Products are archived rather than hard-deleted.
+
+Products have an explicit source: legacy `manual` or `bling`. `manual` exists
+only for pre-rule legacy records; new and operational products must remain
+Bling-backed. New products can only be created by importing an active Bling
+product; `POST /api/products` rejects manual creation in normal runtime. For
+linked products, Bling is authoritative for product ID, `bling_name`, price, SKU/code, GTIN,
+unit, status, format, explicit parent relation and physical/virtual stock.
+`products.name` is the Hub's editable local display name and is never replaced
+by import, link, relink or sync. The Hub also owns the local image, archive
+state and message history. `product_bling_links` is company-scoped and stores
+the last sanitized provider snapshot. `product_bling_stock_balances` stores
+physical and virtual balances separately by warehouse. Migration
+`023_product_bling_links.sql` adds the link and balance tables; migration
+`024_product_bling_sku_unique.sql` adds only a partial unique index on
+`(company_id, lower(btrim(bling_code)))`. The guarded local QA harness is the
+validation target; do not apply migrations to Preview or Production as part of
+ordinary local verification.
+
+ADMIN can import an active Bling product only with a local JPEG/PNG/WebP image
+up to 1 MB, link/relink an existing local product, explicitly sync its current
+Bling ID, and archive products no longer in active use. Unlinking a product is
+prohibited: the compatibility route `DELETE /api/products/:id/bling-link`
+returns 409 without issuing database writes. Import/link/sync fetch authoritative
+detail and stock before a database transaction; active status, nonblank SKU and numeric
+effective stock are required. Effective stock is `stockVirtualTotal ??
+stockPhysicalTotal`: zero and negative virtual balances are valid, and physical
+stock is used only when virtual stock is absent. Missing/invalid price, missing
+SKU, unresolved stock or mismatched provider IDs fail before writes. A
+company-scoped partial unique index prevents duplicate trimmed,
+case-insensitive SKUs; link/relink/sync conflicts return 409 and transaction
+rollback preserves the previous cache. The full provider snapshot and
+warehouse-balance replacement commit atomically. Relink and sync update
+authoritative Bling fields without changing the local display name, image,
+archive state or historical message snapshots. Archive removes a product from
+active use while retaining its row, Bling link/balances, image and history. The
+rejected unlink route leaves the product, link, balances, image and snapshots
+unchanged. ADMIN may edit the local display name and image; catalog price and
+Bling identity remain read-only. Authenticated company users can read cached
+linked data while Bling is disconnected; all
+these mutations remain ADMIN-only.
+
+The product image contract accepts JPEG, PNG or WebP up to 1,000,000 decoded bytes, validates base64 plus magic bytes against the declared MIME type, and stores only an immutable object key and metadata in PostgreSQL. Add/edit forms accept image paste anywhere in the modal: supported images up to 1 MB replace the selection, invalid images preserve the previous selection, and plain-text paste remains native. `ProductStorage` has two explicit drivers: `memory` for local/QA and `r2` for an explicitly configured S3-compatible Cloudflare R2 bucket. R2 requires `PRODUCT_STORAGE_DRIVER=r2` plus server-side `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` and `R2_PUBLIC_BASE_URL`; these must never be exposed through `VITE_` variables. When no driver is set, only local/QA can receive the in-memory adapter; external databases do not silently receive ephemeral storage. Explicit `r2` configuration is validated at startup and registers the product routes; incomplete configuration fails without printing credential values.
+
+R2 object keys are generated by the backend as `products/<company_id>/<product_uuid>/<image_uuid>.<ext>`; the browser never chooses the key or receives S3 credentials. R2 stores image bytes, while PostgreSQL stores product metadata and the key. Public image URLs use the configured custom-domain base; this bucket's images are intentionally public. The Preview bucket is `vitstock-hub-products-preview` at `https://media-preview.vitstock.com.br`; its managed `r2.dev` URL must remain disabled. Railway Preview environment values are a later deployment step and are not part of the local integration.
+
+The in-memory adapter remains the default for local/QA and is not safe for external databases or multiple backend instances. Update-image creates a new immutable key and does not delete the previous object; archiving a product also preserves its image. If product-row creation fails after an upload, the backend makes a best-effort delete of only that request's new object and logs cleanup failure without replacing the original database error.
+
+The product preview shows local name, linked SKU/effective stock, registered catalog price and an editable positive BRL message price (up to two decimals). It submits `productId`, the existing conversation's explicit `remoteJid`, `clientMessageId` and optional integer-cent `priceCentsOverride` to authenticated `POST /api/evolution/messages/send-product`. The backend validates the override and snapshots it only into that message; catalog and Bling cache prices are unchanged. It requires an active tenant-owned product and accessible existing tenant conversation, then acquires the normal conversation lease. Name, image key/URL, bucket and company remain server-owned. `ProductStorage.buildUrl()` supplies the trusted image URL and catalog supplies MIME; Evolution receives `sendMedia` with `mediatype=image`, exact PN/LID/group recipient and local display name plus the deterministic message-snapshot price. This path makes no Bling call and reads only local cache.
+
+The normal outbox transaction locks the client ID and catalog row, inserts a pending local message with structured `productSnapshot`, and inserts `message_product_refs` using its local UUID (not the provider ID). This path uses the locally cached product/image and makes no realtime Bling request. Failure rolls back both before transport; provider rejection retains a failed message/ref. Only failed attempts can retry, reusing their original snapshot/ref; accepted or pending attempts are deduplicated without another provider request or message-upsert publication. Reusing a product client ID for another product or transport JID is rejected. If an early webhook creates a provider row, confirmation transfers the reference and Hub metadata to the surviving local UUID transactionally before removing the pending row.
+
+After success the existing message-upsert/SSE path updates the timeline; the UI merges confirmed history as a safety fallback, not a parallel optimistic product message. `ProductMessageCard` recognizes only structured metadata, never captions, URLs, filenames or OCR. Stored name, integer price, BRL currency and immutable image key survive catalog edits, replacement images, archiving, linking, relinking and sync; rejected unlink attempts do not mutate them. Historical images are served through the authenticated storage route authorized by the tenant's message references. A real Preview provider send still requires a separately authorized human gate.
+
 ### Quoted messages
 
 Quoted/reply metadata is message-scoped. `quotedMessage.ts` creates the small quoted representation from explicit message/provider keys. The backend persists inbound quoted context in `messages.metadata`; when the original is already known it can be used as the preview source, otherwise the quoted payload supplies a compact fallback.
@@ -491,6 +549,7 @@ Reactions belong to the original message, not to an independent timeline row. Re
 | Notes and business data | `/api/evolution/notes`, `/notes/list`, `/business-profile` |
 | Provider ingress | `POST /webhooks/evolution` |
 | Google/contacts | `/api/google/status`, `/api/google/connect`, `/api/google/callback`, `/api/google/sync`, `/api/google/disconnect`, `/api/google/contact*`, `/api/contacts`, `/api/contact-tags` |
+| Product library (memory in local/QA; explicitly configured R2 where enabled) | `/api/products`, `/api/products/:id`, `/api/products/:id/archive`, `/api/products/bling-links`, `/api/products/:id/bling-link`, `/api/products/:id/bling-sync`, `/api/products/bling-import`, `/api/products/storage?key=...`, `/api/evolution/messages/send-product` |
 
 Operational routes use the authenticated server boundary. The deliberately public entry points—login, the OAuth callback and the provider webhook—use their own route-specific validation.
 
@@ -578,6 +637,105 @@ When a task changes message flow, Inbox state, SSE, caching, connection lifecycl
 5. update this document when the architecture or a permanent decision changes.
 
 If this document conflicts with the current implementation, inspect the source code, migrations and tests before making changes. Once actual behavior is confirmed, update this document so the architecture documentation remains aligned with the implementation.
+
+## 24. Bling integration
+
+`bling.ts` exposes authenticated, tenant-bound `/api/integrations/bling` routes.
+`blingClient.ts` calls Bling API v3 directly; MCP/ChatGPT are not runtime dependencies.
+Connect, callback and disconnect require an active ADMIN session. The callback
+requires the same user/company that started authorization. Random 256-bit state
+is hashed in PostgreSQL, expires after five minutes and is atomically marked used
+before exchanging the code. Reconnect invalidates previous states; disconnect
+removes pending states. Cookies/session must still be valid at callback time.
+
+Migration `022_bling_integration.sql` adds `bling_connections`,
+`bling_oauth_states` and `bling_request_budgets`. Migration
+`023_product_bling_links.sql` adds the company-scoped Product Library link and
+warehouse-balance cache; `024_product_bling_sku_unique.sql` adds only the
+normalized company/SKU uniqueness index. Product images remain local Hub/R2
+objects and are never fetched from Bling. Access/refresh tokens use AES-256-GCM with a separate backend
+`INTEGRATION_ENCRYPTION_KEY` (32 random bytes in base64). AAD binds ciphertext to
+provider, version, company and token kind. The key must remain persistent per
+environment; replacing/losing it requires reconnecting existing companies, with
+no fallback decryption key. Google encryption was inspected but
+not reused because it currently derives its key from `SESSION_SECRET`.
+Request logging omits query strings, including OAuth code/state; integration
+errors never include provider bodies, credentials or authorization headers.
+
+PostgreSQL company advisory transaction locks serialize refresh/reconnect/
+disconnect across replicas. Successful token rotations and consumed request
+budgets commit even if the later provider GET fails. SQL/storage failure after
+provider rotation is not recoverable atomically across both systems: reconnect
+may be required. No OAuth POST is automatically retried. Refresh occurs within
+60 seconds of access-token expiry, or once after 401. A second 401 fails closed.
+
+A conservative shared PostgreSQL budget serializes ALL Hub Bling calls (not
+just per company), including across replicas: at least 340 ms between requests,
+120,000/day using the UTC calendar date, and at least 3,100 ms between
+token requests (below the documented 20/minute/IP). Locks remain held through
+transport to avoid delayed-reservation bursts, using one pool connection. Spacing
+is also extended after each HTTP attempt (including failures), so a late database
+acknowledgement cannot compress actual dispatches. This deliberately sacrifices
+throughput/holds a DB connection for a bounded request.
+Bling owns a separate pool capped at one connection and closes it with Fastify.
+The Hub pool remains bounded by DB_POOL_MAX (default four, maximum eight): a
+configured integration adds at most one connection per process, not per tenant.
+This prevents slow provider calls from exhausting session/inbox/health slots,
+including DB_POOL_MAX=1. Bling requests may fail with a bounded pool/lock timeout;
+they do not block unrelated Hub requests. No pool is created if Bling is disabled.
+Other apps/accounts sharing an upstream account or egress IP are outside Hub
+coordination; 429 remains authoritative. Retry-After cooldown is persisted.
+GET retries are limited to two for network/5xx/429 (backoff+jitter); waits over
+five seconds return a sanitized limit error instead of retrying too early.
+Each attempt has an eight-second timeout covering headers AND body, a 5 MiB
+body ceiling and no redirect following. Database lock wait is capped at 12 s.
+
+Read routes allow only fixed product/deposit/stock paths, explicit page/limit
+(1..10,000 / 1..100; defaults 1/50), product name/type and warehouse
+description/status filters. The operational product-selection catalog always
+uses upstream `criterio=2` (active products); clients cannot override that
+criterion, and the Hub fails closed if the provider returns any non-active item
+in that catalog page. Import, link and relink revalidate status from the
+authoritative detail response and accept only `A`. Sync of an existing link is
+different: it remains allowed and records authoritative `A` or `I` status
+without automatically unlinking the product. The product-list contract accepts
+`A`, `I` and the observed `E`, but the detail and persisted link/snapshot
+contracts remain `A`/`I`. An explicit `E` detail is not accepted: selection
+rejects it with 409 before stock lookup or mutation, while direct detail reads
+and existing-link sync fail closed with 502 until the detail contract is
+verified. Migration 023 retains the `A`/`I` status constraint; migration 024
+only enforces normalized company/SKU uniqueness and does not delete or rewrite
+product data, message snapshots or images. No arbitrary upstream URL or
+full-catalog scan is allowed.
+IDs normalize to strings; unsafe JSON numeric IDs fail rather than round.
+Variations retain their own IDs and explicit parent relation. Warehouse field
+`descricao` and flags are preserved. Physical/virtual totals and deposit balances
+remain separate: no recomputation, aggregation or available-stock business rule.
+Product images are not fetched from Bling. The product send path uses cached
+values and makes no Bling request. Message references and historical snapshots
+are untouched by link/sync/relink/archive; the compatibility unlink route
+rejects with 409 and leaves these records unchanged. Orders and webhooks remain
+outside scope.
+Local disconnect deletes only credentials/states; revoke authorization separately
+in Bling's authorized applications when needed.
+
+Official sources (consulted 2026-10-03):
+[applications/OAuth](https://developer.bling.com.br/aplicativos),
+[JWT](https://developer.bling.com.br/migracao-jwt),
+[limits](https://developer.bling.com.br/limites),
+[OpenAPI reference](https://developer.bling.com.br/referencia) and its linked
+[schema](https://developer.bling.com.br/build/assets/openapi-Dw6cY8yQ.json).
+Contract: `https://api.bling.com.br/Api/v3`, authorization
+`https://bling.com.br/Api/v3/oauth/authorize`, token
+`https://api.bling.com.br/Api/v3/oauth/token`, Basic app credentials + form body,
+JWT `enable-jwt: 1` on exchange/refresh/authenticated GETs. Honor `expires_in`
+(OAuth example 21,600 s); refresh lifetime is documented as 30 days; authorization
+code one minute. OpenAPI security scheme uses `bling.com.br` for token host;
+the applications guide uses `api.bling.com.br/Api/v3/oauth/token`, selected here.
+The JWT guide also contains a curl example omitting `/Api/v3`; this discrepancy
+must be checked during the separately authorized first real OAuth gate.
+Pagination OpenAPI minimum is one/default limit 100, with no declared maximum;
+Hub's 100 ceiling is defensive, not claimed as an upstream maximum.
 
 ## Evidence Used
 
