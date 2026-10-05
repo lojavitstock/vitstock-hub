@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { ImagePlus, Link2, Loader2, MoreVertical, Package, PencilLine, Plus, RefreshCw, Search, Save } from 'lucide-react';
+import { createPortal } from 'react-dom';
 import { useAuth } from '../../auth/AuthContext';
 import { useSearchParams } from 'react-router-dom';
 import type { Product } from '../../types';
@@ -11,6 +12,8 @@ import { ProductDialog } from '../products/ProductDialog';
 
 const allowedImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const maxImageBytes = 1_000_000;
+const BLING_SELECTION_TIMEOUT_MS = 10_000;
+const REQUEST_TIMEOUT_MESSAGE = 'O servidor demorou mais que o esperado para responder. Tente novamente.';
 
 type SelectedImage = { base64: string; mimeType: Product['imageMimeType'] };
 
@@ -28,6 +31,86 @@ function fileAsBase64(file: File): Promise<string> {
   });
 }
 
+type ProductActionsMenuProps = {
+  product: Product;
+  syncing: boolean;
+  onEdit: () => void;
+  onSync: () => void;
+  onLink: () => void;
+  onArchive: () => void;
+};
+
+const ProductActionsMenu: React.FC<ProductActionsMenuProps> = ({ product, syncing, onEdit, onSync, onLink, onArchive }) => {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
+  const id = useId();
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const positionMenu = () => {
+      const anchor = buttonRef.current?.getBoundingClientRect();
+      if (!anchor) return;
+      const width = 224;
+      const height = menuRef.current?.getBoundingClientRect().height || 176;
+      const left = Math.max(8, Math.min(anchor.right - width, window.innerWidth - width - 8));
+      const below = anchor.bottom + 4;
+      const top = below + height <= window.innerHeight - 8 ? below : Math.max(8, anchor.top - height - 4);
+      setPosition({ top, left });
+    };
+    positionMenu();
+    const frame = window.requestAnimationFrame(() => menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus());
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node) || (!buttonRef.current?.contains(target) && !menuRef.current?.contains(target))) setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      buttonRef.current?.focus();
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    window.addEventListener('resize', positionMenu);
+    window.addEventListener('scroll', positionMenu, true);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('resize', positionMenu);
+      window.removeEventListener('scroll', positionMenu, true);
+    };
+  }, [open]);
+
+  const run = (action: () => void) => {
+    setOpen(false);
+    action();
+  };
+  const itemClass = 'flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-semibold text-zinc-200 hover:bg-white/10 focus:bg-white/10 focus:outline-none';
+
+  return <>
+    <button ref={buttonRef} type="button" aria-label={`Ações de ${product.name}`} aria-haspopup="menu" aria-controls={id} aria-expanded={open}
+      onClick={(event) => { event.stopPropagation(); setOpen((value) => !value); }}
+      className="flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900/90 text-zinc-300 hover:bg-white/10 hover:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-amber-400">
+      <MoreVertical className="h-4 w-4" aria-hidden="true" />
+    </button>
+    {open && createPortal(<div ref={menuRef} id={id} role="menu" aria-label={`Ações de ${product.name}`}
+      style={{ position: 'fixed', top: position?.top ?? 0, left: position?.left ?? 0, visibility: position ? 'visible' : 'hidden' }}
+      className="z-[1000] max-h-[calc(100vh-1rem)] w-56 overflow-y-auto rounded-lg border border-zinc-700 bg-[#20292f] p-1 shadow-2xl">
+      <button type="button" role="menuitem" onClick={() => run(onEdit)} className={itemClass}><PencilLine className="h-3.5 w-3.5" />Editar nome/imagem</button>
+      {product.source === 'bling' && <>
+        <button type="button" role="menuitem" disabled={syncing} onClick={() => run(onSync)} className={`${itemClass} text-sky-300 disabled:opacity-50`}><RefreshCw className="h-3.5 w-3.5" />{syncing ? 'Sincronizando...' : 'Atualizar do Bling'}</button>
+        <button type="button" role="menuitem" onClick={() => run(onLink)} className={`${itemClass} text-sky-300`}><Link2 className="h-3.5 w-3.5" />Alterar produto Bling</button>
+      </>}
+      {product.source !== 'bling' && <button type="button" role="menuitem" onClick={() => run(onLink)} className={`${itemClass} text-sky-300`}><Link2 className="h-3.5 w-3.5" />Vincular ao Bling</button>}
+      <button type="button" role="menuitem" onClick={() => run(onArchive)} className={`${itemClass} text-red-300 hover:bg-red-500/10 focus:bg-red-500/10`}>Arquivar</button>
+    </div>, document.body)}
+  </>;
+};
+
 export const ProductsSettings: React.FC = () => {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
@@ -38,6 +121,8 @@ export const ProductsSettings: React.FC = () => {
   const archiveInFlightRef = useRef(false);
   const blingMutationInFlightRef = useRef(new Set<string>());
   const importInFlightRef = useRef(false);
+  const blingSelectionControllerRef = useRef<AbortController | null>(null);
+  const blingSelectionGenerationRef = useRef(0);
   const [products, setProducts] = useState<Product[]>([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
@@ -51,7 +136,7 @@ export const ProductsSettings: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [archiveTarget, setArchiveTarget] = useState<Product | null>(null);
   const [archiving, setArchiving] = useState(false);
-  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [expandedProductId, setExpandedProductId] = useState<string | null>(null);
   const [blingLinkTarget, setBlingLinkTarget] = useState<Product | null>(null);
   const [blingDialogMode, setBlingDialogMode] = useState<'link' | 'relink'>('link');
   const [blingSearch, setBlingSearch] = useState('');
@@ -68,6 +153,7 @@ export const ProductsSettings: React.FC = () => {
   const [blingImportDetail, setBlingImportDetail] = useState<BlingProductDetail | null>(null);
   const [blingImportStock, setBlingImportStock] = useState<{ physical: number | null; virtual: number | null } | null>(null);
   const [blingSelectionLoading, setBlingSelectionLoading] = useState(false);
+  const [blingSelectionTimedOut, setBlingSelectionTimedOut] = useState(false);
   const [blingImportName, setBlingImportName] = useState('');
   const [blingImportImage, setBlingImportImage] = useState<SelectedImage | null>(null);
   const [blingImportPreviewUrl, setBlingImportPreviewUrl] = useState<string | null>(null);
@@ -81,6 +167,19 @@ export const ProductsSettings: React.FC = () => {
   const duplicateSkuLink = selectedSku
     ? blingSkuLinks.find((link) => normalizeBlingSku(link.blingCode) === selectedSku)
     : undefined;
+
+  const cancelBlingSelection = useCallback(() => {
+    blingSelectionGenerationRef.current += 1;
+    blingSelectionControllerRef.current?.abort();
+    blingSelectionControllerRef.current = null;
+    setBlingSelectionLoading(false);
+  }, []);
+
+  useEffect(() => () => {
+    blingSelectionGenerationRef.current += 1;
+    blingSelectionControllerRef.current?.abort();
+    blingSelectionControllerRef.current = null;
+  }, []);
 
   useEffect(() => {
     if (!showImportDialog) return;
@@ -106,6 +205,7 @@ export const ProductsSettings: React.FC = () => {
   useEffect(() => {
     if (searchParams.get('action') !== 'new') return;
     if (isAdmin) {
+      cancelBlingSelection();
       setBlingSearch('');
       setBlingProducts([]);
       setBlingPage(1);
@@ -114,6 +214,7 @@ export const ProductsSettings: React.FC = () => {
       setBlingImportProduct(null);
       setBlingImportDetail(null);
       setBlingImportStock(null);
+      setBlingSelectionTimedOut(false);
       setBlingImportName('');
       setBlingImportImage(null);
       setBlingImportPreviewUrl(null);
@@ -185,12 +286,14 @@ export const ProductsSettings: React.FC = () => {
   };
 
   const openNewProduct = () => {
+    cancelBlingSelection();
     setError('');
     setFeedback('');
     resetBlingCatalog();
     setBlingImportProduct(null);
     setBlingImportDetail(null);
     setBlingImportStock(null);
+    setBlingSelectionTimedOut(false);
     setBlingImportName('');
     setBlingImportImage(null);
     setBlingImportPreviewUrl(null);
@@ -204,7 +307,6 @@ export const ProductsSettings: React.FC = () => {
     setName(product.name);
     setSelectedImage(null);
     setPreviewUrl(null);
-    setOpenMenuId(null);
   };
 
   const chooseImage = async (file?: File) => {
@@ -317,7 +419,6 @@ export const ProductsSettings: React.FC = () => {
   };
 
   const openBlingLink = (product: Product, mode: 'link' | 'relink') => {
-    setOpenMenuId(null);
     setBlingLinkTarget(product);
     setBlingDialogMode(mode);
     resetBlingCatalog();
@@ -364,42 +465,96 @@ export const ProductsSettings: React.FC = () => {
     };
   }, [blingLinkTarget, showImportDialog, blingSearch, blingPage, blingConnected]);
 
-  const selectBlingProduct = async (blingProduct: BlingProduct) => {
-    if (showImportDialog) {
+  const loadBlingSelection = async (blingProduct: BlingProduct, resetSelection: boolean) => {
+    const generation = blingSelectionGenerationRef.current + 1;
+    blingSelectionGenerationRef.current = generation;
+    blingSelectionControllerRef.current?.abort();
+    const controller = new AbortController();
+    blingSelectionControllerRef.current = controller;
+    let timedOut = false;
+    let timeout: number | undefined;
+    if (resetSelection) {
       setBlingImportProduct(blingProduct);
       setBlingImportDetail(null);
       setBlingImportStock(null);
       setBlingImportName('');
-      setBlingSelectionLoading(true);
-      setBlingError('');
-      try {
-        const [detailResult, stockResult] = await Promise.all([
-          fetchBlingProductDetail(blingProduct.id), fetchBlingProductStock(blingProduct.id),
-        ]);
-        const detail = detailResult.data;
-        const stock = stockResult.data.find((item) => item.produto.id === blingProduct.id);
-        const physical = stock?.saldoFisicoTotal ?? null;
-        const virtual = stock?.saldoVirtualTotal ?? null;
-        setBlingImportDetail(detail);
-        setBlingImportStock({ physical, virtual });
-        setBlingImportName(detail.nome);
-        setBlingConnected(true);
-        if (detail.id !== blingProduct.id || detail.situacao !== 'A') {
-          setBlingError('Somente produtos ativos do Bling podem ser vinculados ou importados.');
-        } else if (!detail.codigo?.trim()) {
-          setBlingError('Este produto não possui SKU no Bling. Adicione um SKU no Bling e tente novamente.');
-        } else if (effectiveBlingStock(virtual, physical) === null) {
-          setBlingError('Não foi possível obter o estoque deste produto no Bling.');
-        } else if (detail.preco === undefined || !Number.isFinite(detail.preco) || detail.preco < 0
-          || !Number.isSafeInteger(Math.round(detail.preco * 100)) || Math.round(detail.preco * 100) > 2_147_483_647) {
-          setBlingError('Preço do produto Bling fora do contrato esperado.');
-        }
-      } catch (reason) {
-        setBlingError(reason instanceof Error ? reason.message : 'Não foi possível carregar os dados do produto Bling.');
-        setBlingImportProduct(null);
-      } finally {
-        setBlingSelectionLoading(false);
+    }
+    setBlingSelectionTimedOut(false);
+    setBlingSelectionLoading(true);
+    setBlingError('');
+
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      timeout = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+        reject(new Error(REQUEST_TIMEOUT_MESSAGE));
+      }, BLING_SELECTION_TIMEOUT_MS);
+    });
+
+    try {
+      const [detailResult, stockResult] = await Promise.race([
+        Promise.all([
+          fetchBlingProductDetail(blingProduct.id, controller.signal),
+          fetchBlingProductStock(blingProduct.id, controller.signal),
+        ]),
+        timeoutPromise,
+      ]);
+      if (generation !== blingSelectionGenerationRef.current || controller.signal.aborted) return;
+      const detail = detailResult.data;
+      const stock = stockResult.data.find((item) => item.produto.id === blingProduct.id);
+      const physical = stock?.saldoFisicoTotal ?? null;
+      const virtual = stock?.saldoVirtualTotal ?? null;
+      setBlingImportDetail(detail);
+      setBlingImportStock({ physical, virtual });
+      setBlingImportName((current) => resetSelection || !current.trim() ? detail.nome : current);
+      setBlingConnected(true);
+      if (detail.id !== blingProduct.id || detail.situacao !== 'A') {
+        setBlingError('Somente produtos ativos do Bling podem ser vinculados ou importados.');
+      } else if (!detail.codigo?.trim()) {
+        setBlingError('Este produto não possui SKU no Bling. Adicione um SKU no Bling e tente novamente.');
+      } else if (effectiveBlingStock(virtual, physical) === null) {
+        setBlingError('Não foi possível obter o estoque deste produto no Bling.');
+      } else if (detail.preco === undefined || !Number.isFinite(detail.preco) || detail.preco < 0
+        || !Number.isSafeInteger(Math.round(detail.preco * 100)) || Math.round(detail.preco * 100) > 2_147_483_647) {
+        setBlingError('Preço do produto Bling fora do contrato esperado.');
       }
+    } catch (reason) {
+      if (generation !== blingSelectionGenerationRef.current) return;
+      if (timedOut) {
+        setBlingSelectionTimedOut(true);
+        setBlingError(REQUEST_TIMEOUT_MESSAGE);
+      } else if ((reason as { name?: string })?.name !== 'AbortError') {
+        setBlingError(reason instanceof Error ? reason.message : 'Não foi possível carregar os dados do produto Bling.');
+      }
+    } finally {
+      if (timeout !== undefined) window.clearTimeout(timeout);
+      if (generation === blingSelectionGenerationRef.current) {
+        setBlingSelectionLoading(false);
+        if (blingSelectionControllerRef.current === controller) blingSelectionControllerRef.current = null;
+      }
+    }
+  };
+
+  const clearSelectedBlingProduct = () => {
+    cancelBlingSelection();
+    setBlingImportProduct(null);
+    setBlingImportDetail(null);
+    setBlingImportStock(null);
+    setBlingImportName('');
+    setBlingSelectionTimedOut(false);
+    setBlingError('');
+  };
+
+  const closeBlingImportDialog = () => {
+    if (blingImporting) return;
+    cancelBlingSelection();
+    setBlingSelectionTimedOut(false);
+    setShowImportDialog(false);
+  };
+
+  const selectBlingProduct = async (blingProduct: BlingProduct) => {
+    if (showImportDialog) {
+      await loadBlingSelection(blingProduct, true);
       return;
     }
     if (!blingLinkTarget || blingLinking) return;
@@ -493,7 +648,6 @@ export const ProductsSettings: React.FC = () => {
       applySavedProduct(result.product);
       setBlingConnected(true);
       setFeedback(`Produto sincronizado do Bling: “${result.product.name}”.`);
-      setOpenMenuId(null);
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : 'Não foi possível sincronizar o produto Bling.';
       setError(message);
@@ -522,18 +676,36 @@ export const ProductsSettings: React.FC = () => {
 
       <label className="relative block">
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden="true" />
-        <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar produto..." aria-label="Buscar produto" className="w-full rounded-lg border border-zinc-800 bg-[#0C0C0E] py-3 pl-10 pr-3 text-sm text-zinc-100 outline-none focus:border-amber-400" />
+        <input value={search} onChange={(event) => { setSearch(event.target.value); setExpandedProductId(null); }} placeholder="Buscar produto..." aria-label="Buscar produto" className="w-full rounded-lg border border-zinc-800 bg-[#0C0C0E] py-3 pl-10 pr-3 text-sm text-zinc-100 outline-none focus:border-amber-400" />
       </label>
 
       {loading ? <div className="flex items-center justify-center gap-2 rounded-xl border border-zinc-800 bg-[#0C0C0E] p-10 text-sm text-zinc-400"><Loader2 className="h-5 w-5 animate-spin text-amber-400" /> Carregando produtos...</div>
-        : products.length > 0 ? <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        : products.length > 0 ? <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {products.map((product) => (
-            <article key={product.id} className="overflow-hidden rounded-xl border border-zinc-800 bg-[#0C0C0E]">
-              <div className="flex aspect-[4/3] items-center justify-center bg-zinc-900 p-4">
-                <img src={product.imageUrl} alt={`Imagem do produto ${product.name}`} className="h-full w-full object-contain" />
-              </div>
-              <div className="p-4">
-                <h3 className="truncate text-sm font-bold text-zinc-100" title={product.name}>{product.name}</h3>
+            <article key={product.id} data-product-id={product.id}
+              onClick={(event) => {
+                if (event.target instanceof Element && event.target.closest('button, input, textarea, select, a, [role="menu"]')) return;
+                setExpandedProductId((current) => current === product.id ? null : product.id);
+              }}
+              className={`rounded-xl border bg-[#0C0C0E] transition-colors ${expandedProductId === product.id ? 'border-amber-400/30' : 'border-zinc-800 hover:border-zinc-700'}`}>
+              <button type="button" aria-label={`${expandedProductId === product.id ? 'Recolher' : 'Expandir'} ${product.name}`}
+                aria-expanded={expandedProductId === product.id} aria-controls={`product-details-${product.id}`} title={product.name}
+                onClick={() => setExpandedProductId((current) => current === product.id ? null : product.id)}
+                className="flex min-h-[68px] w-full items-center gap-3 rounded-xl p-2 text-left focus:outline-none focus:ring-2 focus:ring-inset focus:ring-amber-400">
+                <img src={product.imageUrl} alt="" className="h-12 w-12 shrink-0 rounded-lg bg-zinc-900 object-contain p-1" />
+                <span className="min-w-0 truncate text-sm font-bold text-zinc-100">{product.name.length > 12 ? `${product.name.slice(0, 11).trimEnd()}…` : product.name}</span>
+              </button>
+              {expandedProductId === product.id ? <div id={`product-details-${product.id}`} className="border-t border-zinc-800 p-3">
+                <div className="relative flex h-44 items-center justify-center rounded-lg bg-zinc-900 p-3">
+                  <img src={product.imageUrl} alt={`Imagem do produto ${product.name}`} className="h-full w-full object-contain" />
+                  {isAdmin && <div className="absolute right-2 top-2">
+                    <ProductActionsMenu product={product} syncing={blingSyncingId === product.id}
+                      onEdit={() => openEditor(product)} onSync={() => void syncBlingProduct(product)}
+                      onLink={() => openBlingLink(product, product.source === 'bling' ? 'relink' : 'link')}
+                      onArchive={() => setArchiveTarget(product)} />
+                  </div>}
+                </div>
+                <h3 className="mt-3 text-sm font-bold text-zinc-100">{product.name}</h3>
                 <p className="mt-1 text-base font-extrabold text-amber-300">{formatBrlPrice(product.priceCents)}</p>
                 {product.source === 'bling' && product.bling && <div className="mt-2 space-y-1.5 text-xs text-sky-200">
                   <span className="inline-flex items-center gap-1 rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 font-bold"><Link2 className="h-3 w-3" /> Bling</span>
@@ -544,22 +716,7 @@ export const ProductsSettings: React.FC = () => {
                   })()}
                   <p className="text-zinc-500">Sincronizado: {new Date(product.bling.syncedAt).toLocaleString('pt-BR')}</p>
                 </div>}
-                {isAdmin && <div className="mt-4 flex items-center justify-between gap-2 border-t border-zinc-800 pt-3">
-                  <button type="button" onClick={() => openEditor(product)} className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400/20 px-3 py-2 text-xs font-bold text-amber-300 hover:bg-amber-400/10"><PencilLine className="h-3.5 w-3.5" /> Editar nome/imagem</button>
-                  <div className="relative">
-                    <button type="button" aria-label={`Ações de ${product.name}`} aria-expanded={openMenuId === product.id} onClick={() => setOpenMenuId((current) => current === product.id ? null : product.id)} className="rounded-lg p-2 text-zinc-400 hover:bg-white/5 hover:text-zinc-100"><MoreVertical className="h-4 w-4" /></button>
-                     {openMenuId === product.id && <div className="absolute right-0 top-full z-10 mt-1 min-w-48 rounded-lg border border-zinc-700 bg-[#20292f] p-1 shadow-xl">
-                       {product.source === 'bling'
-                         ? <>
-                           <button type="button" disabled={blingSyncingId === product.id} onClick={() => void syncBlingProduct(product)} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-semibold text-sky-300 hover:bg-sky-500/10 disabled:opacity-50"><RefreshCw className="h-3.5 w-3.5" /> {blingSyncingId === product.id ? 'Sincronizando...' : 'Atualizar do Bling'}</button>
-                           <button type="button" onClick={() => openBlingLink(product, 'relink')} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-semibold text-sky-300 hover:bg-sky-500/10"><Link2 className="h-3.5 w-3.5" /> Alterar produto Bling</button>
-                         </>
-                         : <button type="button" onClick={() => openBlingLink(product, 'link')} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-semibold text-sky-300 hover:bg-sky-500/10"><Link2 className="h-3.5 w-3.5" /> Vincular ao Bling</button>}
-                       <button type="button" onClick={() => { setArchiveTarget(product); setOpenMenuId(null); }} className="w-full rounded-md px-3 py-2 text-left text-xs font-semibold text-red-300 hover:bg-red-500/10">Arquivar</button>
-                     </div>}
-                  </div>
-                </div>}
-              </div>
+              </div> : <div id={`product-details-${product.id}`} hidden />}
             </article>
           ))}
         </div> : <div className="rounded-xl border border-dashed border-zinc-800 p-8 text-center sm:p-10">
@@ -613,14 +770,20 @@ export const ProductsSettings: React.FC = () => {
         <div className="mt-5 flex justify-end border-t border-zinc-800 pt-4"><button type="button" disabled={blingLinking} onClick={() => setBlingLinkTarget(null)} className="rounded-lg border border-zinc-700 px-4 py-2.5 text-sm font-bold text-zinc-300 hover:bg-white/5">Cancelar</button></div>
       </ProductDialog>}
 
-      {showImportDialog && <ProductDialog title="Adicionar produto" onClose={() => { if (!blingImporting) setShowImportDialog(false); }}>
+      {showImportDialog && <ProductDialog title="Adicionar produto" onClose={closeBlingImportDialog}>
         <form onSubmit={(event) => { event.preventDefault(); void confirmBlingImport(); }} onPaste={(event) => pasteImage(event, chooseBlingImportImage)} className="space-y-4">
           <p className="text-sm leading-6 text-zinc-300">Selecione primeiro um produto ativo no Bling. Preço, SKU e estoque vêm do Bling; nome local e imagem são definidos no Hub.</p>
-          {blingImportProduct && blingImportDetail ? <div className="rounded-lg border border-sky-500/20 bg-sky-500/5 p-3 text-sm text-zinc-200">
-            <div className="font-bold">{blingImportDetail.nome}</div>
-            <div className="mt-1 text-xs text-zinc-400">ID {blingImportDetail.id} · {blingImportDetail.codigo || 'SKU não informado'} · Ativo (A) · Formato {blingImportDetail.formato}</div>
-            <button type="button" disabled={blingImporting} onClick={() => { setBlingImportProduct(null); setBlingImportDetail(null); setBlingImportStock(null); setBlingImportName(''); setBlingError(''); }} className="mt-2 text-xs font-bold text-sky-300 disabled:opacity-50">Alterar produto do Bling</button>
-          </div> : <>
+          {blingImportProduct ? <>
+            <div className="rounded-lg border border-sky-500/20 bg-sky-500/5 p-3 text-sm text-zinc-200">
+              <div className="font-bold">{blingImportDetail?.nome || blingImportProduct.nome}</div>
+              <div className="mt-1 text-xs text-zinc-400">ID {blingImportProduct.id}{blingImportDetail ? ` · ${blingImportDetail.codigo || 'SKU não informado'} · Ativo (A) · Formato ${blingImportDetail.formato}` : ''}</div>
+              <button type="button" disabled={blingImporting} onClick={clearSelectedBlingProduct} className="mt-2 text-xs font-bold text-sky-300 disabled:opacity-50">Alterar produto do Bling</button>
+            </div>
+            {blingSelectionLoading && <p role="status" className="flex items-center gap-2 text-sm text-zinc-300"><Loader2 className="h-4 w-4 animate-spin text-amber-400" />Carregando dados do Bling...</p>}
+            {blingSelectionTimedOut && <button type="button" disabled={blingSelectionLoading || blingImporting}
+              onClick={() => void loadBlingSelection(blingImportProduct, false)}
+              className="inline-flex items-center gap-2 rounded-lg border border-amber-400/30 px-3 py-2 text-sm font-bold text-amber-200 hover:bg-amber-400/10 disabled:opacity-50">Tentar novamente</button>}
+          </> : <>
             <label className="relative block">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden="true" />
               <input value={blingSearch} onChange={(event) => changeBlingSearch(event.target.value)} placeholder="Buscar no catálogo Bling..." aria-label="Buscar produto no Bling para importar" data-dialog-autofocus className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-3 pl-10 pr-3 text-sm text-zinc-100 outline-none focus:border-amber-400" />
@@ -648,17 +811,16 @@ export const ProductsSettings: React.FC = () => {
           {blingSkuLinksLoading && <p role="status" className="text-xs text-zinc-400">Verificando SKUs já cadastrados...</p>}
           {blingSkuCheckError && <p role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{blingSkuCheckError}</p>}
           {duplicateSkuLink && <p role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">Já existe um produto cadastrado no Hub com este SKU.{products.find((item) => item.id === duplicateSkuLink.productId)?.name ? ` Produto: ${products.find((item) => item.id === duplicateSkuLink.productId)!.name}.` : ''}</p>}
-          {blingSelectionLoading && <p role="status" className="text-sm text-zinc-400">Carregando detalhe e estoque do Bling...</p>}
           <div>
             <span className="mb-1.5 block text-sm font-bold text-zinc-300">Imagem local *</span>
-            <input ref={blingImageInputRef} type="file" accept="image/jpeg,image/png,image/webp" aria-label="Imagem local para importação" className="sr-only" onChange={(event) => { void chooseBlingImportImage(event.currentTarget.files?.[0]); }} />
-            <button type="button" onClick={() => blingImageInputRef.current?.click()} className="flex min-h-28 w-full flex-col items-center justify-center overflow-hidden rounded-xl border border-dashed border-zinc-700 bg-zinc-900 p-3 text-center">
+            <input ref={blingImageInputRef} type="file" accept="image/jpeg,image/png,image/webp" aria-label="Imagem local para importação" className="sr-only" disabled={blingSelectionLoading} onChange={(event) => { void chooseBlingImportImage(event.currentTarget.files?.[0]); }} />
+            <button type="button" disabled={blingSelectionLoading} onClick={() => blingImageInputRef.current?.click()} className="flex min-h-28 w-full flex-col items-center justify-center overflow-hidden rounded-xl border border-dashed border-zinc-700 bg-zinc-900 p-3 text-center disabled:cursor-not-allowed disabled:opacity-50">
               {blingImportPreviewUrl ? <img src={blingImportPreviewUrl} alt="Prévia da imagem local" className="max-h-36 object-contain" /> : <><ImagePlus className="h-7 w-7 text-zinc-500" /><span className="mt-2 text-sm text-zinc-300">Selecionar ou colar JPEG, PNG ou WebP · até 1 MB</span></>}
             </button>
           </div>
           {blingError && <p role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{blingError}</p>}
           <div className="flex flex-col-reverse gap-2 border-t border-zinc-800 pt-4 sm:flex-row sm:justify-end">
-            <button type="button" disabled={blingImporting} onClick={() => setShowImportDialog(false)} className="rounded-lg border border-zinc-700 px-4 py-2.5 text-sm font-bold text-zinc-300">Cancelar</button>
+            <button type="button" disabled={blingImporting} onClick={closeBlingImportDialog} className="rounded-lg border border-zinc-700 px-4 py-2.5 text-sm font-bold text-zinc-300">Cancelar</button>
             <button type="submit" disabled={blingImporting || readingImage || blingSelectionLoading || blingSkuLinksLoading || !blingSkuLinksVerified || Boolean(duplicateSkuLink) || !blingImportProduct || !blingImportDetail || !blingImportDetail.codigo?.trim() || !blingImportStock || effectiveBlingStock(blingImportStock.virtual, blingImportStock.physical) === null || !blingImportName.trim() || !blingImportImage || Boolean(blingError) || Boolean(blingSkuCheckError) || blingImportDetail.situacao !== 'A' || blingImportDetail.preco === undefined || !Number.isFinite(blingImportDetail.preco) || blingImportDetail.preco < 0 || Math.round(blingImportDetail.preco * 100) > 2_147_483_647} className="btn-primary justify-center text-sm disabled:opacity-50">{blingImporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}{blingImporting ? 'Salvando...' : 'Salvar produto'}</button>
           </div>
         </form>

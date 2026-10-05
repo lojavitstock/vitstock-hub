@@ -95,12 +95,14 @@ test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar
   test.skip(!email || !password, 'credenciais QA ausentes');
   const errors: string[] = [];
   const sends: string[] = [];
+  let hubBlingRequests = 0;
   await login(page);
   await ensureQaBlingConnected(page.request, apiUrl);
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
   page.on('request', (event) => {
     if (event.method() !== 'GET' && /\/api\/evolution\/(?:messages|media)\//.test(event.url())) sends.push(event.url());
+    if (new URL(event.url()).pathname.startsWith('/api/integrations/bling/')) hubBlingRequests += 1;
   });
   const conversationName = await openFreshProductConversation(page);
   await expect(page.getByRole('heading', { name: conversationName, exact: true })).toBeVisible();
@@ -155,13 +157,23 @@ test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar
     await expect(page.getByTestId('attachment-draft')).toHaveCount(1);
     await expect.poll(() => page.getByTestId('attachment-draft').locator('img')
       .evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
+    const blingRequestsBeforeSuggestions = hubBlingRequests;
     await composer.fill(`Confira \\${name}`);
     const suggestions = page.getByRole('dialog', { name: 'Sugestões de produtos' });
     const option = suggestions.getByRole('option', { name: new RegExp(name) });
     await expect(option).toBeVisible();
     await expect(option).toContainText('R$ 180,00');
+    await expect(option).toContainText('Qtd: 5');
+    await expect(option).not.toContainText(/SKU|Estoque/i);
+    const suggestionPrice = option.getByText('R$ 180,00', { exact: true });
+    const suggestionQuantity = option.getByText('Qtd: 5', { exact: true });
+    const priceAndQuantityRow = suggestionPrice.locator('..');
+    await expect(priceAndQuantityRow.getByText('Qtd: 5', { exact: true })).toHaveCount(1);
+    expect(await priceAndQuantityRow.getAttribute('class')).toContain('justify-between');
+    expect(await suggestionQuantity.getAttribute('class')).not.toContain('text-red-300');
     await expect.poll(() => option.locator('img').evaluate((element: HTMLImageElement) => element.naturalWidth)).toBeGreaterThan(0);
     await suggestions.screenshot({ path: testInfo.outputPath('product-suggestions.png') });
+    expect(hubBlingRequests).toBe(blingRequestsBeforeSuggestions);
     await composer.press('ArrowDown');
     await composer.press('ArrowUp');
     await composer.press('Enter');
@@ -223,6 +235,7 @@ test('busca de produtos descarta respostas antigas, mostra erro e não envia ao 
   await oldRequest;
   await composer.fill('\\novo');
   await expect(suggestions.getByRole('option', { name: /Novo A/ })).toBeVisible();
+  await expect(suggestions.getByText('O servidor demorou mais que o esperado para responder. Tente novamente.')).toHaveCount(0);
   await expect(suggestions.getByRole('option', { name: /Resultado antigo/ })).toHaveCount(0);
   await composer.press('ArrowDown');
   await expect(suggestions.getByRole('option', { name: /Novo B/ })).toHaveAttribute('aria-selected', 'true');
@@ -313,8 +326,18 @@ test('Product Library importa pelo Bling paginado e preserva campos vinculados n
   const completedImport = await importResponse;
   expect(completedImport.status()).toBe(201);
   importedId = (await completedImport.json()).product.id;
-  const card = page.locator('article').filter({ has: page.getByRole('heading', { name: 'Nome local QA 321', exact: true }) });
+  const card = page.locator(`[data-product-id="${importedId}"]`);
   await expect(card).toHaveCount(1);
+  const compactRow = card.getByRole('button', { name: 'Expandir Nome local QA 321', exact: true });
+  await expect(compactRow).toHaveAttribute('aria-expanded', 'false');
+  await expect(card).not.toContainText('R$ 180,00');
+  await expect(card.getByRole('button', { name: 'Ações de Nome local QA 321', exact: true })).toHaveCount(0);
+  await expect(card.getByRole('button', { name: 'Editar nome/imagem', exact: true })).toHaveCount(0);
+  const compactImage = await compactRow.locator('img').boundingBox();
+  expect(compactImage?.width).toBe(48);
+  expect(compactImage?.height).toBe(48);
+  await compactRow.click();
+  await expect(card.getByRole('button', { name: 'Recolher Nome local QA 321', exact: true })).toHaveAttribute('aria-expanded', 'true');
   await expect(card).toContainText('R$ 180,00');
   await expect(card).toContainText('Bling');
   await expect(card).toContainText('SKU: SKU-321');
@@ -322,7 +345,20 @@ test('Product Library importa pelo Bling paginado e preserva campos vinculados n
   expect(importPayload && Object.keys(importPayload).sort()).toEqual(['blingProductId', 'imageBase64', 'imageMimeType', 'name']);
   expect(importPayload).toMatchObject({ blingProductId: '321', name: 'Nome local QA 321', imageMimeType: 'image/png' });
 
-  await card.getByRole('button', { name: 'Editar nome/imagem' }).click();
+  await card.getByRole('button', { name: `Ações de Nome local QA 321`, exact: true }).click();
+  const actionMenu = page.getByRole('menu', { name: 'Ações de Nome local QA 321', exact: true });
+  await expect(actionMenu).toBeVisible();
+  expect(await actionMenu.evaluate((element) => element.parentElement === document.body)).toBe(true);
+  expect(await actionMenu.evaluate((element) => getComputedStyle(element).position)).toBe('fixed');
+  expect((await actionMenu.getByRole('menuitem').allTextContents()).map((value) => value.trim())).toEqual([
+    'Editar nome/imagem', 'Atualizar do Bling', 'Alterar produto Bling', 'Arquivar',
+  ]);
+  await expect(actionMenu.getByRole('menuitem', { name: 'Desvincular do Bling' })).toHaveCount(0);
+  await expect(card.getByRole('button', { name: 'Editar nome/imagem', exact: true })).toHaveCount(0);
+  const menuBox = await actionMenu.boundingBox();
+  expect(menuBox && menuBox.x >= 0 && menuBox.y >= 0 && menuBox.x + menuBox.width <= 1280 && menuBox.y + menuBox.height <= 900).toBe(true);
+  await actionMenu.getByRole('menuitem', { name: 'Editar nome/imagem', exact: true }).click();
+  await expect(actionMenu).toHaveCount(0);
   const editDialog = page.getByRole('dialog', { name: 'Editar produto' });
   await expect(editDialog.getByLabel('Nome local *')).toBeEnabled();
   await expect(editDialog).toContainText('R$ 180,00');
@@ -331,10 +367,11 @@ test('Product Library importa pelo Bling paginado e preserva campos vinculados n
   await expect(card).toContainText('R$ 180,00');
   await expect(card).toContainText('SKU: SKU-321');
   await card.getByRole('button', { name: 'Ações de Nome local QA 321', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Atualizar do Bling', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Alterar produto Bling', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Desvincular do Bling', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Arquivar', exact: true })).toBeVisible();
+  const reopenedMenu = page.getByRole('menu', { name: 'Ações de Nome local QA 321', exact: true });
+  await expect(reopenedMenu.getByRole('menuitem', { name: 'Atualizar do Bling', exact: true })).toBeVisible();
+  await expect(reopenedMenu.getByRole('menuitem', { name: 'Alterar produto Bling', exact: true })).toBeVisible();
+  await expect(reopenedMenu.getByRole('menuitem', { name: 'Desvincular do Bling', exact: true })).toHaveCount(0);
+  await expect(reopenedMenu.getByRole('menuitem', { name: 'Arquivar', exact: true })).toBeVisible();
   expect(externalRequests).toEqual([]);
   } finally {
     if (importedId) {
@@ -344,6 +381,185 @@ test('Product Library importa pelo Bling paginado e preserva campos vinculados n
     await page.request.post(`${apiUrl}/api/integrations/bling/disconnect`).catch(() => undefined);
     await qaPool.end();
   }
+});
+
+test('seleção Bling só expira em 10s, permite retry e ignora resposta antiga após troca', async ({ page }) => {
+  test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
+  await login(page);
+  await ensureQaBlingConnected(page.request, apiUrl);
+  await page.goto('/configuracoes?tab=products');
+  await page.getByRole('button', { name: 'Adicionar produto', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Adicionar produto' });
+  await expect(dialog.getByRole('button', { name: /Produto Catálogo QA 321/ })).toBeVisible();
+  await dialog.getByLabel('Imagem local para importação').setInputFiles({
+    name: 'retry-preservado.png', mimeType: 'image/png', buffer: Buffer.from(tinyPng, 'base64'),
+  });
+  await expect(dialog.getByAltText('Prévia da imagem local')).toBeVisible();
+
+  const corsHeaders = {
+    'access-control-allow-origin': 'http://localhost:3000',
+    'access-control-allow-credentials': 'true',
+  };
+  await page.route('**/api/integrations/bling/products/303', async (route) => {
+    await route.fulfill({ status: 503, contentType: 'application/json', headers: corsHeaders, body: JSON.stringify({ error: 'Detail indisponível imediatamente QA.' }) });
+  });
+  const search = dialog.getByLabel('Buscar produto no Bling para importar');
+  await search.fill('Produto para Importar QA');
+  await dialog.getByRole('button', { name: /Produto para Importar QA/ }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('Detail indisponível imediatamente QA.');
+  await expect(dialog.getByRole('button', { name: 'Tentar novamente', exact: true })).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Alterar produto do Bling', exact: true }).click();
+  await search.fill('Produto Catálogo QA 321');
+  const product321 = dialog.getByRole('button', { name: /Produto Catálogo QA 321/ });
+  await expect(product321).toBeVisible();
+
+  let stock321Requests = 0;
+  let detail321Requests = 0;
+  let catalogRequests = 0;
+  let timedOutStockRoute: import('@playwright/test').Route | null = null;
+  const staleStockBody = JSON.stringify({ data: [{ produto: { id: '321' }, saldoFisicoTotal: 8, saldoVirtualTotal: 5 }] });
+  page.on('request', (event) => {
+    const path = new URL(event.url()).pathname;
+    if (path === '/api/integrations/bling/products') catalogRequests += 1;
+    if (path === '/api/integrations/bling/products/321') detail321Requests += 1;
+  });
+  await page.route('**/api/integrations/bling/products/321/stock', async (route) => {
+    stock321Requests += 1;
+    if (stock321Requests === 1) {
+      timedOutStockRoute = route;
+      return;
+    }
+    if (stock321Requests === 3) {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      await route.fulfill({ status: 200, contentType: 'application/json', headers: corsHeaders, body: staleStockBody }).catch(() => undefined);
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.clock.install({ time: new Date('2026-01-01T00:00:00.000Z') });
+  await page.clock.pauseAt(new Date('2026-01-01T00:00:00.000Z'));
+  const firstStockRequest = page.waitForRequest((event) => new URL(event.url()).pathname === '/api/integrations/bling/products/321/stock');
+  await product321.click();
+  await firstStockRequest;
+  await expect(dialog.getByRole('status')).toContainText('Carregando dados do Bling...');
+  await expect(dialog.getByLabel('Nome local *')).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: 'Salvar produto' })).toBeDisabled();
+  await page.clock.fastForward(9_999);
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+  await expect(dialog.getByRole('status')).toContainText('Carregando dados do Bling...');
+  await page.clock.fastForward(1);
+  await expect(dialog.getByRole('alert')).toHaveText('O servidor demorou mais que o esperado para responder. Tente novamente.');
+  await expect(dialog.getByRole('button', { name: 'Tentar novamente', exact: true })).toBeVisible();
+  await expect(dialog.getByAltText('Prévia da imagem local')).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Salvar produto' })).toBeDisabled();
+
+  const catalogCallsBeforeRetry = catalogRequests;
+  await dialog.getByRole('button', { name: 'Tentar novamente', exact: true }).click();
+  await expect(dialog.getByLabel('Nome local *')).toHaveValue('Produto Catálogo QA 321');
+  await expect(dialog.getByLabel('SKU')).toHaveValue('SKU-321');
+  await expect(dialog.getByLabel('Estoque virtual')).toHaveValue('5');
+  await expect(dialog.getByAltText('Prévia da imagem local')).toBeVisible();
+  expect(detail321Requests).toBe(2);
+  expect(stock321Requests).toBe(2);
+  expect(catalogRequests).toBe(catalogCallsBeforeRetry);
+
+  await dialog.getByRole('button', { name: 'Alterar produto do Bling', exact: true }).click();
+  await search.fill('Produto Catálogo QA 321');
+  await expect(product321).toBeVisible();
+  const staleStockRequest = page.waitForRequest((event) => new URL(event.url()).pathname === '/api/integrations/bling/products/321/stock');
+  await product321.click();
+  await staleStockRequest;
+  await dialog.getByRole('button', { name: 'Alterar produto do Bling', exact: true }).click();
+  await search.fill('Produto Catálogo QA 322');
+  await page.clock.fastForward(200);
+  const product322 = dialog.getByRole('button', { name: /Produto Catálogo QA 322/ });
+  await expect(product322).toBeVisible();
+  await product322.click();
+  await expect(dialog.getByLabel('Nome local *')).toHaveValue('Produto Catálogo QA 322');
+  await expect(dialog.getByLabel('SKU')).toHaveValue('SKU-322');
+  await expect(dialog.getByLabel('Estoque virtual')).toHaveValue('5');
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  await expect(dialog.getByLabel('Nome local *')).toHaveValue('Produto Catálogo QA 322');
+  await expect(dialog.getByLabel('SKU')).toHaveValue('SKU-322');
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+  await timedOutStockRoute?.abort().catch(() => undefined);
+  await dialog.getByRole('button', { name: 'Cancelar', exact: true }).click();
+});
+
+test('cards da Product Library iniciam compactos, mantêm accordion único e menu portal acessível', async ({ page }) => {
+  test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
+  await login(page);
+  const firstName = `Sintra Fast Multiplicador QA ${Date.now()}`;
+  const secondName = `V-Floc Concentrado QA ${Date.now()}`;
+  const first = await importQaProduct(page.request, apiUrl, { blingProductId: nextQaBlingProductId(), name: firstName });
+  productFixturesForCleanup.add(first.id);
+  const second = await importQaProduct(page.request, apiUrl, { blingProductId: nextQaBlingProductId(), name: secondName });
+  productFixturesForCleanup.add(second.id);
+  await page.goto('/configuracoes?tab=products');
+  const firstCard = page.locator(`[data-product-id="${first.id}"]`);
+  const secondCard = page.locator(`[data-product-id="${second.id}"]`);
+  const firstToggle = firstCard.getByRole('button', { name: `Expandir ${firstName}`, exact: true });
+  const secondToggle = secondCard.getByRole('button', { name: `Expandir ${secondName}`, exact: true });
+
+  await expect(firstToggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(secondToggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(firstToggle).toContainText('Sintra Fast…');
+  await expect(firstCard).not.toContainText('R$');
+  await expect(firstCard).not.toContainText('SKU:');
+  await expect(firstCard).not.toContainText('GTIN');
+  await expect(firstCard).not.toContainText('Estoque virtual');
+  await expect(firstCard).not.toContainText('Sincronizado:');
+  await expect(firstCard.getByRole('button', { name: /Ações de/ })).toHaveCount(0);
+  await expect(firstCard.getByRole('button', { name: 'Editar nome/imagem', exact: true })).toHaveCount(0);
+  const thumb = await firstToggle.locator('img').boundingBox();
+  expect(thumb?.width).toBe(48);
+  expect(thumb?.height).toBe(48);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await firstToggle.click();
+  await expect(firstCard.getByRole('button', { name: `Recolher ${firstName}`, exact: true })).toHaveAttribute('aria-expanded', 'true');
+  await expect(firstCard).toContainText(firstName);
+  await expect(firstCard).toContainText('R$ 28,00');
+  await expect(firstCard).toContainText('Bling');
+  await expect(firstCard).toContainText('SKU:');
+  await expect(firstCard).toContainText('Estoque virtual: 5');
+  await expect(firstCard).toContainText('Sincronizado:');
+
+  await secondToggle.click();
+  await expect(firstCard.getByRole('button', { name: `Expandir ${firstName}`, exact: true })).toHaveAttribute('aria-expanded', 'false');
+  await expect(secondCard.getByRole('button', { name: `Recolher ${secondName}`, exact: true })).toHaveAttribute('aria-expanded', 'true');
+  await secondCard.getByRole('button', { name: `Recolher ${secondName}`, exact: true }).click();
+  await expect(secondCard.getByRole('button', { name: `Expandir ${secondName}`, exact: true })).toHaveAttribute('aria-expanded', 'false');
+
+  await firstCard.getByRole('button', { name: `Expandir ${firstName}`, exact: true }).click();
+  const actionButton = firstCard.getByRole('button', { name: `Ações de ${firstName}`, exact: true });
+  await actionButton.click();
+  const menu = page.getByRole('menu', { name: `Ações de ${firstName}`, exact: true });
+  await expect(menu).toBeVisible();
+  expect(await menu.evaluate((element) => element.parentElement === document.body)).toBe(true);
+  expect(await menu.evaluate((element) => getComputedStyle(element).position)).toBe('fixed');
+  const menuBounds = await menu.boundingBox();
+  const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  expect(menuBounds && menuBounds.x >= 0 && menuBounds.y >= 0
+    && menuBounds.x + menuBounds.width <= viewport.width
+    && menuBounds.y + menuBounds.height <= viewport.height).toBe(true);
+  expect((await menu.getByRole('menuitem').allTextContents()).map((value) => value.trim())).toEqual([
+    'Editar nome/imagem', 'Atualizar do Bling', 'Alterar produto Bling', 'Arquivar',
+  ]);
+  await expect(menu.getByRole('menuitem', { name: 'Desvincular do Bling' })).toHaveCount(0);
+  await page.getByLabel('Buscar produto').click();
+  await expect(menu).toHaveCount(0);
+  await actionButton.click();
+  await expect(menu).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  await expect(actionButton).toBeFocused();
+  await actionButton.click();
+  await menu.getByRole('menuitem', { name: 'Editar nome/imagem', exact: true }).click();
+  await expect(menu).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'Editar produto' })).toBeVisible();
+  await page.getByRole('button', { name: 'Cancelar', exact: true }).click();
 });
 
 test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar e arquivar sem envio real', async ({ page }) => {
@@ -427,20 +643,23 @@ test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar 
   createdProductId = (await createResponse.json()).product.id;
   productFixturesForCleanup.add(createdProductId);
 
-  const card = page.locator('article').filter({ hasText: productName }).first();
+  const card = page.locator(`[data-product-id="${createdProductId}"]`);
   await expect(card).toBeVisible();
+  await expect(card.getByRole('button', { name: `Expandir ${productName}`, exact: true })).toHaveAttribute('aria-expanded', 'false');
+  await card.getByRole('button', { name: `Expandir ${productName}`, exact: true }).click();
   await expect(card).toContainText('R$ 180,00');
   await expect(card).toContainText('SKU: SKU-323');
   await expect(card).toContainText('Estoque virtual: 5');
   await expect.poll(() => imageResponseStatuses.length).toBeGreaterThan(0);
   expect(imageResponseStatuses.at(-1)).toBe(200);
-  await expect.poll(() => card.locator('img').evaluate((element: HTMLImageElement) => element.naturalWidth)).toBeGreaterThan(0);
+  await expect.poll(() => card.locator('img[alt^="Imagem do produto"]').evaluate((element: HTMLImageElement) => element.naturalWidth)).toBeGreaterThan(0);
 
   await page.setViewportSize({ width: 820, height: 1180 });
   await expect(card).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByLabel('Buscar produto')).toBeVisible();
-  await card.getByRole('button', { name: 'Editar nome/imagem' }).click();
+  await card.getByRole('button', { name: `Ações de ${productName}`, exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Editar nome/imagem', exact: true }).click();
   await expect(page.getByLabel('Nome local *')).toHaveValue(productName);
   const editDialog = page.getByRole('dialog', { name: 'Editar produto' });
   await expect(editDialog).toContainText('Preço do catálogo · Bling');
@@ -487,10 +706,12 @@ test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar 
   expect(providerMutations).toEqual([]);
 
   await page.goto('/configuracoes?tab=products');
-  const refreshedCard = page.locator('article').filter({ hasText: productName }).first();
+  const refreshedCard = page.locator(`[data-product-id="${createdProductId}"]`);
   await expect(refreshedCard).toBeVisible();
+  await expect(refreshedCard.getByRole('button', { name: `Expandir ${productName}`, exact: true })).toBeVisible();
+  await refreshedCard.getByRole('button', { name: `Expandir ${productName}`, exact: true }).click();
   await refreshedCard.getByRole('button', { name: `Ações de ${productName}` }).click();
-  await page.getByRole('button', { name: 'Arquivar', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Arquivar', exact: true }).click();
   const archiveDialog = page.getByRole('dialog', { name: 'Arquivar produto?' });
   await expect(archiveDialog).toBeVisible();
   await archiveDialog.getByRole('button', { name: 'Arquivar', exact: true }).click();
@@ -542,14 +763,17 @@ test('UI bloqueia SKU duplicado após normalização por caixa e espaços', asyn
   }
 });
 
-test('estoque efetivo usa fallback físico e mantém zero/negativo em vermelho na prévia', async ({ page }) => {
+test('picker usa estoque efetivo cacheado na sugestão e prévia mantém o rótulo aprovado', async ({ page }) => {
   test.skip(!email || !password, 'credenciais QA ausentes');
   await login(page);
   await ensureQaBlingConnected(page.request, apiUrl);
   const pool = new Pool({ connectionString: 'postgresql://vitstock@127.0.0.1:55432/vitstock_qa' });
   const fixtures: Array<{ id: string; name: string; value: string; isNonPositive: boolean }> = [];
+  let blingApiReads = 0;
+  page.on('request', (event) => { if (new URL(event.url()).pathname.startsWith('/api/integrations/bling/')) blingApiReads += 1; });
   try {
     for (const [scenario, value, isNonPositive] of [
+      ['default', '5', false],
       ['physical-only', '7', false],
       ['virtual-zero', '0', true],
       ['virtual-negative', '-2', true],
@@ -561,6 +785,7 @@ test('estoque efetivo usa fallback físico e mantém zero/negativo em vermelho n
       const response = await page.request.get(`${apiUrl}/api/products/${product.id}`);
       expect(response.status()).toBe(200);
       const stored = (await response.json()).product;
+      if (scenario === 'default') expect(stored.bling).toMatchObject({ stockPhysicalTotal: '8', stockVirtualTotal: '5' });
       if (scenario === 'physical-only') expect(stored.bling).toMatchObject({ stockPhysicalTotal: '7', stockVirtualTotal: null });
       if (scenario === 'virtual-zero') expect(stored.bling).toMatchObject({ stockPhysicalTotal: '8', stockVirtualTotal: '0' });
       if (scenario === 'virtual-negative') expect(stored.bling).toMatchObject({ stockPhysicalTotal: '8', stockVirtualTotal: '-2' });
@@ -568,6 +793,31 @@ test('estoque efetivo usa fallback físico e mantém zero/negativo em vermelho n
     expect((await page.request.post(`${apiUrl}/api/qa/bling/scenario`, { data: { scenario: 'default' } })).status()).toBe(200);
     await page.goto('/atendimento');
     const contactName = await openFreshProductConversation(page);
+    const composer = page.getByPlaceholder('Digite sua mensagem para o WhatsApp...');
+    const baselineBlingReads = blingApiReads;
+    for (const fixture of fixtures) {
+      await composer.fill(`\\${fixture.name}`);
+      const suggestions = page.getByRole('dialog', { name: 'Sugestões de produtos' });
+      const option = suggestions.getByRole('option', { name: new RegExp(fixture.name) });
+      await expect(option).toBeVisible();
+      await expect(option).toContainText(`R$ 28,00`);
+      await expect(option).toContainText(`Qtd: ${fixture.value}`);
+      await expect(option).not.toContainText(/SKU\s*:|Estoque(?:\s+(?:virtual|físico))?\s*:/i);
+      const quantity = option.getByText(`Qtd: ${fixture.value}`, { exact: true });
+      if (fixture.isNonPositive) expect(await quantity.getAttribute('class')).toContain('text-red-300');
+      else expect(await quantity.getAttribute('class')).not.toContain('text-red-300');
+      expect(blingApiReads).toBe(baselineBlingReads);
+      if (fixture.value === '7') {
+        await composer.press('ArrowDown');
+        await composer.press('ArrowDown');
+        await composer.press('Enter');
+        const keyboardPreview = page.getByRole('dialog', { name: 'Pré-visualizar produto' });
+        await expect(keyboardPreview.getByText('Estoque virtual: 7', { exact: true })).toBeVisible();
+        await keyboardPreview.getByRole('button', { name: 'Fechar prévia' }).click();
+      } else {
+        await composer.press('Escape');
+      }
+    }
     await page.getByRole('button', { name: 'Produtos', exact: true }).click();
     const picker = page.getByRole('dialog', { name: 'Produtos' });
     for (const fixture of fixtures) {
@@ -671,9 +921,11 @@ test('mutations confirmadas continuam sucesso quando o refresh da lista falha', 
     await route.continue();
   });
 
-  const card = page.locator('article').filter({ hasText: productName }).first();
+  const card = page.locator(`[data-product-id="${imported.id}"]`);
   await expect(card).toBeVisible();
-  await card.getByRole('button', { name: 'Editar nome/imagem' }).click();
+  await card.getByRole('button', { name: `Expandir ${productName}`, exact: true }).click();
+  await card.getByRole('button', { name: `Ações de ${productName}`, exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Editar nome/imagem', exact: true }).click();
   await page.getByLabel('Nome local *').fill(productName);
   failNextListRefresh = true;
   await page.getByRole('button', { name: 'Salvar alterações' }).click();
@@ -683,7 +935,7 @@ test('mutations confirmadas continuam sucesso quando o refresh da lista falha', 
   expect(mutationRequests.update).toBe(1);
 
   await card.getByRole('button', { name: `Ações de ${productName}` }).click();
-  await page.getByRole('button', { name: 'Arquivar', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Arquivar', exact: true }).click();
   const archiveDialog = page.getByRole('dialog', { name: 'Arquivar produto?' });
   failNextListRefresh = true;
   await archiveDialog.getByRole('button', { name: 'Arquivar', exact: true }).click();

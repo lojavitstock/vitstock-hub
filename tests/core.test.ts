@@ -102,6 +102,7 @@ import {
   withOptimisticHubReaction,
 } from '../src/utils/messageReactionActions';
 import { positionMessageActionMenu, positionReactionPalette } from '../src/utils/messagePopoverPosition';
+import { apiRequest } from '../src/services/api';
 import {
   canRestoreComposerDraft,
   captureComposerSubmission,
@@ -143,6 +144,49 @@ import { selectConversationAvatar } from '../src/utils/avatarSelection';
 import { explicitAvatarProviderPhone, avatarResolutionTtls } from '../server/src/avatarResolution';
 import { selectConversationAvatar as selectServerConversationAvatar } from '../server/src/avatarSelection';
 import type { Conversation, Message } from '../src/types';
+
+test('apiRequest distinguishes caller cancellation from its 20 second timeout', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  let timerDelay = 0;
+  let fireTimeout: (() => void) | null = null;
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {
+      setTimeout: (callback: TimerHandler, delay?: number) => {
+        timerDelay = delay || 0;
+        fireTimeout = callback as () => void;
+        return 1;
+      },
+      clearTimeout: () => undefined,
+    } as unknown as Window,
+  });
+  globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    const signal = init?.signal;
+    const rejectForAbort = () => reject(signal?.reason || new DOMException('Aborted', 'AbortError'));
+    if (signal?.aborted) rejectForAbort();
+    else signal?.addEventListener('abort', rejectForAbort, { once: true });
+  })) as typeof fetch;
+
+  try {
+    const caller = new AbortController();
+    const callerRequest = apiRequest('/intentional-cancel', { signal: caller.signal });
+    caller.abort();
+    await assert.rejects(callerRequest, (error: unknown) => error instanceof Error
+      && error.name === 'AbortError'
+      && !error.message.includes('O servidor demorou'));
+    assert.equal(timerDelay, 20_000);
+
+    const timedRequest = apiRequest('/internal-timeout');
+    assert.equal(timerDelay, 20_000);
+    fireTimeout?.();
+    await assert.rejects(timedRequest, /O servidor demorou mais que o esperado para responder/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
+    else Reflect.deleteProperty(globalThis, 'window');
+  }
+});
 
 test('classifies provider JIDs and filters non-conversational entities fail-closed', () => {
   assert.equal(classifyProviderJid('5521999999999@s.whatsapp.net'), 'PN');
