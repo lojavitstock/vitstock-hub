@@ -705,8 +705,32 @@ rejects it with 409 before stock lookup or mutation, while direct detail reads
 and existing-link sync fail closed with 502 until the detail contract is
 verified. Migration 023 retains the `A`/`I` status constraint; migration 024
 only enforces normalized company/SKU uniqueness and does not delete or rewrite
-product data, message snapshots or images. No arbitrary upstream URL or
-full-catalog scan is allowed.
+product data, message snapshots or images. No arbitrary upstream URL is allowed.
+Migration `025_bling_product_catalog_projection.sql` adds a separate
+company-scoped searchable projection of active list fields. It is a cache only:
+detail/status/price/stock checks used by import, link, relink and existing-link
+sync still use the authoritative provider reads. The projection deliberately
+does not store stock or media. A tenant advisory lock coordinates a complete
+active-catalog sync across replicas; each generation is staged page-by-page at
+100 records through `BlingApiClient` and its PostgreSQL request budget. A
+non-empty short page does not terminate the scan: a subsequent empty page is
+required as the terminal confirmation; repeated product IDs or a failed/malformed
+page abort publication. The generation is published atomically only after this
+complete scan. Failed/incomplete generations are discarded and cannot replace the previous active snapshot. One previous
+generation is retained for 24 hours so local pagination remains pinned to the
+same snapshot across a concurrent refresh; older retired/building rows are
+cleaned on the next sync.
+
+The active projection is fresh for six hours. Missing or stale snapshots trigger
+a controlled `criterio=2` sync, while an explicit ADMIN refresh is available in
+the existing link/import dialogs. If a refresh fails and an older snapshot
+exists, search returns it marked stale; without any complete snapshot, search
+fails closed. Search and `Carregar mais` on a fresh snapshot make no provider
+calls. One submitted query searches normalized name tokens (all tokens must
+appear, order-independent) plus a case-insensitive exact SKU match; ranking is
+exact SKU, exact normalized name, normalized-name prefix, then all-token match,
+with normalized name and Bling ID as stable tie-breakers. The generation ID
+pins local pages. No provider token fan-out or stock-wide scan is performed.
 IDs normalize to strings; unsafe JSON numeric IDs fail rather than round.
 Variations retain their own IDs and explicit parent relation. Warehouse field
 `descricao` and flags are preserved. Physical/virtual totals and deposit balances

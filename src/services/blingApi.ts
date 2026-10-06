@@ -8,6 +8,20 @@ export type BlingProduct = {
   tipo: 'S' | 'P' | 'N';
   situacao: 'A' | 'I' | 'E';
   formato: 'S' | 'V' | 'E';
+  idProdutoPai?: string;
+};
+
+export type BlingCatalogPage = {
+  data: BlingProduct[];
+  page: number;
+  limit: number;
+  total: number;
+  hasMore: boolean;
+  generationId: string;
+  syncedAt: string;
+  stale: boolean;
+  refreshFailed: boolean;
+  refreshing: boolean;
 };
 
 export type BlingProductDetail = BlingProduct & {
@@ -40,10 +54,16 @@ export type ProductBlingLink = {
   updatedAt: string;
 };
 
-export async function fetchBlingProducts(search = '', page = 1, signal?: AbortSignal) {
+export async function fetchBlingProducts(search = '', page = 1, signal?: AbortSignal, generationId?: string) {
   const params = new URLSearchParams({ page: String(page), limit: '20' });
-  if (search.trim()) params.set('nome', search.trim());
-  return apiRequest<{ data: BlingProduct[]; page: number; limit: number }>(`/api/integrations/bling/products?${params.toString()}`, { signal });
+  if (search.trim()) params.set('q', search.trim());
+  if (generationId) params.set('generationId', generationId);
+  return apiRequest<BlingCatalogPage>(`/api/integrations/bling/products?${params.toString()}`, { signal });
+}
+
+export async function refreshBlingProductCatalog() {
+  return apiRequest<{ generationId: string; syncedAt: string; products: number; pages: number }>(
+    '/api/integrations/bling/products/catalog-sync', { method: 'POST' });
 }
 
 export async function fetchBlingProductDetail(id: string, signal?: AbortSignal) {

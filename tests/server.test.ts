@@ -185,14 +185,25 @@ test('product send: trusted snapshots, tenant boundaries, exact JIDs and atomic 
   } finally { await app.close(); }
 });
 
-test('Bling product selection catalog fixes active criterion, honors search/pagination and fails closed on provider violations', async () => {
+test('Bling product selection catalog searches the company projection and never calls provider for a cached page', async () => {
   const { default: Fastify } = await import('../server/node_modules/fastify/fastify.js');
   const { registerBlingRoutes } = await import('../server/src/bling.js');
-  const calls: Array<{ resource: string; query: URLSearchParams }> = [];
-  let providerValue: unknown = { data: [
-    { id: '301', nome: 'Produto QA A', codigo: 'SKU-301', tipo: 'P', situacao: 'A', formato: 'S' },
-    { id: '302', nome: 'Produto QA B', codigo: 'SKU-302', tipo: 'P', situacao: 'A', formato: 'S' },
-  ] };
+  const searches: Array<{ companyId: string; plan: any; page: number; limit: number; type: string }> = [];
+  let providerReads = 0;
+  const active = { id: '00000000-0000-4000-8000-000000000301', syncedAt: new Date().toISOString(), status: 'active' as const };
+  const catalogRepository = {
+    async activeGeneration(companyId: string) { assert.equal(companyId, 'qa-company'); return active; },
+    async generation(companyId: string, generationId: string) { assert.equal(companyId, 'qa-company'); return generationId === active.id ? active : null; },
+    async tryAcquireSyncLock() { throw new Error('fresh snapshot must not sync'); },
+    async startGeneration() {}, async upsertPage() {}, async publishGeneration() { return 0; }, async discardGeneration() {},
+    async search(input: any) {
+      searches.push(input);
+      return { data: [
+        { id: '301', nome: 'Produto QA A', codigo: 'SKU-301', preco: 10, tipo: 'P', situacao: 'A', formato: 'S' },
+        { id: '302', nome: 'Produto QA B', codigo: 'SKU-302', preco: 20, tipo: 'P', situacao: 'A', formato: 'S' },
+      ].slice((input.page - 1) * input.limit, input.page * input.limit), total: 2 };
+    },
+  };
   const app = Fastify({ logger: false });
   app.decorateRequest('user', null);
   app.addHook('onRequest', async (request) => {
@@ -200,36 +211,28 @@ test('Bling product selection catalog fixes active criterion, honors search/pagi
   });
   await registerBlingRoutes(app, {
     store: {}, credentials: { clientId: 'qa', clientSecret: 'not-used', redirectUri: 'https://api.example.test/callback' },
-    client: { read: async (_company: string, resource: string, query: URLSearchParams) => {
-      calls.push({ resource, query: new URLSearchParams(query) });
-      return providerValue;
-    } },
+    client: { read: async () => { providerReads += 1; return { data: [] }; } }, catalogRepository,
   } as any);
   try {
-    const response = await app.inject({ method: 'GET', url: '/api/integrations/bling/products?page=3&limit=2&nome=Produto%20QA' });
+    const response = await app.inject({ method: 'GET', url: '/api/integrations/bling/products?page=1&limit=2&nome=Produto%20QA' });
     assert.equal(response.statusCode, 200, response.body);
     assert.deepEqual(response.json().data.map((item: { situacao: string }) => item.situacao), ['A', 'A']);
-    assert.equal(response.json().page, 3);
+    assert.equal(response.json().page, 1);
     assert.equal(response.json().limit, 2);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0]!.resource, 'products');
-    assert.equal(calls[0]!.query.get('criterio'), '2');
-    assert.equal(calls[0]!.query.get('pagina'), '3');
-    assert.equal(calls[0]!.query.get('limite'), '2');
-    assert.equal(calls[0]!.query.get('nome'), 'Produto QA');
+    assert.equal(response.json().hasMore, false);
+    assert.equal(searches.length, 1);
+    assert.equal(searches[0]!.companyId, 'qa-company');
+    assert.deepEqual(searches[0]!.plan.nameTokens, ['produto', 'qa']);
+    assert.equal(searches[0]!.page, 1);
+    assert.equal(searches[0]!.limit, 2);
+    assert.equal(providerReads, 0, 'a recent catalog projection must serve search locally');
 
     const override = await app.inject({ method: 'GET', url: '/api/integrations/bling/products?criterio=5' });
     assert.equal(override.statusCode, 400);
-    assert.equal(calls.length, 1, 'a rejected client criterion must not call Bling');
-
-    providerValue = { data: [
-      { id: '301', nome: 'Produto QA A', tipo: 'P', situacao: 'A', formato: 'S' },
-      { id: '201', nome: 'Produto inativo', tipo: 'P', situacao: 'I', formato: 'S' },
-    ] };
-    const providerViolation = await app.inject({ method: 'GET', url: '/api/integrations/bling/products?page=2&limit=2' });
-    assert.equal(providerViolation.statusCode, 502);
-    assert.equal(calls[1]!.query.get('criterio'), '2');
-    assert.match(providerViolation.json().error, /não ativo/i);
+    assert.equal(searches.length, 1, 'a rejected provider criterion must not reach the repository or provider');
+    const ambiguous = await app.inject({ method: 'GET', url: '/api/integrations/bling/products?q=snow&nome=snow' });
+    assert.equal(ambiguous.statusCode, 400);
+    assert.equal(providerReads, 0);
   } finally { await app.close(); }
 });
 

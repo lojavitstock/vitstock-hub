@@ -520,10 +520,17 @@ Token POST usa apenas grant_type/code ou grant_type/refresh_token; redirect_uri
 
 Migration `022_bling_integration.sql` é aditiva (três tabelas da integração).
 Migration `023_product_bling_links.sql` adiciona o vínculo Bling da Product
-Library e saldos por depósito; não altera registros históricos de mensagens.
-Validar ambas somente pelo harness QA local guardado. Railway aplicará pelo
-runner existente apenas em deployment posteriormente aprovado; esta tarefa não
-autoriza aplicar migration em Preview/Production.
+Library e saldos por depósito; `024_product_bling_sku_unique.sql` adiciona
+somente unicidade case-insensitive de SKU por empresa. Migration
+`025_bling_product_catalog_projection.sql` adiciona gerações e entradas do
+catálogo ativo pesquisável, sem tocar Product Library, mensagens ou estoque.
+Validar migrations pelo harness QA local guardado. Railway aplicará pelo runner
+existente somente em deployment posteriormente aprovado; não aplicar migration
+manualmente em Preview/Production. A primeira verificação de OAuth real continua
+limitada a uma página; o sync completo de catálogo pertence ao fluxo posterior
+de busca controlada, com páginas de 100, página vazia terminal, lock por empresa
+e TTL de seis horas. O sync pode realizar uma chamada final adicional para
+confirmar o fim quando a última página não preencher o limite.
 Recuperação lógica, por operador autorizado: desabilitar env Bling/reverter código
 sem remover tabelas; remoção posterior das três tabelas perde vínculos/states/
 budget mas não afeta catálogo local. Não apagar a migration de controle em uso.

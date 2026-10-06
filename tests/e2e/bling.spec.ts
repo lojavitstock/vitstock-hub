@@ -115,6 +115,9 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
       if (path === 'products/101') expect(body.data.id).toBe('101');
       if (path.startsWith('products/101/stock')) expect(body.data[0]).toMatchObject({ produto: { id: '101' }, saldoFisicoTotal: 8, saldoVirtualTotal: 5 });
     }
+    await page.request.post(`${api}/api/qa/bling/scenario`, { data: { scenario: 'default' } });
+    const catalogSync = await page.request.post(`${api}/api/integrations/bling/products/catalog-sync`);
+    expect(catalogSync.status()).toBe(200, await catalogSync.text());
     const catalogPage1 = await page.request.get(`${api}/api/integrations/bling/products?page=1&limit=20`);
     expect(catalogPage1.status()).toBe(200);
     const page1Body = await catalogPage1.json();
@@ -128,10 +131,10 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     expect(catalogPage2.status()).toBe(200);
     const page2Body = await catalogPage2.json();
     expect(page2Body).toMatchObject({ page: 2, limit: 20 });
-    expect(page2Body.data).toEqual([
-      expect.objectContaining({ id: '322', situacao: 'A' }),
-      expect.objectContaining({ id: '323', situacao: 'A' }),
-    ]);
+    expect(page2Body.data).toHaveLength(2);
+    const allCatalogIds = [...page1Ids, ...page2Body.data.map((product: { id: string }) => product.id)];
+    expect(new Set(allCatalogIds).size).toBe(22);
+    expect([...allCatalogIds].sort()).toEqual(['101', ...Array.from({ length: 21 }, (_, index) => String(303 + index))].sort());
     const activeSearch = await page.request.get(`${api}/api/integrations/bling/products?page=1&limit=5&nome=${encodeURIComponent('Produto Catálogo QA 322')}`);
     expect((await activeSearch.json()).data).toEqual([expect.objectContaining({ id: '322', situacao: 'A' })]);
     const inactiveSearch = await page.request.get(`${api}/api/integrations/bling/products?page=1&limit=5&nome=${encodeURIComponent('Produto Inativo QA')}`);
@@ -247,7 +250,7 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     expect((await page.request.get(`${api}/api/integrations/bling/products?limit=101`)).status()).toBe(400);
     const oauthBefore = Number((await pool.query("SELECT requests FROM bling_request_budgets WHERE budget='oauth'")).rows[0].requests);
     await pool.query("UPDATE bling_connections SET access_token_expires_at=now()-interval '1 second'");
-    const concurrent = await Promise.all(Array.from({ length: 10 }, () => page.request.get(`${api}/api/integrations/bling/products`)));
+    const concurrent = await Promise.all(Array.from({ length: 10 }, () => page.request.get(`${api}/api/integrations/bling/products/101`)));
     expect(concurrent.map(r => r.status())).toEqual(Array(10).fill(200));
     const oauthAfter = Number((await pool.query("SELECT requests FROM bling_request_budgets WHERE budget='oauth'")).rows[0].requests);
     expect(oauthAfter - oauthBefore).toBe(1);
@@ -296,7 +299,7 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     const budget = (await pool.query("SELECT requests,day FROM bling_request_budgets WHERE budget='api'")).rows[0];
     try {
       await pool.query("UPDATE bling_request_budgets SET requests=120000,day=CURRENT_DATE WHERE budget='api'");
-      expect((await page.request.get(`${api}/api/integrations/bling/products`)).status()).toBe(429);
+      expect((await page.request.post(`${api}/api/integrations/bling/products/catalog-sync`)).status()).toBe(429);
     } finally { await pool.query("UPDATE bling_request_budgets SET requests=$1,day=$2 WHERE budget='api'", [budget.requests,budget.day]); }
     expect((await page.request.get(`${api}/api/integrations/bling/callback?state=${'a'.repeat(43)}&code=qa-local-code`, { maxRedirects: 0 })).headers().location).toContain('bling=error');
     page.once('dialog', dialog => dialog.accept());
@@ -430,8 +433,9 @@ test('Bling QA migration is additive, constrained and logically reversible witho
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='022_bling_integration.sql'")).rows).toHaveLength(1);
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='023_product_bling_links.sql'")).rows).toHaveLength(1);
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='024_product_bling_sku_unique.sql'")).rows).toHaveLength(1);
+    expect((await client.query("SELECT name FROM schema_migrations WHERE name='025_bling_product_catalog_projection.sql'")).rows).toHaveLength(1);
     const tables = (await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'bling_%' ORDER BY table_name")).rows.map(r => r.table_name);
-    expect(tables).toEqual(['bling_connections','bling_oauth_states','bling_request_budgets']);
+    expect(tables).toEqual(['bling_connections','bling_oauth_states','bling_product_catalog_entries','bling_product_catalog_generations','bling_request_budgets']);
     const productTables = (await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('product_bling_links','product_bling_stock_balances') ORDER BY table_name")).rows.map(r => r.table_name);
     expect(productTables).toEqual(['product_bling_links','product_bling_stock_balances']);
     const stockTypes = (await client.query("SELECT column_name,data_type FROM information_schema.columns WHERE table_name='product_bling_stock_balances' AND column_name IN ('physical_balance','virtual_balance') ORDER BY column_name")).rows;
@@ -442,7 +446,7 @@ test('Bling QA migration is additive, constrained and logically reversible witho
     expect(skuIndex).toMatch(/WHERE .*bling_code IS NOT NULL.*btrim\(bling_code\).*<>\s+''/i);
     expect((await client.query("SELECT constraint_type FROM information_schema.table_constraints WHERE table_name='bling_connections' AND constraint_type='PRIMARY KEY'")).rows).toHaveLength(1);
     await client.query('BEGIN');
-    await client.query('DROP TABLE bling_oauth_states, bling_connections, bling_request_budgets');
+    await client.query('DROP TABLE bling_product_catalog_entries, bling_product_catalog_generations, bling_oauth_states, bling_connections, bling_request_budgets');
     await client.query('ROLLBACK');
     expect((await client.query("SELECT to_regclass('bling_connections') AS name")).rows[0].name).toBe('bling_connections');
   } finally { await client.query('ROLLBACK'); client.release(); await pool.end(); }
