@@ -93,11 +93,16 @@ export const AtendimentoPage: React.FC = () => {
   const attendantName = user?.name || 'Atendente';
   const [whatsappStatus, setWhatsappStatus] = useState<WhatsappInstance['status']>('connecting');
   const [contactAvatarViewerItem, setContactAvatarViewerItem] = useState<MediaViewerItem | null>(null);
-  const openContactAvatarViewer = useCallback((src: string) => {
+  const contactAvatarTriggerRef = useRef<HTMLElement | null>(null);
+  const openContactAvatarViewer = useCallback((src: string, trigger: HTMLElement) => {
     if (!src.trim()) return;
+    contactAvatarTriggerRef.current = trigger;
     setContactAvatarViewerItem({ type: 'image', src, fileName: 'foto-contato.jpg' });
   }, []);
-  const closeContactAvatarViewer = useCallback(() => setContactAvatarViewerItem(null), []);
+  const closeContactAvatarViewer = useCallback(() => {
+    setContactAvatarViewerItem(null);
+    window.requestAnimationFrame(() => contactAvatarTriggerRef.current?.focus());
+  }, []);
   const whatsappConnected = whatsappStatus === 'connected';
   const composerRef = useRef<MessageComposerHandle>(null);
   const composerTextRef = useRef('');

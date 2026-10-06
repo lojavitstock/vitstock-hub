@@ -9,7 +9,7 @@ type ContactPhotoProps = {
   emphasized?: boolean;
   lazy?: boolean;
   sourceCategory?: AvatarDebugSource;
-  onPhotoClick?: (avatar: string) => void;
+  onPhotoClick?: (avatar: string, trigger: HTMLElement) => void;
 };
 
 export const ContactPhoto = React.memo<ContactPhotoProps>(({
@@ -32,8 +32,8 @@ export const ContactPhoto = React.memo<ContactPhotoProps>(({
     if (onPhotoClick) setLoadedAvatar(null);
   }, [avatar, onPhotoClick]);
 
-  const activatePhoto = () => {
-    if (isClickable && avatar) onPhotoClick?.(avatar);
+  const activatePhoto = (trigger: HTMLElement) => {
+    if (isClickable && avatar) onPhotoClick?.(avatar, trigger);
   };
 
   return (
@@ -43,11 +43,11 @@ export const ContactPhoto = React.memo<ContactPhotoProps>(({
       role={isClickable ? 'button' : undefined}
       tabIndex={isClickable ? 0 : undefined}
       aria-label={isClickable ? `Ampliar foto de ${name}` : undefined}
-      onClick={isClickable ? activatePhoto : undefined}
+      onClick={isClickable ? (event) => activatePhoto(event.currentTarget) : undefined}
       onKeyDown={isClickable ? (event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
-          activatePhoto();
+          activatePhoto(event.currentTarget);
         }
       } : undefined}
     >
