@@ -104,7 +104,7 @@ The explicit `public/manifest.webmanifest` and `public/sw.js` provide install me
 
 - API base URL: `VITE_API_URL`, defaulting to `http://localhost:3001`.
 - Browser fetches include cookies.
-- General requests time out after 20 seconds; Evolution-specific browser requests use a 30-second timeout.
+- General browser requests time out after 20 seconds; Evolution-specific browser requests use a 30-second timeout. The two Bling catalog requests that can wait for a complete provider sync use a per-request 120-second timeout; this does not change other Hub requests.
 - Errors are surfaced to callers rather than converted to false successes.
 
 `VITE_*` variables are public build-time values. They must never contain provider keys, database URLs or session secrets.
@@ -705,12 +705,47 @@ rejects it with 409 before stock lookup or mutation, while direct detail reads
 and existing-link sync fail closed with 502 until the detail contract is
 verified. Migration 023 retains the `A`/`I` status constraint; migration 024
 only enforces normalized company/SKU uniqueness and does not delete or rewrite
-product data, message snapshots or images. No arbitrary upstream URL or
-full-catalog scan is allowed.
+product data, message snapshots or images. No arbitrary upstream URL is allowed.
+Migration `025_bling_product_catalog_projection.sql` adds a separate
+company-scoped searchable projection of active list fields. It is a cache only:
+detail/status/price/stock checks used by import, link, relink and existing-link
+sync still use the authoritative provider reads. The projection deliberately
+does not store stock or media. A tenant advisory lock coordinates a complete
+active-catalog sync across replicas; each generation is staged page-by-page at
+100 records through `BlingApiClient` and its PostgreSQL request budget. A
+non-empty short page does not terminate the scan: a subsequent empty page is
+required as the terminal confirmation; repeated product IDs or a failed/malformed
+page abort publication. The generation is published atomically only after this
+complete scan. Failed/incomplete generations are discarded and cannot replace the previous active snapshot. One previous
+generation is retained for 24 hours so local pagination remains pinned to the
+same snapshot across a concurrent refresh; older retired/building rows are
+cleaned on the next sync.
+
+The active projection is fresh for six hours. Missing or stale snapshots trigger
+a controlled `criterio=2` sync, while an explicit ADMIN refresh is available in
+the existing link/import dialogs. If a refresh fails and an older snapshot
+exists, search returns it marked stale; without any complete snapshot, search
+fails closed. Search and `Carregar mais` on a fresh snapshot make no provider
+calls. One submitted query searches normalized name tokens (all tokens must
+appear, order-independent) plus a case-insensitive exact SKU match; ranking is
+exact SKU, exact normalized name, normalized-name prefix, then all-token match,
+with normalized name and Bling ID as stable tie-breakers. The generation ID
+pins local pages. No provider token fan-out or stock-wide scan is performed.
 IDs normalize to strings; unsafe JSON numeric IDs fail rather than round.
 Variations retain their own IDs and explicit parent relation. Warehouse field
 `descricao` and flags are preserved. Physical/virtual totals and deposit balances
 remain separate: no recomputation, aggregation or available-stock business rule.
+
+The local catalog also reproduces the documented `GET /produtos` `tipo` filter
+from projected fields: `T` includes all; `P` matches `product_type=P`; `S`
+matches service types `S` and `N`; `E` matches product compositions
+(`product_type=P`, `product_format=E`); `PS` matches simple products
+(`product_type=P`, `product_format=S`, no parent); `C` matches parent products
+with variations (`product_type=P`, `product_format=V`, no parent); and `V`
+matches variation rows with a parent ID. The mapping uses the provider's
+documented `tipo`, `formato` and `idProdutoPai` meanings; the route defaults to
+`T`. These predicates are applied locally and do not add provider calls.
+
 Product images are not fetched from Bling. The product send path uses cached
 values and makes no Bling request. Message references and historical snapshots
 are untouched by link/sync/relink/archive; the compatibility unlink route
@@ -719,7 +754,7 @@ outside scope.
 Local disconnect deletes only credentials/states; revoke authorization separately
 in Bling's authorized applications when needed.
 
-Official sources (consulted 2026-10-03):
+Official sources (consulted 2026-10-06):
 [applications/OAuth](https://developer.bling.com.br/aplicativos),
 [JWT](https://developer.bling.com.br/migracao-jwt),
 [limits](https://developer.bling.com.br/limites),

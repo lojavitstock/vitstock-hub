@@ -583,6 +583,16 @@ snapshot histórico da mensagem, sem alterar preço de catálogo/cache e sem
 chamar o Bling durante o envio. Atendentes podem ler dados em cache; mutações de
 produto continuam exclusivas de ADMIN.
 
+O catálogo de candidatos do Bling usa uma projeção local somente para busca e
+seleção, sem substituir a autoridade do provider. A migration 025 guarda campos
+de lista ativos por empresa e ID Bling; busca normalizada por tokens de nome,
+SKU completo exato e paginação são locais. Uma sincronização ativa paginada
+somente é publicada quando todas as páginas terminam corretamente. Ela ocorre
+quando não há snapshot, após TTL de seis horas, ou por ação ADMIN “Atualizar
+catálogo Bling”; busca digitada não dispara chamadas. Importação/vínculo
+continuam revalidando dados autoritativos no Bling e estoque não é sincronizado
+para o catálogo inteiro.
+
 Vitstock Hub deve permanecer uma ferramenta prática.
 
 A pergunta para uma nova funcionalidade não deve ser:

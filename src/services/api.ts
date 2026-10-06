@@ -9,11 +9,14 @@ function callerAbortError(signal?: AbortSignal | null): Error {
   return error;
 }
 
-export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers);
-  if (init?.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+type ApiRequestInit = RequestInit & { timeoutMs?: number };
 
-  const callerSignal = init?.signal;
+export async function apiRequest<T>(path: string, init?: ApiRequestInit): Promise<T> {
+  const { timeoutMs = REQUEST_TIMEOUT_MS, ...requestInit } = init ?? {};
+  const headers = new Headers(requestInit.headers);
+  if (requestInit.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+
+  const callerSignal = requestInit.signal;
   if (callerSignal?.aborted) throw callerAbortError(callerSignal);
 
   let response: Response;
@@ -22,13 +25,13 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
   const timeout = window.setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, REQUEST_TIMEOUT_MS);
+  }, timeoutMs);
   const onAbort = () => controller.abort(callerAbortError(callerSignal));
   callerSignal?.addEventListener('abort', onAbort, { once: true });
   try {
     try {
       response = await fetch(`${API_URL}${path}`, {
-        ...init,
+        ...requestInit,
         signal: controller.signal,
         credentials: 'include',
         headers,

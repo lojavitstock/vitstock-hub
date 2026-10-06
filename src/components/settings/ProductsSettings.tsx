@@ -5,7 +5,7 @@ import { useAuth } from '../../auth/AuthContext';
 import { useSearchParams } from 'react-router-dom';
 import type { Product } from '../../types';
 import type { BlingProduct, BlingProductDetail, ProductBlingLink } from '../../services/blingApi';
-import { fetchBlingConnectionStatus, fetchBlingProductDetail, fetchBlingProductStock, fetchBlingProducts, fetchProductBlingLinks, importProductFromBling, linkProductToBling, syncProductFromBling } from '../../services/blingApi';
+import { fetchBlingConnectionStatus, fetchBlingProductDetail, fetchBlingProductStock, fetchBlingProducts, fetchProductBlingLinks, importProductFromBling, linkProductToBling, refreshBlingProductCatalog, syncProductFromBling } from '../../services/blingApi';
 import { archiveProduct, fetchProducts, updateProduct } from '../../services/productsApi';
 import { effectiveBlingStock, formatBrlPrice, normalizeBlingSku } from '../../utils/productLibrary';
 import { ProductDialog } from '../products/ProductDialog';
@@ -123,6 +123,8 @@ export const ProductsSettings: React.FC = () => {
   const importInFlightRef = useRef(false);
   const blingSelectionControllerRef = useRef<AbortController | null>(null);
   const blingSelectionGenerationRef = useRef(0);
+  const blingCatalogControllerRef = useRef<AbortController | null>(null);
+  const blingCatalogRequestGenerationRef = useRef(0);
   const [products, setProducts] = useState<Product[]>([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
@@ -140,9 +142,12 @@ export const ProductsSettings: React.FC = () => {
   const [blingLinkTarget, setBlingLinkTarget] = useState<Product | null>(null);
   const [blingDialogMode, setBlingDialogMode] = useState<'link' | 'relink'>('link');
   const [blingSearch, setBlingSearch] = useState('');
+  const [blingSubmittedSearch, setBlingSubmittedSearch] = useState('');
   const [blingProducts, setBlingProducts] = useState<BlingProduct[]>([]);
   const [blingPage, setBlingPage] = useState(1);
   const [blingHasMore, setBlingHasMore] = useState(false);
+  const [blingGenerationId, setBlingGenerationId] = useState<string | null>(null);
+  const [blingCatalogStale, setBlingCatalogStale] = useState(false);
   const [blingLoading, setBlingLoading] = useState(false);
   const [blingLinking, setBlingLinking] = useState(false);
   const [blingError, setBlingError] = useState('');
@@ -411,10 +416,16 @@ export const ProductsSettings: React.FC = () => {
   };
 
   const resetBlingCatalog = () => {
+    blingCatalogRequestGenerationRef.current += 1;
+    blingCatalogControllerRef.current?.abort();
+    blingCatalogControllerRef.current = null;
     setBlingSearch('');
+    setBlingSubmittedSearch('');
     setBlingProducts([]);
     setBlingPage(1);
     setBlingHasMore(false);
+    setBlingGenerationId(null);
+    setBlingCatalogStale(false);
     setBlingError('');
   };
 
@@ -426,44 +437,90 @@ export const ProductsSettings: React.FC = () => {
 
   const changeBlingSearch = (value: string) => {
     setBlingSearch(value);
+  };
+
+  const loadBlingCatalogPage = useCallback(async (query: string, page: number, generationId: string | null, append: boolean) => {
+    const requestGeneration = blingCatalogRequestGenerationRef.current + 1;
+    blingCatalogRequestGenerationRef.current = requestGeneration;
+    blingCatalogControllerRef.current?.abort();
+    const controller = new AbortController();
+    blingCatalogControllerRef.current = controller;
+    setBlingLoading(true);
+    setBlingError('');
+    try {
+      const result = await fetchBlingProducts(query, page, controller.signal, generationId ?? undefined);
+      if (requestGeneration !== blingCatalogRequestGenerationRef.current) return false;
+      setBlingProducts((current) => append
+        ? [...current, ...result.data.filter((item) => !current.some((existing) => existing.id === item.id))]
+        : result.data);
+      setBlingPage(page);
+      setBlingHasMore(result.hasMore);
+      setBlingGenerationId(result.generationId);
+      setBlingCatalogStale(result.stale);
+      if (result.refreshFailed) setBlingError('Não foi possível atualizar o catálogo Bling; exibindo a última versão salva.');
+      setBlingConnected(true);
+      return true;
+    } catch (reason) {
+      const aborted = typeof reason === 'object' && reason !== null && 'name' in reason && reason.name === 'AbortError';
+      if (requestGeneration === blingCatalogRequestGenerationRef.current && !aborted) {
+        const message = reason instanceof Error ? reason.message : 'Não foi possível carregar o catálogo Bling.';
+        setBlingError(message);
+        if (/não conectado|não está conectado/i.test(message)) setBlingConnected(false);
+      }
+      return false;
+    } finally {
+      if (requestGeneration === blingCatalogRequestGenerationRef.current) setBlingLoading(false);
+    }
+  }, []);
+
+  const submitBlingSearch = () => {
+    const query = blingSearch.trim();
+    setBlingSubmittedSearch(query);
     setBlingPage(1);
+    setBlingGenerationId(null);
     setBlingProducts([]);
     setBlingHasMore(false);
+    void loadBlingCatalogPage(query, 1, null, false);
+  };
+
+  const loadMoreBlingProducts = () => {
+    if (blingLoading || !blingHasMore || !blingGenerationId) return;
+    void loadBlingCatalogPage(blingSubmittedSearch, blingPage + 1, blingGenerationId, true);
+  };
+
+  const refreshBlingCatalog = async () => {
+    if (blingLoading) return;
+    setBlingLoading(true);
+    setBlingError('');
+    try {
+      await refreshBlingProductCatalog();
+      const query = blingSearch.trim();
+      setBlingSubmittedSearch(query);
+      setBlingPage(1);
+      setBlingGenerationId(null);
+      setBlingProducts([]);
+      setBlingHasMore(false);
+      await loadBlingCatalogPage(query, 1, null, false);
+    } catch (reason) {
+      setBlingError(reason instanceof Error ? reason.message : 'Não foi possível atualizar o catálogo Bling.');
+    } finally { setBlingLoading(false); }
   };
 
   useEffect(() => {
-    if (!blingLinkTarget && !showImportDialog) return;
+    if (!blingLinkTarget && !(showImportDialog && !blingImportProduct)) return;
     if (blingConnected === false) {
       setBlingError('O Bling não está conectado. Conecte-o em Configurações → Integrações para usar esta ação.');
       return;
     }
-    const controller = new AbortController();
-    setBlingLoading(true);
-    setBlingError('');
-    const timer = window.setTimeout(() => {
-      void fetchBlingProducts(blingSearch, blingPage, controller.signal)
-        .then((result) => {
-          const items = result.data || [];
-          setBlingProducts((current) => blingPage === 1
-            ? items
-            : [...current, ...items.filter((item) => !current.some((existing) => existing.id === item.id))]);
-          setBlingHasMore(items.length === result.limit);
-          setBlingConnected(true);
-        })
-        .catch((reason) => {
-          if (reason?.name !== 'AbortError') {
-            const message = reason instanceof Error ? reason.message : 'Não foi possível carregar o catálogo Bling.';
-            setBlingError(message);
-            if (/não conectado|não está conectado/i.test(message)) setBlingConnected(false);
-          }
-        })
-        .finally(() => setBlingLoading(false));
-    }, blingSearch.trim() ? 180 : 0);
+    setBlingPage(1);
+    setBlingGenerationId(null);
+    void loadBlingCatalogPage(blingSubmittedSearch, 1, null, false);
     return () => {
-      window.clearTimeout(timer);
-      controller.abort();
+      blingCatalogRequestGenerationRef.current += 1;
+      blingCatalogControllerRef.current?.abort();
+      blingCatalogControllerRef.current = null;
     };
-  }, [blingLinkTarget, showImportDialog, blingSearch, blingPage, blingConnected]);
+  }, [Boolean(blingLinkTarget), showImportDialog && !blingImportProduct, loadBlingCatalogPage]);
 
   const loadBlingSelection = async (blingProduct: BlingProduct, resetSelection: boolean) => {
     const generation = blingSelectionGenerationRef.current + 1;
@@ -758,15 +815,22 @@ export const ProductsSettings: React.FC = () => {
         <p className="text-sm leading-6 text-zinc-300">{blingDialogMode === 'relink'
           ? 'Escolha outro produto Bling. Os dados autoritativos do Bling serão atualizados; nome local, imagem e histórico de mensagens serão preservados.'
           : 'Escolha um produto Bling. Os dados autoritativos do Bling serão sincronizados; nome local, imagem e snapshots históricos serão preservados.'}</p>
-        <label className="relative mt-4 block">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden="true" />
-          <input value={blingSearch} onChange={(event) => changeBlingSearch(event.target.value)} placeholder="Buscar no catálogo Bling..." aria-label="Buscar produto no Bling" data-dialog-autofocus className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-3 pl-10 pr-3 text-sm text-zinc-100 outline-none focus:border-amber-400" />
-        </label>
+        <div className="mt-4 flex gap-2">
+          <label className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden="true" />
+            <input value={blingSearch} onChange={(event) => changeBlingSearch(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); submitBlingSearch(); } }} placeholder="Buscar no catálogo Bling..." aria-label="Buscar produto no Bling" data-dialog-autofocus className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-3 pl-10 pr-3 text-sm text-zinc-100 outline-none focus:border-amber-400" />
+          </label>
+          <button type="button" disabled={blingLoading} onClick={submitBlingSearch} aria-label="Buscar no catálogo Bling" title="Buscar" className="inline-flex shrink-0 items-center justify-center rounded-lg border border-zinc-700 px-3 text-zinc-300 hover:bg-white/5 disabled:opacity-50"><Search className="h-4 w-4" aria-hidden="true" /></button>
+          <button type="button" disabled={blingLoading} onClick={() => void refreshBlingCatalog()} className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-zinc-700 px-3 text-xs font-bold text-sky-300 hover:bg-white/5 disabled:opacity-50">{blingLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}<span className="hidden sm:inline">Atualizar catálogo Bling</span></button>
+        </div>
+        {blingSearch.trim() !== blingSubmittedSearch && <p className="mt-2 text-xs text-zinc-500">Pressione Enter ou clique na lupa para pesquisar.</p>}
+        {blingCatalogStale && <p role="status" className="mt-2 text-xs text-amber-300">Exibindo uma versão salva do catálogo Bling.</p>}
         {blingError && <p role="alert" className="mt-3 rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{blingError}</p>}
         {blingLoading ? <div className="flex items-center justify-center gap-2 p-8 text-sm text-zinc-400"><Loader2 className="h-5 w-5 animate-spin text-amber-400" /> Consultando Bling...</div>
-          : blingProducts.length > 0 ? <div className="mt-4 max-h-80 space-y-2 overflow-y-auto">{blingProducts.map((blingProduct) => <button key={blingProduct.id} type="button" disabled={blingLinking} onClick={() => void selectBlingProduct(blingProduct)} className="flex w-full items-start justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900/70 p-3 text-left hover:border-sky-400/50 disabled:opacity-50"><span className="min-w-0"><span className="block truncate text-sm font-bold text-zinc-100">{blingProduct.nome}</span><span className="mt-1 block text-xs text-zinc-500">ID {blingProduct.id}{blingProduct.codigo ? ` · ${blingProduct.codigo}` : ' · SKU não informado'} · {blingProduct.situacao === 'E' ? 'Encerrado (E)' : blingProduct.situacao === 'I' ? 'Inativo (I)' : 'Ativo (A)'} · Formato {blingProduct.formato}</span></span><span className="shrink-0 text-xs font-bold text-amber-300">{blingProduct.preco === undefined ? 'Preço não informado' : formatBrlPrice(Math.round(blingProduct.preco * 100))}</span></button>)}</div>
-          : <p className="mt-5 rounded-lg border border-dashed border-zinc-800 p-6 text-center text-sm text-zinc-500">Nenhum produto Bling encontrado.</p>}
-        {blingHasMore && <button type="button" disabled={blingLoading} onClick={() => setBlingPage((page) => page + 1)} className="mt-3 w-full rounded-lg border border-zinc-700 px-4 py-2.5 text-sm font-bold text-sky-300 disabled:opacity-50">{blingLoading ? 'Carregando...' : 'Carregar mais'}</button>}
+          : blingSearch.trim() !== blingSubmittedSearch ? <p className="mt-5 rounded-lg border border-dashed border-zinc-800 p-6 text-center text-sm text-zinc-500">A busca será executada quando você confirmar.</p>
+            : blingProducts.length > 0 ? <div className="mt-4 max-h-80 space-y-2 overflow-y-auto">{blingProducts.map((blingProduct) => <button key={blingProduct.id} type="button" disabled={blingLinking} onClick={() => void selectBlingProduct(blingProduct)} className="flex w-full items-start justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900/70 p-3 text-left hover:border-sky-400/50 disabled:opacity-50"><span className="min-w-0"><span className="block truncate text-sm font-bold text-zinc-100">{blingProduct.nome}</span><span className="mt-1 block text-xs text-zinc-500">ID {blingProduct.id}{blingProduct.codigo ? ` · ${blingProduct.codigo}` : ' · SKU não informado'} · Ativo (A) · Formato {blingProduct.formato}</span></span><span className="shrink-0 text-xs font-bold text-amber-300">{blingProduct.preco === undefined ? 'Preço não informado' : formatBrlPrice(Math.round(blingProduct.preco * 100))}</span></button>)}</div>
+              : <p className="mt-5 rounded-lg border border-dashed border-zinc-800 p-6 text-center text-sm text-zinc-500">Nenhum produto Bling encontrado.</p>}
+        {!blingSearch.trim() || blingSearch.trim() === blingSubmittedSearch ? blingHasMore && <button type="button" disabled={blingLoading} onClick={loadMoreBlingProducts} className="mt-3 w-full rounded-lg border border-zinc-700 px-4 py-2.5 text-sm font-bold text-sky-300 disabled:opacity-50">{blingLoading ? 'Carregando...' : 'Carregar mais'}</button> : null}
         <div className="mt-5 flex justify-end border-t border-zinc-800 pt-4"><button type="button" disabled={blingLinking} onClick={() => setBlingLinkTarget(null)} className="rounded-lg border border-zinc-700 px-4 py-2.5 text-sm font-bold text-zinc-300 hover:bg-white/5">Cancelar</button></div>
       </ProductDialog>}
 
@@ -784,14 +848,21 @@ export const ProductsSettings: React.FC = () => {
               onClick={() => void loadBlingSelection(blingImportProduct, false)}
               className="inline-flex items-center gap-2 rounded-lg border border-amber-400/30 px-3 py-2 text-sm font-bold text-amber-200 hover:bg-amber-400/10 disabled:opacity-50">Tentar novamente</button>}
           </> : <>
-            <label className="relative block">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden="true" />
-              <input value={blingSearch} onChange={(event) => changeBlingSearch(event.target.value)} placeholder="Buscar no catálogo Bling..." aria-label="Buscar produto no Bling para importar" data-dialog-autofocus className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-3 pl-10 pr-3 text-sm text-zinc-100 outline-none focus:border-amber-400" />
-            </label>
+            <div className="flex gap-2">
+              <label className="relative min-w-0 flex-1">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" aria-hidden="true" />
+                <input value={blingSearch} onChange={(event) => changeBlingSearch(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); submitBlingSearch(); } }} placeholder="Buscar no catálogo Bling..." aria-label="Buscar produto no Bling para importar" data-dialog-autofocus className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-3 pl-10 pr-3 text-sm text-zinc-100 outline-none focus:border-amber-400" />
+              </label>
+              <button type="button" disabled={blingLoading} onClick={submitBlingSearch} aria-label="Buscar no catálogo Bling" title="Buscar" className="inline-flex shrink-0 items-center justify-center rounded-lg border border-zinc-700 px-3 text-zinc-300 hover:bg-white/5 disabled:opacity-50"><Search className="h-4 w-4" aria-hidden="true" /></button>
+              <button type="button" disabled={blingLoading} onClick={() => void refreshBlingCatalog()} className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-zinc-700 px-3 text-xs font-bold text-sky-300 hover:bg-white/5 disabled:opacity-50">{blingLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}<span className="hidden sm:inline">Atualizar catálogo Bling</span></button>
+            </div>
+            {blingSearch.trim() !== blingSubmittedSearch && <p className="text-xs text-zinc-500">Pressione Enter ou clique na lupa para pesquisar.</p>}
+            {blingCatalogStale && <p role="status" className="text-xs text-amber-300">Exibindo uma versão salva do catálogo Bling.</p>}
             {blingLoading ? <div className="flex items-center justify-center gap-2 p-5 text-sm text-zinc-400"><Loader2 className="h-5 w-5 animate-spin text-amber-400" /> Consultando Bling...</div>
-              : blingProducts.length > 0 ? <div className="max-h-48 space-y-2 overflow-y-auto">{blingProducts.filter((item) => item.situacao === 'A').map((blingProduct) => <button key={blingProduct.id} type="button" disabled={blingSelectionLoading} onClick={() => void selectBlingProduct(blingProduct)} className="flex w-full items-start justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900/70 p-3 text-left hover:border-sky-400/50 disabled:opacity-50"><span className="min-w-0"><span className="block truncate text-sm font-bold text-zinc-100">{blingProduct.nome}</span><span className="mt-1 block text-xs text-zinc-500">ID {blingProduct.id} · {blingProduct.codigo || 'SKU não informado'} · Ativo (A)</span></span><span className="shrink-0 text-xs font-bold text-amber-300">{blingProduct.preco === undefined ? 'Preço não informado' : formatBrlPrice(Math.round(blingProduct.preco * 100))}</span></button>)}</div>
-                : <p className="rounded-lg border border-dashed border-zinc-800 p-4 text-center text-sm text-zinc-500">Nenhum produto ativo encontrado.</p>}
-            {blingHasMore && <button type="button" disabled={blingLoading || blingSelectionLoading} onClick={() => setBlingPage((page) => page + 1)} className="w-full rounded-lg border border-zinc-700 px-4 py-2 text-sm font-bold text-sky-300 disabled:opacity-50">Carregar mais</button>}
+              : blingSearch.trim() !== blingSubmittedSearch ? <p className="rounded-lg border border-dashed border-zinc-800 p-4 text-center text-sm text-zinc-500">Confirme a busca para carregar os resultados.</p>
+                : blingProducts.length > 0 ? <div className="max-h-48 space-y-2 overflow-y-auto">{blingProducts.map((blingProduct) => <button key={blingProduct.id} type="button" disabled={blingSelectionLoading} onClick={() => void selectBlingProduct(blingProduct)} className="flex w-full items-start justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900/70 p-3 text-left hover:border-sky-400/50 disabled:opacity-50"><span className="min-w-0"><span className="block truncate text-sm font-bold text-zinc-100">{blingProduct.nome}</span><span className="mt-1 block text-xs text-zinc-500">ID {blingProduct.id} · {blingProduct.codigo || 'SKU não informado'} · Ativo (A)</span></span><span className="shrink-0 text-xs font-bold text-amber-300">{blingProduct.preco === undefined ? 'Preço não informado' : formatBrlPrice(Math.round(blingProduct.preco * 100))}</span></button>)}</div>
+                  : <p className="rounded-lg border border-dashed border-zinc-800 p-4 text-center text-sm text-zinc-500">Nenhum produto ativo encontrado.</p>}
+            {(blingSearch.trim() === blingSubmittedSearch) && blingHasMore && <button type="button" disabled={blingLoading || blingSelectionLoading} onClick={loadMoreBlingProducts} className="w-full rounded-lg border border-zinc-700 px-4 py-2 text-sm font-bold text-sky-300 disabled:opacity-50">Carregar mais</button>}
           </>}
 
           <label className="block text-sm font-bold text-zinc-300">Nome local *
