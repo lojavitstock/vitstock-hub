@@ -22,6 +22,35 @@ export type BlingProductStock = {
   saldoVirtualTotal?: number;
 };
 
+export type BlingContactCandidate = { id: string; name: string; document: string | null; phone: string | null };
+export type BlingContactLookup =
+  | { status: 'not_found' }
+  | { status: 'multiple'; matches: BlingContactCandidate[]; truncated: boolean }
+  | {
+    status: 'found';
+    contact: {
+      id: string;
+      name: string;
+      fantasy: string | null;
+      document: string | null;
+      zipCode: string | null;
+      address: string | null;
+      phone: string | null;
+      email: string | null;
+    };
+    orders: Array<{ id: string | null; number: string | null; date: string | null; total: number | null }>;
+    ordersTruncated: boolean;
+    ordersError: string | null;
+  };
+
+export function lookupBlingContact(phone: string, contactId?: string, signal?: AbortSignal) {
+  return apiRequest<BlingContactLookup>('/api/integrations/bling/contact-lookup', {
+    method: 'POST',
+    body: JSON.stringify({ phone, ...(contactId ? { contactId } : {}) }),
+    signal,
+  });
+}
+
 export type ProductBlingLink = {
   productId: string;
   blingProductId: string;

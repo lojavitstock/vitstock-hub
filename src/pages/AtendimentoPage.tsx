@@ -30,6 +30,7 @@ import { useAuth } from '../auth/AuthContext';
 import { ConversationTagRail } from '../components/conversations/ConversationTagRail';
 import { ConversationList } from '../components/conversations/ConversationList';
 import { ContactPhoto } from '../components/conversations/ContactPhoto';
+import { BlingContactLookupSheet } from '../components/conversations/BlingContactLookupSheet';
 import { MessageTimeline } from '../components/conversations/MessageTimeline';
 import { MessageComposer, MessageComposerHandle } from '../components/conversations/MessageComposer';
 import { ForwardMessageDialog } from '../components/conversations/ForwardMessageDialog';
@@ -90,6 +91,7 @@ export const AtendimentoPage: React.FC = () => {
 
   const attendantName = user?.name || 'Atendente';
   const [whatsappStatus, setWhatsappStatus] = useState<WhatsappInstance['status']>('connecting');
+  const [blingLookupConversationId, setBlingLookupConversationId] = useState<string | null>(null);
   const whatsappConnected = whatsappStatus === 'connected';
   const composerRef = useRef<MessageComposerHandle>(null);
   const composerTextRef = useRef('');
@@ -199,6 +201,10 @@ export const AtendimentoPage: React.FC = () => {
   useEffect(() => {
     setNotificationActiveConversationId(activeConvId || null);
   }, [activeConvId, setNotificationActiveConversationId]);
+
+  useEffect(() => {
+    setBlingLookupConversationId(null);
+  }, [activeConvId]);
 
   useEffect(() => {
     registerNotificationConversations(conversations);
@@ -2164,6 +2170,14 @@ export const AtendimentoPage: React.FC = () => {
               <div className="flex justify-center"><ContactPhoto name={activeConv.contact.name} avatar={activeConv.isGroup ? (activeConv.groupAvatar || activeConv.contact.avatar) : activeConv.contact.avatar} size="large" emphasized /></div>
               <h4 className="font-extrabold text-slate-100">{googleContactStatus === 'saved' && googleMatchedName ? googleMatchedName : businessProfile?.verifiedName || businessProfile?.name || activeConv.contact.name}</h4>
               <p className="text-xs text-amber-300 font-mono">{formatPhoneForDisplay(activeConv.contact.phone)}</p>
+              <button
+                type="button"
+                onClick={() => setBlingLookupConversationId(activeConv.id)}
+                disabled={activeConv.isGroup || !activeConv.contact.phone.trim()}
+                className="mx-auto mt-2 inline-flex items-center gap-2 rounded-lg border border-amber-300/30 bg-amber-300/10 px-3 py-2 text-xs font-extrabold text-amber-200 transition hover:bg-amber-300/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Search className="h-3.5 w-3.5" /> Verificar cadastro no Bling
+              </button>
               {googleContactStatus === 'checking' ? (
                 <span className="mx-auto mt-2 inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-[#2a343a] text-slate-300 text-xs font-bold"><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Verificando Google Contacts...</span>
               ) : googleContactStatus === 'saved' ? (
@@ -2292,6 +2306,14 @@ export const AtendimentoPage: React.FC = () => {
             </div>
           </form>
         </div>
+      )}
+
+      {whatsappConnected && blingLookupConversationId && activeConv && blingLookupConversationId === activeConv.id && (
+        <BlingContactLookupSheet
+          key={activeConv.id}
+          phone={activeConv.contact.phone}
+          onClose={() => setBlingLookupConversationId(null)}
+        />
       )}
 
     </div>
