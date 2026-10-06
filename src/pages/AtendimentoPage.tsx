@@ -30,6 +30,7 @@ import { useAuth } from '../auth/AuthContext';
 import { ConversationTagRail } from '../components/conversations/ConversationTagRail';
 import { ConversationList } from '../components/conversations/ConversationList';
 import { ContactPhoto } from '../components/conversations/ContactPhoto';
+import { MediaViewer } from '../components/conversations/MediaViewer';
 import { MessageTimeline } from '../components/conversations/MessageTimeline';
 import { MessageComposer, MessageComposerHandle } from '../components/conversations/MessageComposer';
 import { ForwardMessageDialog } from '../components/conversations/ForwardMessageDialog';
@@ -71,6 +72,7 @@ import { canDeleteMessageForEveryone, canEditMessage, canForwardMessage } from '
 import { applyOutboundSendConfirmation } from '../utils/outboundMessageConfirmation';
 import { useNotifications } from '../components/notifications/NotificationProvider';
 import { consumeConversationQuery } from '../utils/messageNotification';
+import type { MediaViewerItem } from '../utils/mediaViewer';
 
 export const AtendimentoPage: React.FC = () => {
   const instanceName = 'vitstock_atendimento';
@@ -90,6 +92,12 @@ export const AtendimentoPage: React.FC = () => {
 
   const attendantName = user?.name || 'Atendente';
   const [whatsappStatus, setWhatsappStatus] = useState<WhatsappInstance['status']>('connecting');
+  const [contactAvatarViewerItem, setContactAvatarViewerItem] = useState<MediaViewerItem | null>(null);
+  const openContactAvatarViewer = useCallback((src: string) => {
+    if (!src.trim()) return;
+    setContactAvatarViewerItem({ type: 'image', src, fileName: 'foto-contato.jpg' });
+  }, []);
+  const closeContactAvatarViewer = useCallback(() => setContactAvatarViewerItem(null), []);
   const whatsappConnected = whatsappStatus === 'connected';
   const composerRef = useRef<MessageComposerHandle>(null);
   const composerTextRef = useRef('');
@@ -2161,7 +2169,7 @@ export const AtendimentoPage: React.FC = () => {
           </div>
           <div className="flex-1 overflow-y-auto p-5 space-y-5">
             <div className="text-center space-y-2">
-              <div className="flex justify-center"><ContactPhoto name={activeConv.contact.name} avatar={activeConv.isGroup ? (activeConv.groupAvatar || activeConv.contact.avatar) : activeConv.contact.avatar} size="large" emphasized /></div>
+              <div className="flex justify-center"><ContactPhoto name={activeConv.contact.name} avatar={activeConv.isGroup ? (activeConv.groupAvatar || activeConv.contact.avatar) : activeConv.contact.avatar} size="large" emphasized onPhotoClick={openContactAvatarViewer} /></div>
               <h4 className="font-extrabold text-slate-100">{googleContactStatus === 'saved' && googleMatchedName ? googleMatchedName : businessProfile?.verifiedName || businessProfile?.name || activeConv.contact.name}</h4>
               <p className="text-xs text-amber-300 font-mono">{formatPhoneForDisplay(activeConv.contact.phone)}</p>
               {googleContactStatus === 'checking' ? (
@@ -2294,6 +2302,7 @@ export const AtendimentoPage: React.FC = () => {
         </div>
       )}
 
+      {contactAvatarViewerItem && <MediaViewer item={contactAvatarViewerItem} onClose={closeContactAvatarViewer} />}
     </div>
   );
 };
