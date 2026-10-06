@@ -10,6 +10,18 @@ export const BLING_CATALOG_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_PROVIDER_PAGES = 10_000;
 const GENERATION_RETENTION_MS = 24 * 60 * 60 * 1000;
 
+export type BlingCatalogType = 'T' | 'P' | 'S' | 'E' | 'PS' | 'C' | 'V';
+
+const catalogTypeFilters: Record<BlingCatalogType, string> = {
+  T: 'TRUE',
+  P: "product_type = 'P'",
+  S: "product_type IN ('S', 'N')",
+  E: "product_type = 'P' AND product_format = 'E'",
+  PS: "product_type = 'P' AND product_format = 'S' AND parent_product_id IS NULL",
+  C: "product_type = 'P' AND product_format = 'V' AND parent_product_id IS NULL",
+  V: "product_type = 'P' AND parent_product_id IS NOT NULL",
+};
+
 export type BlingCatalogProduct = {
   id: string;
   nome: string;
@@ -59,7 +71,7 @@ export interface BlingCatalogRepository {
   publishGeneration(companyId: string, generationId: string): Promise<number>;
   discardGeneration(companyId: string, generationId: string): Promise<void>;
   search(input: { companyId: string; generationId: string; plan: BlingCatalogSearchPlan;
-    page: number; limit: number; type: 'T' | 'P' | 'S' | 'E' | 'PS' | 'C' | 'V' }): Promise<{ data: BlingCatalogProduct[]; total: number }>;
+    page: number; limit: number; type: BlingCatalogType }): Promise<{ data: BlingCatalogProduct[]; total: number }>;
 }
 
 export class PgBlingCatalogRepository implements BlingCatalogRepository {
@@ -165,24 +177,24 @@ export class PgBlingCatalogRepository implements BlingCatalogRepository {
 
   async search({ companyId, generationId, plan, page, limit, type }: Parameters<BlingCatalogRepository['search']>[0]) {
     const values = [companyId, generationId, plan.all, plan.normalizedSku, plan.nameTokens,
-      type, plan.normalizedName];
-    const typeFilter = `($6='T' OR product_type=$6)`;
+      plan.normalizedName];
+    const typeFilter = catalogTypeFilters[type];
     const queryFilter = `($3::boolean OR ($4::text IS NOT NULL AND normalized_sku=$4)
       OR (cardinality($5::text[]) > 0 AND NOT EXISTS (
         SELECT 1 FROM unnest($5::text[]) AS tokens(token) WHERE position(token IN normalized_name)=0)))`;
     const where = `company_id=$1 AND generation_id=$2 AND status='A' AND ${typeFilter} AND ${queryFilter}`;
     const count = await this.pool.query<{ total: string }>(`SELECT count(*)::text AS total
-      FROM bling_product_catalog_entries WHERE ${where}`, values.slice(0, 6));
+      FROM bling_product_catalog_entries WHERE ${where}`, values.slice(0, 5));
     const rows = await this.pool.query(`SELECT bling_product_id AS id,name AS nome,sku AS codigo,
         price::double precision AS preco,product_type AS tipo,status AS situacao,
         product_format AS formato,parent_product_id AS "idProdutoPai"
       FROM bling_product_catalog_entries WHERE ${where}
       ORDER BY CASE
         WHEN $4::text IS NOT NULL AND normalized_sku=$4 THEN 0
-        WHEN $7::text <> '' AND normalized_name=$7 THEN 1
-        WHEN $7::text <> '' AND left(normalized_name,length($7))=$7 THEN 2
+        WHEN $6::text <> '' AND normalized_name=$6 THEN 1
+        WHEN $6::text <> '' AND left(normalized_name,length($6))=$6 THEN 2
         ELSE 3 END,normalized_name,bling_product_id
-      LIMIT $8 OFFSET $9`, [...values, limit, (page - 1) * limit]);
+      LIMIT $7 OFFSET $8`, [...values, limit, (page - 1) * limit]);
     const data = rows.rows.map(row => ({
       id: String(row.id), nome: String(row.nome),
       ...(row.codigo === null ? {} : { codigo: String(row.codigo) }),
@@ -210,7 +222,7 @@ export class BlingCatalogService {
   }
 
   async search(companyId: string, input: { query: string; page: number; limit: number;
-    type: 'T' | 'P' | 'S' | 'E' | 'PS' | 'C' | 'V'; generationId?: string }) {
+    type: BlingCatalogType; generationId?: string }) {
     let state: SnapshotResult;
     if (input.generationId) {
       const snapshot = await this.repository.generation(companyId, input.generationId);

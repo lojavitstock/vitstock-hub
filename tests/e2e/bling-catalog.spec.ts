@@ -27,8 +27,22 @@ test('Bling catalog projection syncs complete snapshots and serves normalized se
   };
 
   try {
+    await pool.query('DELETE FROM bling_product_catalog_generations WHERE company_id=$1', [company]);
     await setScenario('catalog-multipage');
     let before = await requestBudget();
+
+    await page.goto('/configuracoes?tab=products');
+    await page.getByRole('button', { name: 'Adicionar produto', exact: true }).click();
+    const initialSearchInput = page.getByLabel('Buscar produto no Bling para importar');
+    await expect.poll(requestBudget, { timeout: 20_000 }).toBe(before + 4);
+    await initialSearchInput.fill('snow');
+    await sleep(300);
+    expect(await requestBudget()).toBe(before + 4, 'opening without a snapshot may sync once, but typing alone must not call Bling');
+    await page.getByRole('button', { name: 'Buscar no catálogo Bling' }).click();
+    await expect(page.getByRole('button', { name: /Shampoo Snow - Vonixx/ })).toBeVisible();
+    expect(await requestBudget()).toBe(before + 4, 'submitting against a fresh snapshot must remain local');
+
+    before = await requestBudget();
     const fullSyncResponse = await page.request.post(`${api}/api/integrations/bling/products/catalog-sync`);
     expect(fullSyncResponse.status()).toBe(200, await fullSyncResponse.text());
     const fullSync = await fullSyncResponse.json();
@@ -56,6 +70,34 @@ test('Bling catalog projection syncs complete snapshots and serves normalized se
       expect(partial.data.some((item: { id: string }) => item.id === '910000000000000000'), q).toBe(false);
     }
     expect((await localSearch('Produto Inativo QA')).data).toEqual([]);
+
+    const searchByType = async (tipo?: string, q = '') => {
+      const params = new URLSearchParams({ limit: '20' });
+      if (tipo) params.set('tipo', tipo);
+      if (q) params.set('q', q);
+      const response = await page.request.get(`${api}/api/integrations/bling/products?${params.toString()}`);
+      expect(response.status()).toBe(200, await response.text());
+      return response.json();
+    };
+    const typeTotals: Record<string, number> = { T: 205, P: 203, S: 2, E: 1, PS: 200, C: 1, V: 1 };
+    for (const [tipo, total] of Object.entries(typeTotals)) {
+      expect((await searchByType(tipo)).total, `tipo=${tipo}`).toBe(total);
+    }
+    expect((await searchByType(undefined)).total, 'omitted tipo defaults to T').toBe(205);
+    const composition = await searchByType('E', 'Composição QA');
+    expect(composition.data.map((item: { id: string }) => item.id)).toEqual(['910000000000000003']);
+    const simpleProduct = await searchByType('PS', 'Shampoo Snow');
+    expect(simpleProduct.data.map((item: { id: string }) => item.id)).toContain('910000000000000000');
+    expect((await searchByType('PS', 'Variação QA')).total).toBe(0);
+    const configurable = await searchByType('C', 'Produto com variações QA');
+    expect(configurable.data.map((item: { id: string }) => item.id)).toEqual(['910000000000000006']);
+    expect((await searchByType('C', 'Variação QA')).total).toBe(0);
+    const variation = await searchByType('V', 'Variação QA');
+    expect(variation.data.map((item: { id: string }) => item.id)).toEqual(['910000000000000007']);
+    expect((await searchByType('P', 'Serviço QA')).total).toBe(0);
+    expect((await searchByType('S', 'Serviço QA')).data.map((item: { id: string }) => item.id))
+      .toEqual(expect.arrayContaining(['910000000000000004', '910000000000000005']));
+    expect((await searchByType('S', '06 21 22 QA')).data.map((item: { id: string }) => item.id)).toEqual(['910000000000000005']);
 
     before = await requestBudget();
     const page1Response = await page.request.get(`${api}/api/integrations/bling/products?limit=20&page=1`);
@@ -108,8 +150,6 @@ test('Bling catalog projection syncs complete snapshots and serves normalized se
     expect(await requestBudget()).toBe(before + 4, 'two concurrent requests must share one complete scan');
 
     await setScenario('catalog-multipage');
-    await page.goto('/configuracoes?tab=products');
-    await page.getByRole('button', { name: 'Adicionar produto', exact: true }).click();
     const searchInput = page.getByLabel('Buscar produto no Bling para importar');
     before = await requestBudget();
     await searchInput.fill('snow');

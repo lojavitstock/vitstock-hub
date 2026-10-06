@@ -225,13 +225,26 @@ test('Bling product selection catalog searches the company projection and never 
     assert.deepEqual(searches[0]!.plan.nameTokens, ['produto', 'qa']);
     assert.equal(searches[0]!.page, 1);
     assert.equal(searches[0]!.limit, 2);
+    assert.equal(searches[0]!.type, 'T', 'omitting tipo uses the documented all-products default');
     assert.equal(providerReads, 0, 'a recent catalog projection must serve search locally');
+
+    for (const tipo of ['T', 'P', 'S', 'E', 'PS', 'C', 'V']) {
+      const typed = await app.inject({ method: 'GET', url: `/api/integrations/bling/products?tipo=${tipo}` });
+      assert.equal(typed.statusCode, 200, `documented tipo ${tipo} must be accepted`);
+      assert.equal(searches.at(-1)?.type, tipo);
+    }
+    assert.equal(providerReads, 0, 'type filters over a fresh snapshot must stay local');
+    const searchesBeforeInvalid = searches.length;
+    const unsupportedType = await app.inject({ method: 'GET', url: '/api/integrations/bling/products?tipo=INVALID' });
+    assert.equal(unsupportedType.statusCode, 400);
+    assert.equal(searches.length, searchesBeforeInvalid, 'an unknown tipo must be rejected before local search');
 
     const override = await app.inject({ method: 'GET', url: '/api/integrations/bling/products?criterio=5' });
     assert.equal(override.statusCode, 400);
-    assert.equal(searches.length, 1, 'a rejected provider criterion must not reach the repository or provider');
+    assert.equal(searches.length, searchesBeforeInvalid, 'a rejected provider criterion must not reach the repository or provider');
     const ambiguous = await app.inject({ method: 'GET', url: '/api/integrations/bling/products?q=snow&nome=snow' });
     assert.equal(ambiguous.statusCode, 400);
+    assert.equal(searches.length, searchesBeforeInvalid);
     assert.equal(providerReads, 0);
   } finally { await app.close(); }
 });

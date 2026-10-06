@@ -276,8 +276,11 @@ publicada somente após conclusão e preservação do último snapshot em falha.
 `npm run test:e2e -- tests/e2e/bling-catalog.spec.ts` valida as migrations 025
 no PostgreSQL QA, multipágina, busca/acento/SKU, ausência de provider calls em
 busca/carregar mais, snapshot preservado em resposta inválida/incompleta,
-coordenação do lock PostgreSQL e confirmação explícita na UI. Usa apenas o mock
-Bling interno.
+coordenação do lock PostgreSQL, filtros `tipo` da API local e carregamento
+inicial do seletor sem snapshot (incluindo que digitar não chama o provider).
+Usa apenas o mock Bling interno. `tests/core.test.ts` também verifica o timeout
+geral de 20 segundos, o timeout específico de 120 segundos para as duas
+operações do catálogo e a distinção entre timeout e cancelamento do caller.
 
 `tests/bling.test.ts` integra `npm test`: OAuth ADMIN/state/tenant/erros,
 criptografia autenticada com AAD, refresh e concorrência, headers JWT/Basic,

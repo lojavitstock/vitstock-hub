@@ -1,5 +1,7 @@
 import { apiRequest } from './api';
 
+const BLING_CATALOG_REQUEST_TIMEOUT_MS = 120_000;
+
 export type BlingProduct = {
   id: string;
   nome: string;
@@ -58,12 +60,13 @@ export async function fetchBlingProducts(search = '', page = 1, signal?: AbortSi
   const params = new URLSearchParams({ page: String(page), limit: '20' });
   if (search.trim()) params.set('q', search.trim());
   if (generationId) params.set('generationId', generationId);
-  return apiRequest<BlingCatalogPage>(`/api/integrations/bling/products?${params.toString()}`, { signal });
+  return apiRequest<BlingCatalogPage>(`/api/integrations/bling/products?${params.toString()}`,
+    { signal, timeoutMs: BLING_CATALOG_REQUEST_TIMEOUT_MS });
 }
 
 export async function refreshBlingProductCatalog() {
   return apiRequest<{ generationId: string; syncedAt: string; products: number; pages: number }>(
-    '/api/integrations/bling/products/catalog-sync', { method: 'POST' });
+    '/api/integrations/bling/products/catalog-sync', { method: 'POST', timeoutMs: BLING_CATALOG_REQUEST_TIMEOUT_MS });
 }
 
 export async function fetchBlingProductDetail(id: string, signal?: AbortSignal) {

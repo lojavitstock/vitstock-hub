@@ -104,7 +104,7 @@ The explicit `public/manifest.webmanifest` and `public/sw.js` provide install me
 
 - API base URL: `VITE_API_URL`, defaulting to `http://localhost:3001`.
 - Browser fetches include cookies.
-- General requests time out after 20 seconds; Evolution-specific browser requests use a 30-second timeout.
+- General browser requests time out after 20 seconds; Evolution-specific browser requests use a 30-second timeout. The two Bling catalog requests that can wait for a complete provider sync use a per-request 120-second timeout; this does not change other Hub requests.
 - Errors are surfaced to callers rather than converted to false successes.
 
 `VITE_*` variables are public build-time values. They must never contain provider keys, database URLs or session secrets.
@@ -735,6 +735,17 @@ IDs normalize to strings; unsafe JSON numeric IDs fail rather than round.
 Variations retain their own IDs and explicit parent relation. Warehouse field
 `descricao` and flags are preserved. Physical/virtual totals and deposit balances
 remain separate: no recomputation, aggregation or available-stock business rule.
+
+The local catalog also reproduces the documented `GET /produtos` `tipo` filter
+from projected fields: `T` includes all; `P` matches `product_type=P`; `S`
+matches service types `S` and `N`; `E` matches product compositions
+(`product_type=P`, `product_format=E`); `PS` matches simple products
+(`product_type=P`, `product_format=S`, no parent); `C` matches parent products
+with variations (`product_type=P`, `product_format=V`, no parent); and `V`
+matches variation rows with a parent ID. The mapping uses the provider's
+documented `tipo`, `formato` and `idProdutoPai` meanings; the route defaults to
+`T`. These predicates are applied locally and do not add provider calls.
+
 Product images are not fetched from Bling. The product send path uses cached
 values and makes no Bling request. Message references and historical snapshots
 are untouched by link/sync/relink/archive; the compatibility unlink route
@@ -743,7 +754,7 @@ outside scope.
 Local disconnect deletes only credentials/states; revoke authorization separately
 in Bling's authorized applications when needed.
 
-Official sources (consulted 2026-10-03):
+Official sources (consulted 2026-10-06):
 [applications/OAuth](https://developer.bling.com.br/aplicativos),
 [JWT](https://developer.bling.com.br/migracao-jwt),
 [limits](https://developer.bling.com.br/limites),

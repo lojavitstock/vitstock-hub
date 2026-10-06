@@ -55,9 +55,18 @@ export const qaBlingTransport: BlingTransport = async (url, init) => {
         id: String(910_000_000_000_000_000n + BigInt(index)),
         nome: index === 0 ? 'Shampoo Snow - Vonixx'
           : index === 1 ? 'Ácido Fast Limpador - Vonixx'
-            : index === 2 ? 'Produto com nome VNX-SNOW500' : `Produto Catálogo Local QA ${index}`,
+            : index === 2 ? 'Produto com nome VNX-SNOW500'
+              : index === 3 ? 'Composição QA'
+                : index === 4 ? 'Serviço QA'
+                  : index === 5 ? 'Serviço 06 21 22 QA'
+                    : index === 6 ? 'Produto com variações QA'
+                      : index === 7 ? 'Variação QA' : `Produto Catálogo Local QA ${index}`,
         codigo: index === 0 ? 'VNX-SNOW500' : index === 1 ? 'ACIDO-FAST-01' : index === 2 ? 'SKU-NAME-DECOY' : `SKU-CAT-${index}`,
-        preco: 28, tipo: 'P', situacao: 'A', formato: 'S',
+        preco: 28,
+        tipo: index === 4 ? 'S' : index === 5 ? 'N' : 'P',
+        situacao: 'A',
+        formato: index === 3 ? 'E' : index === 6 ? 'V' : 'S',
+        ...(index === 7 ? { idProdutoPai: String(910_000_000_000_000_006n) } : {}),
       }))
       : [productDetail('101'), productDetail('201'), productDetail('202'), ...Array.from({ length: 21 }, (_, index) => productDetail(String(303 + index)))];
     const criterion = Number(target.searchParams.get('criterio') || 5);
