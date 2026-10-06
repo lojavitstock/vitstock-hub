@@ -3,7 +3,8 @@ import { API_BASE, TOKEN_URL, BlingError } from './blingContract.js';
 import type { BlingTransport } from './blingClient.js';
 
 export type QaBlingScenario = 'default' | 'updated' | 'price-updated' | 'invalid-stock' | 'empty-stock' | 'missing-price' | 'detail-mismatch'
-  | 'missing-sku' | 'blank-sku' | 'physical-only' | 'virtual-zero' | 'virtual-negative' | 'sku-collision';
+  | 'missing-sku' | 'blank-sku' | 'physical-only' | 'virtual-zero' | 'virtual-negative' | 'sku-collision'
+  | 'catalog-multipage' | 'catalog-fail-page-two' | 'catalog-slow' | 'catalog-inactive-response';
 let scenario: QaBlingScenario = 'default';
 
 export function setQaBlingScenario(value: QaBlingScenario) {
@@ -45,15 +46,36 @@ export const qaBlingTransport: BlingTransport = async (url, init) => {
     body = { access_token: 'qa.header.signature', refresh_token: 'qa-local-refresh', expires_in: 21600, token_type: 'Bearer' };
   } else if (init.method !== 'GET') throw new BlingError(400);
   else if (target.pathname === '/Api/v3/produtos') {
-    const products = [productDetail('101'), productDetail('201'), productDetail('202'), ...Array.from({ length: 21 }, (_, index) => productDetail(String(303 + index)))];
+    const page = Number(target.searchParams.get('pagina') || 1);
+    const limit = Number(target.searchParams.get('limite') || 50);
+    if (scenario === 'catalog-fail-page-two' && page === 2) return new Response('{}', { status: 500 });
+    if (scenario === 'catalog-slow') await new Promise(resolve => setTimeout(resolve, 250));
+    const products = scenario.startsWith('catalog-')
+      ? Array.from({ length: 205 }, (_, index) => ({
+        id: String(910_000_000_000_000_000n + BigInt(index)),
+        nome: index === 0 ? 'Shampoo Snow - Vonixx'
+          : index === 1 ? 'Ácido Fast Limpador - Vonixx'
+            : index === 2 ? 'Produto com nome VNX-SNOW500'
+              : index === 3 ? 'Composição QA'
+                : index === 4 ? 'Serviço QA'
+                  : index === 5 ? 'Serviço 06 21 22 QA'
+                    : index === 6 ? 'Produto com variações QA'
+                      : index === 7 ? 'Variação QA' : `Produto Catálogo Local QA ${index}`,
+        codigo: index === 0 ? 'VNX-SNOW500' : index === 1 ? 'ACIDO-FAST-01' : index === 2 ? 'SKU-NAME-DECOY' : `SKU-CAT-${index}`,
+        preco: 28,
+        tipo: index === 4 ? 'S' : index === 5 ? 'N' : 'P',
+        situacao: 'A',
+        formato: index === 3 ? 'E' : index === 6 ? 'V' : 'S',
+        ...(index === 7 ? { idProdutoPai: String(910_000_000_000_000_006n) } : {}),
+      }))
+      : [productDetail('101'), productDetail('201'), productDetail('202'), ...Array.from({ length: 21 }, (_, index) => productDetail(String(303 + index)))];
     const criterion = Number(target.searchParams.get('criterio') || 5);
     const byCriterion = criterion === 2 ? products.filter(item => item.situacao === 'A')
       : criterion === 3 ? products.filter(item => item.situacao === 'I')
         : criterion === 4 ? products.filter(item => item.situacao === 'E') : products;
+    if (scenario === 'catalog-inactive-response' && page === 1) byCriterion.unshift(productDetail('201'));
     const name = target.searchParams.get('nome')?.toLocaleLowerCase();
     const filtered = name ? byCriterion.filter((item) => item.nome.toLocaleLowerCase().includes(name)) : byCriterion;
-    const page = Number(target.searchParams.get('pagina') || 1);
-    const limit = Number(target.searchParams.get('limite') || 50);
     body = { data: filtered.slice((page - 1) * limit, page * limit) };
   }
   else if (/^\/Api\/v3\/produtos\/[0-9]+$/.test(target.pathname)) body = { data: productDetail(target.pathname.split('/').at(-1) || '') };
