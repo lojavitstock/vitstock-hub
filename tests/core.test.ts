@@ -103,6 +103,7 @@ import {
 } from '../src/utils/messageReactionActions';
 import { positionMessageActionMenu, positionReactionPalette } from '../src/utils/messagePopoverPosition';
 import { apiRequest } from '../src/services/api';
+import { fetchBlingProducts, refreshBlingProductCatalog } from '../src/services/blingApi';
 import {
   canRestoreComposerDraft,
   captureComposerSubmission,
@@ -181,6 +182,63 @@ test('apiRequest distinguishes caller cancellation from its 20 second timeout', 
     assert.equal(timerDelay, 20_000);
     fireTimeout?.();
     await assert.rejects(timedRequest, /O servidor demorou mais que o esperado para responder/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
+    else Reflect.deleteProperty(globalThis, 'window');
+  }
+});
+
+test('Bling catalog requests use a scoped 120 second timeout without changing other API requests', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const timers: Array<{ delay: number; fire: () => void }> = [];
+  const paths: string[] = [];
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {
+      setTimeout: (callback: TimerHandler, delay?: number) => {
+        timers.push({ delay: delay || 0, fire: callback as () => void });
+        return timers.length;
+      },
+      clearTimeout: () => undefined,
+    } as unknown as Window,
+  });
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    paths.push(String(input));
+    return new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      const rejectForAbort = () => reject(signal?.reason || new DOMException('Aborted', 'AbortError'));
+      if (signal?.aborted) rejectForAbort();
+      else signal?.addEventListener('abort', rejectForAbort, { once: true });
+    });
+  }) as typeof fetch;
+
+  try {
+    const unrelated = apiRequest('/unrelated');
+    assert.equal(timers[0]?.delay, 20_000);
+    timers[0]?.fire();
+    await assert.rejects(unrelated, /O servidor demorou mais que o esperado para responder/);
+
+    const products = fetchBlingProducts('snow');
+    assert.equal(timers[1]?.delay, 120_000);
+    assert.match(paths[1] || '', /\/api\/integrations\/bling\/products\?/);
+    timers[1]?.fire();
+    await assert.rejects(products, /O servidor demorou mais que o esperado para responder/);
+
+    const refresh = refreshBlingProductCatalog();
+    assert.equal(timers[2]?.delay, 120_000);
+    assert.match(paths[2] || '', /\/api\/integrations\/bling\/products\/catalog-sync/);
+    timers[2]?.fire();
+    await assert.rejects(refresh, /O servidor demorou mais que o esperado para responder/);
+
+    const caller = new AbortController();
+    const canceled = fetchBlingProducts('', 1, caller.signal);
+    assert.equal(timers[3]?.delay, 120_000);
+    caller.abort();
+    await assert.rejects(canceled, (error: unknown) => error instanceof Error
+      && error.name === 'AbortError'
+      && !error.message.includes('O servidor demorou'));
   } finally {
     globalThis.fetch = originalFetch;
     if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);

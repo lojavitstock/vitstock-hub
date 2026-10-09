@@ -134,6 +134,7 @@ test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar
   try {
     const addDialog = settings.getByRole('dialog', { name: 'Adicionar produto' });
     await addDialog.getByLabel('Buscar produto no Bling para importar').fill('Produto Catálogo QA 322');
+    await addDialog.getByRole('button', { name: 'Buscar no catálogo Bling' }).click();
     await addDialog.getByRole('button', { name: /Produto Catálogo QA 322/ }).click();
     await expect(addDialog.getByLabel('Nome local *')).toBeEnabled();
     await expect(addDialog.getByLabel('Preço no Bling')).toBeDisabled();
@@ -308,6 +309,7 @@ test('Product Library importa pelo Bling paginado e preserva campos vinculados n
   await expect(dialog.getByLabel('Estoque virtual')).toBeDisabled();
   const search = dialog.getByLabel('Buscar produto no Bling para importar');
   await search.fill('Produto Catálogo QA 321');
+  await dialog.getByRole('button', { name: 'Buscar no catálogo Bling' }).click();
   const item = dialog.getByRole('button', { name: /Produto Catálogo QA 321/ });
   await item.click();
   await expect(dialog.getByLabel('Nome local *')).toHaveValue('Produto Catálogo QA 321');
@@ -405,11 +407,13 @@ test('seleção Bling só expira em 10s, permite retry e ignora resposta antiga 
   });
   const search = dialog.getByLabel('Buscar produto no Bling para importar');
   await search.fill('Produto para Importar QA');
+  await dialog.getByRole('button', { name: 'Buscar no catálogo Bling' }).click();
   await dialog.getByRole('button', { name: /Produto para Importar QA/ }).click();
   await expect(dialog.getByRole('alert')).toHaveText('Detail indisponível imediatamente QA.');
   await expect(dialog.getByRole('button', { name: 'Tentar novamente', exact: true })).toHaveCount(0);
   await dialog.getByRole('button', { name: 'Alterar produto do Bling', exact: true }).click();
   await search.fill('Produto Catálogo QA 321');
+  await dialog.getByRole('button', { name: 'Buscar no catálogo Bling' }).click();
   const product321 = dialog.getByRole('button', { name: /Produto Catálogo QA 321/ });
   await expect(product321).toBeVisible();
 
@@ -466,12 +470,14 @@ test('seleção Bling só expira em 10s, permite retry e ignora resposta antiga 
 
   await dialog.getByRole('button', { name: 'Alterar produto do Bling', exact: true }).click();
   await search.fill('Produto Catálogo QA 321');
+  await dialog.getByRole('button', { name: 'Buscar no catálogo Bling' }).click();
   await expect(product321).toBeVisible();
   const staleStockRequest = page.waitForRequest((event) => new URL(event.url()).pathname === '/api/integrations/bling/products/321/stock');
   await product321.click();
   await staleStockRequest;
   await dialog.getByRole('button', { name: 'Alterar produto do Bling', exact: true }).click();
   await search.fill('Produto Catálogo QA 322');
+  await dialog.getByRole('button', { name: 'Buscar no catálogo Bling' }).click();
   await page.clock.fastForward(200);
   const product322 = dialog.getByRole('button', { name: /Produto Catálogo QA 322/ });
   await expect(product322).toBeVisible();
@@ -584,6 +590,7 @@ test('Biblioteca de Produtos permite cadastrar, editar, buscar, pré-visualizar 
   await page.getByRole('button', { name: 'Adicionar produto' }).click();
   const addDialog = page.getByRole('dialog', { name: 'Adicionar produto' });
   await addDialog.getByLabel('Buscar produto no Bling para importar').fill('Produto Catálogo QA 323');
+  await addDialog.getByRole('button', { name: 'Buscar no catálogo Bling' }).click();
   await addDialog.getByRole('button', { name: /Produto Catálogo QA 323/ }).click();
   await expect(addDialog.getByLabel('Nome local *')).toBeEnabled();
   await expect(addDialog.getByLabel('Preço no Bling')).toBeDisabled();
@@ -749,6 +756,7 @@ test('UI bloqueia SKU duplicado após normalização por caixa e espaços', asyn
     await page.getByRole('button', { name: 'Adicionar produto', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'Adicionar produto' });
     await dialog.getByLabel('Buscar produto no Bling para importar').fill('Produto Catálogo QA 321');
+    await dialog.getByRole('button', { name: 'Buscar no catálogo Bling' }).click();
     await dialog.getByRole('button', { name: /Produto Catálogo QA 321/ }).click();
     await expect(dialog.getByLabel('SKU')).toHaveValue(' sku-101 ');
     await expect(dialog.getByRole('alert')).toContainText('Já existe um produto cadastrado no Hub com este SKU.');
@@ -971,6 +979,7 @@ test('falha real da mutation continua visível e submit repetido não duplica cr
   await page.getByRole('button', { name: 'Adicionar produto' }).click();
   const dialog = page.getByRole('dialog', { name: 'Adicionar produto' });
   await dialog.getByLabel('Buscar produto no Bling para importar').fill('Produto Catálogo QA 321');
+  await dialog.getByRole('button', { name: 'Buscar no catálogo Bling' }).click();
   await dialog.getByRole('button', { name: /Produto Catálogo QA 321/ }).click();
   await dialog.getByLabel('Nome local *').fill(`Mutation failure QA ${Date.now()}`);
   await dialog.getByLabel('Imagem local para importação').setInputFiles({ name: 'product.png', mimeType: 'image/png', buffer: Buffer.from(tinyPng, 'base64') });

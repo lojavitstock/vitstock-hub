@@ -196,7 +196,7 @@ Uma migration exige revisão de:
 
 Não execute migration em produção como agente. Se um teste local de migration for necessário, confirme antes que o banco é seguro: `localhost` não garante PostgreSQL local nem ambiente isolado.
 
-Para a biblioteca de produtos, `npm run dev:e2e`/`npm run qa:setup` são os fluxos autorizados para aplicar `021_product_library.sql`; os guards fixam PostgreSQL em `127.0.0.1:55432/vitstock_qa`, Evolution/Google em mocks locais e abortam se os limites não forem satisfeitos. Não rode `server:migrate` sem confirmar explicitamente o destino. O driver padrão de QA é `memory`; `npm --prefix server run product:r2-smoke` é um smoke opt-in que grava e remove somente um objeto temporário no bucket R2 Preview, e `npm run product:r2-qa-smoke` exercita a Product API em QA local com R2 real quando o backend QA foi iniciado explicitamente com `PRODUCT_STORAGE_DRIVER=r2`. Nenhum teste padrão de CI escreve em R2. Evolution continua mock-only; o envio real Preview exige autorização separada.
+Para Product Library/Bling, `npm run dev:e2e`/`npm run qa:setup` são os fluxos autorizados para aplicar as migrations pelo runner; os guards fixam PostgreSQL em `127.0.0.1:55432/vitstock_qa`, Evolution/Google em mocks locais e abortam se os limites não forem satisfeitos. Não rode `server:migrate` sem confirmar explicitamente o destino. O driver padrão de QA é `memory`; `npm --prefix server run product:r2-smoke` é um smoke opt-in que grava e remove somente um objeto temporário no bucket R2 Preview, e `npm run product:r2-qa-smoke` exercita a Product API em QA local com R2 real quando o backend QA foi iniciado explicitamente com `PRODUCT_STORAGE_DRIVER=r2`. Nenhum teste padrão de CI escreve em R2. Evolution continua mock-only; o envio real Preview exige autorização separada.
 
 `npm run test:e2e -- tests/e2e/product-send.spec.ts tests/e2e/products.spec.ts` valida o fluxo de produtos em QA. A suíte de envio consulta refs por conexão fixa ao PostgreSQL QA somente após confirmar `/api/qa/ready`; não usa `.env.local` ou `DATABASE_URL`. O cenário de rejeição de mídia é controlado por uma rota admin registrada apenas em QA e restaurado após o teste. Os testes backend em `tests/server.test.ts` usam banco/transport/storage simulados para rollback, concorrência, tenant, campos forjados e corrida de confirmação/webhook, sem R2 ou provider reais.
 
@@ -270,6 +270,18 @@ Isso ainda não significa validação funcional final.
 
 ### Bling read-only foundation
 
+`tests/blingCatalog.test.ts` integra `npm test` e cobre normalização, busca por
+tokens AND, ranking SKU/nome, páginas locais, limite de sync 100, geração
+publicada somente após conclusão e preservação do último snapshot em falha.
+`npm run test:e2e -- tests/e2e/bling-catalog.spec.ts` valida as migrations 025
+no PostgreSQL QA, multipágina, busca/acento/SKU, ausência de provider calls em
+busca/carregar mais, snapshot preservado em resposta inválida/incompleta,
+coordenação do lock PostgreSQL, filtros `tipo` da API local e carregamento
+inicial do seletor sem snapshot (incluindo que digitar não chama o provider).
+Usa apenas o mock Bling interno. `tests/core.test.ts` também verifica o timeout
+geral de 20 segundos, o timeout específico de 120 segundos para as duas
+operações do catálogo e a distinção entre timeout e cancelamento do caller.
+
 `tests/bling.test.ts` integra `npm test`: OAuth ADMIN/state/tenant/erros,
 criptografia autenticada com AAD, refresh e concorrência, headers JWT/Basic,
 timeout de corpo, 401/429/Retry-After/5xx/network/retries, contratos e IDs/string.
@@ -291,8 +303,8 @@ selecionável. Import/link/relink rejeitam `I` e `E`; `E` no detail é somente u
 sinal de rejeição para seleção, enquanto leitura direta rejeita esse contrato
 com 502. Detail, snapshots persistidos e sync de vínculo existente permanecem
 `A`/`I`; sync continua cobrindo status autoritativo `I`. A migration 024 adiciona
-somente unicidade case-insensitive de SKU por empresa; migrations 022, 023 e
-024 são aplicadas apenas pelo `dev:e2e` guardado. Também valida importação com
+somente unicidade case-insensitive de SKU por empresa; migrations 022, 023, 024
+e 025 são aplicadas apenas pelo `dev:e2e` guardado. Também valida importação com
 dados autoritativos e imagem local, SKU ausente e duplicado, conflito atômico no
 sync, link/relink/sync, nome local preservado, preço cadastrado protegido,
 saldos físicos/virtuais e rollback quando o estoque é inválido. O DELETE de

@@ -5,11 +5,13 @@ import { config, isQaMode } from './config.js';
 import { integrationCipher } from './blingEncryption.js';
 import { BlingApiClient, type BlingCredentials } from './blingClient.js';
 import { PgBlingStore, stateHash, type BlingStore } from './blingStore.js';
-import { AUTHORIZATION_URL, BlingError, blingContactDetailModel, blingContactListModel, blingSalesOrderModel, idSchema, pagination, parseContract, productDetailModel, productListModel, stockModel, warehouseModel } from './blingContract.js';
+import { AUTHORIZATION_URL, BlingError, blingContactDetailModel, blingContactListModel, blingSalesOrderModel, idSchema, pagination, parseContract, productDetailModel, stockModel, warehouseModel } from './blingContract.js';
 import { qaBlingTransport } from './blingQa.js';
 import { blingPhoneMatches, normalizeBlingLookupPhone } from './blingContactLookup.js';
+import { BlingCatalogService, PgBlingCatalogRepository, type BlingCatalogRepository } from './blingCatalog.js';
 
-export type BlingDependencies = { store: BlingStore; client: BlingApiClient; credentials: BlingCredentials; qa?: boolean };
+export type BlingDependencies = { store: BlingStore; client: BlingApiClient; credentials: BlingCredentials; qa?: boolean;
+  catalogRepository?: BlingCatalogRepository };
 export function runtimeBling(): BlingDependencies | undefined {
   if (!config.BLING_CLIENT_ID || !config.BLING_CLIENT_SECRET || !config.BLING_REDIRECT_URI || !config.INTEGRATION_ENCRYPTION_KEY) return undefined;
   try {
@@ -27,6 +29,8 @@ export function runtimeBling(): BlingDependencies | undefined {
 }
 export async function registerBlingRoutes(app: FastifyInstance, dependencies = runtimeBling()) {
   app.addHook('onClose', async () => { await dependencies?.store.close?.(); });
+  const catalog = dependencies ? new BlingCatalogService(
+    dependencies.catalogRepository ?? new PgBlingCatalogRepository(), dependencies.client) : undefined;
   const base = '/api/integrations/bling';
   const redirect = (result: 'connected' | 'error') => `${config.FRONTEND_URL}/configuracoes?tab=integracoes&bling=${result}`;
   const safe = async (reply: FastifyReply, action: () => Promise<unknown>) => {
@@ -60,27 +64,25 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
     // Local unlink only. Revoke the application separately in Bling if needed.
     return { disconnected: true };
   }));
-  const productQuery = pagination.extend({ nome: z.string().trim().min(1).max(120).optional(),
-    tipo: z.enum(['T','P','S','E','PS','C','V']).default('T') }).strict();
+  const productQuery = pagination.extend({
+    q: z.string().trim().max(120).optional(),
+    // Keep the previous query key as a compatibility alias; both use the local projection.
+    nome: z.string().trim().max(120).optional(),
+    tipo: z.enum(['T','P','S','E','PS','C','V']).default('T'),
+    generationId: z.string().uuid().optional(),
+  }).strict();
   const warehouseQuery = pagination.extend({ descricao: z.string().trim().min(1).max(120).optional(), situacao: z.coerce.number().int().min(0).max(1).optional() }).strict();
-  for (const resource of ['products', 'warehouses'] as const) {
-    app.get(`${base}/${resource}`, { preHandler: requireAdmin }, async (request, reply) => safe(reply, async () => {
-      const parsed = (resource === 'products' ? productQuery : warehouseQuery).safeParse(request.query);
-      if (!parsed.success) throw new BlingError(400, 'Paginação ou filtros inválidos');
-      const { page, limit, ...filters } = parsed.data;
-      const query = new URLSearchParams({ pagina: String(page), limite: String(limit) });
-      if (resource === 'products') query.set('criterio', '2');
-      for (const [key, value] of Object.entries(filters)) if (value !== undefined) query.set(key, String(value));
-      const value = await ready().client.read(request.user!.companyId, resource, query);
-      const data = resource === 'products'
-        ? parseContract(z.object({ data: z.array(productListModel) }), value).data
-        : parseContract(z.object({ data: z.array(warehouseModel) }), value).data;
-      if (resource === 'products' && data.some(product => product.situacao !== 'A')) {
-        throw new BlingError(502, 'Resposta do catálogo Bling contém produto não ativo');
-      }
-      return { data, page, limit };
-    }));
-  }
+  app.get(`${base}/products`, { preHandler: requireAdmin }, async (request, reply) => safe(reply, async () => {
+    const parsed = productQuery.safeParse(request.query);
+    if (!parsed.success || (parsed.data.q !== undefined && parsed.data.nome !== undefined)) {
+      throw new BlingError(400, 'Paginação ou filtros inválidos');
+    }
+    ready();
+    const { page, limit, tipo, generationId } = parsed.data;
+    return catalog!.search(request.user!.companyId, { query: parsed.data.q ?? parsed.data.nome ?? '', page, limit,
+      type: tipo, ...(generationId ? { generationId } : {}) });
+  }));
+
   app.post(`${base}/contact-lookup`, { preHandler: requireUser }, async (request, reply) => safe(reply, async () => {
     const input = z.object({ phone: z.string().trim().min(1).max(80), contactId: idSchema.optional() }).strict().safeParse(request.body);
     if (!input.success) throw new BlingError(400, 'Telefone ou contato inválido');
@@ -179,6 +181,23 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
       .slice(0, 5)
       .map(order => ({ id: order.id ?? null, number: order.numero == null ? null : String(order.numero), date: order.data ?? null, total: order.total ?? null }));
     return { status: 'found' as const, contact, orders: latestOrders, ordersTruncated, ordersError };
+  }));
+  app.post(`${base}/products/catalog-sync`, { preHandler: requireAdmin }, async (request, reply) => safe(reply, async () => {
+    if (Object.keys(request.query as object).length || Object.keys((request.body ?? {}) as object).length) {
+      throw new BlingError(400, 'Parâmetros inválidos');
+    }
+    ready();
+    return catalog!.refresh(request.user!.companyId);
+  }));
+
+  app.get(`${base}/warehouses`, { preHandler: requireAdmin }, async (request, reply) => safe(reply, async () => {
+    const parsed = warehouseQuery.safeParse(request.query);
+    if (!parsed.success) throw new BlingError(400, 'Paginação ou filtros inválidos');
+    const { page, limit, ...filters } = parsed.data;
+    const query = new URLSearchParams({ pagina: String(page), limite: String(limit) });
+    for (const [key, value] of Object.entries(filters)) if (value !== undefined) query.set(key, String(value));
+    return parseContract(z.object({ data: z.array(warehouseModel) }),
+      await ready().client.read(request.user!.companyId, 'warehouses', query));
   }));
   app.get(`${base}/products/:id`, { preHandler: requireAdmin }, async (request, reply) => safe(reply, async () => {
     const parsed = z.object({ id: idSchema }).safeParse(request.params);
