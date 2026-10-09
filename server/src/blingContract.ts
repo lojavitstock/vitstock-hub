@@ -36,6 +36,31 @@ export const warehouseModel = z.object({ id: idSchema, descricao: z.string(), si
 export const stockModel = z.object({ produto: z.object({ id: idSchema }), saldoFisicoTotal: z.number().finite().optional(),
   saldoVirtualTotal: z.number().finite().optional(), depositos: z.array(z.object({ id: idSchema,
     saldoFisico: z.number().finite().optional(), saldoVirtual: z.number().finite().optional() })).optional() });
+const nullableText = z.string().nullish();
+export const blingContactListModel = z.object({
+  id: idSchema,
+  nome: z.string(),
+  situacao: z.enum(['A', 'E', 'I', 'S']).optional(),
+  numeroDocumento: nullableText,
+  telefone: nullableText,
+  celular: nullableText,
+});
+const contactAddressModel = z.object({
+  endereco: nullableText, cep: nullableText, bairro: nullableText, municipio: nullableText,
+  uf: nullableText, numero: nullableText, complemento: nullableText,
+}).nullish();
+export const blingContactDetailModel = blingContactListModel.extend({
+  fantasia: nullableText,
+  tipo: z.enum(['J', 'F', 'E']).optional(),
+  email: nullableText,
+  endereco: z.object({ geral: contactAddressModel, cobranca: contactAddressModel }).nullish(),
+});
+export const blingSalesOrderModel = z.object({
+  id: idSchema.optional(),
+  numero: z.union([z.number().int(), z.string()]).nullish(),
+  data: nullableText,
+  total: z.number().finite().nullish(),
+});
 export const tokenModel = z.object({ access_token: z.string().min(1).max(16000), refresh_token: z.string().min(1).max(16000),
   token_type: z.string().refine(v => v.toLowerCase() === 'bearer'), expires_in: z.number().int().positive().max(86400) });
 export type Tokens = z.infer<typeof tokenModel>;

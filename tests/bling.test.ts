@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { integrationCipher } from '../server/src/blingEncryption.js';
 import { API_BASE, TOKEN_URL, AUTHORIZATION_URL, pagination, productListModel, productDetailModel, warehouseModel, stockModel, parseContract, BlingError } from '../server/src/blingContract.js';
 import { BlingApiClient, retryAfterMs, type BlingTransport } from '../server/src/blingClient.js';
+import { blingPhoneMatches, normalizeBlingLookupPhone } from '../server/src/blingContactLookup.js';
 import type { BlingSession, BlingStore, Connection } from '../server/src/blingStore.js';
 
 const credentials = { clientId: 'fake-client', clientSecret: 'secret-not-loggable', redirectUri: 'https://api.example.test/api/integrations/bling/callback' };
@@ -348,4 +349,103 @@ test('Bling actual Fastify logging strips callback query, headers, body and resp
   assert.match(child.stdout, /REAL_LOGGER_GATE_OK/);
   assert.match(child.stdout, /incoming request/); assert.match(child.stdout, /request completed/);
   assert.doesNotMatch(child.stdout, /PRIVATE_|vitstock_session=|set-cookie/i);
+});
+
+test('Bling contact lookup phone normalization accepts explicit Brazilian formats and never guesses a ninth digit', () => {
+  const national = normalizeBlingLookupPhone('(21) 99000-0011');
+  assert.deepEqual(national, { digits: '5521990000011', formatted: '(21) 99000-0011' });
+  assert.deepEqual(normalizeBlingLookupPhone('+55 21 99000-0011'), national);
+  assert.deepEqual(normalizeBlingLookupPhone('0055 (21) 99000-0011'), national);
+  assert.deepEqual(normalizeBlingLookupPhone('5521990000011@s.whatsapp.net'), national);
+  assert.equal(normalizeBlingLookupPhone('(21) 4000-0011')?.formatted, '(21) 4000-0011');
+  assert.equal(normalizeBlingLookupPhone('+1 212 555 0100'), null);
+  assert.equal(normalizeBlingLookupPhone('2199000011@lid'), null);
+  assert.equal(normalizeBlingLookupPhone('21 99000-0011 ramal 3'), null);
+  assert.equal(blingPhoneMatches('(21) 9000-0011', national!), false);
+  assert.equal(blingPhoneMatches('+55 21 99000-0011', national!), true);
+});
+
+test('Bling contact lookup uses documented read routes, asks on duplicates, and sorts linked orders by date', async t => {
+  const { default: Fastify } = await import('../server/node_modules/fastify/fastify.js');
+  const { registerBlingRoutes } = await import('../server/src/bling.js');
+  const store = new MemoryStore();
+  store.rows.set('A', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + 3600000, connectedAt: 'today' });
+  const first = { id: 901, nome: 'Ana QA', situacao: 'A', numeroDocumento: '123.456.789-01', telefone: '(21) 4000-0011', celular: '(21) 99000-0011' };
+  const second = { id: 902, nome: 'Ana Empresa QA', situacao: 'A', numeroDocumento: '12.345.678/0001-90', telefone: '+55 21 99000-0011', celular: null };
+  let mode: 'multiple' | 'empty' | 'forbidden' = 'multiple';
+  let ordersMode: 'normal' | 'empty' | 'forbidden' = 'normal';
+  const requestedUrls: URL[] = [];
+  const client = new BlingApiClient(store, credentials, async url => {
+    const target = new URL(url);
+    requestedUrls.push(target);
+    if (target.pathname === '/Api/v3/contatos' && mode === 'forbidden') return json({}, 403);
+    if (target.pathname === '/Api/v3/contatos') {
+      assert.equal(target.searchParams.get('criterio'), '1');
+      assert.equal(target.searchParams.get('limite'), '100');
+      assert.equal(target.searchParams.get('telefone'), '(21) 99000-0011');
+      return json({ data: mode === 'empty' ? [] : [first, second] });
+    }
+    if (target.pathname === '/Api/v3/contatos/901') return json({ data: {
+      ...first, fantasia: 'Ana Comércio', tipo: 'F', email: 'ana@example.test',
+      endereco: { geral: { cep: '20000-011', endereco: 'Rua QA', numero: '11', bairro: 'Centro', municipio: 'Rio de Janeiro', uf: 'RJ' } },
+    } });
+    if (target.pathname === '/Api/v3/pedidos/vendas') {
+      assert.equal(target.searchParams.get('idContato'), '901');
+      if (ordersMode === 'forbidden') return json({}, 403);
+      if (ordersMode === 'empty') return json({ data: [] });
+      return json({ data: [
+        { id: 11, numero: 11, data: '2026-09-10', total: 100 },
+        { id: 12, numero: 12, data: '2026-10-01', total: 215.5 },
+      ] });
+    }
+    return json({}, 404);
+  }, async () => {});
+  const app = Fastify({ logger: false }); app.decorateRequest('user', null);
+  let user: any = { id: 'attendant-A', companyId: 'A', role: 'attendant' };
+  app.addHook('onRequest', async request => { request.user = user; });
+  await registerBlingRoutes(app, { store, client, credentials });
+  t.after(() => app.close());
+
+  const lookup = (payload: Record<string, string>) => app.inject({ method: 'POST', url: '/api/integrations/bling/contact-lookup', payload });
+  const duplicateResult = await lookup({ phone: '+55 21 99000-0011' });
+  assert.equal(duplicateResult.statusCode, 200);
+  assert.deepEqual(duplicateResult.json(), {
+    status: 'multiple', truncated: false,
+    matches: [
+      { id: '901', name: 'Ana QA', document: '123.456.789-01', phone: '(21) 99000-0011' },
+      { id: '902', name: 'Ana Empresa QA', document: '12.345.678/0001-90', phone: '+55 21 99000-0011' },
+    ],
+  });
+  assert.equal(requestedUrls.length, 1);
+
+  const selected = await lookup({ phone: '5521990000011', contactId: '901' });
+  assert.equal(selected.statusCode, 200);
+  const result = selected.json();
+  assert.equal(result.status, 'found');
+  assert.deepEqual(result.contact, {
+    id: '901', name: 'Ana QA', fantasy: 'Ana Comércio', document: '123.456.789-01', zipCode: '20000-011',
+    address: 'Rua QA, 11, Centro, Rio de Janeiro, RJ', phone: '(21) 99000-0011', email: 'ana@example.test',
+  });
+  assert.deepEqual(result.orders.map((order: { number: string }) => order.number), ['12', '11']);
+  assert.equal(requestedUrls.some(url => url.pathname === '/Api/v3/contatos/901'), true);
+  assert.equal(requestedUrls.some(url => url.pathname === '/Api/v3/pedidos/vendas' && url.searchParams.get('idContato') === '901'), true);
+
+  ordersMode = 'empty';
+  const withoutOrders = await lookup({ phone: '5521990000011', contactId: '901' });
+  assert.equal(withoutOrders.json().status, 'found');
+  assert.deepEqual(withoutOrders.json().orders, []);
+  assert.equal(withoutOrders.json().ordersError, null);
+  ordersMode = 'forbidden';
+  const orderPermissionError = await lookup({ phone: '5521990000011', contactId: '901' });
+  assert.equal(orderPermissionError.json().status, 'found');
+  assert.match(orderPermissionError.json().ordersError, /permissões da integração/);
+
+  mode = 'empty';
+  assert.deepEqual((await lookup({ phone: '5521990000011' })).json(), { status: 'not_found' });
+  mode = 'forbidden';
+  const forbidden = await lookup({ phone: '5521990000011' });
+  assert.equal(forbidden.statusCode, 403);
+  assert.match(forbidden.json().error, /permissões da integração/);
+  user = null;
+  assert.equal((await lookup({ phone: '5521990000011' })).statusCode, 401);
 });

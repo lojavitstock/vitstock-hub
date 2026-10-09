@@ -35,6 +35,12 @@ const productDetail = (id: string) => {
   };
 };
 
+const qaContact = {
+  id: 901, nome: 'Contato QA Avatar Válido', situacao: 'A', numeroDocumento: '123.456.789-01',
+  telefone: '(21) 4000-0011', celular: '(21) 99000-0011', fantasia: 'Empresa QA', tipo: 'F', email: 'contato@example.test',
+  endereco: { geral: { endereco: 'Rua QA', numero: '11', complemento: 'Sala 2', bairro: 'Centro', municipio: 'Rio de Janeiro', uf: 'RJ', cep: '20000-011' } },
+};
+
 export const qaBlingTransport: BlingTransport = async (url, init) => {
   if (!isQaMode) throw new BlingError(503, 'Mock Bling bloqueado fora de QA');
   const target = new URL(url);
@@ -91,6 +97,18 @@ export const qaBlingTransport: BlingTransport = async (url, init) => {
       depositos: [{ id: 7, saldoFisico: 4.25, saldoVirtual: 9 }] }] };
     else body = { data: [{ produto: { id: productId }, saldoFisicoTotal: 8, saldoVirtualTotal: 5,
       depositos: [{ id: 7, saldoFisico: 8, saldoVirtual: 5 }] }] };
+  }
+  else if (target.pathname === '/Api/v3/contatos') {
+    const phone = (target.searchParams.get('telefone') || '').replace(/\D/g, '');
+    const contactPhones = [qaContact.telefone, qaContact.celular].map(value => value.replace(/\D/g, ''));
+    body = { data: contactPhones.includes(phone) ? [qaContact] : [] };
+  }
+  else if (target.pathname === '/Api/v3/contatos/901') body = { data: qaContact };
+  else if (target.pathname === '/Api/v3/pedidos/vendas' && target.searchParams.get('idContato') === '901') {
+    body = { data: [
+      { id: 902, numero: 902, data: '2026-10-01', total: 215.5 },
+      { id: 901, numero: 901, data: '2026-09-20', total: 120 },
+    ] };
   }
   else return new Response('{}', { status: 404 });
   return new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
