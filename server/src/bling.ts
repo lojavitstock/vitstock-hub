@@ -206,7 +206,7 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
         if (salesModules.length === 1) {
           const situations = parseContract(z.object({ data: z.array(blingSituationModel).max(1000) }),
             await read('moduleSituations', new URLSearchParams(), salesModules[0]!.id)).data;
-          const names = new Map(situations.map(item => [item.id, item.nome.trim()]).filter(([, name]) => Boolean(name)));
+          const names = new Map<string, string>(situations.map(item => [item.id, item.nome.trim()] as const).filter(([, name]) => Boolean(name)));
           for (const order of latestOrders) if (!order.status && order.statusId) {
             order.status = names.get(order.statusId) || null;
           }
