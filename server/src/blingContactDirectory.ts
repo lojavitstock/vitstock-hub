@@ -246,4 +246,3 @@ export class BlingContactDirectoryService {
     } finally { await release(); }
   }
 }
-
