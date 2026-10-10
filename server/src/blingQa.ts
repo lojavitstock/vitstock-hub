@@ -99,15 +99,16 @@ export const qaBlingTransport: BlingTransport = async (url, init) => {
       depositos: [{ id: 7, saldoFisico: 8, saldoVirtual: 5 }] }] };
   }
   else if (target.pathname === '/Api/v3/contatos') {
-    const phone = (target.searchParams.get('telefone') || '').replace(/\D/g, '');
-    const contactPhones = [qaContact.telefone, qaContact.celular].map(value => value.replace(/\D/g, ''));
-    body = { data: contactPhones.includes(phone) ? [qaContact] : [] };
+    const page = Number(target.searchParams.get('pagina') || 1);
+    const limit = Number(target.searchParams.get('limite') || 100);
+    // Directory refresh uses complete bounded pages, never a per-conversation provider scan.
+    body = { data: page === 1 ? [qaContact].slice(0, limit) : [] };
   }
   else if (target.pathname === '/Api/v3/contatos/901') body = { data: qaContact };
   else if (target.pathname === '/Api/v3/pedidos/vendas' && target.searchParams.get('idContato') === '901') {
     body = { data: [
-      { id: 902, numero: 902, data: '2026-10-01', total: 215.5 },
-      { id: 901, numero: 901, data: '2026-09-20', total: 120 },
+      { id: 902, numero: 902, data: '2026-10-01', total: 215.5, situacao: { id: 7, valor: 'Em separação QA' } },
+      { id: 901, numero: 901, data: '2026-09-20', total: 120, situacao: { id: 8, valor: 'Personalizado QA' } },
     ] };
   }
   else return new Response('{}', { status: 404 });

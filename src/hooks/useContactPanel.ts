@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { apiRequest } from '../services/api';
 import { EvolutionApiService } from '../services/evolutionApi';
 import { Conversation } from '../types';
+import { fetchGoogleContactStatus, invalidateContactIntegrationStatus } from '../services/contactIntegrationStatus';
 
 export type GoogleContactForm = {
   name: string;
@@ -40,6 +41,7 @@ export const extractBusinessProfile = (profile: any) => {
 
 type UseContactPanelOptions = {
   activeConversation?: Conversation;
+  companyId?: string;
   isMock: boolean;
   setConversations: React.Dispatch<React.SetStateAction<Conversation[]>>;
   rememberContactName?: (phone: string, name: string) => void;
@@ -47,6 +49,7 @@ type UseContactPanelOptions = {
 
 export const useContactPanel = ({
   activeConversation,
+  companyId,
   isMock,
   setConversations,
   rememberContactName,
@@ -127,32 +130,7 @@ export const useContactPanel = ({
       setGoogleContactForm(fallbackForm);
     }, 8_000);
 
-    apiRequest<{
-      connected: boolean;
-      saved: boolean;
-      name: string | null;
-      resourceName: string | null;
-      email: string;
-      cpf: string;
-      address: string;
-      addresses?: string[];
-      otherPhone: string;
-      otherPhones?: string[];
-      emails?: string[];
-      birthday?: string;
-      nickname?: string;
-      company?: string;
-      jobTitle?: string;
-      occupation?: string;
-      relations?: string;
-      events?: string;
-      customFields?: string;
-      website?: string;
-      notes?: string;
-    }>('/api/google/contact-status', {
-      method: 'POST',
-      body: JSON.stringify({ phone: activeContactPhone }),
-    }).then((status) => {
+    fetchGoogleContactStatus(companyId || '', activeContactPhone).then((status) => {
       if (!mounted || statusSettled) return;
       statusSettled = true;
       window.clearTimeout(statusTimeout);
@@ -215,7 +193,7 @@ export const useContactPanel = ({
       window.clearTimeout(statusTimeout);
       setShowGoogleContactForm(false);
     };
-  }, [activeContactPhone, activeConversationId, rememberContactName, showContactInfo, setConversations]);
+  }, [activeContactPhone, activeConversationId, companyId, rememberContactName, showContactInfo, setConversations]);
 
   const openGoogleContactForm = useCallback(() => {
     if (!activeConversation) return;
@@ -238,6 +216,7 @@ export const useContactPanel = ({
         method: 'POST',
         body: JSON.stringify(googleContactForm),
       });
+      if (companyId) invalidateContactIntegrationStatus(companyId, activeConversation.contact.phone);
       setGoogleContactStatus('saved');
       setGoogleMatchedName(result.name);
       setShowGoogleContactForm(false);
@@ -253,7 +232,7 @@ export const useContactPanel = ({
     } finally {
       setSavingGoogleContact(false);
     }
-  }, [activeConversation, googleContactForm, rememberContactName, setConversations]);
+  }, [activeConversation, companyId, googleContactForm, rememberContactName, setConversations]);
 
   return {
     showContactInfo,

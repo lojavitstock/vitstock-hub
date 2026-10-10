@@ -648,11 +648,28 @@ is hashed in PostgreSQL, expires after five minutes and is atomically marked use
 before exchanging the code. Reconnect invalidates previous states; disconnect
 removes pending states. Cookies/session must still be valid at callback time.
 
+Each successful authorization-code exchange rotates a company-scoped
+`authorization_id`; normal access-token refresh preserves it. Contact-directory
+generations store the ID captured before sync, and publication verifies that it
+still matches the connected authorization in the same transaction. Reads expose
+only an active generation whose ID matches the current connection. A reconnect
+therefore makes the previous snapshot unavailable until a successful sync, while
+a failed OAuth attempt leaves the previous authorization and snapshot intact.
+If authorization changes during sync, the building generation is not published.
+Existing generations that predate this binding are retained but assigned an
+unmatched ID by migration `027_bling_contact_authorization_binding.sql`, so an
+explicit sync is required after that migration; no contact rows are deleted.
+
 Migration `022_bling_integration.sql` adds `bling_connections`,
 `bling_oauth_states` and `bling_request_budgets`. Migration
 `023_product_bling_links.sql` adds the company-scoped Product Library link and
 warehouse-balance cache; `024_product_bling_sku_unique.sql` adds only the
-normalized company/SKU uniqueness index. Product images remain local Hub/R2
+normalized company/SKU uniqueness index. Migration
+`026_bling_contact_directory.sql` adds company-scoped contact-directory
+generations and entries. Migration
+`027_bling_contact_authorization_binding.sql` adds authorization IDs to Bling
+connections and contact-directory generations without deleting directory data.
+Product images remain local Hub/R2
 objects and are never fetched from Bling. Access/refresh tokens use AES-256-GCM with a separate backend
 `INTEGRATION_ENCRYPTION_KEY` (32 random bytes in base64). AAD binds ciphertext to
 provider, version, company and token kind. The key must remain persistent per

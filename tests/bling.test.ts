@@ -1,12 +1,13 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { integrationCipher } from '../server/src/blingEncryption.js';
 import { API_BASE, TOKEN_URL, AUTHORIZATION_URL, pagination, productListModel, productDetailModel, warehouseModel, stockModel, parseContract, BlingError } from '../server/src/blingContract.js';
 import { BlingApiClient, retryAfterMs, type BlingTransport } from '../server/src/blingClient.js';
-import { blingPhoneMatches, normalizeBlingLookupPhone } from '../server/src/blingContactLookup.js';
+import { blingPhoneMatches, mapBlingContactPhoneFields, normalizeBlingLookupPhone } from '../server/src/blingContactLookup.js';
+import { formatBlingDocument, formatBlingZipCode, googleMapsSearchUrl } from '../src/utils/blingContactDisplay.js';
 import type { BlingSession, BlingStore, Connection } from '../server/src/blingStore.js';
 
 const credentials = { clientId: 'fake-client', clientSecret: 'secret-not-loggable', redirectUri: 'https://api.example.test/api/integrations/bling/callback' };
@@ -32,7 +33,13 @@ class MemoryStore implements BlingStore {
     await previous;
     try { return await action({
       get: async () => this.rows.get(company) ?? null,
-      save: async v => { this.saves++; this.rows.set(company, { access: v.access_token, refresh: v.refresh_token, expires: Date.now() + v.expires_in * 1000, connectedAt: '2026-10-03T00:00:00.000Z' }); },
+      save: async (v, newAuthorization = false) => {
+        this.saves++;
+        const current = this.rows.get(company);
+        this.rows.set(company, { access: v.access_token, refresh: v.refresh_token, expires: Date.now() + v.expires_in * 1000,
+          connectedAt: newAuthorization || !current ? '2026-10-03T00:00:00.000Z' : current.connectedAt,
+          authorizationId: newAuthorization || !current ? randomUUID() : current.authorizationId });
+      },
       remove: async () => { this.rows.delete(company); for (const [k,v] of this.states) if (v.company === company) this.states.delete(k); },
       validState: async () => [...this.states.values()].some(v => v.company === company && v.used),
       budget: async kind => { this.budgets.push(kind); },
@@ -42,7 +49,7 @@ class MemoryStore implements BlingStore {
 }
 function setup(transport: BlingTransport, expired = false, timeout = 30) {
   const store = new MemoryStore();
-  store.rows.set('A', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + (expired ? -1 : 3600000), connectedAt: 'today' });
+  store.rows.set('A', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + (expired ? -1 : 3600000), connectedAt: 'today', authorizationId: 'authorization-A' });
   const sleeps: number[] = [];
   const client = new BlingApiClient(store, credentials, transport, async ms => { sleeps.push(ms); }, Date.now, timeout);
   return { client, store, sleeps, read: () => client.read('A', 'products', new URLSearchParams({ pagina: '1', limite: '50' })) };
@@ -84,8 +91,10 @@ test('Bling expired token: concurrent requests single-flight, rotated tokens per
     assert.equal(new Headers(init.headers).get('Authorization'), `Bearer ${tokens.access_token}`);
     return json({ data: [] });
   }, true);
+  const authorizationId = store.rows.get('A')!.authorizationId;
   await Promise.all(Array.from({ length: 10 }, () => read()));
   assert.equal(refreshes, 1); assert.equal(store.saves, 1); assert.equal(store.rows.get('A')?.refresh, tokens.refresh_token);
+  assert.equal(store.rows.get('A')?.authorizationId, authorizationId, 'refresh OAuth must preserve the directory authorization ID');
   assert.equal(store.budgets.filter(v => v === 'oauth').length, 1);
 });
 test('Bling near-expiry refreshes before GET', async () => {
@@ -222,6 +231,7 @@ test('Bling OAuth routes: admin, state valid/invalid/expired/reuse, missing code
   for (const route of ['connect', 'disconnect']) assert.equal((await app.inject({ method: 'POST', url: `${base}/${route}` })).statusCode, 403);
   user.role = 'admin';
   const state = await begin(); assert.equal(state.length, 43); assert.equal((await callback(state)).headers.location?.endsWith('bling=connected'), true);
+  const firstAuthorizationId = store.rows.get('A')!.authorizationId;
   const status = (await app.inject(`${base}/status`)).json(); assert.deepEqual(Object.keys(status).sort(), ['configured','connected','connectedAt']); assert.equal(status.connected, true);
   assert.equal((await callback(state)).headers.location?.endsWith('bling=error'), true); assert.equal(exchanges, 1);
   assert.equal((await callback('x'.repeat(43))).headers.location?.endsWith('bling=error'), true);
@@ -232,6 +242,9 @@ test('Bling OAuth routes: admin, state valid/invalid/expired/reuse, missing code
   user = { id: 'otherA', companyId: 'A', role: 'admin' }; await callback(foreign); assert.equal(exchanges, 1);
   user.id = 'uA'; fail = true; const failed = await begin(); await callback(failed); await callback(failed); assert.equal(exchanges, 2);
   assert.equal(store.rows.get('A')?.refresh, tokens.refresh_token);
+  assert.equal(store.rows.get('A')?.authorizationId, firstAuthorizationId, 'failed authorization must not replace the existing authorization');
+  fail = false; const reauthorization = await begin(); await callback(reauthorization);
+  assert.notEqual(store.rows.get('A')?.authorizationId, firstAuthorizationId, 'successful authorization must rotate the authorization identity');
   const disconnected = await app.inject({ method: 'POST', url: `${base}/disconnect` }); assert.equal(disconnected.statusCode, 200);
   assert.equal((await app.inject(`${base}/status`)).json().connected, false);
   user = null; assert.equal((await app.inject(`${base}/status`)).statusCode, 401);
@@ -365,26 +378,58 @@ test('Bling contact lookup phone normalization accepts explicit Brazilian format
   assert.equal(blingPhoneMatches('+55 21 99000-0011', national!), true);
 });
 
-test('Bling contact lookup uses documented read routes, asks on duplicates, and sorts linked orders by date', async t => {
+test('Bling contact display formats only complete CPF/CNPJ/CEP values and creates safe map search URLs', () => {
+  assert.equal(formatBlingDocument('12345678901'), '123.456.789-01');
+  assert.equal(formatBlingDocument('12345678000199'), '12.345.678/0001-99');
+  assert.equal(formatBlingDocument('1234567890'), '1234567890');
+  assert.equal(formatBlingDocument(null), null);
+  assert.equal(formatBlingZipCode('20000011'), '20000-011');
+  assert.equal(formatBlingZipCode('1234567'), '1234567');
+  assert.equal(formatBlingZipCode(''), '');
+  assert.equal(googleMapsSearchUrl('Rua QA, 10, Centro'), 'https://www.google.com/maps/search/?api=1&query=Rua+QA%2C+10%2C+Centro');
+  assert.equal(googleMapsSearchUrl('  '), null);
+});
+
+test('Bling Fone and Celular remain independent original fields for every presence combination', () => {
+  assert.deepEqual(mapBlingContactPhoneFields('Fone A', 'Celular B'), { phone: 'Fone A', mobile: 'Celular B' });
+  assert.deepEqual(mapBlingContactPhoneFields('Somente Fone', null), { phone: 'Somente Fone', mobile: null });
+  assert.deepEqual(mapBlingContactPhoneFields(null, 'Somente Celular'), { phone: null, mobile: 'Somente Celular' });
+  assert.deepEqual(mapBlingContactPhoneFields('Mesmo número', 'Mesmo número'), { phone: 'Mesmo número', mobile: 'Mesmo número' });
+  assert.deepEqual(mapBlingContactPhoneFields(null, null), { phone: null, mobile: null });
+});
+
+test('Bling contact lookup uses the tenant snapshot, asks on duplicates, and sorts linked orders by date', async t => {
   const { default: Fastify } = await import('../server/node_modules/fastify/fastify.js');
   const { registerBlingRoutes } = await import('../server/src/bling.js');
   const store = new MemoryStore();
-  store.rows.set('A', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + 3600000, connectedAt: 'today' });
+  store.rows.set('A', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + 3600000, connectedAt: 'today', authorizationId: 'authorization-A' });
   const first = { id: 901, nome: 'Ana QA', situacao: 'A', numeroDocumento: '123.456.789-01', telefone: '(21) 4000-0011', celular: '(21) 99000-0011' };
   const second = { id: 902, nome: 'Ana Empresa QA', situacao: 'A', numeroDocumento: '12.345.678/0001-90', telefone: '+55 21 99000-0011', celular: null };
-  let mode: 'multiple' | 'empty' | 'forbidden' = 'multiple';
   let ordersMode: 'normal' | 'empty' | 'forbidden' = 'normal';
   const requestedUrls: URL[] = [];
+  const syncedAt = new Date().toISOString();
+  const directoryEntries = [
+    { id: '901', name: first.nome, document: first.numeroDocumento, phone: first.telefone, mobile: first.celular, status: first.situacao },
+    { id: '902', name: second.nome, document: second.numeroDocumento, phone: second.telefone, mobile: null, status: second.situacao },
+  ];
+  const contactDirectoryRepository = {
+    tryAcquireSyncLock: async () => async () => undefined,
+    currentAuthorizationId: async (companyId: string) => companyId === 'A' ? 'authorization-A' : null,
+    activeGeneration: async (companyId: string) => companyId === 'A' ? { id: 'generation-A', syncedAt, count: directoryEntries.length } : null,
+    startGeneration: async () => undefined,
+    upsertPage: async () => undefined,
+    publishGeneration: async () => directoryEntries.length,
+    discardGeneration: async () => undefined,
+    findByPhone: async (companyId: string, generationId: string, digits: string, limit: number) => companyId === 'A' && generationId === 'generation-A'
+      ? directoryEntries.filter(contact => [contact.phone, contact.mobile].some(value => normalizeBlingLookupPhone(value)?.digits === digits)).slice(0, limit)
+      : [],
+    findById: async (companyId: string, generationId: string, id: string) => companyId === 'A' && generationId === 'generation-A'
+      ? directoryEntries.find(contact => contact.id === id) ?? null : null,
+  };
   const client = new BlingApiClient(store, credentials, async url => {
     const target = new URL(url);
     requestedUrls.push(target);
-    if (target.pathname === '/Api/v3/contatos' && mode === 'forbidden') return json({}, 403);
-    if (target.pathname === '/Api/v3/contatos') {
-      assert.equal(target.searchParams.get('criterio'), '1');
-      assert.equal(target.searchParams.get('limite'), '100');
-      assert.equal(target.searchParams.get('telefone'), '(21) 99000-0011');
-      return json({ data: mode === 'empty' ? [] : [first, second] });
-    }
+    if (target.pathname === '/Api/v3/contatos') throw new Error('contact lookup must use its local snapshot');
     if (target.pathname === '/Api/v3/contatos/901') return json({ data: {
       ...first, fantasia: 'Ana Comércio', tipo: 'F', email: 'ana@example.test',
       endereco: { geral: { cep: '20000-011', endereco: 'Rua QA', numero: '11', bairro: 'Centro', municipio: 'Rio de Janeiro', uf: 'RJ' } },
@@ -394,8 +439,8 @@ test('Bling contact lookup uses documented read routes, asks on duplicates, and 
       if (ordersMode === 'forbidden') return json({}, 403);
       if (ordersMode === 'empty') return json({ data: [] });
       return json({ data: [
-        { id: 11, numero: 11, data: '2026-09-10', total: 100 },
-        { id: 12, numero: 12, data: '2026-10-01', total: 215.5 },
+        { id: 11, numero: 11, data: '2026-09-10', total: 100, situacao: { id: 90902, valor: 'Personalizado QA' } },
+        { id: 12, numero: 12, data: '2026-10-01', total: 215.5, situacao: { id: 90901, valor: 'Em separação QA' } },
       ] });
     }
     return json({}, 404);
@@ -403,7 +448,7 @@ test('Bling contact lookup uses documented read routes, asks on duplicates, and 
   const app = Fastify({ logger: false }); app.decorateRequest('user', null);
   let user: any = { id: 'attendant-A', companyId: 'A', role: 'attendant' };
   app.addHook('onRequest', async request => { request.user = user; });
-  await registerBlingRoutes(app, { store, client, credentials });
+  await registerBlingRoutes(app, { store, client, credentials, contactDirectoryRepository });
   t.after(() => app.close());
 
   const lookup = (payload: Record<string, string>) => app.inject({ method: 'POST', url: '/api/integrations/bling/contact-lookup', payload });
@@ -412,11 +457,11 @@ test('Bling contact lookup uses documented read routes, asks on duplicates, and 
   assert.deepEqual(duplicateResult.json(), {
     status: 'multiple', truncated: false,
     matches: [
-      { id: '901', name: 'Ana QA', document: '123.456.789-01', phone: '(21) 99000-0011' },
-      { id: '902', name: 'Ana Empresa QA', document: '12.345.678/0001-90', phone: '+55 21 99000-0011' },
+      { id: '901', name: 'Ana QA', document: '123.456.789-01', phone: '(21) 4000-0011', mobile: '(21) 99000-0011' },
+      { id: '902', name: 'Ana Empresa QA', document: '12.345.678/0001-90', phone: '+55 21 99000-0011', mobile: null },
     ],
   });
-  assert.equal(requestedUrls.length, 1);
+  assert.equal(requestedUrls.some(url => url.pathname === '/Api/v3/contatos'), false, 'conversation lookup must not scan provider contacts');
 
   const selected = await lookup({ phone: '5521990000011', contactId: '901' });
   assert.equal(selected.statusCode, 200);
@@ -424,9 +469,12 @@ test('Bling contact lookup uses documented read routes, asks on duplicates, and 
   assert.equal(result.status, 'found');
   assert.deepEqual(result.contact, {
     id: '901', name: 'Ana QA', fantasy: 'Ana Comércio', document: '123.456.789-01', zipCode: '20000-011',
-    address: 'Rua QA, 11, Centro, Rio de Janeiro, RJ', phone: '(21) 99000-0011', email: 'ana@example.test',
+    address: 'Rua QA, 11, Centro, Rio de Janeiro, RJ', phone: '(21) 4000-0011', mobile: '(21) 99000-0011', email: 'ana@example.test',
   });
   assert.deepEqual(result.orders.map((order: { number: string }) => order.number), ['12', '11']);
+  assert.deepEqual(result.orders.map((order: { status: string }) => order.status), ['Em separação QA', 'Personalizado QA']);
+  assert.deepEqual(result.orders.map((order: { statusId: string }) => order.statusId), ['90901', '90902']);
+  assert.equal(result.directorySyncedAt, syncedAt);
   assert.equal(requestedUrls.some(url => url.pathname === '/Api/v3/contatos/901'), true);
   assert.equal(requestedUrls.some(url => url.pathname === '/Api/v3/pedidos/vendas' && url.searchParams.get('idContato') === '901'), true);
 
@@ -440,12 +488,39 @@ test('Bling contact lookup uses documented read routes, asks on duplicates, and 
   assert.equal(orderPermissionError.json().status, 'found');
   assert.match(orderPermissionError.json().ordersError, /permissões da integração/);
 
-  mode = 'empty';
+  directoryEntries.splice(0, directoryEntries.length);
   assert.deepEqual((await lookup({ phone: '5521990000011' })).json(), { status: 'not_found' });
-  mode = 'forbidden';
-  const forbidden = await lookup({ phone: '5521990000011' });
-  assert.equal(forbidden.statusCode, 403);
-  assert.match(forbidden.json().error, /permissões da integração/);
   user = null;
   assert.equal((await lookup({ phone: '5521990000011' })).statusCode, 401);
+});
+
+test('Bling contact existence is tenant-scoped and unavailable without a fresh complete snapshot', async t => {
+  const { default: Fastify } = await import('../server/node_modules/fastify/fastify.js');
+  const { registerBlingRoutes } = await import('../server/src/bling.js');
+  const store = new MemoryStore();
+  store.rows.set('A', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + 3600000, connectedAt: 'today', authorizationId: 'authorization-A' });
+  store.rows.set('B', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + 3600000, connectedAt: 'today', authorizationId: 'authorization-B' });
+  const client = new BlingApiClient(store, credentials, async () => json({ data: [] }), async () => {});
+  const syncedAt = new Date().toISOString();
+  const repository = {
+    tryAcquireSyncLock: async () => async () => undefined,
+    currentAuthorizationId: async (companyId: string) => companyId === 'A' ? 'authorization-A' : 'authorization-B',
+    activeGeneration: async (companyId: string) => companyId === 'A' ? { id: 'A-gen', syncedAt, count: 1 } : null,
+    startGeneration: async () => undefined, upsertPage: async () => undefined, publishGeneration: async () => 0, discardGeneration: async () => undefined,
+    findByPhone: async (companyId: string, generationId: string, digits: string) => companyId === 'A' && generationId === 'A-gen' && digits === '5521990000011'
+      ? [{ id: '901', name: 'Contato A', document: null, phone: null, mobile: '(21) 99000-0011', status: 'A' }] : [],
+    findById: async () => null,
+  };
+  const app = Fastify({ logger: false }); app.decorateRequest('user', null);
+  let user: any = { id: 'A-user', companyId: 'A', role: 'attendant' };
+  app.addHook('onRequest', async request => { request.user = user; });
+  await registerBlingRoutes(app, { store, client, credentials, contactDirectoryRepository: repository });
+  t.after(() => app.close());
+
+  const check = () => app.inject({ method: 'POST', url: '/api/integrations/bling/contact-existence', payload: { phone: '(21) 99000-0011' } });
+  assert.equal((await check()).json().status, 'found');
+  user = { id: 'B-user', companyId: 'B', role: 'attendant' };
+  const noSnapshot = await check();
+  assert.equal(noSnapshot.statusCode, 200);
+  assert.equal(noSnapshot.json().status, 'unavailable');
 });

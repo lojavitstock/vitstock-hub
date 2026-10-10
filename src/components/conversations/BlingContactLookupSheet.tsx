@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, RefreshCw, Search, ShoppingBag, X } from 'lucide-react';
 import { lookupBlingContact, type BlingContactLookup } from '../../services/blingApi';
 import { formatPhoneForDisplay } from '../../utils/phone';
+import { formatBlingDocument, formatBlingZipCode, googleMapsSearchUrl } from '../../utils/blingContactDisplay';
 
 type Props = { phone: string; onClose: () => void };
 type LookupState = { status: 'loading'; selectedId?: string }
@@ -22,6 +23,11 @@ function formatOrderDate(value: string | null) {
 function formatOrderTotal(value: number | null) {
   if (value === null) return null;
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+}
+
+function formatOrderStatus(status: string | null, statusId: string | null) {
+  if (status?.trim()) return status.trim();
+  return statusId ? `Situação Bling ${statusId}` : null;
 }
 
 export const BlingContactLookupSheet: React.FC<Props> = ({ phone, onClose }) => {
@@ -118,6 +124,7 @@ export const BlingContactLookupSheet: React.FC<Props> = ({ phone, onClose }) => 
                   <span className="block text-sm font-bold text-slate-100">{match.name}</span>
                   <span className="mt-1 block text-xs text-slate-400">CPF/CNPJ: {displayValue(match.document)}</span>
                   <span className="mt-1 block text-xs font-mono text-amber-200">Fone: {displayValue(match.phone)}</span>
+                  <span className="mt-1 block text-xs font-mono text-slate-400">Celular: {displayValue(match.mobile)}</span>
                   <span className="mt-2 block text-[11px] font-bold text-amber-300">Ver este cadastro</span>
                 </button>
               ))}
@@ -138,10 +145,11 @@ export const BlingContactLookupSheet: React.FC<Props> = ({ phone, onClose }) => 
                 <dl className="space-y-3">
                   <Field label="Nome" value={state.contact.name} />
                   <Field label="Fantasia" value={state.contact.fantasy} />
-                  <Field label="CPF ou CNPJ" value={state.contact.document} />
-                  <Field label="CEP" value={state.contact.zipCode} />
-                  <Field label="Endereço" value={state.contact.address} />
+                  <Field label="CPF ou CNPJ" value={formatBlingDocument(state.contact.document)} />
+                  <Field label="CEP" value={formatBlingZipCode(state.contact.zipCode)} />
+                  <AddressField value={state.contact.address} />
                   <Field label="Fone" value={state.contact.phone} />
+                  <Field label="Celular" value={state.contact.mobile} />
                   <Field label="E-mail" value={state.contact.email} />
                 </dl>
               </section>
@@ -163,6 +171,7 @@ export const BlingContactLookupSheet: React.FC<Props> = ({ phone, onClose }) => 
                           <span className="text-xs font-extrabold text-slate-100">Pedido {order.number || order.id || '—'}</span>
                           <span className="text-[11px] text-slate-400">{formatOrderDate(order.date)}</span>
                         </div>
+                        {formatOrderStatus(order.status, order.statusId) && <span className="mt-2 inline-flex max-w-full rounded-full border border-sky-300/20 bg-sky-300/5 px-2 py-0.5 text-[10px] font-semibold text-sky-200">{formatOrderStatus(order.status, order.statusId)}</span>}
                         {order.total !== null && <p className="mt-1.5 text-xs font-bold text-emerald-300">{formatOrderTotal(order.total)}</p>}
                       </div>
                     ))}
@@ -186,3 +195,13 @@ const Field: React.FC<{ label: string; value: string | null }> = ({ label, value
     <dd className="mt-0.5 break-words text-xs leading-relaxed text-slate-200">{displayValue(value)}</dd>
   </div>
 );
+
+const AddressField: React.FC<{ value: string | null }> = ({ value }) => {
+  const url = googleMapsSearchUrl(value);
+  return <div>
+    <dt className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Endereço</dt>
+    <dd className="mt-0.5 break-words text-xs leading-relaxed text-slate-200">
+      {url ? <a href={url} target="_blank" rel="noopener noreferrer" className="text-sky-300 underline decoration-sky-300/40 underline-offset-2 hover:text-sky-200">{value}</a> : displayValue(value)}
+    </dd>
+  </div>;
+};

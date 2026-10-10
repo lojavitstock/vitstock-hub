@@ -38,7 +38,7 @@ export type BlingProductStock = {
   saldoVirtualTotal?: number;
 };
 
-export type BlingContactCandidate = { id: string; name: string; document: string | null; phone: string | null };
+export type BlingContactCandidate = { id: string; name: string; document: string | null; phone: string | null; mobile: string | null };
 export type BlingContactLookup =
   | { status: 'not_found' }
   | { status: 'multiple'; matches: BlingContactCandidate[]; truncated: boolean }
@@ -52,12 +52,32 @@ export type BlingContactLookup =
       zipCode: string | null;
       address: string | null;
       phone: string | null;
+      mobile: string | null;
       email: string | null;
     };
-    orders: Array<{ id: string | null; number: string | null; date: string | null; total: number | null }>;
+    orders: Array<{ id: string | null; number: string | null; date: string | null; total: number | null; status: string | null; statusId: string | null }>;
     ordersTruncated: boolean;
     ordersError: string | null;
+    directorySyncedAt: string;
   };
+
+export type BlingContactExistence = { status: 'found' | 'not_found' | 'unavailable'; syncedAt: string | null };
+
+export function checkBlingContactExistence(phone: string, signal?: AbortSignal) {
+  return apiRequest<BlingContactExistence>('/api/integrations/bling/contact-existence', {
+    method: 'POST', body: JSON.stringify({ phone }), signal,
+  });
+}
+
+export function fetchBlingContactDirectoryStatus() {
+  return apiRequest<{ ready: boolean; stale: boolean; syncing: boolean; syncedAt: string | null; contacts: number }>(
+    '/api/integrations/bling/contact-directory/status');
+}
+
+export function refreshBlingContactDirectory() {
+  return apiRequest<{ generationId: string; syncedAt: string; contacts: number; pages: number }>(
+    '/api/integrations/bling/contact-directory/sync', { method: 'POST', timeoutMs: 300_000 });
+}
 
 export function lookupBlingContact(phone: string, contactId?: string, signal?: AbortSignal) {
   return apiRequest<BlingContactLookup>('/api/integrations/bling/contact-lookup', {

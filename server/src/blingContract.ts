@@ -60,6 +60,7 @@ export const blingSalesOrderModel = z.object({
   numero: z.union([z.number().int(), z.string()]).nullish(),
   data: nullableText,
   total: z.number().finite().nullish(),
+  situacao: z.object({ id: idSchema.optional(), valor: nullableText }).nullish(),
 });
 export const tokenModel = z.object({ access_token: z.string().min(1).max(16000), refresh_token: z.string().min(1).max(16000),
   token_type: z.string().refine(v => v.toLowerCase() === 'bearer'), expires_in: z.number().int().positive().max(86400) });

@@ -43,6 +43,7 @@ import { formatMessageTimestamp } from '../components/conversations/conversation
 import { useConversationMessages } from '../hooks/useConversationMessages';
 import { conversationNeedsResponse, useConversationInbox } from '../hooks/useConversationInbox';
 import { useContactPanel } from '../hooks/useContactPanel';
+import { useConversationIntegrationBadges } from '../hooks/useConversationIntegrationBadges';
 import { toQuotedMessage } from '../utils/quotedMessage';
 import { canRestoreComposerDraft, captureComposerSubmission, readConversationDraft, scheduleComposerFocus, writeConversationDraft } from '../utils/composerSubmission';
 import { createOutboundTrace, createReplyTraceId, traceReplySendFailure } from '../utils/outboundTrace';
@@ -475,9 +476,16 @@ export const AtendimentoPage: React.FC = () => {
     saveGoogleContactForm,
   } = useContactPanel({
     activeConversation: activeConv,
+    companyId: user?.companyId,
     isMock,
     setConversations,
     rememberContactName,
+  });
+  const integrationBadges = useConversationIntegrationBadges({
+    companyId: user?.companyId,
+    conversationId: activeConv?.id,
+    phone: activeConv?.contact.phone,
+    isGroup: activeConv?.isGroup,
   });
 
   useEffect(() => {
@@ -1918,6 +1926,10 @@ export const AtendimentoPage: React.FC = () => {
                 <div>
                   <h2 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
                     {activeConv.contact.name}
+                    {!activeConv.isGroup && activeConv.contact.phone.trim() && <>
+                      <span title={integrationBadges.google === 'found' ? 'Contato salvo no Google Contacts' : integrationBadges.google === 'not_found' ? 'Contato não encontrado no Google Contacts' : integrationBadges.google === 'checking' ? 'Verificando Google Contacts' : 'Google Contacts indisponível'} className={`inline-flex items-center rounded border px-1 py-0.5 text-[9px] font-extrabold leading-none ${integrationBadges.google === 'found' ? 'border-blue-300/30 bg-blue-300/10 text-blue-200' : 'border-slate-500/30 bg-slate-500/10 text-slate-300'}`}>G</span>
+                      <span title={integrationBadges.bling === 'found' ? 'Contato encontrado no Bling' : integrationBadges.bling === 'not_found' ? 'Contato não encontrado no índice Bling atualizado' : integrationBadges.bling === 'checking' ? 'Verificando índice de contatos Bling' : 'Índice Bling indisponível ou desatualizado'} className={`inline-flex items-center rounded border px-1 py-0.5 text-[9px] font-extrabold leading-none ${integrationBadges.bling === 'found' ? 'border-emerald-300/30 bg-emerald-300/10 text-emerald-200' : 'border-slate-500/30 bg-slate-500/10 text-slate-300'}`}>B</span>
+                    </>}
                   </h2>
                   <p className="text-xs text-zinc-400 font-mono">{activeConv.isGroup ? 'Grupo WhatsApp' : formatPhoneForDisplay(activeConv.contact.phone)}</p>
                 </div>

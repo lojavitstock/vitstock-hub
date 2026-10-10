@@ -2,6 +2,10 @@ import { formatPhoneForDisplay, normalizePhoneIdentity } from './contactDomain.j
 
 export type BlingLookupPhone = { digits: string; formatted: string };
 
+export function mapBlingContactPhoneFields(telefone: string | null | undefined, celular: string | null | undefined) {
+  return { phone: telefone ?? null, mobile: celular ?? null };
+}
+
 /**
  * Accepts only Brazilian numbers with a complete DDD and 10/11 national digits.
  * Known WhatsApp phone JIDs are unwrapped; other JIDs and arbitrary text fail closed.

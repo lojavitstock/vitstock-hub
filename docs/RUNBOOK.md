@@ -524,6 +524,12 @@ Library e saldos por depósito; `024_product_bling_sku_unique.sql` adiciona
 somente unicidade case-insensitive de SKU por empresa. Migration
 `025_bling_product_catalog_projection.sql` adiciona gerações e entradas do
 catálogo ativo pesquisável, sem tocar Product Library, mensagens ou estoque.
+`026_bling_contact_directory.sql` cria o diretório de contatos local por
+empresa. `027_bling_contact_authorization_binding.sql` vincula esse diretório à
+autorização OAuth atual. Gerações anteriores permanecem armazenadas, mas não
+podem ser usadas até a próxima sincronização explícita. Validar somente no QA
+local guardado; o runner aplicará as migrations automaticamente em deployment
+posteriormente aprovado, nunca executá-las manualmente em Preview/Production.
 Validar migrations pelo harness QA local guardado. Railway aplicará pelo runner
 existente somente em deployment posteriormente aprovado; não aplicar migration
 manualmente em Preview/Production. A primeira verificação de OAuth real continua

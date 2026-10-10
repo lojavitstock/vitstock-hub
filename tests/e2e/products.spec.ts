@@ -105,7 +105,7 @@ test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar
     if (new URL(event.url()).pathname.startsWith('/api/integrations/bling/')) hubBlingRequests += 1;
   });
   const conversationName = await openFreshProductConversation(page);
-  await expect(page.getByRole('heading', { name: conversationName, exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: new RegExp(`^${conversationName}(?:\\s|$)`) })).toBeVisible();
   const composer = page.getByPlaceholder('Digite sua mensagem para o WhatsApp...');
   await composer.fill('Rascunho preservado');
   await page.locator('input[type="file"][multiple]').setInputFiles({ name: 'rascunho.png', mimeType: 'image/png', buffer: Buffer.from(tinyPng, 'base64') });
@@ -150,7 +150,7 @@ test('+ abre cadastro na mesma aba SPA e retorno preserva atendimento sem enviar
     await expect(page).toHaveURL(/\/atendimento$/);
     expect(await page.evaluate(() => (window as any).__sameTabDocument)).toBe(documentToken);
     await expect(picker).toBeVisible();
-    await expect(page.getByRole('heading', { name: conversationName, exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: new RegExp(`^${conversationName}(?:\\s|$)`) })).toBeVisible();
     await picker.getByLabel('Buscar produto para pré-visualizar').fill(name);
     await expect(picker.getByRole('option', { name: new RegExp(name) })).toBeVisible();
     await picker.getByRole('button', { name: 'Cancelar' }).click();

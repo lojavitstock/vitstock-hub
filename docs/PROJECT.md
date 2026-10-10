@@ -353,6 +353,13 @@ mesclados/restaurados sob as permissões administrativas existentes. A
 integração Google permanece a origem deliberada para salvar e editar dados
 externos, sem apagar o contato local quando a sincronização falha.
 
+O atendimento também pode mostrar contexto de Google Contacts e Bling somente
+para a conversa privada selecionada. A verificação de existência no Bling usa
+um diretório local por empresa, atualizado explicitamente por um administrador;
+consultas de conversa comparam telefone/celular exatos e não fazem varreduras do
+provider. Um diretório ausente ou vencido aparece como indisponível, não como
+“não encontrado”.
+
 O contato deve funcionar como ponto de união entre comunicação e relacionamento comercial.
 
 ---
