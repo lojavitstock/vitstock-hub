@@ -105,9 +105,9 @@ export const qaBlingTransport: BlingTransport = async (url, init) => {
     body = { data: page === 1 ? [qaContact].slice(0, limit) : [] };
   }
   else if (target.pathname === '/Api/v3/contatos/901') body = { data: qaContact };
-  else if (target.pathname === '/Api/v3/situacoes/modulos') body = { data: [{ id: 12, nome: 'Pedidos de Venda' }] };
+  else if (target.pathname === '/Api/v3/situacoes/modulos') body = { data: [{ id: 12, nome: 'Vendas', descricao: 'Pedidos de Venda' }] };
   else if (target.pathname === '/Api/v3/situacoes/modulos/12') body = { data: [
-    { id: 7, nome: 'Em separação QA' }, { id: 8, nome: 'Personalizado QA' }] };
+    { id: 7, nome: 'Em separação QA' }, { id: 1234, nome: 'Personalizado QA', idHerdado: 8 }] };
   else if (target.pathname === '/Api/v3/pedidos/vendas' && target.searchParams.get('idContato') === '901') {
     body = { data: [
       { id: 902, numero: 902, data: '2026-10-01', total: 215.5, situacao: { id: 7, valor: 2 } },

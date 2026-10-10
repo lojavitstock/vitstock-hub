@@ -55,8 +55,11 @@ export const blingContactDetailModel = blingContactListModel.extend({
   email: nullableText,
   endereco: z.object({ geral: contactAddressModel, cobranca: contactAddressModel }).nullish(),
 });
-export const blingSituationModuleModel = z.object({ id: idSchema, nome: z.string() });
-export const blingSituationModel = z.object({ id: idSchema, nome: z.string() });
+export const blingSituationModuleModel = z.object({ id: idSchema, nome: z.string(), descricao: nullableText });
+export const blingSituationModel = z.object({
+  id: idSchema, nome: z.string(),
+  idHerdado: z.union([z.number().int().nonnegative(), z.string().regex(/^\d+$/)]).nullish(),
+});
 export const blingSalesOrderModel = z.object({
   id: idSchema.optional(),
   numero: z.union([z.number().int(), z.string()]).nullish(),

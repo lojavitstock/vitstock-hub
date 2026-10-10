@@ -407,6 +407,7 @@ test('Bling contact lookup uses the tenant snapshot, asks on duplicates, and sor
   const second = { id: 902, nome: 'Ana Empresa QA', situacao: 'A', numeroDocumento: '12.345.678/0001-90', telefone: '+55 21 99000-0011', celular: null };
   let ordersMode: 'normal' | 'empty' | 'forbidden' = 'normal';
   let situationsForbidden = false;
+  let inheritedAmbiguous = false;
   const requestedUrls: URL[] = [];
   const syncedAt = new Date().toISOString();
   const directoryEntries = [
@@ -436,10 +437,13 @@ test('Bling contact lookup uses the tenant snapshot, asks on duplicates, and sor
       endereco: { geral: { cep: '20000-011', endereco: 'Rua QA', numero: '11', bairro: 'Centro', municipio: 'Rio de Janeiro', uf: 'RJ' } },
     } });
     if (target.pathname === '/Api/v3/situacoes/modulos') {
-      return situationsForbidden ? json({}, 403) : json({ data: [{ id: 12, nome: 'Pedidos de Venda' }] });
+      return situationsForbidden ? json({}, 403) : json({ data: [{ id: 12, nome: 'Vendas', descricao: 'Pedidos de Venda' }] });
     }
     if (target.pathname === '/Api/v3/situacoes/modulos/12') {
-      return situationsForbidden ? json({}, 403) : json({ data: [{ id: 90902, nome: 'Personalizado QA' }] });
+      return situationsForbidden ? json({}, 403) : json({ data: [
+        { id: 56789, nome: 'Personalizado QA', idHerdado: 90902 },
+        ...(inheritedAmbiguous ? [{ id: 56790, nome: 'Outra situação QA', idHerdado: 90902 }] : []),
+      ] });
     }
     if (target.pathname === '/Api/v3/pedidos/vendas') {
       assert.equal(target.searchParams.get('idContato'), '901');
@@ -488,6 +492,15 @@ test('Bling contact lookup uses the tenant snapshot, asks on duplicates, and sor
   assert.equal(requestedUrls.some(url => url.pathname === '/Api/v3/situacoes/modulos/12'), true);
   assert.equal(requestedUrls.some(url => url.pathname === '/Api/v3/contatos/901'), true);
   assert.equal(requestedUrls.some(url => url.pathname === '/Api/v3/pedidos/vendas' && url.searchParams.get('idContato') === '901'), true);
+
+  inheritedAmbiguous = true;
+  const ambiguous = await lookup({ phone: '5521990000011', contactId: '901' });
+  assert.equal(ambiguous.statusCode, 200);
+  assert.deepEqual(ambiguous.json().orders.map((order: { number: string }) => order.number), ['12', '11']);
+  assert.equal(ambiguous.json().orders[1].status, null,
+    'a shared inherited code cannot be mislabeled as a custom situation');
+  assert.equal(ambiguous.json().orders[1].statusId, '90902');
+  inheritedAmbiguous = false;
 
   ordersMode = 'empty';
   const withoutOrders = await lookup({ phone: '5521990000011', contactId: '901' });

@@ -202,14 +202,34 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
       try {
         const modules = parseContract(z.object({ data: z.array(blingSituationModuleModel).max(100) }),
           await read('situationModules', new URLSearchParams())).data;
-        const salesModules = modules.filter(mod => /pedidos?\s+de\s+vendas?/i.test(mod.nome));
+        // The provider may identify this module in nome or descricao.
+        const salesModules = modules.filter(mod => /pedidos?\W*(?:de\W*)?vendas?/i.test(`${mod.nome} ${mod.descricao ?? ''}`));
         if (salesModules.length === 1) {
           const situations = parseContract(z.object({ data: z.array(blingSituationModel).max(1000) }),
             await read('moduleSituations', new URLSearchParams(), salesModules[0]!.id)).data;
-          const names = new Map<string, string>(situations.map(item => [item.id, item.nome.trim()] as const).filter(([, name]) => Boolean(name)));
-          for (const order of latestOrders) if (!order.status && order.statusId) {
-            order.status = names.get(order.statusId) || null;
+          const byId = new Map<string, string>();
+          const byInheritedId = new Map<string, string | null>();
+          for (const situation of situations) {
+            const name = situation.nome.trim();
+            if (!name) continue;
+            byId.set(situation.id, name);
+            if (situation.idHerdado == null) continue;
+            const inherited = String(situation.idHerdado);
+            const previous = byInheritedId.get(inherited);
+            // Multiple custom situations may inherit the same legacy code:
+            // do not invent a name when that code is ambiguous.
+            byInheritedId.set(inherited, previous === undefined ? name : previous === name ? name : null);
           }
+          for (const order of latestOrders) if (!order.status && order.statusId) {
+            order.status = byId.get(order.statusId) ?? byInheritedId.get(order.statusId) ?? null;
+          }
+          if (latestOrders.some(order => !order.status && order.statusId)) {
+            app.log.debug({ integration: 'bling', operation: 'situationNames', reason: 'unmatched_or_ambiguous' },
+              'Algumas situações de pedidos não puderam ser identificadas');
+          }
+        } else {
+          app.log.warn({ integration: 'bling', operation: 'situationNames', reason: 'sales_module_ambiguous_or_missing',
+            candidates: salesModules.length }, 'Módulo de pedidos de venda não identificado na API Bling');
         }
       } catch (error) {
         const kind = error instanceof BlingError ? error.statusCode : 'provider';
