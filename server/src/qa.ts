@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { isQaMode } from './config.js';
+import { config, isQaMode } from './config.js';
 import { db } from './db.js';
 import { requireAdmin } from './auth.js';
 import { publishRealtimeEvent } from './realtime.js';
@@ -361,6 +361,21 @@ const qaInboundSchema = z.object({
 
 export async function registerQaRoutes(app: FastifyInstance) {
   if (!isQaMode) return;
+
+  app.post('/api/qa/evolution/webhook', { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({
+      event: z.enum(['messages.upsert', 'messages.set', 'messages.update']),
+      data: z.record(z.string(), z.unknown()),
+    }).strict().safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Evento Evolution QA inválido' });
+    const result = await app.inject({
+      method: 'POST',
+      url: '/webhooks/evolution',
+      headers: { 'x-webhook-secret': config.WEBHOOK_SECRET },
+      payload: parsed.data,
+    });
+    return reply.code(result.statusCode).send(result.json());
+  });
 
   app.post('/api/qa/evolution/media-scenario', { preHandler: requireAdmin }, async (request, reply) => {
     const parsed = z.object({ scenario: z.enum(['success', 'reject']) }).strict().safeParse(request.body);

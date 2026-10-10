@@ -3,6 +3,8 @@ import { attachBrowserDiagnostics, installBrowserDiagnostics, relevantBrowserErr
 
 const email = process.env.E2E_EMAIL?.trim();
 const password = process.env.E2E_PASSWORD;
+const secondEmail = process.env.E2E_SECOND_EMAIL?.trim();
+const secondPassword = process.env.E2E_SECOND_PASSWORD;
 
 test('Atendimento abre a lista e uma conversa sem enviar mensagens', async ({ page }, testInfo) => {
   const diagnostics = installBrowserDiagnostics(page);
@@ -196,5 +198,145 @@ test('resolver preserva o histórico, exige confirmação e permite reabrir pelo
     expect(relevantBrowserErrors(diagnostics), 'erros fatais atribuíveis à aplicação').toEqual([]);
   } finally {
     await attachBrowserDiagnostics(page, diagnostics, testInfo);
+  }
+});
+
+test('nova mensagem inbound reabre conversa concluída e não duplica por replay, histórico ou status', async ({ browser }, testInfo) => {
+  test.setTimeout(120_000);
+  test.skip(!email || !password || !secondEmail || !secondPassword, 'são necessárias duas contas QA para validar a transição em tempo real');
+
+  const contextA = await browser.newContext();
+  const contextB = await browser.newContext();
+  const pageA = await contextA.newPage();
+  const pageB = await contextB.newPage();
+  const diagnosticsA = installBrowserDiagnostics(pageA);
+  const diagnosticsB = installBrowserDiagnostics(pageB);
+  const login = async (page: import('@playwright/test').Page, loginEmail: string, loginPassword: string) => {
+    await page.goto('/');
+    await page.getByLabel('E-mail').fill(loginEmail);
+    await page.getByLabel('Senha').fill(loginPassword);
+    await page.getByRole('button', { name: 'Entrar' }).click();
+    await expect(page).toHaveURL(/\/atendimento(?:\?.*)?$/);
+    await expect(page.getByRole('heading', { name: 'Atendimento' })).toBeVisible();
+  };
+  const cardFor = (page: import('@playwright/test').Page, name: string) => page.getByRole('button', { name: new RegExp(`Abrir conversa com ${name}`) });
+  const timelineText = (page: import('@playwright/test').Page, text: string) => page.locator('p.whitespace-pre-wrap').filter({ hasText: text });
+  const ensureCardVisible = async (page: import('@playwright/test').Page, name: string) => {
+    const card = cardFor(page, name);
+    await expect.poll(async () => {
+      if (await card.isVisible().catch(() => false)) return true;
+      const sync = page.getByRole('button', { name: 'Sincronizar Mensagens' });
+      if (await sync.isEnabled().catch(() => false)) await sync.click();
+      return card.isVisible().catch(() => false);
+    }, { timeout: 20_000, intervals: [500, 1_500, 3_000] }).toBe(true);
+  };
+  const sendWebhook = async (page: import('@playwright/test').Page, event: 'messages.upsert' | 'messages.set' | 'messages.update', data: Record<string, unknown>) => {
+    const response = await page.request.post('http://localhost:3001/api/qa/evolution/webhook', { data: { event, data } });
+    expect(response.status(), `${event} QA webhook`).toBe(202);
+  };
+  const resolve = async (page: import('@playwright/test').Page) => {
+    await page.getByRole('button', { name: 'Concluído', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Resolver conversa?' });
+    await expect(dialog).toBeVisible();
+    const response = page.waitForResponse(result => result.request().method() === 'PATCH'
+      && new URL(result.url()).pathname === '/api/evolution/chats/status');
+    await dialog.getByRole('button', { name: 'Resolver conversa' }).click();
+    expect((await response).status()).toBe(200);
+    await expect(dialog).toBeHidden();
+  };
+
+  try {
+    await Promise.all([login(pageA, email!, password!), login(pageB, secondEmail!, secondPassword!)]);
+    const phone = `55219${Date.now().toString().slice(-8)}`;
+    const remoteJid = `${phone}@s.whatsapp.net`;
+    const name = `QA Reabertura ${Date.now()}`;
+    const initialText = 'Histórico anterior à conclusão permanece';
+    const seeded = await pageA.request.post('http://localhost:3001/api/qa/evolution/inbound', {
+      data: { remoteJid, phone, name, content: initialText },
+    });
+    expect(seeded.status()).toBe(200);
+    await Promise.all([ensureCardVisible(pageA, name), ensureCardVisible(pageB, name)]);
+
+    await cardFor(pageA, name).click();
+    await expect(timelineText(pageA, initialText)).toHaveText(initialText);
+    await resolve(pageA);
+    await expect(cardFor(pageA, name)).toHaveCount(0);
+    await expect(cardFor(pageB, name)).toHaveCount(0);
+
+    const liveMessageId = `qa-reopen-${Date.now()}`;
+    const liveText = 'Nova mensagem inbound deve reabrir';
+    const liveEvent = {
+      key: { id: liveMessageId, remoteJid, fromMe: false },
+      pushName: name,
+      message: { conversation: liveText },
+      messageTimestamp: Math.floor(Date.now() / 1000) + 1,
+    };
+    await sendWebhook(pageA, 'messages.upsert', liveEvent);
+    await expect(cardFor(pageA, name)).toBeVisible();
+    await expect(cardFor(pageA, name)).toContainText(liveText);
+    await expect(cardFor(pageB, name)).toBeVisible();
+    await expect(cardFor(pageB, name)).toContainText(liveText);
+
+    await cardFor(pageB, name).click();
+    await expect(timelineText(pageB, initialText)).toHaveText(initialText);
+    await expect(timelineText(pageB, liveText)).toHaveText(liveText);
+    await pageB.reload();
+    await expect(pageB.getByRole('heading', { name: 'Atendimento' })).toBeVisible();
+    await expect(cardFor(pageB, name)).toBeVisible();
+    await cardFor(pageB, name).click();
+    await expect(pageB.getByRole('button', { name: 'Concluído', exact: true })).toBeVisible();
+    await expect(timelineText(pageB, initialText)).toHaveText(initialText);
+    await expect(timelineText(pageB, liveText)).toHaveText(liveText);
+
+    await resolve(pageB);
+    await expect(cardFor(pageA, name)).toHaveCount(0);
+    await expect(cardFor(pageB, name)).toHaveCount(0);
+
+    await sendWebhook(pageA, 'messages.upsert', liveEvent);
+    await expect(cardFor(pageA, name)).toHaveCount(0);
+    await expect(cardFor(pageB, name)).toHaveCount(0);
+
+    await sendWebhook(pageA, 'messages.set', {
+      key: { id: `qa-set-${Date.now()}`, remoteJid, fromMe: false },
+      pushName: name,
+      message: { conversation: 'Snapshot histórico não reabre' },
+      messageTimestamp: Math.floor(Date.now() / 1000) + 3,
+    });
+    await expect(cardFor(pageA, name)).toHaveCount(0);
+    await expect(cardFor(pageB, name)).toHaveCount(0);
+
+    const oldText = 'Inbound histórico não reabre';
+    await sendWebhook(pageA, 'messages.upsert', {
+      key: { id: `qa-old-${Date.now()}`, remoteJid, fromMe: false },
+      pushName: name,
+      message: { conversation: oldText },
+      messageTimestamp: Math.floor(Date.now() / 1000) - 3600,
+    });
+    await sendWebhook(pageA, 'messages.update', {
+      key: { id: liveMessageId, remoteJid },
+      update: { status: 'READ' },
+    });
+    await sendWebhook(pageA, 'messages.upsert', {
+      key: { id: `qa-outbound-${Date.now()}`, remoteJid, fromMe: true },
+      pushName: name,
+      message: { conversation: 'Outbound não reabre' },
+      messageTimestamp: Math.floor(Date.now() / 1000) + 2,
+    });
+    await expect(cardFor(pageA, name)).toHaveCount(0);
+    await expect(cardFor(pageB, name)).toHaveCount(0);
+
+    await pageB.getByRole('button', { name: /^Resolvidas:/ }).click();
+    await expect(cardFor(pageB, name)).toBeVisible();
+    await cardFor(pageB, name).click();
+    await expect(pageB.getByRole('button', { name: 'Reabrir Conversa', exact: true })).toBeVisible();
+    await expect(timelineText(pageB, initialText)).toHaveText(initialText);
+    await expect(timelineText(pageB, liveText)).toHaveText(liveText);
+    expect(relevantBrowserErrors(diagnosticsA)).toEqual([]);
+    expect(relevantBrowserErrors(diagnosticsB)).toEqual([]);
+  } finally {
+    await attachBrowserDiagnostics(pageA, diagnosticsA, testInfo);
+    await attachBrowserDiagnostics(pageB, diagnosticsB, testInfo);
+    await contextA.close();
+    await contextB.close();
   }
 });
