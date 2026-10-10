@@ -544,6 +544,17 @@ Hub não revoga o app na conta Bling; revogação é feita separadamente no prov
 401 persistente exige reconectar; não repetir token POST automaticamente após
 timeout, pois uma rotação pode ter ocorrido. Não promover só por testes verdes.
 
+`BLING_STOCK_SYNC_ENABLED` controla o sync periódico de estoque da Product
+Library e permanece `false` por padrão. Quando habilitado deliberadamente, o
+worker executa leituras `stock` seriais pelo `BlingApiClient` e orçamento
+coordenado existente a cada 60 minutos; não grava dados no Bling. Falhas mantêm
+os últimos saldos válidos e registram apenas um estado de erro sanitizado.
+Migration `028_product_stock_sync_state.sql` adiciona o estado operacional do
+sync e deve ser validada somente pelo QA local; ela nunca deve ser aplicada
+manualmente em Preview/Production. Antes de habilitar o flag em qualquer
+ambiente remoto, confirme migration aprovada e capacidade/rate budget com o
+responsável; esta implementação não autoriza mudança de ambiente.
+
 ```powershell
 # Git (leitura e revisão)
 git status

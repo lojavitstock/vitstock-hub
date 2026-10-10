@@ -81,6 +81,9 @@ export type ProductBlingLink = {
   stockPhysicalTotal: string | null;
   stockVirtualTotal: string | null;
   lastSyncedAt: string;
+  stockSyncedAt: string | null;
+  stockSyncAttemptedAt: string | null;
+  stockSyncError: string | null;
   createdAt: string;
   updatedAt: string;
 };

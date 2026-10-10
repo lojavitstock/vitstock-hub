@@ -61,6 +61,9 @@ export interface ProductBlingMetadata {
   stockPhysicalTotal: string | null;
   stockVirtualTotal: string | null;
   syncedAt: string;
+  stockSyncedAt: string | null;
+  stockSyncAttemptedAt: string | null;
+  stockSyncError: string | null;
 }
 
 export interface ProductMessageSnapshot {

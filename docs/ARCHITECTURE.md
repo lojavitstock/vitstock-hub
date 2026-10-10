@@ -678,6 +678,10 @@ is also extended after each HTTP attempt (including failures), so a late databas
 acknowledgement cannot compress actual dispatches. This deliberately sacrifices
 throughput/holds a DB connection for a bounded request.
 Bling owns a separate pool capped at one connection and closes it with Fastify.
+When automatic stock sync is enabled, the worker reuses this same runtime/store;
+it does not create another Bling pool. The worker stops in Fastify `preClose`,
+before the shared store is closed, and uses the bounded Hub database pool for
+tenant-scoped stock persistence under a PostgreSQL advisory lock.
 The Hub pool remains bounded by DB_POOL_MAX (default four, maximum eight): a
 configured integration adds at most one connection per process, not per tenant.
 This prevents slow provider calls from exhausting session/inbox/health slots,

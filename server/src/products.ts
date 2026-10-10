@@ -52,6 +52,9 @@ type ProductRow = {
   stock_physical_total?: string | null;
   stock_virtual_total?: string | null;
   last_synced_at?: string | null;
+  stock_synced_at?: string | null;
+  stock_sync_attempted_at?: string | null;
+  stock_sync_error?: string | null;
 };
 
 type ProductBlingLinkRow = {
@@ -69,6 +72,9 @@ type ProductBlingLinkRow = {
   stock_physical_total: string | null;
   stock_virtual_total: string | null;
   last_synced_at: string;
+  stock_synced_at: string | null;
+  stock_sync_attempted_at: string | null;
+  stock_sync_error: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -79,7 +85,8 @@ const publicProductColumns = `p.id, p.company_id, p.name, p.price_cents, p.curre
   p.image_mime_type, p.image_size_bytes, p.archived_at, p.created_at, p.updated_at,
   l.bling_product_id, l.bling_parent_product_id, l.bling_name, l.bling_code, l.bling_gtin,
   l.bling_unit, l.bling_price_cents, l.bling_status, l.bling_format,
-  l.stock_physical_total, l.stock_virtual_total, l.last_synced_at`;
+  l.stock_physical_total, l.stock_virtual_total, l.last_synced_at,
+  l.stock_synced_at, l.stock_sync_attempted_at, l.stock_sync_error`;
 const publicProductFrom = `FROM products p LEFT JOIN product_bling_links l
   ON l.company_id = p.company_id AND l.product_id = p.id`;
 
@@ -132,6 +139,9 @@ function publicProductForCompany(
       stockPhysicalTotal: row.stock_physical_total,
       stockVirtualTotal: row.stock_virtual_total,
       syncedAt: row.last_synced_at!,
+      stockSyncedAt: row.stock_synced_at ?? null,
+      stockSyncAttemptedAt: row.stock_sync_attempted_at ?? null,
+      stockSyncError: row.stock_sync_error ?? null,
     } : null,
   };
 }
@@ -162,6 +172,9 @@ const toPublicBlingLink = (row: ProductBlingLinkRow) => ({
   stockPhysicalTotal: row.stock_physical_total,
   stockVirtualTotal: row.stock_virtual_total,
   lastSyncedAt: row.last_synced_at,
+  stockSyncedAt: row.stock_synced_at,
+  stockSyncAttemptedAt: row.stock_sync_attempted_at,
+  stockSyncError: row.stock_sync_error,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
@@ -254,8 +267,8 @@ async function persistBlingSnapshot(
       (company_id, product_id, bling_product_id, bling_parent_product_id,
        bling_name, bling_code, bling_gtin, bling_unit, bling_price_cents,
        bling_status, bling_format, stock_physical_total, stock_virtual_total,
-       last_synced_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), now())
+       last_synced_at, stock_synced_at, stock_sync_attempted_at, stock_sync_error, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), now(), now(), NULL, now())
      ON CONFLICT (company_id, product_id) DO UPDATE SET
        bling_product_id = EXCLUDED.bling_product_id,
        bling_parent_product_id = EXCLUDED.bling_parent_product_id,
@@ -269,6 +282,9 @@ async function persistBlingSnapshot(
        stock_physical_total = EXCLUDED.stock_physical_total,
        stock_virtual_total = EXCLUDED.stock_virtual_total,
        last_synced_at = EXCLUDED.last_synced_at,
+       stock_synced_at = EXCLUDED.stock_synced_at,
+       stock_sync_attempted_at = EXCLUDED.stock_sync_attempted_at,
+       stock_sync_error = NULL,
        updated_at = EXCLUDED.updated_at`,
     [companyId, productId, snapshot.blingProductId, snapshot.parentProductId,
       snapshot.name, snapshot.code, snapshot.gtin, snapshot.unit, snapshot.priceCents,
@@ -331,7 +347,8 @@ export async function registerProductRoutes(app: FastifyInstance, storage: Produ
       `SELECT company_id, product_id, bling_product_id, bling_parent_product_id,
               bling_name, bling_code, bling_gtin, bling_unit, bling_price_cents,
               bling_status, bling_format, stock_physical_total, stock_virtual_total,
-              last_synced_at, created_at, updated_at
+              last_synced_at, stock_synced_at, stock_sync_attempted_at, stock_sync_error,
+              created_at, updated_at
        FROM product_bling_links
        WHERE company_id = $1
        ORDER BY product_id`,

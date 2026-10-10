@@ -53,6 +53,7 @@ const configSchema = z.object({
   // Optional integration validation belongs to runtimeBling(), not app startup.
   BLING_REDIRECT_URI: z.string().optional(),
   INTEGRATION_ENCRYPTION_KEY: z.string().optional(),
+  BLING_STOCK_SYNC_ENABLED: z.preprocess((value) => value === true || value === 'true', z.boolean()).default(false),
 });
 
 const parsed = configSchema.safeParse(process.env);

@@ -12,13 +12,13 @@ import { registerConversationTagRoutes } from './conversationTags.js';
 import { registerQuickReplyRoutes } from './quickReplies.js';
 import { registerProductRoutes } from './products.js';
 import { selectProductStorage } from './productStorage.js';
-import { registerBlingRoutes, runtimeBling } from './bling.js';
+import { registerBlingRoutes, runtimeBling, type BlingDependencies } from './bling.js';
 
 export const safeRequestLog = (request: { method?: string; url?: string; id?: string }) => ({
   method: request.method, url: request.url?.split('?')[0], id: request.id,
 });
 
-export async function createApp() {
+export async function createApp(options?: { bling: BlingDependencies | undefined }) {
   const app = Fastify({
     logger: {
       level: config.NODE_ENV === 'production' ? 'info' : 'debug',
@@ -74,7 +74,7 @@ export async function createApp() {
     }
   });
 
-  const bling = runtimeBling();
+  const bling = options === undefined ? runtimeBling() : options.bling;
   await registerAuthRoutes(app);
   await registerGoogleContactRoutes(app);
   await registerBlingRoutes(app, bling);

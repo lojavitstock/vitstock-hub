@@ -772,6 +772,16 @@ export const ProductsSettings: React.FC = () => {
                     return <p className={stock !== null && stock <= 0 ? 'font-bold text-red-300' : ''}>Estoque virtual: {stock ?? 'não informado'}</p>;
                   })()}
                   <p className="text-zinc-500">Sincronizado: {new Date(product.bling.syncedAt).toLocaleString('pt-BR')}</p>
+                  {(() => {
+                    const stockSyncedAt = product.bling.stockSyncedAt || product.bling.syncedAt;
+                    const stockTimestamp = new Date(stockSyncedAt).getTime();
+                    const stockStale = !Number.isFinite(stockTimestamp) || Date.now() - stockTimestamp > 2 * 60 * 60 * 1000;
+                    return product.bling.stockSyncError
+                      ? <p role="status" className="font-semibold text-amber-300">A última atualização automática falhou; exibindo os últimos valores válidos.</p>
+                      : stockStale
+                        ? <p role="status" className="font-semibold text-amber-300">Estoque pode estar desatualizado.</p>
+                        : <p className="text-zinc-500">Estoque atualizado: {new Date(stockTimestamp).toLocaleString('pt-BR')}</p>;
+                  })()}
                 </div>}
               </div> : <div id={`product-details-${product.id}`} hidden />}
             </article>

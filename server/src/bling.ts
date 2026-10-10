@@ -27,7 +27,7 @@ export function runtimeBling(): BlingDependencies | undefined {
     return { credentials, store, client, qa: isQaMode };
   } catch { return undefined; }
 }
-export async function registerBlingRoutes(app: FastifyInstance, dependencies = runtimeBling()) {
+export async function registerBlingRoutes(app: FastifyInstance, dependencies: BlingDependencies | undefined) {
   app.addHook('onClose', async () => { await dependencies?.store.close?.(); });
   const catalog = dependencies ? new BlingCatalogService(
     dependencies.catalogRepository ?? new PgBlingCatalogRepository(), dependencies.client) : undefined;

@@ -434,12 +434,21 @@ test('Bling QA migration is additive, constrained and logically reversible witho
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='023_product_bling_links.sql'")).rows).toHaveLength(1);
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='024_product_bling_sku_unique.sql'")).rows).toHaveLength(1);
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='025_bling_product_catalog_projection.sql'")).rows).toHaveLength(1);
+    // The shared local QA database may already include this later additive migration from another feature worktree.
+    const contactDirectoryApplied = (await client.query("SELECT name FROM schema_migrations WHERE name='026_bling_contact_directory.sql'")).rows.length === 1;
     const tables = (await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'bling_%' ORDER BY table_name")).rows.map(r => r.table_name);
-    expect(tables).toEqual(['bling_connections','bling_oauth_states','bling_product_catalog_entries','bling_product_catalog_generations','bling_request_budgets']);
+    const expectedBlingTables = ['bling_connections','bling_oauth_states','bling_product_catalog_entries','bling_product_catalog_generations','bling_request_budgets', ...(contactDirectoryApplied ? ['bling_contact_directory_entries','bling_contact_directory_generations'] : [])].sort();
+    expect(tables).toEqual(expectedBlingTables);
     const productTables = (await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('product_bling_links','product_bling_stock_balances') ORDER BY table_name")).rows.map(r => r.table_name);
     expect(productTables).toEqual(['product_bling_links','product_bling_stock_balances']);
     const stockTypes = (await client.query("SELECT column_name,data_type FROM information_schema.columns WHERE table_name='product_bling_stock_balances' AND column_name IN ('physical_balance','virtual_balance') ORDER BY column_name")).rows;
     expect(stockTypes).toEqual([{ column_name: 'physical_balance', data_type: 'numeric' }, { column_name: 'virtual_balance', data_type: 'numeric' }]);
+    const stockSyncColumns = (await client.query("SELECT column_name,data_type FROM information_schema.columns WHERE table_name='product_bling_links' AND column_name IN ('stock_synced_at','stock_sync_attempted_at','stock_sync_error') ORDER BY column_name")).rows;
+    expect(stockSyncColumns).toEqual([
+      { column_name: 'stock_sync_attempted_at', data_type: 'timestamp with time zone' },
+      { column_name: 'stock_sync_error', data_type: 'text' },
+      { column_name: 'stock_synced_at', data_type: 'timestamp with time zone' },
+    ]);
     expect((await client.query("SELECT constraint_name FROM information_schema.table_constraints WHERE table_name='product_bling_links' AND constraint_type='UNIQUE'")).rows).toEqual(expect.arrayContaining([{ constraint_name: 'product_bling_links_bling_id_unique' }]));
     const skuIndex = (await client.query("SELECT indexdef FROM pg_indexes WHERE indexname='product_bling_links_company_sku_unique'")).rows[0]?.indexdef as string;
     expect(skuIndex).toMatch(/UNIQUE INDEX.*\(company_id, lower\(btrim\(bling_code\)\)\)/i);

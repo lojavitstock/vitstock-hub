@@ -317,17 +317,40 @@ test('Bling optional configuration never prevents full backend startup', () => {
     const child = spawnSync(process.execPath, ['--import', './server/node_modules/tsx/dist/loader.mjs', '--input-type=module', '-e', `
       import { createQaEnv } from './scripts/qa-env.mjs';
       Object.assign(process.env, createQaEnv(), { NODE_ENV:'test', QA_MODE:'false', PRODUCT_STORAGE_DRIVER:'memory' }, ${JSON.stringify(bling)});
+    delete process.env.BLING_STOCK_SYNC_ENABLED;
+    const { config } = await import('./server/src/config.ts');
+    if (config.BLING_STOCK_SYNC_ENABLED !== false) throw new Error('stock sync worker must default to disabled');
       const { runtimeBling } = await import('./server/src/bling.ts');
       const dependencies = runtimeBling(); const configured = !!dependencies;
       await dependencies?.store.close?.();
       const { createApp } = await import('./server/src/app.ts');
       const app = await createApp(); await app.ready(); await app.close();
       const { db } = await import('./server/src/db.ts'); await db.end();
-      console.log(JSON.stringify({ started:true, configured }));
+      console.log(JSON.stringify({ started:true, configured, stockWorkerEnabled:config.BLING_STOCK_SYNC_ENABLED }));
     `], { encoding:'utf8', timeout:20000 });
     assert.equal(child.status, 0, `configuration scenario ${index} must start`);
     assert.match(child.stdout, new RegExp(`"started":true,"configured":${index === scenarios.length-1}`));
+    assert.match(child.stdout, /"stockWorkerEnabled":false/);
   }
+});
+
+test('createApp uses and closes the injected Bling runtime without creating another runtime', () => {
+  const child = spawnSync(process.execPath, ['--import', './server/node_modules/tsx/dist/loader.mjs', '--input-type=module', '-e', `
+    import { createQaEnv } from './scripts/qa-env.mjs';
+    Object.assign(process.env, createQaEnv(), { NODE_ENV:'test', QA_MODE:'true', PRODUCT_STORAGE_DRIVER:'memory' });
+    const { createApp } = await import('./server/src/app.ts');
+    const store = { closeCalls:0, async close(){ this.closeCalls += 1; } };
+    const app = await createApp({ bling:{ store, client:{}, credentials:{ clientId:'qa', clientSecret:'qa', redirectUri:'http://localhost:3001/api/integrations/bling/callback' }, qa:true } });
+    await app.ready();
+    const route = await app.inject({ method:'GET', url:'/api/integrations/bling/status' });
+    if (route.statusCode !== 401) throw new Error('Bling route was not registered with the injected runtime');
+    await app.close();
+    const { db } = await import('./server/src/db.ts'); await db.end();
+    if (store.closeCalls !== 1) throw new Error('The injected shared Bling store must be closed exactly once');
+    console.log('INJECTED_BLING_RUNTIME_CLOSED_ONCE');
+  `], { encoding:'utf8', timeout:20000 });
+  assert.equal(child.status, 0, 'the injected runtime must survive app startup and close once');
+  assert.match(child.stdout, /INJECTED_BLING_RUNTIME_CLOSED_ONCE/);
 });
 
 test('Bling actual Fastify logging strips callback query, headers, body and response cookie', () => {
