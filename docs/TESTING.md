@@ -285,6 +285,8 @@ operações do catálogo e a distinção entre timeout e cancelamento do caller.
 `tests/bling.test.ts` integra `npm test`: OAuth ADMIN/state/tenant/erros,
 criptografia autenticada com AAD, refresh e concorrência, headers JWT/Basic,
 timeout de corpo, 401/429/Retry-After/5xx/network/retries, contratos e IDs/string.
+Também confirma que autorização bem-sucedida troca `authorization_id`, refresh
+OAuth preserva esse ID e uma tentativa OAuth malsucedida não substitui a conexão.
 Também cobre body OAuth estrito, inicialização do backend com env opcional
 incompleto/inválido e captura do logger Fastify real (request/response/callback).
 Confirma que confirmação tardia de reserva PostgreSQL não comprime a janela
@@ -296,6 +298,10 @@ QA requer reconectar seus vínculos fictícios, pois a chave muda. Nenhum secret
 
 `npm run test:e2e -- tests/e2e/bling.spec.ts` testa Configurações/connect/callback/
 disconnect, ciphertext no PostgreSQL QA, state single-use/expirado, ADMIN/tenant,
+rotação de autorização invalida o diretório antigo sem apagá-lo, falha OAuth
+preserva a autorização/snapshot anteriores, refresh mantém o diretório válido,
+e sincronização após reconexão volta a habilitar a consulta. Migrations 022, 023,
+024, 025, 026 e 027 são aplicadas apenas pelo `dev:e2e` guardado.
 read models, dez GETs concorrentes com apenas um refresh e budget diário esgotado.
 Também valida catálogo operacional via `criterio=2`, paginação/busca ativa,
 contrato de status `A`/`I`/`E` da lista observada e fail-closed do catálogo

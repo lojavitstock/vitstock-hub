@@ -106,11 +106,49 @@ test('Bling QA OAuth UI, encrypted persistence, tenant isolation, single-use sta
     await page.locator('section[aria-labelledby="bling-title"]').screenshot({ path: testInfo.outputPath('bling-connected.png') });
     const status = await (await page.request.get(`${api}/api/integrations/bling/status`)).json();
     expect(Object.keys(status).sort()).toEqual(['configured','connected','connectedAt']);
-    const connection = (await pool.query('SELECT access_token_encrypted,refresh_token_encrypted FROM bling_connections')).rows;
+    const connection = (await pool.query('SELECT access_token_encrypted,refresh_token_encrypted,company_id,authorization_id FROM bling_connections')).rows;
     expect(connection).toHaveLength(1);
     expect(connection[0].access_token_encrypted).toMatch(/^v1\./);
     expect(connection[0].access_token_encrypted).not.toContain('qa.header.signature');
     expect(connection[0].refresh_token_encrypted).not.toContain('qa-local-refresh');
+    const companyId = connection[0].company_id as string;
+    const firstAuthorizationId = connection[0].authorization_id as string;
+    const directorySyncA = await page.request.post(`${api}/api/integrations/bling/contact-directory/sync`);
+    expect(directorySyncA.status()).toBe(200, await directorySyncA.text());
+    const directoryGenerationA = (await directorySyncA.json()).generationId as string;
+    const directoryLookup = () => page.request.post(`${api}/api/integrations/bling/contact-existence`, { data: { phone: '(21) 99000-0011' } });
+    expect(await (await directoryLookup()).json()).toMatchObject({ status: 'found' });
+
+    const failedConnect = await page.request.post(`${api}/api/integrations/bling/connect`);
+    const failedCallback = new URL((await failedConnect.json()).url);
+    failedCallback.searchParams.set('code', 'qa-invalid-code');
+    expect((await page.request.get(failedCallback.toString(), { maxRedirects: 0 })).headers().location).toContain('bling=error');
+    expect((await pool.query('SELECT authorization_id FROM bling_connections WHERE company_id=$1', [companyId])).rows[0].authorization_id).toBe(firstAuthorizationId);
+    expect(await (await directoryLookup()).json()).toMatchObject({ status: 'found' });
+
+    expect((await page.request.post(`${api}/api/integrations/bling/disconnect`)).status()).toBe(200);
+    expect((await pool.query(`SELECT status FROM bling_contact_directory_generations
+      WHERE company_id=$1 AND generation_id=$2`, [companyId, directoryGenerationA])).rows).toEqual([{ status: 'active' }]);
+    expect(await (await directoryLookup()).json()).toMatchObject({ status: 'unavailable' });
+    const reconnect = await page.request.post(`${api}/api/integrations/bling/connect`);
+    const reconnectUrl = (await reconnect.json()).url as string;
+    expect((await page.request.get(reconnectUrl, { maxRedirects: 0 })).headers().location).toContain('bling=connected');
+    const secondAuthorizationId = (await pool.query('SELECT authorization_id FROM bling_connections WHERE company_id=$1', [companyId])).rows[0].authorization_id as string;
+    expect(secondAuthorizationId).not.toBe(firstAuthorizationId);
+    expect((await (await page.request.get(`${api}/api/integrations/bling/contact-directory/status`)).json()).ready).toBe(false);
+    expect(await (await directoryLookup()).json()).toMatchObject({ status: 'unavailable' });
+    const staleLookup = await page.request.post(`${api}/api/integrations/bling/contact-lookup`, { data: { phone: '(21) 99000-0011' } });
+    expect(staleLookup.status()).toBe(503);
+
+    const directorySyncB = await page.request.post(`${api}/api/integrations/bling/contact-directory/sync`);
+    expect(directorySyncB.status()).toBe(200, await directorySyncB.text());
+    expect((await (await page.request.get(`${api}/api/integrations/bling/contact-directory/status`)).json()).ready).toBe(true);
+    expect(await (await directoryLookup()).json()).toMatchObject({ status: 'found' });
+    await pool.query('UPDATE bling_connections SET access_token_expires_at=now()-interval \'1 second\' WHERE company_id=$1', [companyId]);
+    const refreshedLookup = await page.request.post(`${api}/api/integrations/bling/contact-lookup`, { data: { phone: '(21) 99000-0011' } });
+    expect(refreshedLookup.status()).toBe(200, await refreshedLookup.text());
+    expect((await pool.query('SELECT authorization_id FROM bling_connections WHERE company_id=$1', [companyId])).rows[0].authorization_id).toBe(secondAuthorizationId);
+    expect(await (await directoryLookup()).json()).toMatchObject({ status: 'found' });
     for (const path of ['products?page=1&limit=1', 'products/101', 'warehouses', 'products/101/stock', 'products/101/stock?warehouseId=7']) {
       const res = await page.request.get(`${api}/api/integrations/bling/${path}`); expect(res.status()).toBe(200);
       const body = await res.json(); expect(JSON.stringify(body)).not.toMatch(/access_token|refresh_token|client_secret/);
@@ -437,6 +475,7 @@ test('Bling QA migration is additive, constrained and logically reversible witho
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='024_product_bling_sku_unique.sql'")).rows).toHaveLength(1);
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='025_bling_product_catalog_projection.sql'")).rows).toHaveLength(1);
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='026_bling_contact_directory.sql'")).rows).toHaveLength(1);
+    expect((await client.query("SELECT name FROM schema_migrations WHERE name='027_bling_contact_authorization_binding.sql'")).rows).toHaveLength(1);
     const tables = (await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'bling_%' ORDER BY table_name")).rows.map(r => r.table_name);
     expect(tables).toEqual(['bling_connections','bling_contact_directory_entries','bling_contact_directory_generations','bling_oauth_states','bling_product_catalog_entries','bling_product_catalog_generations','bling_request_budgets']);
     const productTables = (await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('product_bling_links','product_bling_stock_balances') ORDER BY table_name")).rows.map(r => r.table_name);
@@ -479,6 +518,46 @@ test('Bling contact migration 026 requires a non-null count for published genera
     await expect(insertGeneration('retired', null)).rejects.toMatchObject({ code: '23514' });
     await expect(insertGeneration('active', 0)).resolves.toBeDefined();
     await expect(insertGeneration('retired', 4)).resolves.toBeDefined();
+  } finally {
+    await migrationPool?.end();
+    await adminPool.query(`DROP DATABASE IF EXISTS ${databaseName}`).catch(() => undefined);
+    await adminPool.end();
+  }
+});
+
+test('Bling contact migration 027 backfills authorization IDs without deleting historical directory data', async () => {
+  test.setTimeout(30_000);
+  const databaseName = `qa_migration_027_${randomUUID().replaceAll('-', '')}`;
+  const adminPool = new pg.Pool({ host: '127.0.0.1', port: 55432, user: 'vitstock', database: 'postgres' });
+  let migrationPool: InstanceType<typeof pg.Pool> | undefined;
+  try {
+    await adminPool.query(`CREATE DATABASE ${databaseName}`);
+    migrationPool = new pg.Pool({ host: '127.0.0.1', port: 55432, user: 'vitstock', database: databaseName });
+    await migrationPool.query('CREATE TABLE companies (id UUID PRIMARY KEY)');
+    await migrationPool.query('CREATE TABLE users (id UUID PRIMARY KEY)');
+    for (const file of ['022_bling_integration.sql', '026_bling_contact_directory.sql']) {
+      await migrationPool.query(await readFile(new URL(`../../server/migrations/${file}`, import.meta.url), 'utf8'));
+    }
+    const companyId = randomUUID();
+    const generationId = randomUUID();
+    await migrationPool.query('INSERT INTO companies (id) VALUES ($1)', [companyId]);
+    await migrationPool.query(`INSERT INTO bling_connections(company_id,access_token_encrypted,refresh_token_encrypted,access_token_expires_at)
+      VALUES($1,'cipher-access','cipher-refresh',now() + interval '1 hour')`, [companyId]);
+    await migrationPool.query(`INSERT INTO bling_contact_directory_generations(company_id,generation_id,status,completed_at,contact_count)
+      VALUES($1,$2,'active',now(),1)`, [companyId, generationId]);
+    await migrationPool.query(`INSERT INTO bling_contact_directory_entries(company_id,generation_id,bling_contact_id,name)
+      VALUES($1,$2,'901','Historical QA contact')`, [companyId, generationId]);
+
+    await migrationPool.query(await readFile(new URL('../../server/migrations/027_bling_contact_authorization_binding.sql', import.meta.url), 'utf8'));
+    const authorizationId = (await migrationPool.query('SELECT authorization_id FROM bling_connections WHERE company_id=$1', [companyId])).rows[0].authorization_id as string;
+    const oldGeneration = (await migrationPool.query('SELECT authorization_id,status FROM bling_contact_directory_generations WHERE company_id=$1 AND generation_id=$2', [companyId, generationId])).rows[0];
+    expect(authorizationId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(oldGeneration.authorization_id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(oldGeneration.authorization_id).not.toBe(authorizationId, 'a pre-binding generation must not be trusted as belonging to the current authorization');
+    expect(oldGeneration.status).toBe('active');
+    expect((await migrationPool.query('SELECT name FROM bling_contact_directory_entries WHERE company_id=$1 AND generation_id=$2', [companyId, generationId])).rows).toEqual([{ name: 'Historical QA contact' }]);
+    await migrationPool.query(`INSERT INTO bling_contact_directory_generations(company_id,generation_id,authorization_id,status)
+      VALUES($1,$2,$3,'building')`, [companyId, randomUUID(), authorizationId]);
   } finally {
     await migrationPool?.end();
     await adminPool.query(`DROP DATABASE IF EXISTS ${databaseName}`).catch(() => undefined);

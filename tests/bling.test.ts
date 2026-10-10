@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { integrationCipher } from '../server/src/blingEncryption.js';
@@ -33,7 +33,13 @@ class MemoryStore implements BlingStore {
     await previous;
     try { return await action({
       get: async () => this.rows.get(company) ?? null,
-      save: async v => { this.saves++; this.rows.set(company, { access: v.access_token, refresh: v.refresh_token, expires: Date.now() + v.expires_in * 1000, connectedAt: '2026-10-03T00:00:00.000Z' }); },
+      save: async (v, newAuthorization = false) => {
+        this.saves++;
+        const current = this.rows.get(company);
+        this.rows.set(company, { access: v.access_token, refresh: v.refresh_token, expires: Date.now() + v.expires_in * 1000,
+          connectedAt: newAuthorization || !current ? '2026-10-03T00:00:00.000Z' : current.connectedAt,
+          authorizationId: newAuthorization || !current ? randomUUID() : current.authorizationId });
+      },
       remove: async () => { this.rows.delete(company); for (const [k,v] of this.states) if (v.company === company) this.states.delete(k); },
       validState: async () => [...this.states.values()].some(v => v.company === company && v.used),
       budget: async kind => { this.budgets.push(kind); },
@@ -43,7 +49,7 @@ class MemoryStore implements BlingStore {
 }
 function setup(transport: BlingTransport, expired = false, timeout = 30) {
   const store = new MemoryStore();
-  store.rows.set('A', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + (expired ? -1 : 3600000), connectedAt: 'today' });
+  store.rows.set('A', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + (expired ? -1 : 3600000), connectedAt: 'today', authorizationId: 'authorization-A' });
   const sleeps: number[] = [];
   const client = new BlingApiClient(store, credentials, transport, async ms => { sleeps.push(ms); }, Date.now, timeout);
   return { client, store, sleeps, read: () => client.read('A', 'products', new URLSearchParams({ pagina: '1', limite: '50' })) };
@@ -85,8 +91,10 @@ test('Bling expired token: concurrent requests single-flight, rotated tokens per
     assert.equal(new Headers(init.headers).get('Authorization'), `Bearer ${tokens.access_token}`);
     return json({ data: [] });
   }, true);
+  const authorizationId = store.rows.get('A')!.authorizationId;
   await Promise.all(Array.from({ length: 10 }, () => read()));
   assert.equal(refreshes, 1); assert.equal(store.saves, 1); assert.equal(store.rows.get('A')?.refresh, tokens.refresh_token);
+  assert.equal(store.rows.get('A')?.authorizationId, authorizationId, 'refresh OAuth must preserve the directory authorization ID');
   assert.equal(store.budgets.filter(v => v === 'oauth').length, 1);
 });
 test('Bling near-expiry refreshes before GET', async () => {
@@ -223,6 +231,7 @@ test('Bling OAuth routes: admin, state valid/invalid/expired/reuse, missing code
   for (const route of ['connect', 'disconnect']) assert.equal((await app.inject({ method: 'POST', url: `${base}/${route}` })).statusCode, 403);
   user.role = 'admin';
   const state = await begin(); assert.equal(state.length, 43); assert.equal((await callback(state)).headers.location?.endsWith('bling=connected'), true);
+  const firstAuthorizationId = store.rows.get('A')!.authorizationId;
   const status = (await app.inject(`${base}/status`)).json(); assert.deepEqual(Object.keys(status).sort(), ['configured','connected','connectedAt']); assert.equal(status.connected, true);
   assert.equal((await callback(state)).headers.location?.endsWith('bling=error'), true); assert.equal(exchanges, 1);
   assert.equal((await callback('x'.repeat(43))).headers.location?.endsWith('bling=error'), true);
@@ -233,6 +242,9 @@ test('Bling OAuth routes: admin, state valid/invalid/expired/reuse, missing code
   user = { id: 'otherA', companyId: 'A', role: 'admin' }; await callback(foreign); assert.equal(exchanges, 1);
   user.id = 'uA'; fail = true; const failed = await begin(); await callback(failed); await callback(failed); assert.equal(exchanges, 2);
   assert.equal(store.rows.get('A')?.refresh, tokens.refresh_token);
+  assert.equal(store.rows.get('A')?.authorizationId, firstAuthorizationId, 'failed authorization must not replace the existing authorization');
+  fail = false; const reauthorization = await begin(); await callback(reauthorization);
+  assert.notEqual(store.rows.get('A')?.authorizationId, firstAuthorizationId, 'successful authorization must rotate the authorization identity');
   const disconnected = await app.inject({ method: 'POST', url: `${base}/disconnect` }); assert.equal(disconnected.statusCode, 200);
   assert.equal((await app.inject(`${base}/status`)).json().connected, false);
   user = null; assert.equal((await app.inject(`${base}/status`)).statusCode, 401);
@@ -390,7 +402,7 @@ test('Bling contact lookup uses the tenant snapshot, asks on duplicates, and sor
   const { default: Fastify } = await import('../server/node_modules/fastify/fastify.js');
   const { registerBlingRoutes } = await import('../server/src/bling.js');
   const store = new MemoryStore();
-  store.rows.set('A', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + 3600000, connectedAt: 'today' });
+  store.rows.set('A', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + 3600000, connectedAt: 'today', authorizationId: 'authorization-A' });
   const first = { id: 901, nome: 'Ana QA', situacao: 'A', numeroDocumento: '123.456.789-01', telefone: '(21) 4000-0011', celular: '(21) 99000-0011' };
   const second = { id: 902, nome: 'Ana Empresa QA', situacao: 'A', numeroDocumento: '12.345.678/0001-90', telefone: '+55 21 99000-0011', celular: null };
   let ordersMode: 'normal' | 'empty' | 'forbidden' = 'normal';
@@ -402,6 +414,7 @@ test('Bling contact lookup uses the tenant snapshot, asks on duplicates, and sor
   ];
   const contactDirectoryRepository = {
     tryAcquireSyncLock: async () => async () => undefined,
+    currentAuthorizationId: async (companyId: string) => companyId === 'A' ? 'authorization-A' : null,
     activeGeneration: async (companyId: string) => companyId === 'A' ? { id: 'generation-A', syncedAt, count: directoryEntries.length } : null,
     startGeneration: async () => undefined,
     upsertPage: async () => undefined,
@@ -485,12 +498,13 @@ test('Bling contact existence is tenant-scoped and unavailable without a fresh c
   const { default: Fastify } = await import('../server/node_modules/fastify/fastify.js');
   const { registerBlingRoutes } = await import('../server/src/bling.js');
   const store = new MemoryStore();
-  store.rows.set('A', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + 3600000, connectedAt: 'today' });
-  store.rows.set('B', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + 3600000, connectedAt: 'today' });
+  store.rows.set('A', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + 3600000, connectedAt: 'today', authorizationId: 'authorization-A' });
+  store.rows.set('B', { access: 'jwt.old.signature', refresh: 'refresh-old', expires: Date.now() + 3600000, connectedAt: 'today', authorizationId: 'authorization-B' });
   const client = new BlingApiClient(store, credentials, async () => json({ data: [] }), async () => {});
   const syncedAt = new Date().toISOString();
   const repository = {
     tryAcquireSyncLock: async () => async () => undefined,
+    currentAuthorizationId: async (companyId: string) => companyId === 'A' ? 'authorization-A' : 'authorization-B',
     activeGeneration: async (companyId: string) => companyId === 'A' ? { id: 'A-gen', syncedAt, count: 1 } : null,
     startGeneration: async () => undefined, upsertPage: async () => undefined, publishGeneration: async () => 0, discardGeneration: async () => undefined,
     findByPhone: async (companyId: string, generationId: string, digits: string) => companyId === 'A' && generationId === 'A-gen' && digits === '5521990000011'

@@ -26,8 +26,9 @@ export type BlingContactDirectoryGeneration = {
 
 export interface BlingContactDirectoryRepository {
   tryAcquireSyncLock(companyId: string): Promise<(() => Promise<void>) | null>;
+  currentAuthorizationId(companyId: string): Promise<string | null>;
   activeGeneration(companyId: string): Promise<BlingContactDirectoryGeneration | null>;
-  startGeneration(companyId: string, generationId: string): Promise<void>;
+  startGeneration(companyId: string, generationId: string, authorizationId: string): Promise<void>;
   upsertPage(companyId: string, generationId: string, entries: BlingContactDirectoryEntry[]): Promise<void>;
   publishGeneration(companyId: string, generationId: string): Promise<number>;
   discardGeneration(companyId: string, generationId: string): Promise<void>;
@@ -56,21 +57,33 @@ export class PgBlingContactDirectoryRepository implements BlingContactDirectoryR
 
   async activeGeneration(companyId: string) {
     const result = await this.pool.query<{ generation_id: string; completed_at: Date | string; contact_count: number | string }>(
-      `SELECT generation_id, completed_at, contact_count
-       FROM bling_contact_directory_generations
-       WHERE company_id=$1 AND status='active'`, [companyId]);
+      `SELECT g.generation_id, g.completed_at, g.contact_count
+       FROM bling_contact_directory_generations g
+       JOIN bling_connections c ON c.company_id=g.company_id AND c.authorization_id=g.authorization_id
+       WHERE g.company_id=$1 AND g.status='active'`, [companyId]);
     const row = result.rows[0];
     return row ? { id: String(row.generation_id), syncedAt: new Date(row.completed_at).toISOString(), count: Number(row.contact_count) } : null;
   }
 
-  async startGeneration(companyId: string, generationId: string) {
+  async currentAuthorizationId(companyId: string) {
+    const result = await this.pool.query<{ authorization_id: string }>(
+      'SELECT authorization_id FROM bling_connections WHERE company_id=$1', [companyId]);
+    return result.rows[0] ? String(result.rows[0].authorization_id) : null;
+  }
+
+  async startGeneration(companyId: string, generationId: string, authorizationId: string) {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      const connection = await client.query<{ authorization_id: string }>(
+        'SELECT authorization_id FROM bling_connections WHERE company_id=$1 FOR SHARE', [companyId]);
+      if (String(connection.rows[0]?.authorization_id ?? '') !== authorizationId) {
+        throw new BlingError(409, 'A autorização Bling mudou; atualize o diretório novamente');
+      }
       await client.query(`DELETE FROM bling_contact_directory_generations
         WHERE company_id=$1 AND (status='building' OR (status='retired' AND completed_at < now() - interval '30 days'))`, [companyId]);
-      await client.query(`INSERT INTO bling_contact_directory_generations(company_id,generation_id,status)
-        VALUES($1,$2,'building')`, [companyId, generationId]);
+      await client.query(`INSERT INTO bling_contact_directory_generations(company_id,generation_id,authorization_id,status)
+        VALUES($1,$2,$3,'building')`, [companyId, generationId, authorizationId]);
       await client.query('COMMIT');
     } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; }
     finally { client.release(); }
@@ -103,10 +116,15 @@ export class PgBlingContactDirectoryRepository implements BlingContactDirectoryR
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const generation = await client.query<{ status: string }>(
-        `SELECT status FROM bling_contact_directory_generations
+      const connection = await client.query<{ authorization_id: string }>(
+        'SELECT authorization_id FROM bling_connections WHERE company_id=$1 FOR SHARE', [companyId]);
+      const generation = await client.query<{ status: string; authorization_id: string }>(
+        `SELECT status,authorization_id FROM bling_contact_directory_generations
          WHERE company_id=$1 AND generation_id=$2 FOR UPDATE`, [companyId, generationId]);
       if (generation.rows[0]?.status !== 'building') throw new Error('Geração do diretório Bling não está em construção');
+      if (String(connection.rows[0]?.authorization_id ?? '') !== generation.rows[0].authorization_id) {
+        throw new BlingError(409, 'A autorização Bling mudou durante a sincronização; o diretório não foi publicado');
+      }
       const count = await client.query<{ count: string }>(
         `SELECT count(*)::text AS count FROM bling_contact_directory_entries
          WHERE company_id=$1 AND generation_id=$2`, [companyId, generationId]);
@@ -129,7 +147,11 @@ export class PgBlingContactDirectoryRepository implements BlingContactDirectoryR
   async findByPhone(companyId: string, generationId: string, digits: string, limit: number) {
     const result = await this.pool.query(`SELECT bling_contact_id AS id,name,document,phone,mobile,status
       FROM bling_contact_directory_entries
-      WHERE company_id=$1 AND generation_id=$2 AND (phone_digits=$3 OR mobile_digits=$3)
+      WHERE company_id=$1 AND generation_id=$2
+        AND EXISTS (SELECT 1 FROM bling_contact_directory_generations g
+          JOIN bling_connections c ON c.company_id=g.company_id AND c.authorization_id=g.authorization_id
+          WHERE g.company_id=$1 AND g.generation_id=$2 AND g.status='active')
+        AND (phone_digits=$3 OR mobile_digits=$3)
       ORDER BY lower(name),bling_contact_id LIMIT $4`, [companyId, generationId, digits, limit]);
     return result.rows as BlingContactDirectoryEntry[];
   }
@@ -137,7 +159,10 @@ export class PgBlingContactDirectoryRepository implements BlingContactDirectoryR
   async findById(companyId: string, generationId: string, contactId: string) {
     const result = await this.pool.query(`SELECT bling_contact_id AS id,name,document,phone,mobile,status
       FROM bling_contact_directory_entries
-      WHERE company_id=$1 AND generation_id=$2 AND bling_contact_id=$3`, [companyId, generationId, contactId]);
+      WHERE company_id=$1 AND generation_id=$2 AND bling_contact_id=$3
+        AND EXISTS (SELECT 1 FROM bling_contact_directory_generations g
+          JOIN bling_connections c ON c.company_id=g.company_id AND c.authorization_id=g.authorization_id
+          WHERE g.company_id=$1 AND g.generation_id=$2 AND g.status='active')`, [companyId, generationId, contactId]);
     return result.rows[0] as BlingContactDirectoryEntry | undefined ?? null;
   }
 }
@@ -178,6 +203,7 @@ export class BlingContactDirectoryService {
     const snapshot = await this.repository.activeGeneration(companyId);
     if (!this.fresh(snapshot)) return { status: 'unavailable' as const, syncedAt: snapshot?.syncedAt ?? null };
     const matches = await this.repository.findByPhone(companyId, snapshot!.id, phone.digits, 1);
+    if (!(await this.isCurrentSnapshot(companyId, snapshot!))) return { status: 'unavailable' as const, syncedAt: null };
     return { status: matches.length ? 'found' as const : 'not_found' as const, syncedAt: snapshot!.syncedAt };
   }
 
@@ -186,13 +212,24 @@ export class BlingContactDirectoryService {
     if (!this.fresh(snapshot)) throw new BlingError(503, 'O índice de contatos Bling precisa ser atualizado antes da consulta');
     if (contactId) {
       const selected = await this.repository.findById(companyId, snapshot!.id, contactId);
+      if (!(await this.isCurrentSnapshot(companyId, snapshot!))) {
+        throw new BlingError(503, 'A autorização Bling mudou; atualize o diretório antes da consulta');
+      }
       if (!selected || ![selected.phone, selected.mobile].some(value => normalizeBlingLookupPhone(value)?.digits === phone.digits)) {
         throw new BlingError(404, 'O cadastro selecionado não corresponde ao telefone desta conversa');
       }
       return { snapshot: snapshot!, matches: [selected], truncated: false };
     }
     const matches = await this.repository.findByPhone(companyId, snapshot!.id, phone.digits, 21);
+    if (!(await this.isCurrentSnapshot(companyId, snapshot!))) {
+      throw new BlingError(503, 'A autorização Bling mudou; atualize o diretório antes da consulta');
+    }
     return { snapshot: snapshot!, matches: matches.slice(0, 20), truncated: matches.length > 20 };
+  }
+
+  private async isCurrentSnapshot(companyId: string, snapshot: BlingContactDirectoryGeneration) {
+    const current = await this.repository.activeGeneration(companyId);
+    return current?.id === snapshot.id;
   }
 
   async refresh(companyId: string): Promise<BlingContactDirectorySyncSummary> {
@@ -210,7 +247,9 @@ export class BlingContactDirectoryService {
     const generationId = randomUUID();
     let started = false;
     try {
-      await this.repository.startGeneration(companyId, generationId);
+      const authorizationId = await this.repository.currentAuthorizationId(companyId);
+      if (!authorizationId) throw new BlingError(409, 'Conecte o Bling antes de atualizar o diretório');
+      await this.repository.startGeneration(companyId, generationId, authorizationId);
       started = true;
       const seen = new Set<string>();
       let pages = 0;

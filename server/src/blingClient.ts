@@ -71,7 +71,7 @@ export class BlingApiClient {
     const tokens = parseContract(tokenModel, await this.json(response));
     // JWT syntax only; Bling validates authenticity. Never trust JWT claims as tenant identity.
     if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(tokens.access_token)) throw new BlingError(502, 'Bling não retornou o token JWT esperado');
-    await session.save(tokens);
+    await session.save(tokens, grant === 'authorization_code');
     return tokens;
   }
   async connect(company: string, code: string, stateHash: string) {

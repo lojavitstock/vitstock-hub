@@ -1,14 +1,14 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { createDatabasePool } from './db.js';
 import { integrationCipher } from './blingEncryption.js';
 import { BlingError, type Tokens } from './blingContract.js';
 
 export const stateHash = (state: string) => createHash('sha256').update(state).digest('hex');
-export type Connection = { access: string; refresh: string; expires: number; connectedAt: string };
+export type Connection = { access: string; refresh: string; expires: number; connectedAt: string; authorizationId: string };
 export interface BlingSession {
   get(): Promise<Connection | null>;
-  save(tokens: Tokens): Promise<void>;
+  save(tokens: Tokens, newAuthorization?: boolean): Promise<void>;
   remove(): Promise<void>;
   validState(hash: string): Promise<boolean>;
   budget(kind: 'api' | 'oauth'): Promise<void>;
@@ -71,14 +71,19 @@ export class PgBlingStore implements BlingStore {
           if (!row) return null;
           return { access: this.cipher.decrypt(row.access_token_encrypted, company, 'access'),
             refresh: this.cipher.decrypt(row.refresh_token_encrypted, company, 'refresh'),
-            expires: row.access_token_expires_at.getTime(), connectedAt: row.connected_at.toISOString() };
+            expires: row.access_token_expires_at.getTime(), connectedAt: row.connected_at.toISOString(),
+            authorizationId: String(row.authorization_id) };
         },
-        save: async tokens => {
-          await client.query(`INSERT INTO bling_connections(company_id,access_token_encrypted,refresh_token_encrypted,access_token_expires_at)
-            VALUES($1,$2,$3,now() + ($4 * interval '1 second')) ON CONFLICT(company_id) DO UPDATE SET
+        save: async (tokens, newAuthorization = false) => {
+          await client.query(`INSERT INTO bling_connections(company_id,access_token_encrypted,refresh_token_encrypted,access_token_expires_at,authorization_id)
+            VALUES($1,$2,$3,now() + ($4 * interval '1 second'),$5) ON CONFLICT(company_id) DO UPDATE SET
             access_token_encrypted=EXCLUDED.access_token_encrypted,refresh_token_encrypted=EXCLUDED.refresh_token_encrypted,
-            access_token_expires_at=EXCLUDED.access_token_expires_at,updated_at=now()`,
-          [company, this.cipher.encrypt(tokens.access_token, company, 'access'), this.cipher.encrypt(tokens.refresh_token, company, 'refresh'), tokens.expires_in]);
+            access_token_expires_at=EXCLUDED.access_token_expires_at,
+            authorization_id=CASE WHEN $6 THEN EXCLUDED.authorization_id ELSE bling_connections.authorization_id END,
+            connected_at=CASE WHEN $6 THEN clock_timestamp() ELSE bling_connections.connected_at END,
+            updated_at=now()`,
+          [company, this.cipher.encrypt(tokens.access_token, company, 'access'), this.cipher.encrypt(tokens.refresh_token, company, 'refresh'),
+            tokens.expires_in, randomUUID(), newAuthorization]);
         },
         remove: async () => {
           await client.query('DELETE FROM bling_connections WHERE company_id=$1', [company]);
