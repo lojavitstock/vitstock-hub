@@ -9,9 +9,10 @@ import { AUTHORIZATION_URL, BlingError, blingContactDetailModel, blingContactLis
 import { qaBlingTransport } from './blingQa.js';
 import { blingPhoneMatches, normalizeBlingLookupPhone } from './blingContactLookup.js';
 import { BlingCatalogService, PgBlingCatalogRepository, type BlingCatalogRepository } from './blingCatalog.js';
+import { BlingContactDirectoryService, PgBlingContactDirectoryRepository, type BlingContactDirectoryRepository } from './blingContactDirectory.js';
 
 export type BlingDependencies = { store: BlingStore; client: BlingApiClient; credentials: BlingCredentials; qa?: boolean;
-  catalogRepository?: BlingCatalogRepository };
+  catalogRepository?: BlingCatalogRepository; contactDirectoryRepository?: BlingContactDirectoryRepository };
 export function runtimeBling(): BlingDependencies | undefined {
   if (!config.BLING_CLIENT_ID || !config.BLING_CLIENT_SECRET || !config.BLING_REDIRECT_URI || !config.INTEGRATION_ENCRYPTION_KEY) return undefined;
   try {
@@ -31,6 +32,8 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
   app.addHook('onClose', async () => { await dependencies?.store.close?.(); });
   const catalog = dependencies ? new BlingCatalogService(
     dependencies.catalogRepository ?? new PgBlingCatalogRepository(), dependencies.client) : undefined;
+  const contactDirectory = dependencies ? new BlingContactDirectoryService(
+    dependencies.contactDirectoryRepository ?? new PgBlingContactDirectoryRepository(), dependencies.client) : undefined;
   const base = '/api/integrations/bling';
   const redirect = (result: 'connected' | 'error') => `${config.FRONTEND_URL}/configuracoes?tab=integracoes&bling=${result}`;
   const safe = async (reply: FastifyReply, action: () => Promise<unknown>) => {
@@ -64,6 +67,18 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
     // Local unlink only. Revoke the application separately in Bling if needed.
     return { disconnected: true };
   }));
+  app.get(`${base}/contact-directory/status`, { preHandler: requireAdmin }, async (request, reply) => safe(reply, async () => {
+    const { store } = ready();
+    if (!(await store.status(request.user!.companyId)).connected) return { ready: false, stale: false, syncing: false, syncedAt: null, contacts: 0 };
+    return contactDirectory!.status(request.user!.companyId);
+  }));
+  app.post(`${base}/contact-directory/sync`, { preHandler: requireAdmin }, async (request, reply) => safe(reply, async () => {
+    if (Object.keys(request.query as object).length || Object.keys((request.body ?? {}) as object).length) {
+      throw new BlingError(400, 'Parâmetros inválidos');
+    }
+    ready();
+    return contactDirectory!.refresh(request.user!.companyId);
+  }));
   const productQuery = pagination.extend({
     q: z.string().trim().max(120).optional(),
     // Keep the previous query key as a compatibility alias; both use the local projection.
@@ -88,8 +103,9 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
     if (!input.success) throw new BlingError(400, 'Telefone ou contato inválido');
     const phone = normalizeBlingLookupPhone(input.data.phone);
     if (!phone) throw new BlingError(400, 'Informe um telefone brasileiro com DDD válido para consultar o Bling');
-    const { client } = ready();
+    const { client, store } = ready();
     const companyId = request.user!.companyId;
+    if (!(await store.status(companyId)).connected) throw new BlingError(409, 'Conecte o Bling antes de consultar contatos');
     const read = async (resource: 'contacts' | 'contact' | 'salesOrders', query: URLSearchParams, id?: string) => {
       try { return await client.read(companyId, resource, query, id); }
       catch (error) {
@@ -100,19 +116,8 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
       }
     };
 
-    const matches = new Map<string, z.infer<typeof blingContactListModel>>();
-    const contactPageSize = 100;
-    let contactSearchTruncated = false;
-    for (let page = 1; page <= 5; page += 1) {
-      const query = new URLSearchParams({ pagina: String(page), limite: String(contactPageSize), criterio: '1', telefone: phone.formatted });
-      const result = parseContract(z.object({ data: z.array(blingContactListModel) }), await read('contacts', query));
-      for (const contact of result.data) {
-        if ([contact.celular, contact.telefone].some(value => blingPhoneMatches(value, phone))) matches.set(contact.id, contact);
-      }
-      if (result.data.length < contactPageSize) break;
-      if (page === 5) contactSearchTruncated = true;
-    }
-    const candidates = Array.from(matches.values());
+    const { snapshot, matches: candidates, truncated: contactSearchTruncated } = await contactDirectory!.lookup(companyId, phone, input.data.contactId);
+    const matches = new Map(candidates.map(contact => [contact.id, contact]));
     if (input.data.contactId) {
       if (!matches.has(input.data.contactId)) throw new BlingError(404, 'O cadastro selecionado não corresponde ao telefone desta conversa');
     } else if (!candidates.length) {
@@ -124,9 +129,10 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
         truncated: contactSearchTruncated,
         matches: candidates.slice(0, 20).map(contact => ({
           id: contact.id,
-          name: contact.nome,
-          document: contact.numeroDocumento ?? null,
-          phone: contact.celular || contact.telefone || null,
+          name: contact.name,
+          document: contact.document,
+          phone: contact.mobile || contact.phone,
+          mobile: contact.mobile,
         })),
       };
     }
@@ -153,6 +159,7 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
       address: address ? [address.endereco, address.numero, address.complemento, address.bairro, address.municipio, address.uf]
         .map(value => value?.trim()).filter(Boolean).join(', ') || null : null,
       phone: [detail.celular, detail.telefone].find(value => blingPhoneMatches(value, phone)) ?? null,
+      mobile: detail.celular ?? null,
       email: detail.email ?? null,
     };
 
@@ -179,8 +186,18 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
     const latestOrders = Array.from(new Map(orders.map(order => [order.id || `${order.numero ?? ''}:${order.data ?? ''}`, order])).values())
       .sort((left, right) => (right.data ?? '').localeCompare(left.data ?? ''))
       .slice(0, 5)
-      .map(order => ({ id: order.id ?? null, number: order.numero == null ? null : String(order.numero), date: order.data ?? null, total: order.total ?? null }));
-    return { status: 'found' as const, contact, orders: latestOrders, ordersTruncated, ordersError };
+      .map(order => ({ id: order.id ?? null, number: order.numero == null ? null : String(order.numero), date: order.data ?? null, total: order.total ?? null,
+        status: order.situacao?.valor ?? null, statusId: order.situacao?.id ?? null }));
+    return { status: 'found' as const, contact, orders: latestOrders, ordersTruncated, ordersError, directorySyncedAt: snapshot.syncedAt };
+  }));
+  app.post(`${base}/contact-existence`, { preHandler: requireUser }, async (request, reply) => safe(reply, async () => {
+    const input = z.object({ phone: z.string().trim().min(1).max(80) }).strict().safeParse(request.body);
+    if (!input.success) throw new BlingError(400, 'Telefone inválido');
+    const phone = normalizeBlingLookupPhone(input.data.phone);
+    if (!phone) throw new BlingError(400, 'Telefone brasileiro inválido');
+    const { store } = ready();
+    if (!(await store.status(request.user!.companyId)).connected) return { status: 'unavailable' as const, syncedAt: null };
+    return contactDirectory!.existence(request.user!.companyId, phone);
   }));
   app.post(`${base}/products/catalog-sync`, { preHandler: requireAdmin }, async (request, reply) => safe(reply, async () => {
     if (Object.keys(request.query as object).length || Object.keys((request.body ?? {}) as object).length) {

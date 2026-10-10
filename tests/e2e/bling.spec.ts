@@ -434,8 +434,9 @@ test('Bling QA migration is additive, constrained and logically reversible witho
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='023_product_bling_links.sql'")).rows).toHaveLength(1);
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='024_product_bling_sku_unique.sql'")).rows).toHaveLength(1);
     expect((await client.query("SELECT name FROM schema_migrations WHERE name='025_bling_product_catalog_projection.sql'")).rows).toHaveLength(1);
+    expect((await client.query("SELECT name FROM schema_migrations WHERE name='026_bling_contact_directory.sql'")).rows).toHaveLength(1);
     const tables = (await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'bling_%' ORDER BY table_name")).rows.map(r => r.table_name);
-    expect(tables).toEqual(['bling_connections','bling_oauth_states','bling_product_catalog_entries','bling_product_catalog_generations','bling_request_budgets']);
+    expect(tables).toEqual(['bling_connections','bling_contact_directory_entries','bling_contact_directory_generations','bling_oauth_states','bling_product_catalog_entries','bling_product_catalog_generations','bling_request_budgets']);
     const productTables = (await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('product_bling_links','product_bling_stock_balances') ORDER BY table_name")).rows.map(r => r.table_name);
     expect(productTables).toEqual(['product_bling_links','product_bling_stock_balances']);
     const stockTypes = (await client.query("SELECT column_name,data_type FROM information_schema.columns WHERE table_name='product_bling_stock_balances' AND column_name IN ('physical_balance','virtual_balance') ORDER BY column_name")).rows;
