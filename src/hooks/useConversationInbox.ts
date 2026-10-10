@@ -415,8 +415,8 @@ export const useConversationInbox = ({
     }
   }, [activeConversation, isMock, loadChats]);
 
-  const updateActiveChatStatus = useCallback(async (status: ChatStatus) => {
-    if (!activeConversation) return;
+  const updateActiveChatStatus = useCallback(async (status: ChatStatus): Promise<boolean> => {
+    if (!activeConversation) return false;
 
     const previousStatus = activeConversation.status;
     const previousNeedsResponse = conversationNeedsResponse(activeConversation);
@@ -439,12 +439,13 @@ export const useConversationInbox = ({
 
     if (isMock) {
       setAssignmentFeedback(feedback);
-      return;
+      return true;
     }
 
     try {
       await EvolutionApiService.updateChatStatus(activeConversation.id, status, activeConversation.contact.phone);
       setAssignmentFeedback(feedback);
+      return true;
     } catch (error) {
       setConversations((previous) => previous.map((conversation) => conversation.id === activeConversation.id ? {
         ...conversation,
@@ -452,6 +453,7 @@ export const useConversationInbox = ({
         needsResponse: previousNeedsResponse,
       } : conversation));
       setAssignmentFeedback(error instanceof Error ? error.message : 'Não foi possível atualizar o status');
+      return false;
     }
   }, [activeConversation, isMock]);
 

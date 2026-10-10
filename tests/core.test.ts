@@ -1029,6 +1029,29 @@ test('conversation.updated reconcilia responsável, status e leitura sem refetch
   assert.equal(read?.[0]?.unreadCount, 0);
 });
 
+test('mensagem inbound só reabre conversa resolvida quando backend confirma a transição', () => {
+  const resolved = conversation('conversation-resolved', { status: 'resolved', lastMessageAt: 1_000, unreadCount: 0 });
+  const event = {
+    type: 'message.upsert',
+    remoteJid: resolved.id,
+    timestampMs: 2_000,
+    message: { id: 'inbound-new', conversationId: resolved.id, sender: 'contact', content: 'Nova mensagem', timestampMs: 2_000 } as Message,
+  };
+
+  const replayWithoutTransition = reconcileRealtimeConversation([resolved], event);
+  assert.equal(replayWithoutTransition?.[0]?.status, 'resolved');
+
+  const confirmedTransition = reconcileRealtimeConversation([resolved], { ...event, conversationStatus: 'open' });
+  assert.equal(confirmedTransition?.[0]?.status, 'open');
+
+  const newerActivity = conversation('conversation-resolved', { status: 'resolved', lastMessageAt: 3_000, lastMessage: 'Resposta mais nova' });
+  const staleMessageWithoutAuthority = reconcileRealtimeConversation([newerActivity], event);
+  assert.equal(staleMessageWithoutAuthority?.[0]?.status, 'resolved');
+  const authoritativeTransition = reconcileRealtimeConversation([newerActivity], { ...event, conversationStatus: 'open' });
+  assert.equal(authoritativeTransition?.[0]?.status, 'open');
+  assert.equal(authoritativeTransition?.[0]?.lastMessage, 'Resposta mais nova', 'status muda sem regredir a atividade ou a posição');
+});
+
 test('política realtime usa intervalo de segurança de cinco minutos e evento explícito de reconexão', () => {
   assert.equal(REALTIME_SAFETY_INTERVAL_MS, 5 * 60 * 1000);
   assert.equal(REALTIME_RECONNECTED_EVENT, 'realtime.reconnected');
@@ -1405,14 +1428,17 @@ test('contadores e filtros de não lidas e não respondidas usam a mesma popula�
     conversation('b', { unreadCount: 0, needsResponse: true, lastMessageFromMe: false }),
     conversation('c', { unreadCount: 3, needsResponse: false, lastMessageFromMe: true }),
     conversation('d', { unreadCount: 0, needsResponse: false, lastMessageFromMe: true }),
+    conversation('e', { status: 'resolved', unreadCount: 5, needsResponse: true, lastMessageFromMe: false }),
   ];
   const needsResponse = conversationNeedsResponse;
 
   assert.equal(conversations.filter((item) => matchesConversationFilter(item, 'unread', needsResponse)).length, 2);
   assert.equal(conversations.filter((item) => matchesConversationFilter(item, 'unanswered', needsResponse)).length, 2);
   assert.equal(conversations.filter((item) => matchesConversationFilter(item, 'all', needsResponse)).length, 4);
-  assert.equal(conversations.filter((item) => item.unreadCount > 0).length, 2);
-  assert.equal(conversations.filter(needsResponse).length, 2);
+  assert.equal(conversations.filter((item) => matchesConversationFilter(item, 'resolved', needsResponse)).length, 1);
+  assert.equal(matchesConversationFilter(conversations[4]!, 'groups', needsResponse), false);
+  assert.equal(conversations.filter((item) => item.status !== 'resolved' && item.unreadCount > 0).length, 2);
+  assert.equal(conversations.filter((item) => item.status !== 'resolved' && needsResponse(item)).length, 2);
 });
 
 test('tráfego exige metadata real ou tag sistêmica e não usa texto como heurística', () => {

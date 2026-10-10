@@ -8,13 +8,14 @@ export const isTrafficConversation = (conversation: Conversation) => (
 );
 
 export const matchesConversationFilter = (conversation: Conversation, filter: ConversationFilter, needsResponse: (conversation: Conversation) => boolean) => {
+  if (filter === 'resolved') return conversation.status === 'resolved';
+  if (conversation.status === 'resolved') return false;
   if (filter === 'all') return true;
   if (filter === 'unread') return conversation.unreadCount > 0;
   if (filter === 'unanswered') return needsResponse(conversation);
   if (filter === 'traffic') return isTrafficConversation(conversation);
   if (filter === 'groups') return conversation.isGroup === true;
   if (filter === 'delivery') return conversation.status === 'pending';
-  if (filter === 'resolved') return conversation.status === 'resolved';
   if (filter.startsWith('tag:')) return (conversation.conversationTags || []).some((tag) => tag.id === filter.slice(4));
   return false;
 };

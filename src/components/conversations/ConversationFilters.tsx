@@ -28,14 +28,18 @@ export const ConversationFilters = React.memo<ConversationFiltersProps>(({
   needsResponse,
 }) => {
   const counts = React.useMemo(() => conversations.reduce<Record<string, number>>((result, conversation) => {
+    if (conversation.status === 'resolved') {
+      result.resolved += 1;
+      return result;
+    }
+    result.all += 1;
     if (conversation.unreadCount > 0) result.unread += 1;
     if (needsResponse(conversation)) result.unanswered += 1;
     if (conversation.isGroup) result.groups += 1;
     if (conversation.status === 'pending') result.delivery += 1;
-    if (conversation.status === 'resolved') result.resolved += 1;
     return result;
   }, {
-    all: conversations.length,
+    all: 0,
     unread: 0,
     unanswered: 0,
     groups: 0,

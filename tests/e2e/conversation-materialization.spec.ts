@@ -79,6 +79,14 @@ test('provider-only chat accepts tags before the first reply', async ({ page }, 
     await page.getByRole('button', { name: 'Gerenciar tags da conversa' }).click();
 
     await page.getByRole('button', { name: 'Concluído', exact: true }).click();
+    const resolveDialog = page.getByRole('dialog', { name: 'Resolver conversa?' });
+    await expect(resolveDialog).toBeVisible();
+    await resolveDialog.getByRole('button', { name: 'Resolver conversa', exact: true }).click();
+    const resolvedCard = page.getByRole('button', { name: new RegExp(`Abrir conversa com ${fixtureBody.name}`) });
+    await expect(resolvedCard).toHaveCount(0);
+    await page.getByRole('button', { name: /^Resolvidas:/ }).click();
+    await expect(resolvedCard).toBeVisible();
+    await resolvedCard.click();
     await expect(page.getByRole('button', { name: 'Reabrir Conversa', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Reabrir Conversa', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Concluído', exact: true })).toBeVisible();

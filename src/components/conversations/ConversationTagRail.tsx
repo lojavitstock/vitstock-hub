@@ -163,6 +163,7 @@ export const ConversationTagRail: React.FC<Props> = ({
         {pill('all', 'Tudo')}
         {pill('unread', 'Não lidas', conversations.filter((conversation) => conversation.unreadCount > 0).length)}
         {pill('unanswered', 'Não resp.', conversations.filter(responsePredicate).length)}
+        {pill('resolved', 'Resolvidas', conversations.filter((conversation) => conversation.status === 'resolved').length)}
         {trafficTag && pill('traffic', trafficTag.name, conversationTagCount(conversations, trafficTag), trafficTag.color)}
         {customTags.map((tag) => pill(`tag:${tag.id}`, tag.name, conversationTagCount(conversations, tag), tag.color))}
       </div>

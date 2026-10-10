@@ -143,3 +143,58 @@ test('Atendimento abre a lista e uma conversa sem enviar mensagens', async ({ pa
     await attachBrowserDiagnostics(page, diagnostics, testInfo);
   }
 });
+
+test('resolver preserva o histórico, exige confirmação e permite reabrir pelo filtro', async ({ page }, testInfo) => {
+  const diagnostics = installBrowserDiagnostics(page);
+  test.skip(!email || !password, 'defina E2E_EMAIL e E2E_PASSWORD ou execute npm run dev:e2e');
+  try {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await page.goto('/');
+    await page.getByLabel('E-mail').fill(email!);
+    await page.getByLabel('Senha').fill(password!);
+    await page.getByRole('button', { name: 'Entrar' }).click();
+    await expect(page).toHaveURL(/\/atendimento(?:\?.*)?$/);
+
+    const cards = page.getByRole('button', { name: /Abrir conversa com/ });
+    await expect(cards.first()).toBeVisible({ timeout: 15_000 });
+    const selectedCardName = await cards.first().getAttribute('aria-label');
+    await cards.first().click();
+    await expect(page.getByRole('button', { name: 'Concluído', exact: true })).toBeVisible();
+
+    let statusRequests = 0;
+    page.on('request', request => {
+      if (request.method() === 'PATCH' && new URL(request.url()).pathname === '/api/evolution/chats/status') statusRequests += 1;
+    });
+    await page.getByRole('button', { name: 'Concluído', exact: true }).click();
+    const confirm = page.getByRole('dialog', { name: 'Resolver conversa?' });
+    await expect(confirm).toBeVisible();
+    await expect(confirm).toContainText('histórico será preservado');
+    await confirm.getByRole('button', { name: 'Cancelar' }).click();
+    await expect(confirm).toBeHidden();
+    expect(statusRequests).toBe(0, 'cancelamento não deve alterar estado no backend');
+
+    await page.getByRole('button', { name: 'Concluído', exact: true }).click();
+    const resolvedResponse = page.waitForResponse(response => response.request().method() === 'PATCH'
+      && new URL(response.url()).pathname === '/api/evolution/chats/status');
+    await page.getByRole('dialog', { name: 'Resolver conversa?' }).getByRole('button', { name: 'Resolver conversa' }).click();
+    expect((await resolvedResponse).status()).toBe(200);
+    await expect(page.getByRole('dialog', { name: 'Resolver conversa?' })).toBeHidden();
+    await expect(page.getByRole('button', { name: selectedCardName! })).toHaveCount(0);
+
+    const resolvedFilter = page.getByRole('button', { name: /^Resolvidas:/ });
+    await resolvedFilter.click();
+    const resolvedCard = page.getByRole('button', { name: selectedCardName! });
+    await expect(resolvedCard).toBeVisible();
+    await resolvedCard.click();
+    const reopenedResponse = page.waitForResponse(response => response.request().method() === 'PATCH'
+      && new URL(response.url()).pathname === '/api/evolution/chats/status');
+    await page.getByRole('button', { name: 'Reabrir Conversa', exact: true }).click();
+    expect((await reopenedResponse).status()).toBe(200);
+    await expect(page.getByRole('button', { name: 'Tudo', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('button', { name: 'Concluído', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: selectedCardName! })).toBeVisible();
+    expect(relevantBrowserErrors(diagnostics), 'erros fatais atribuíveis à aplicação').toEqual([]);
+  } finally {
+    await attachBrowserDiagnostics(page, diagnostics, testInfo);
+  }
+});

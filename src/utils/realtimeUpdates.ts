@@ -13,6 +13,7 @@ export type RealtimeEventPayload = {
   fromMe?: boolean;
   reaction?: boolean;
   status?: string;
+  conversationStatus?: 'open' | 'pending' | 'resolved';
   assignedUserId?: string | null;
   assignedUserName?: string | null;
   leaseOwnerUserId?: string | null;
@@ -125,19 +126,28 @@ const updateConversationFromMessage = (
   const isSameActivity = conversation.lastMessageFromMe === !isIncoming
     && expectedPreview === conversation.lastMessage.trim();
   const isOlderActivity = Boolean(conversation.lastMessageAt && timestampMs > 0 && timestampMs < conversation.lastMessageAt);
-  if (isOlderActivity && !isSameActivity) return conversation;
+  if (isOlderActivity && !isSameActivity) {
+    return conversation.status === 'resolved' && event.conversationStatus === 'open'
+      ? { ...conversation, status: 'open' }
+      : conversation;
+  }
 
   // A provider event can use a second-based timestamp while the optimistic
   // item uses milliseconds. Confirm its key without regressing the activity
   // timestamp, preview, unread state or list position.
   if (isOlderActivity && isSameActivity) {
     const nextKey = messageKeyForConversation(message, event, conversation);
-    if (conversation.lastMessageKey?.id === nextKey.id) return conversation;
-    return { ...conversation, lastMessageKey: nextKey };
+    const nextStatus = conversation.status === 'resolved' && isIncoming && event.conversationStatus === 'open'
+      ? 'open'
+      : conversation.status;
+    if (conversation.lastMessageKey?.id === nextKey.id && nextStatus === conversation.status) return conversation;
+    return { ...conversation, lastMessageKey: nextKey, status: nextStatus };
   }
 
   const isSameMessage = conversation.lastMessageKey?.id === message.id;
-  const nextStatus = conversation.status === 'resolved' && isIncoming ? 'open' : conversation.status;
+  const nextStatus = conversation.status === 'resolved' && isIncoming && event.conversationStatus === 'open'
+    ? 'open'
+    : conversation.status;
   const nextUnreadCount = isIncoming && !isSameMessage && event.incrementUnread !== false
     ? conversation.unreadCount + 1
     : conversation.unreadCount;

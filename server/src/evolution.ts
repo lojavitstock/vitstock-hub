@@ -2445,6 +2445,7 @@ type ProviderPersistenceResult = {
   staged?: boolean;
   reaction?: boolean;
   originalFound?: boolean;
+  conversationReopened?: boolean;
   conversationRemoteJid?: string;
   message?: any;
 };
@@ -2871,7 +2872,7 @@ async function persistProviderMessage(
         identityCandidates,
         lastMessage: conversationPreview,
         lastMessageAt: local.sentAt,
-        reopenResolved: options.reopen && local.sender === 'contact',
+        reopenResolved: false,
         isGroup,
         groupName,
         groupAvatarUrl: local.groupAvatarUrl,
@@ -2968,7 +2969,7 @@ async function persistProviderMessage(
         identityCandidates,
         lastMessage: conversationPreview,
         lastMessageAt: local.sentAt,
-        reopenResolved: options.reopen && local.sender === 'contact',
+        reopenResolved: false,
         isGroup,
         groupName,
         groupAvatarUrl: local.groupAvatarUrl,
@@ -3009,6 +3010,33 @@ async function persistProviderMessage(
       ],
     );
     insertedNewMessage = Boolean(inserted.rowCount);
+    let conversationReopened = false;
+
+    if (insertedNewMessage && options.reopen && local.sender === 'contact') {
+      const reopened = await client.query<{ evolution_remote_jid: string }>(
+        `UPDATE conversations
+         SET status='open', resolved_at=NULL, updated_at=now()
+         WHERE id=$1::uuid AND company_id=$2::uuid
+           AND status='resolved'
+           AND resolved_at < $3::timestamptz
+         RETURNING evolution_remote_jid`,
+        [conversationId, companyId, local.sentAt],
+      );
+      conversationReopened = Boolean(reopened.rowCount);
+      if (reopened.rowCount) {
+        const statusJids = [...new Set([reopened.rows[0]!.evolution_remote_jid, ...identityCandidates]
+          .filter((jid) => isConversationalProviderJid(jid)))];
+        for (const jid of statusJids) {
+          await client.query(
+            `INSERT INTO conversation_statuses (company_id,evolution_remote_jid,status,updated_by)
+             VALUES ($1::uuid,$2,'open',NULL)
+             ON CONFLICT (company_id,evolution_remote_jid) DO UPDATE SET
+               status='open',updated_by=NULL,updated_at=now()`,
+            [companyId, jid],
+          );
+        }
+      }
+    }
 
     // Reprocessamentos podem trazer metadados ou mídia que não existiam na
     // primeira entrega. Preservamos autoria interna somente quando já existe
@@ -3106,6 +3134,7 @@ async function persistProviderMessage(
     }
     return {
       persisted: insertedNewMessage,
+      ...(conversationReopened ? { conversationReopened: true } : {}),
       conversationRemoteJid: local.remoteJid,
       message: localMessageToRealtimeMessage(local),
     };
@@ -3388,7 +3417,7 @@ async function ensureOutboundMessage(input: {
       identityCandidates,
       lastMessage: conversationPreview,
       lastMessageAt: new Date(),
-      reopenResolved: true,
+      reopenResolved: false,
       assignedUserId: input.userId,
       isGroup,
       groupName: undefined,
@@ -4844,17 +4873,37 @@ export async function registerEvolutionRoutes(app: FastifyInstance, productStora
     });
     if (!conversation) return reply.code(404).send({ error: 'Conversa não encontrada' });
 
-    for (const jid of assignmentJids(parsed.data)) {
-      await db.query(
-        `INSERT INTO conversation_statuses (company_id, evolution_remote_jid, status, updated_by)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (company_id, evolution_remote_jid) DO UPDATE SET
-           status = EXCLUDED.status,
-           updated_by = EXCLUDED.updated_by,
-           updated_at = now()`,
-        [request.user!.companyId, jid, parsed.data.status, request.user!.id],
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const updated = await client.query(
+        `UPDATE conversations
+         SET status=$1,
+             resolved_at=CASE WHEN $1='resolved' THEN now() ELSE NULL END,
+             updated_at=now()
+         WHERE id=$2::uuid AND company_id=$3::uuid`,
+        [parsed.data.status, conversation.id, request.user!.companyId],
       );
-    }
+      if (!updated.rowCount) {
+        await client.query('ROLLBACK');
+        return reply.code(404).send({ error: 'Conversa não encontrada' });
+      }
+      for (const jid of assignmentJids(parsed.data)) {
+        await client.query(
+          `INSERT INTO conversation_statuses (company_id, evolution_remote_jid, status, updated_by)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (company_id, evolution_remote_jid) DO UPDATE SET
+             status = EXCLUDED.status,
+             updated_by = EXCLUDED.updated_by,
+             updated_at = now()`,
+          [request.user!.companyId, jid, parsed.data.status, request.user!.id],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
 
     publishRealtimeEvent(request.user!.companyId, 'conversation.updated', {
       remoteJid: parsed.data.remoteJid,
@@ -6689,7 +6738,11 @@ export async function registerEvolutionRoutes(app: FastifyInstance, productStora
               remoteJid: providerRemoteJid(record),
               evolutionMessageId: providerMessageId(record),
             });
-            const persisted = await persistProviderMessage(companyId, record, { incrementUnread: true, reopen: true });
+            const isNewInboundEvent = normalizedEvent === 'messages.upsert';
+            const persisted = await persistProviderMessage(companyId, record, {
+              incrementUnread: isNewInboundEvent,
+              reopen: isNewInboundEvent,
+            });
             if (persisted?.ignored) continue;
             if (persisted?.persisted) {
               persistedMessages += 1;
@@ -6706,6 +6759,7 @@ export async function registerEvolutionRoutes(app: FastifyInstance, productStora
                 messageId: persisted.message.id,
                 timestampMs: persisted.message.timestampMs,
                 fromMe: record?.key?.fromMe === true,
+                ...(persisted.conversationReopened ? { conversationStatus: 'open' } : {}),
                 ...(persisted.reaction ? { reaction: true } : {}),
                 message: persisted.message,
               });

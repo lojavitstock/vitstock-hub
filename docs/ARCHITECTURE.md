@@ -308,9 +308,18 @@ Unread state and response state are intentionally distinct:
 
 - `unreadCount` indicates whether the conversation has been read;
 - `needsResponse` indicates whether the latest relevant customer activity still needs a response;
+- resolved conversations are excluded from `all` and the other active filters; `resolved` is a separate history-preserving view;
 - a resolved conversation is not considered to need a response solely due to its prior last message.
 
 `conversationNeedsResponse()` keeps this distinction outside the display layer.
+
+Resolution updates the canonical `conversations.status` and the JID-scoped
+`conversation_statuses` aliases in one transaction and emits the normal
+`conversation.updated` event. `resolved_at` records the resolution boundary.
+Only a newly persisted inbound customer message whose provider timestamp is
+later than that boundary reopens the conversation; webhook replay, historical
+backfill and outbound messages do not. Resolving never deletes messages or
+conversation history.
 
 ### Conversation ownership
 

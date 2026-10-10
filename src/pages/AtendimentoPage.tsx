@@ -94,6 +94,8 @@ export const AtendimentoPage: React.FC = () => {
   const attendantName = user?.name || 'Atendente';
   const [whatsappStatus, setWhatsappStatus] = useState<WhatsappInstance['status']>('connecting');
   const [blingLookupConversationId, setBlingLookupConversationId] = useState<string | null>(null);
+  const [showResolveConfirmation, setShowResolveConfirmation] = useState(false);
+  const [resolvingConversation, setResolvingConversation] = useState(false);
   const [contactAvatarViewerItem, setContactAvatarViewerItem] = useState<MediaViewerItem | null>(null);
   const contactAvatarTriggerRef = useRef<HTMLElement | null>(null);
   const openContactAvatarViewer = useCallback((src: string, trigger: HTMLElement) => {
@@ -1940,7 +1942,13 @@ export const AtendimentoPage: React.FC = () => {
                     <UserCheck className="w-3.5 h-3.5" /> {capturingChat ? 'Capturando...' : 'Capturar atendimento'}
                   </button>
                 ))}
-                <button type="button" onClick={() => updateActiveChatStatus(activeConv.status === 'resolved' ? 'open' : 'resolved')} className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500 hover:text-zinc-950 transition-all flex items-center gap-1.5">
+                <button type="button" onClick={() => {
+                  if (activeConv.status === 'resolved') {
+                    void updateActiveChatStatus('open').then((succeeded) => {
+                      if (succeeded) setFilterTab('all');
+                    });
+                  } else setShowResolveConfirmation(true);
+                }} className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500 hover:text-zinc-950 transition-all flex items-center gap-1.5">
                   <CheckCircle className="w-3.5 h-3.5" />
                   {activeConv.status === 'resolved' ? 'Reabrir Conversa' : 'Concluído'}
                 </button>
@@ -2327,6 +2335,27 @@ export const AtendimentoPage: React.FC = () => {
           phone={activeConv.contact.phone}
           onClose={() => setBlingLookupConversationId(null)}
         />
+      )}
+
+      {showResolveConfirmation && activeConv && (
+        <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/70 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !resolvingConversation) setShowResolveConfirmation(false); }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="resolve-conversation-title" className="w-full max-w-md rounded-2xl border border-[#46535a] bg-[#182126] p-5 shadow-2xl">
+            <h3 id="resolve-conversation-title" className="text-base font-extrabold text-slate-100">Resolver conversa?</h3>
+            <p className="mt-2 text-sm leading-6 text-slate-300">A conversa sairá da lista ativa, mas o histórico será preservado e continuará disponível em Resolvidas.</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" disabled={resolvingConversation} onClick={() => setShowResolveConfirmation(false)} className="rounded-lg border border-[#46535a] px-3 py-2 text-xs font-bold text-slate-300 hover:bg-white/5 disabled:opacity-50">Cancelar</button>
+              <button type="button" disabled={resolvingConversation} onClick={async () => {
+                if (!activeConv) return;
+                const resolvedConversationId = activeConv.id;
+                setResolvingConversation(true);
+                const succeeded = await updateActiveChatStatus('resolved');
+                setResolvingConversation(false);
+                setShowResolveConfirmation(false);
+                if (succeeded && activeConvId === resolvedConversationId) setActiveConvId('');
+              }} className="rounded-lg bg-emerald-400 px-3 py-2 text-xs font-extrabold text-zinc-950 hover:bg-emerald-300 disabled:opacity-50">{resolvingConversation ? 'Resolvendo...' : 'Resolver conversa'}</button>
+            </div>
+          </section>
+        </div>
       )}
 
       {contactAvatarViewerItem && <MediaViewer item={contactAvatarViewerItem} onClose={closeContactAvatarViewer} />}
