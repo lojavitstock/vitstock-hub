@@ -105,10 +105,13 @@ export const qaBlingTransport: BlingTransport = async (url, init) => {
     body = { data: page === 1 ? [qaContact].slice(0, limit) : [] };
   }
   else if (target.pathname === '/Api/v3/contatos/901') body = { data: qaContact };
+  else if (target.pathname === '/Api/v3/situacoes/modulos') body = { data: [{ id: 12, nome: 'Pedidos de Venda' }] };
+  else if (target.pathname === '/Api/v3/situacoes/modulos/12') body = { data: [
+    { id: 7, nome: 'Em separação QA' }, { id: 8, nome: 'Personalizado QA' }] };
   else if (target.pathname === '/Api/v3/pedidos/vendas' && target.searchParams.get('idContato') === '901') {
     body = { data: [
-      { id: 902, numero: 902, data: '2026-10-01', total: 215.5, situacao: { id: 7, valor: 'Em separação QA' } },
-      { id: 901, numero: 901, data: '2026-09-20', total: 120, situacao: { id: 8, valor: 'Personalizado QA' } },
+      { id: 902, numero: 902, data: '2026-10-01', total: 215.5, situacao: { id: 7, valor: 2 } },
+      { id: 901, numero: 901, data: '2026-09-20', total: 120, situacao: { id: 8, valor: 7 } },
     ] };
   }
   else return new Response('{}', { status: 404 });

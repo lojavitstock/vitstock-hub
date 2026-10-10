@@ -5,7 +5,7 @@ import { config, isQaMode } from './config.js';
 import { integrationCipher } from './blingEncryption.js';
 import { BlingApiClient, type BlingCredentials } from './blingClient.js';
 import { PgBlingStore, stateHash, type BlingStore } from './blingStore.js';
-import { AUTHORIZATION_URL, BlingError, blingContactDetailModel, blingContactListModel, blingSalesOrderModel, idSchema, pagination, parseContract, productDetailModel, stockModel, warehouseModel } from './blingContract.js';
+import { AUTHORIZATION_URL, BlingError, blingContactDetailModel, blingContactListModel, blingSalesOrderModel, idSchema, pagination, parseContract, productDetailModel, stockModel, warehouseModel, blingSituationModuleModel, blingSituationModel } from './blingContract.js';
 import { qaBlingTransport } from './blingQa.js';
 import { blingPhoneMatches, mapBlingContactPhoneFields, normalizeBlingLookupPhone } from './blingContactLookup.js';
 import { BlingCatalogService, PgBlingCatalogRepository, type BlingCatalogRepository } from './blingCatalog.js';
@@ -106,7 +106,7 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
     const { client, store } = ready();
     const companyId = request.user!.companyId;
     if (!(await store.status(companyId)).connected) throw new BlingError(409, 'Conecte o Bling antes de consultar contatos');
-    const read = async (resource: 'contacts' | 'contact' | 'salesOrders', query: URLSearchParams, id?: string) => {
+    const read = async (resource: 'contacts' | 'contact' | 'salesOrders' | 'situationModules' | 'moduleSituations', query: URLSearchParams, id?: string) => {
       try { return await client.read(companyId, resource, query, id); }
       catch (error) {
         if (error instanceof BlingError && error.statusCode === 403) {
@@ -175,17 +175,48 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
       }
     } catch (error) {
       const status = error instanceof BlingError ? error.statusCode : 0;
-      ordersError = status === 403
+      const kind = status === 403 ? 'permission' : status === 409 ? 'authorization'
+        : status === 429 ? 'rate_limit'
+          : error instanceof BlingError && error.message === 'Resposta do Bling fora do contrato esperado'
+            ? 'contract' : 'provider';
+      app.log.warn({ integration: 'bling', operation: 'salesOrders', kind },
+        'Consulta de pedidos Bling indisponível'); // No customer data, credentials or provider payloads.
+      ordersError = kind === 'permission'
         ? 'O Bling não autorizou a consulta de pedidos. Verifique as permissões da integração.'
-        : status === 409
-          ? 'Reconecte a conta Bling para consultar os pedidos.'
-          : 'Não foi possível carregar os pedidos agora.';
+        : kind === 'authorization' ? 'Reconecte a conta Bling para consultar os pedidos.'
+          : kind === 'rate_limit' ? 'O Bling atingiu o limite temporário de consultas. Tente novamente mais tarde.'
+            : kind === 'contract' ? 'O Bling retornou pedidos em um formato não reconhecido. Tente novamente mais tarde.'
+              : 'Não foi possível carregar os pedidos agora.';
     }
     const latestOrders = Array.from(new Map(orders.map(order => [order.id || `${order.numero ?? ''}:${order.data ?? ''}`, order])).values())
       .sort((left, right) => (right.data ?? '').localeCompare(left.data ?? ''))
       .slice(0, 5)
       .map(order => ({ id: order.id ?? null, number: order.numero == null ? null : String(order.numero), date: order.data ?? null, total: order.total ?? null,
-        status: order.situacao?.valor ?? null, statusId: order.situacao?.id ?? null }));
+        // Numeric valor is a provider code, not a human-readable status label.
+        status: order.situacao?.nome?.trim() || (typeof order.situacao?.valor === 'string' &&
+          !/^\\d+$/.test(order.situacao.valor.trim()) ? order.situacao.valor.trim() || null : null),
+        statusId: order.situacao?.id ?? null }));
+    // Situation names are optional enrichment. Missing scope, bad payloads, or API outages
+    // must never hide already-loaded sales orders or invent labels for custom situations.
+    if (!ordersError && latestOrders.some(order => !order.status && order.statusId)) {
+      try {
+        const modules = parseContract(z.object({ data: z.array(blingSituationModuleModel).max(100) }),
+          await read('situationModules', new URLSearchParams())).data;
+        const salesModules = modules.filter(mod => /pedidos?\\s+de\\s+vendas?/i.test(mod.nome));
+        if (salesModules.length === 1) {
+          const situations = parseContract(z.object({ data: z.array(blingSituationModel).max(1000) }),
+            await read('moduleSituations', new URLSearchParams(), salesModules[0]!.id)).data;
+          const names = new Map(situations.map(item => [item.id, item.nome.trim()]).filter(([, name]) => Boolean(name)));
+          for (const order of latestOrders) if (!order.status && order.statusId) {
+            order.status = names.get(order.statusId) || null;
+          }
+        }
+      } catch (error) {
+        const kind = error instanceof BlingError ? error.statusCode : 'provider';
+        app.log.warn({ integration: 'bling', operation: 'situationNames', kind },
+          'Nomes das situações Bling indisponíveis; pedidos preservados');
+      }
+    }
     return { status: 'found' as const, contact, orders: latestOrders, ordersTruncated, ordersError, directorySyncedAt: snapshot.syncedAt };
   }));
   app.post(`${base}/contact-existence`, { preHandler: requireUser }, async (request, reply) => safe(reply, async () => {

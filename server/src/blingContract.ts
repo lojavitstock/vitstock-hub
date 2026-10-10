@@ -55,12 +55,18 @@ export const blingContactDetailModel = blingContactListModel.extend({
   email: nullableText,
   endereco: z.object({ geral: contactAddressModel, cobranca: contactAddressModel }).nullish(),
 });
+export const blingSituationModuleModel = z.object({ id: idSchema, nome: z.string() });
+export const blingSituationModel = z.object({ id: idSchema, nome: z.string() });
 export const blingSalesOrderModel = z.object({
   id: idSchema.optional(),
   numero: z.union([z.number().int(), z.string()]).nullish(),
   data: nullableText,
   total: z.number().finite().nullish(),
-  situacao: z.object({ id: idSchema.optional(), valor: nullableText }).nullish(),
+  // Bling returns situacao.valor as an integer for sales orders; old mocks used a label string.
+  situacao: z.object({ id: idSchema.optional(),
+    valor: z.union([z.number().int(), z.string()]).nullish(),
+    nome: nullableText,
+  }).nullish(),
 });
 export const tokenModel = z.object({ access_token: z.string().min(1).max(16000), refresh_token: z.string().min(1).max(16000),
   token_type: z.string().refine(v => v.toLowerCase() === 'bearer'), expires_in: z.number().int().positive().max(86400) });

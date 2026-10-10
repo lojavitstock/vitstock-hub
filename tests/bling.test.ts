@@ -406,6 +406,7 @@ test('Bling contact lookup uses the tenant snapshot, asks on duplicates, and sor
   const first = { id: 901, nome: 'Ana QA', situacao: 'A', numeroDocumento: '123.456.789-01', telefone: '(21) 4000-0011', celular: '(21) 99000-0011' };
   const second = { id: 902, nome: 'Ana Empresa QA', situacao: 'A', numeroDocumento: '12.345.678/0001-90', telefone: '+55 21 99000-0011', celular: null };
   let ordersMode: 'normal' | 'empty' | 'forbidden' = 'normal';
+  let situationsForbidden = false;
   const requestedUrls: URL[] = [];
   const syncedAt = new Date().toISOString();
   const directoryEntries = [
@@ -434,12 +435,18 @@ test('Bling contact lookup uses the tenant snapshot, asks on duplicates, and sor
       ...first, fantasia: 'Ana Comércio', tipo: 'F', email: 'ana@example.test',
       endereco: { geral: { cep: '20000-011', endereco: 'Rua QA', numero: '11', bairro: 'Centro', municipio: 'Rio de Janeiro', uf: 'RJ' } },
     } });
+    if (target.pathname === '/Api/v3/situacoes/modulos') {
+      return situationsForbidden ? json({}, 403) : json({ data: [{ id: 12, nome: 'Pedidos de Venda' }] });
+    }
+    if (target.pathname === '/Api/v3/situacoes/modulos/12') {
+      return situationsForbidden ? json({}, 403) : json({ data: [{ id: 90902, nome: 'Personalizado QA' }] });
+    }
     if (target.pathname === '/Api/v3/pedidos/vendas') {
       assert.equal(target.searchParams.get('idContato'), '901');
       if (ordersMode === 'forbidden') return json({}, 403);
       if (ordersMode === 'empty') return json({ data: [] });
       return json({ data: [
-        { id: 11, numero: 11, data: '2026-09-10', total: 100, situacao: { id: 90902, valor: 'Personalizado QA' } },
+        { id: 11, numero: 11, data: '2026-09-10', total: 100, situacao: { id: 90902, valor: 5 } },
         { id: 12, numero: 12, data: '2026-10-01', total: 215.5, situacao: { id: 90901, valor: 'Em separação QA' } },
       ] });
     }
@@ -475,6 +482,10 @@ test('Bling contact lookup uses the tenant snapshot, asks on duplicates, and sor
   assert.deepEqual(result.orders.map((order: { status: string }) => order.status), ['Em separação QA', 'Personalizado QA']);
   assert.deepEqual(result.orders.map((order: { statusId: string }) => order.statusId), ['90901', '90902']);
   assert.equal(result.directorySyncedAt, syncedAt);
+  assert.equal(result.ordersError, null, 'numeric situacao.valor must not hide orders');
+  assert.equal(requestedUrls.some(url => url.pathname === '/Api/v3/situacoes/modulos'), true,
+    'custom situation names are obtained only by read-only lookup');
+  assert.equal(requestedUrls.some(url => url.pathname === '/Api/v3/situacoes/modulos/12'), true);
   assert.equal(requestedUrls.some(url => url.pathname === '/Api/v3/contatos/901'), true);
   assert.equal(requestedUrls.some(url => url.pathname === '/Api/v3/pedidos/vendas' && url.searchParams.get('idContato') === '901'), true);
 
@@ -483,6 +494,17 @@ test('Bling contact lookup uses the tenant snapshot, asks on duplicates, and sor
   assert.equal(withoutOrders.json().status, 'found');
   assert.deepEqual(withoutOrders.json().orders, []);
   assert.equal(withoutOrders.json().ordersError, null);
+  situationsForbidden = true;
+  ordersMode = 'normal';
+  const withoutSituationPermission = await lookup({ phone: '5521990000011', contactId: '901' });
+  assert.equal(withoutSituationPermission.statusCode, 200);
+  assert.equal(withoutSituationPermission.json().ordersError, null,
+    'missing permission for status names cannot hide orders');
+  assert.deepEqual(withoutSituationPermission.json().orders.map((order: { number: string }) => order.number), ['12', '11']);
+  assert.equal(withoutSituationPermission.json().orders[1].status, null,
+    'numeric status code must never be fabricated into a label');
+  assert.equal(withoutSituationPermission.json().orders[1].statusId, '90902');
+
   ordersMode = 'forbidden';
   const orderPermissionError = await lookup({ phone: '5521990000011', contactId: '901' });
   assert.equal(orderPermissionError.json().status, 'found');

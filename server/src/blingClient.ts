@@ -81,11 +81,12 @@ export class BlingApiClient {
     });
   }
   // Closed set: neither URLs nor arbitrary paths can be supplied by the browser.
-  async read(company: string, resource: 'products' | 'product' | 'warehouses' | 'stock' | 'contacts' | 'contact' | 'salesOrders', query: URLSearchParams, id?: string, warehouseId?: string) {
+  async read(company: string, resource: 'products' | 'product' | 'warehouses' | 'stock' | 'contacts' | 'contact' | 'salesOrders' | 'situationModules' | 'moduleSituations', query: URLSearchParams, id?: string, warehouseId?: string) {
     if (id && !/^[1-9]\d{0,19}$/.test(id) || warehouseId && !/^[1-9]\d{0,19}$/.test(warehouseId)) throw new BlingError(400, 'Identificador inválido');
     const paths = { products: '/produtos', product: `/produtos/${id}`, warehouses: '/depositos', stock: `/estoques/saldos${warehouseId ? `/${warehouseId}` : ''}`,
-      contacts: '/contatos', contact: `/contatos/${id}`, salesOrders: '/pedidos/vendas' };
-    if (!Object.hasOwn(paths, resource) || (['product', 'contact'].includes(resource) && !id)) throw new BlingError(400, 'Recurso Bling inválido');
+      contacts: '/contatos', contact: `/contatos/${id}`, salesOrders: '/pedidos/vendas',
+      situationModules: '/situacoes/modulos', moduleSituations: `/situacoes/modulos/${id}` };
+    if (!Object.hasOwn(paths, resource) || (['product', 'contact', 'moduleSituations'].includes(resource) && !id)) throw new BlingError(400, 'Recurso Bling inválido');
     return this.store.locked(company, async session => {
       const connection = await session.get();
       if (!connection) throw new BlingError(409, 'Bling não conectado');
