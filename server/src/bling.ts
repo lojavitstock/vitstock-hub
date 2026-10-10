@@ -202,7 +202,7 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
       try {
         const modules = parseContract(z.object({ data: z.array(blingSituationModuleModel).max(100) }),
           await read('situationModules', new URLSearchParams())).data;
-        const salesModules = modules.filter(mod => /pedidos?\\s+de\\s+vendas?/i.test(mod.nome));
+        const salesModules = modules.filter(mod => /pedidos?\s+de\s+vendas?/i.test(mod.nome));
         if (salesModules.length === 1) {
           const situations = parseContract(z.object({ data: z.array(blingSituationModel).max(1000) }),
             await read('moduleSituations', new URLSearchParams(), salesModules[0]!.id)).data;
