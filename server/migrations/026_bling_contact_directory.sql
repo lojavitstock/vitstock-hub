@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS bling_contact_directory_generations (
   PRIMARY KEY (company_id, generation_id),
   CHECK (
     (status = 'building' AND completed_at IS NULL AND contact_count IS NULL)
-    OR (status IN ('active', 'retired') AND completed_at IS NOT NULL AND contact_count >= 0)
+    OR (status IN ('active', 'retired') AND completed_at IS NOT NULL AND contact_count IS NOT NULL AND contact_count >= 0)
   )
 );
 

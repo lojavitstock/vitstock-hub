@@ -99,6 +99,9 @@ test('Bling contact directory sync paginates bounded pages and subsequent lookup
   const found = await service.lookup('company-a', mobile);
   assert.deepEqual(found.matches.map(match => match.id), [entry.id]);
   assert.equal((await service.existence('company-a', mobile)).status, 'found');
+  const landline = normalizeBlingLookupPhone(entry.phone)!;
+  assert.deepEqual((await service.lookup('company-a', landline)).matches.map(match => match.id), [entry.id]);
+  assert.equal((await service.existence('company-a', landline)).status, 'found');
   assert.equal((await service.existence('company-a', normalizeBlingLookupPhone('5521991234568')!)).status, 'not_found');
   assert.equal(queries.length, 2, 'conversation lookup and existence checks must not call the Bling API');
   assert.equal((await service.existence('company-b', mobile)).status, 'unavailable', 'directory state is tenant-scoped');

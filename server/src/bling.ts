@@ -7,7 +7,7 @@ import { BlingApiClient, type BlingCredentials } from './blingClient.js';
 import { PgBlingStore, stateHash, type BlingStore } from './blingStore.js';
 import { AUTHORIZATION_URL, BlingError, blingContactDetailModel, blingContactListModel, blingSalesOrderModel, idSchema, pagination, parseContract, productDetailModel, stockModel, warehouseModel } from './blingContract.js';
 import { qaBlingTransport } from './blingQa.js';
-import { blingPhoneMatches, normalizeBlingLookupPhone } from './blingContactLookup.js';
+import { blingPhoneMatches, mapBlingContactPhoneFields, normalizeBlingLookupPhone } from './blingContactLookup.js';
 import { BlingCatalogService, PgBlingCatalogRepository, type BlingCatalogRepository } from './blingCatalog.js';
 import { BlingContactDirectoryService, PgBlingContactDirectoryRepository, type BlingContactDirectoryRepository } from './blingContactDirectory.js';
 
@@ -131,8 +131,7 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
           id: contact.id,
           name: contact.name,
           document: contact.document,
-          phone: contact.mobile || contact.phone,
-          mobile: contact.mobile,
+          ...mapBlingContactPhoneFields(contact.phone, contact.mobile),
         })),
       };
     }
@@ -158,8 +157,7 @@ export async function registerBlingRoutes(app: FastifyInstance, dependencies = r
       zipCode: address?.cep ?? null,
       address: address ? [address.endereco, address.numero, address.complemento, address.bairro, address.municipio, address.uf]
         .map(value => value?.trim()).filter(Boolean).join(', ') || null : null,
-      phone: [detail.celular, detail.telefone].find(value => blingPhoneMatches(value, phone)) ?? null,
-      mobile: detail.celular ?? null,
+      ...mapBlingContactPhoneFields(detail.telefone, detail.celular),
       email: detail.email ?? null,
     };
 

@@ -1,4 +1,6 @@
 import { expect, request, test } from '@playwright/test';
+import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import pg from '../../server/node_modules/pg/lib/index.js';
 import { spawnSync } from 'node:child_process';
 import { ensureQaBlingConnected, importQaProduct, nextQaBlingProductId } from './productFixtures';
@@ -451,4 +453,35 @@ test('Bling QA migration is additive, constrained and logically reversible witho
     await client.query('ROLLBACK');
     expect((await client.query("SELECT to_regclass('bling_connections') AS name")).rows[0].name).toBe('bling_connections');
   } finally { await client.query('ROLLBACK'); client.release(); await pool.end(); }
+});
+
+test('Bling contact migration 026 requires a non-null count for published generations in a clean disposable database', async () => {
+  test.setTimeout(30_000);
+  const databaseName = `qa_migration_026_${randomUUID().replaceAll('-', '')}`;
+  const adminPool = new pg.Pool({ host: '127.0.0.1', port: 55432, user: 'vitstock', database: 'postgres' });
+  let migrationPool: InstanceType<typeof pg.Pool> | undefined;
+  try {
+    await adminPool.query(`CREATE DATABASE ${databaseName}`);
+    migrationPool = new pg.Pool({ host: '127.0.0.1', port: 55432, user: 'vitstock', database: databaseName });
+    await migrationPool.query('CREATE TABLE companies (id UUID PRIMARY KEY)');
+    const migration = await readFile(new URL('../../server/migrations/026_bling_contact_directory.sql', import.meta.url), 'utf8');
+    await migrationPool.query(migration);
+    const companyId = randomUUID();
+    await migrationPool.query('INSERT INTO companies (id) VALUES ($1)', [companyId]);
+
+    const insertGeneration = (status: 'building' | 'active' | 'retired', count: number | null) => migrationPool!.query(
+      `INSERT INTO bling_contact_directory_generations(company_id,generation_id,status,completed_at,contact_count)
+       VALUES($1,$2,$3,$4,$5)`,
+      [companyId, randomUUID(), status, status === 'building' ? null : new Date(), count],
+    );
+    await expect(insertGeneration('building', null)).resolves.toBeDefined();
+    await expect(insertGeneration('active', null)).rejects.toMatchObject({ code: '23514' });
+    await expect(insertGeneration('retired', null)).rejects.toMatchObject({ code: '23514' });
+    await expect(insertGeneration('active', 0)).resolves.toBeDefined();
+    await expect(insertGeneration('retired', 4)).resolves.toBeDefined();
+  } finally {
+    await migrationPool?.end();
+    await adminPool.query(`DROP DATABASE IF EXISTS ${databaseName}`).catch(() => undefined);
+    await adminPool.end();
+  }
 });

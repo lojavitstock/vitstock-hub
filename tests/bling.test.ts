@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { integrationCipher } from '../server/src/blingEncryption.js';
 import { API_BASE, TOKEN_URL, AUTHORIZATION_URL, pagination, productListModel, productDetailModel, warehouseModel, stockModel, parseContract, BlingError } from '../server/src/blingContract.js';
 import { BlingApiClient, retryAfterMs, type BlingTransport } from '../server/src/blingClient.js';
-import { blingPhoneMatches, normalizeBlingLookupPhone } from '../server/src/blingContactLookup.js';
+import { blingPhoneMatches, mapBlingContactPhoneFields, normalizeBlingLookupPhone } from '../server/src/blingContactLookup.js';
 import { formatBlingDocument, formatBlingZipCode, googleMapsSearchUrl } from '../src/utils/blingContactDisplay.js';
 import type { BlingSession, BlingStore, Connection } from '../server/src/blingStore.js';
 
@@ -378,6 +378,14 @@ test('Bling contact display formats only complete CPF/CNPJ/CEP values and create
   assert.equal(googleMapsSearchUrl('  '), null);
 });
 
+test('Bling Fone and Celular remain independent original fields for every presence combination', () => {
+  assert.deepEqual(mapBlingContactPhoneFields('Fone A', 'Celular B'), { phone: 'Fone A', mobile: 'Celular B' });
+  assert.deepEqual(mapBlingContactPhoneFields('Somente Fone', null), { phone: 'Somente Fone', mobile: null });
+  assert.deepEqual(mapBlingContactPhoneFields(null, 'Somente Celular'), { phone: null, mobile: 'Somente Celular' });
+  assert.deepEqual(mapBlingContactPhoneFields('Mesmo número', 'Mesmo número'), { phone: 'Mesmo número', mobile: 'Mesmo número' });
+  assert.deepEqual(mapBlingContactPhoneFields(null, null), { phone: null, mobile: null });
+});
+
 test('Bling contact lookup uses the tenant snapshot, asks on duplicates, and sorts linked orders by date', async t => {
   const { default: Fastify } = await import('../server/node_modules/fastify/fastify.js');
   const { registerBlingRoutes } = await import('../server/src/bling.js');
@@ -436,7 +444,7 @@ test('Bling contact lookup uses the tenant snapshot, asks on duplicates, and sor
   assert.deepEqual(duplicateResult.json(), {
     status: 'multiple', truncated: false,
     matches: [
-      { id: '901', name: 'Ana QA', document: '123.456.789-01', phone: '(21) 99000-0011', mobile: '(21) 99000-0011' },
+      { id: '901', name: 'Ana QA', document: '123.456.789-01', phone: '(21) 4000-0011', mobile: '(21) 99000-0011' },
       { id: '902', name: 'Ana Empresa QA', document: '12.345.678/0001-90', phone: '+55 21 99000-0011', mobile: null },
     ],
   });
@@ -448,7 +456,7 @@ test('Bling contact lookup uses the tenant snapshot, asks on duplicates, and sor
   assert.equal(result.status, 'found');
   assert.deepEqual(result.contact, {
     id: '901', name: 'Ana QA', fantasy: 'Ana Comércio', document: '123.456.789-01', zipCode: '20000-011',
-    address: 'Rua QA, 11, Centro, Rio de Janeiro, RJ', phone: '(21) 99000-0011', mobile: '(21) 99000-0011', email: 'ana@example.test',
+    address: 'Rua QA, 11, Centro, Rio de Janeiro, RJ', phone: '(21) 4000-0011', mobile: '(21) 99000-0011', email: 'ana@example.test',
   });
   assert.deepEqual(result.orders.map((order: { number: string }) => order.number), ['12', '11']);
   assert.deepEqual(result.orders.map((order: { status: string }) => order.status), ['Em separação QA', 'Personalizado QA']);
